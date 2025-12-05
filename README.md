@@ -13,9 +13,10 @@ conda create -n openfocus python=3.10
 conda activate openfocus
 
 # Core runtime dependencies
-pip install opencv-python pyqt6 numpy dtcwt torch torchvision
+pip install opencv-python pyqt6 numpy imageio dtcwt scipy torch torchvision 
+```
 
-> **Pre-built package:** A compact Windows build (without AI fusion to keep footprint small) is available on the [Releases](https://github.com/your-org/OpenFocus/releases) page. If you need StackMFF V4:
+> **Pre-built package:** A compact Windows build (without AI fusion to keep footprint small) is available on the [Releases](https://github.com/your-org/OpenFocus/releases) page. If you want to use StackMFF V4:
 > 1. Clone and follow the setup instructions in [Xinzhe99/StackMFF-Series](https://github.com/Xinzhe99/StackMFF-Series) **or** install the dependencies above.
 > 2. Launch the app with `python main.py` (in your configured environment) or run the downloaded `OpenFocus.exe` from a Python environment that already has torch/torchvision installed.
 
