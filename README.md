@@ -17,7 +17,7 @@ pip install opencv-python pyqt6 numpy imageio dtcwt scipy torch torchvision
 python main.py
 ```
 
-> **Pre-built package:** A compact Windows build is available on the [Releases](https://github.com/your-org/OpenFocus/releases) page. 
+> **Pre-built package (Windows only):** Grab the compact Windows build from the [Releases](https://github.com/your-org/OpenFocus/releases) page; other platforms can run from source.
 
 ## Table of Contents
 - [⚙️ Environment Setup](#environment-setup)
