@@ -1,2 +1,2 @@
 # OpenFocus
-OpenFocus is all your need.
+OpenFocus is all you need.
