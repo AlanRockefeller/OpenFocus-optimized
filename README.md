@@ -70,9 +70,7 @@ Mix and match the built-in algorithms to suit your data:
 ## 🤝 Contribution
 We welcome community contributions of all kinds:
 1. **Issues**: Report bugs, request features, or propose UX enhancements.
-2. **Algorithm & Performance Work**: Share new fusion/registration ideas, optimizations, or benchmark results.
-
-Please open an issue to discuss significant changes before submitting pull requests and include validation steps with your patches.
+2. **Algorithm & Performance Work**: Share new fusion/registration ideas, optimizations.
 
 > Bug reports or suggestions? Please open an issue so we can follow up quickly.
 
