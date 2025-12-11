@@ -15,7 +15,7 @@ from PyQt6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QImage
 from image_loader import ImageStackLoader
 import cv2
 from styles import GLOBAL_DARK_STYLE
-from dialogs import EnvironmentInfoDialog, ContactInfoDialog, BatchProcessingDialog
+from dialogs import EnvironmentInfoDialog, ContactInfoDialog, BatchProcessingDialog, TileSettingsDialog
 from utils import (
     show_message_box,
     show_warning_box,
@@ -61,6 +61,14 @@ class OpenFocus(QMainWindow):
         self.is_images_aligned = False  # 标记图像是否已对齐
         self.last_alignment_options = None  # 存储上次使用的对齐选项
         self.current_kernel_mode = None
+
+        # Tile settings defaults
+        self.tile_enabled = True
+        self.tile_block_size = 1024
+        self.tile_overlap = 256
+        self.tile_threshold = 2048
+        # Registration downscale default (用户可在 Settings -> Registration 中修改)
+        self.reg_downscale_width = 1024
         
         self.render_manager = RenderManager(self)
         self.output_manager = OutputManager(self)
@@ -372,6 +380,25 @@ class OpenFocus(QMainWindow):
                 output_path=output_path,
                 processing_settings=processing_settings,
             )
+
+    def show_tile_settings(self):
+        """显示 Tile 设置对话框"""
+        dialog = TileSettingsDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # 设置已由对话框写回到 self 属性；可在此处触发必要的刷新
+            self.update_slider_availability()
+            # 如果需要，可以在右侧面板或其它地方反映设置变化
+            return True
+        return False
+
+    def show_registration_settings(self):
+        """显示配准设置对话框，允许用户修改 downscale_width"""
+        from dialogs import RegistrationSettingsDialog
+        dialog = RegistrationSettingsDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            # 值已写回到 self.reg_downscale_width
+            return True
+        return False
 
     def rotate_stack(self, rotation_code):
         """Delegate stack rotation to the transform manager."""

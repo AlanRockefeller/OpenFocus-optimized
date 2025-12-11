@@ -114,6 +114,18 @@ def setup_menus(window: QMainWindow) -> None:
     window.del_input_label_action.setEnabled(False)
     delete_label_menu.addAction(window.del_input_label_action)
 
+    # Settings 菜单（添加在 Edit 和 Help 之间）
+    settings_menu = menubar.addMenu("Settings")
+
+    tile_action = QAction("Tile", window)
+    # 打开瓦片设置对话框
+    tile_action.triggered.connect(lambda: window.show_tile_settings())
+    settings_menu.addAction(tile_action)
+
+    registration_action = QAction("Registration", window)
+    registration_action.triggered.connect(lambda: window.show_registration_settings())
+    settings_menu.addAction(registration_action)
+
     help_menu = menubar.addMenu("Help")
 
     env_action = QAction("Environment Info", window)

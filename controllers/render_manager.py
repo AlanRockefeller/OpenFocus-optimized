@@ -66,6 +66,11 @@ class RenderManager:
             window.rb_c.isChecked(),
             window.rb_d.isChecked(),
             kernel_slider_value,
+            tile_enabled=getattr(window, "tile_enabled", None),
+            tile_block_size=getattr(window, "tile_block_size", None),
+            tile_overlap=getattr(window, "tile_overlap", None),
+            tile_threshold=getattr(window, "tile_threshold", None),
+            reg_downscale_width=getattr(window, "reg_downscale_width", None),
         )
 
         self.worker.finished_signal.connect(self.on_render_finished)

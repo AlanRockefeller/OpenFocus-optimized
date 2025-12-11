@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QKeySequence, QShortcut, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -89,7 +89,8 @@ def create_right_panel() -> RightPanelComponents:
     method_help_layout = QHBoxLayout()
     method_help_layout.addStretch()
     btn_method_help = QPushButton("?")
-    btn_method_help.setFixedSize(20, 20)
+    btn_method_help.setFixedSize(22, 22)
+    btn_method_help.setFont(QFont("Arial", 16))
     btn_method_help.setStyleSheet(HELP_BUTTON_STYLE)
     method_help_layout.addWidget(btn_method_help)
     method_layout.addLayout(method_help_layout)
@@ -108,7 +109,8 @@ def create_right_panel() -> RightPanelComponents:
     reg_help_layout = QHBoxLayout()
     reg_help_layout.addStretch()
     btn_reg_help = QPushButton("?")
-    btn_reg_help.setFixedSize(20, 20)
+    btn_reg_help.setFixedSize(22, 22)
+    btn_reg_help.setFont(QFont("Arial", 16))
     btn_reg_help.setStyleSheet(HELP_BUTTON_STYLE)
     reg_help_layout.addWidget(btn_reg_help)
     registration_layout.addLayout(reg_help_layout)

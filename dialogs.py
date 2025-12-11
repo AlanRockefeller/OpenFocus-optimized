@@ -1055,3 +1055,294 @@ class DownsampleDialog(QDialog):
     def get_scale_factor(self):
         """返回缩放因子 (0.0 - 1.0)"""
         return self.slider.value() / 100.0
+
+
+class TileHelpDialog(HelpDialog):
+    """Tile 参数帮助对话框"""
+
+    def __init__(self, parent=None):
+        help_text = """<h3>Tile Settings Help</h3>
+        <p><b>tile_enabled</b>: Enable or disable tiled processing. When enabled, large images
+        will be processed in smaller blocks to reduce memory usage.</p>
+
+        <p><b>tile_block_size</b>: Size (in pixels) of each square tile block. Typical values
+        are 512–2048 depending on memory and speed tradeoffs.</p>
+
+        <p><b>tile_overlap</b>: Overlap (in pixels) between adjacent tiles used to avoid seams
+        when combining results. A positive overlap helps smooth boundaries.</p>
+
+        <p><b>tile_threshold</b>: If the image's longest side is larger than this threshold,
+        tiled processing will be considered. Smaller images are processed as a whole.</p>"""
+
+        super().__init__("Tile Settings Help", help_text, parent)
+
+
+class TileSettingsDialog(QDialog):
+    """用于用户自定义 Tile 设置的对话框"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("Tile Settings")
+        self.resize(420, 260)
+
+        # 应用与其他对话框一致的深色样式
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #2b2b2b;
+                color: #ffffff;
+                font-family: "Segoe UI", "Microsoft YaHei";
+            }}
+            QLabel {{
+                color: #ffffff;
+            }}
+            QSpinBox {{
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555;
+                padding: 5px;
+                selection-background-color: {PRIMARY_BLUE};
+                min-height: 28px;
+            }}
+            QPushButton {{
+                background-color: #444;
+                color: white;
+                border: 1px solid #222;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #555;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+
+        # Group for tile options
+        from PyQt6.QtWidgets import QGroupBox
+
+        group = QGroupBox("Tile Options")
+        g_layout = QVBoxLayout(group)
+
+        # tile_enabled (radio buttons)
+        enabled_layout = QHBoxLayout()
+        enabled_label = QLabel("Tile Enabled:")
+        enabled_layout.addWidget(enabled_label)
+        self.rb_enabled = QRadioButton("Enabled")
+        self.rb_disabled = QRadioButton("Disabled")
+        enabled_layout.addWidget(self.rb_enabled)
+        enabled_layout.addWidget(self.rb_disabled)
+        enabled_layout.addStretch()
+        g_layout.addLayout(enabled_layout)
+
+        # tile_block_size
+        block_layout = QHBoxLayout()
+        block_layout.addWidget(QLabel("Tile Block Size:"))
+        self.spin_block = QSpinBox()
+        self.spin_block.setRange(64, 16384)
+        self.spin_block.setSingleStep(1)
+        self.spin_block.setValue(1024)
+        # 移除右侧的增减按钮以便用户直接输入或使用键盘/滑块调整
+        self.spin_block.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        block_layout.addWidget(self.spin_block)
+        block_layout.addStretch()
+        g_layout.addLayout(block_layout)
+
+        # tile_overlap
+        overlap_layout = QHBoxLayout()
+        overlap_layout.addWidget(QLabel("Tile Overlap:"))
+        self.spin_overlap = QSpinBox()
+        self.spin_overlap.setRange(0, 4096)
+        self.spin_overlap.setSingleStep(1)
+        self.spin_overlap.setValue(256)
+        # 移除右侧的增减按钮
+        self.spin_overlap.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        overlap_layout.addWidget(self.spin_overlap)
+        overlap_layout.addStretch()
+        g_layout.addLayout(overlap_layout)
+
+        # tile_threshold
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel("Tile Threshold:"))
+        self.spin_threshold = QSpinBox()
+        self.spin_threshold.setRange(256, 131072)
+        self.spin_threshold.setSingleStep(1)
+        self.spin_threshold.setValue(2048)
+        # 移除右侧的增减按钮
+        self.spin_threshold.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        threshold_layout.addWidget(self.spin_threshold)
+        threshold_layout.addStretch()
+        g_layout.addLayout(threshold_layout)
+
+        layout.addWidget(group)
+
+        # Buttons: help and OK/Cancel
+        btn_layout = QHBoxLayout()
+        help_btn = QPushButton("?")
+        help_btn.setToolTip("Show help for tile settings")
+        help_btn.setFixedSize(22, 22)
+        help_btn.setFont(QFont("Arial", 16))
+        help_btn.setStyleSheet(
+            "QPushButton { background-color: #444; color: white; border: 1px solid #222; border-radius: 11px; }"
+        )
+        help_btn.clicked.connect(self.show_help)
+        btn_layout.addWidget(help_btn)
+        btn_layout.addStretch()
+
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.on_accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+        # load defaults from parent if available
+        self.load_defaults()
+
+    def load_defaults(self):
+        if self.parent_window:
+            val = getattr(self.parent_window, "tile_enabled", True)
+            if val:
+                self.rb_enabled.setChecked(True)
+            else:
+                self.rb_disabled.setChecked(True)
+
+            self.spin_block.setValue(getattr(self.parent_window, "tile_block_size", 1024))
+            self.spin_overlap.setValue(getattr(self.parent_window, "tile_overlap", 256))
+            self.spin_threshold.setValue(getattr(self.parent_window, "tile_threshold", 2048))
+        else:
+            self.rb_enabled.setChecked(True)
+
+    def show_help(self):
+        dlg = TileHelpDialog(self)
+        dlg.exec()
+
+    def on_accept(self):
+        enabled = True if self.rb_enabled.isChecked() else False
+        bsize = int(self.spin_block.value())
+        overlap = int(self.spin_overlap.value())
+        thr = int(self.spin_threshold.value())
+
+        if self.parent_window:
+            setattr(self.parent_window, "tile_enabled", enabled)
+            setattr(self.parent_window, "tile_block_size", bsize)
+            setattr(self.parent_window, "tile_overlap", overlap)
+            setattr(self.parent_window, "tile_threshold", thr)
+
+        self.accept()
+
+
+class RegistrationSettingsDialog(QDialog):
+    """Dialog to configure registration downscale_width."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("Registration Settings")
+        self.resize(360, 140)
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #2b2b2b;
+                color: #ffffff;
+                font-family: "Segoe UI", "Microsoft YaHei";
+            }}
+            QLabel {{
+                color: #ffffff;
+            }}
+            QSpinBox {{
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #555;
+                padding: 5px;
+                selection-background-color: {PRIMARY_BLUE};
+                min-height: 28px;
+            }}
+            QPushButton {{
+                background-color: #444;
+                color: white;
+                border: 1px solid #222;
+                padding: 6px 12px;
+                border-radius: 4px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #555;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+
+        from PyQt6.QtWidgets import QGroupBox
+
+        group = QGroupBox("Registration Options")
+        g_layout = QHBoxLayout(group)
+
+        lbl = QLabel("Downscale Width:")
+        lbl.setMinimumWidth(120)
+        g_layout.addWidget(lbl)
+
+        self.spin_downscale = QSpinBox()
+        self.spin_downscale.setRange(256, 8192)
+        self.spin_downscale.setSingleStep(1)
+        # 默认值会在 load_defaults 中设置
+        self.spin_downscale.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_downscale.setValue(1024)
+        g_layout.addWidget(self.spin_downscale)
+        g_layout.addStretch()
+
+        layout.addWidget(group)
+
+        btn_layout = QHBoxLayout()
+        help_btn = QPushButton("?")
+        help_btn.setToolTip("Show help for registration settings")
+        help_btn.setFixedSize(22, 22)
+        help_btn.setFont(QFont("Arial", 16))
+        help_btn.setStyleSheet(
+            "QPushButton { background-color: #444; color: white; border: 1px solid #222; border-radius: 11px; }"
+        )
+        help_btn.clicked.connect(self.show_help)
+        btn_layout.addWidget(help_btn)
+        btn_layout.addStretch()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.on_accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+        self.load_defaults()
+
+    def load_defaults(self):
+        if self.parent_window:
+            val = getattr(self.parent_window, "reg_downscale_width", 1024)
+            try:
+                self.spin_downscale.setValue(int(val))
+            except Exception:
+                self.spin_downscale.setValue(1024)
+
+    def on_accept(self):
+        val = int(self.spin_downscale.value())
+        if self.parent_window:
+            setattr(self.parent_window, "reg_downscale_width", val)
+        self.accept()
+
+    def show_help(self):
+        help_text = """<h3>Downscale Width</h3>
+        <p><b>downscale_width</b> controls the width used for preprocessing (downsampling)
+        when extracting features for registration. A smaller value speeds up feature detection
+        and reduces memory usage at the cost of some geometric precision.</p>
+
+        <p><b>Recommended:</b> use <code>1024</code> for large images (>=2048px),
+        use <code>1600</code> for medium images, and keep it higher only if you need
+        maximum alignment precision and have sufficient CPU/GPU resources.</p>
+
+        <p>Lowering this value accelerates registration and reduces memory use; increasing
+        it can improve accuracy on very detailed images but increases runtime.</p>"""
+        dlg = HelpDialog("Registration Setting Help", help_text, parent=self)
+        dlg.exec()

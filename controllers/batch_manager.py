@@ -44,6 +44,11 @@ class BatchManager:
             output_type=output_type,
             output_path=output_path,
             processing_settings=processing_settings,
+            reg_downscale_width=getattr(self.window, "reg_downscale_width", None),
+            tile_enabled=getattr(self.window, "tile_enabled", None),
+            tile_block_size=getattr(self.window, "tile_block_size", None),
+            tile_overlap=getattr(self.window, "tile_overlap", None),
+            tile_threshold=getattr(self.window, "tile_threshold", None),
         )
         self._thread = QThread()
         self._worker.moveToThread(self._thread)

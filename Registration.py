@@ -296,6 +296,16 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
 
     # --- 初始化 ---
     h_orig, w_orig = images[0].shape[:2]
+    # 如果单张图像过大（任一边 >= 2048），强制将用于下采样的目标宽度设为 1024
+    max_dim = max(h_orig, w_orig)
+    if max_dim >= 2048:
+        try:
+            # 记录之前的值以便调试
+            prev_down = downscale_width
+        except NameError:
+            prev_down = None
+        downscale_width = 1024
+        print(f"[Registration] Large image detected ({h_orig}x{w_orig}), setting downscale_width {prev_down} -> {downscale_width}")
     
     # 全局累积矩阵 (用于将当前帧直接映射回第0帧)
     H_global = np.eye(3, dtype=np.float32)
@@ -457,6 +467,15 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
 
     # --- 2. 初始化 ---
     h_orig, w_orig = images[0].shape[:2]
+    # 如果单张图像过大（任一边 >= 2048），强制将用于下采样的目标宽度设为 1024
+    max_dim = max(h_orig, w_orig)
+    if max_dim >= 2048:
+        try:
+            prev_down = downscale_width
+        except NameError:
+            prev_down = None
+        downscale_width = 1024
+        print(f"[Registration][ECC] Large image detected ({h_orig}x{w_orig}), setting downscale_width {prev_down} -> {downscale_width}")
     
     # 全局变换矩阵 (3x3 单位矩阵)
     H_global = np.eye(3, dtype=np.float32)
@@ -871,7 +890,7 @@ class ImageRegistration:
     
     SUPPORTED_METHODS = ['homography', 'ecc', 'both']
     
-    def __init__(self, method: str = 'homography'):
+    def __init__(self, method: str = 'homography', downscale_width: int = 1024):
         """
         初始化配准器
         
@@ -885,6 +904,8 @@ class ImageRegistration:
             )
         
         self.method = method
+        # 用户可配置的下采样宽度，用于特征提取等预处理阶段
+        self.downscale_width = int(downscale_width) if downscale_width is not None else 1024
     
     def process(self, 
                 input_source: Union[str, List[np.ndarray]], 
@@ -929,7 +950,7 @@ class ImageRegistration:
         Returns:
             配准后的图像列表
         """
-        return _align_homography_impl(input_source, output_path)
+        return _align_homography_impl(input_source, output_path, downscale_width=self.downscale_width)
     
     def _process_ecc(self, 
                     input_source: Union[str, List[np.ndarray]], 
@@ -944,7 +965,7 @@ class ImageRegistration:
         Returns:
             配准后的图像列表
         """
-        return _align_ecc_impl(input_source, output_path)
+        return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width)
     
     def set_method(self, method: str):
         """

@@ -29,6 +29,11 @@ class RenderWorker(QThread):
         rb_c_checked,
         rb_d_checked,
         kernel_slider_value,
+        tile_enabled=None,
+        tile_block_size=None,
+        tile_overlap=None,
+        tile_threshold=None,
+        reg_downscale_width=None,
     ):
         super().__init__()
         self.raw_images = raw_images
@@ -47,6 +52,13 @@ class RenderWorker(QThread):
         self.rb_c_checked = rb_c_checked
         self.rb_d_checked = rb_d_checked
         self.kernel_slider_value = kernel_slider_value
+        # Tile params passed from UI (may be None -> use fusion defaults)
+        self.tile_enabled = tile_enabled
+        self.tile_block_size = tile_block_size
+        self.tile_overlap = tile_overlap
+        self.tile_threshold = tile_threshold
+        # Registration downscale width passed from UI (optional)
+        self.reg_downscale_width = reg_downscale_width
 
     def run(self):
         """在线程中执行图像处理流程"""
@@ -90,7 +102,11 @@ class RenderWorker(QThread):
                         mode = None # Should not happen if need_registration is True
 
                     if mode:
-                        registration = ImageRegistration(method=mode)
+                        # Pass configured downscale width into ImageRegistration when available
+                        if self.reg_downscale_width is not None:
+                            registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
+                        else:
+                            registration = ImageRegistration(method=mode)
                         processed_images = registration.process(processed_images, output_path=None)
                         registration_performed = True
 
@@ -118,7 +134,14 @@ class RenderWorker(QThread):
                 else:
                     algorithm = "guided_filter"
 
-                fusion = MultiFocusFusion(algorithm=algorithm, use_gpu=False)
+                fusion = MultiFocusFusion(
+                    algorithm=algorithm,
+                    use_gpu=False,
+                    tile_enabled=(self.tile_enabled if self.tile_enabled is not None else True),
+                    tile_block_size=(self.tile_block_size if self.tile_block_size is not None else 1024),
+                    tile_overlap=(self.tile_overlap if self.tile_overlap is not None else 256),
+                    tile_threshold=(self.tile_threshold if self.tile_threshold is not None else 2048),
+                )
                 use_gpu = fusion.use_gpu
 
                 kernel_size_value = max(1, int(self.kernel_slider_value))
@@ -175,7 +198,8 @@ class BatchWorker(QThread):
     finished = pyqtSignal(dict)  # 处理结果
     error = pyqtSignal(str)  # 错误信息
     
-    def __init__(self, folder_paths, output_type, output_path, processing_settings):
+    def __init__(self, folder_paths, output_type, output_path, processing_settings, reg_downscale_width=None,
+                 tile_enabled=None, tile_block_size=None, tile_overlap=None, tile_threshold=None):
         super().__init__()
         self.folder_paths = folder_paths
         self.output_type = output_type  # 'subfolder', 'same', 'custom'
@@ -188,6 +212,13 @@ class BatchWorker(QThread):
         self.image_loader = ImageStackLoader()
         from Registration import ImageRegistration
         self.fusion = MultiFocusFusion()
+        # optional registration downscale width to pass into ImageRegistration
+        self.reg_downscale_width = reg_downscale_width
+        # optional tile parameters (inherited from main window)
+        self.tile_enabled = tile_enabled
+        self.tile_block_size = tile_block_size
+        self.tile_overlap = tile_overlap
+        self.tile_threshold = tile_threshold
     
     def run(self):
         """执行批处理"""
@@ -253,7 +284,10 @@ class BatchWorker(QThread):
                 mode = None
 
             if mode:
-                registration = ImageRegistration(method=mode)
+                if getattr(self, 'reg_downscale_width', None) is not None:
+                    registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
+                else:
+                    registration = ImageRegistration(method=mode)
                 aligned_images = registration.process(images, output_path=None)
             else:
                 # 如果没有选择任何配准方法，直接使用原始图像
@@ -268,7 +302,26 @@ class BatchWorker(QThread):
                 fusion_params["model_path"] = resource_path("weights", "stackmffv4.pth")
             
             # 创建相应算法的融合器实例
-            fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=True)
+            # 优先使用 processing_settings 中的 fusion_params 中可能包含的 tile 覆盖值
+            tile_kwargs = {}
+            if isinstance(fusion_params, dict):
+                # allow explicit per-batch overrides
+                if 'tile_enabled' in fusion_params:
+                    tile_kwargs['tile_enabled'] = fusion_params.pop('tile_enabled')
+                if 'tile_block_size' in fusion_params:
+                    tile_kwargs['tile_block_size'] = fusion_params.pop('tile_block_size')
+                if 'tile_overlap' in fusion_params:
+                    tile_kwargs['tile_overlap'] = fusion_params.pop('tile_overlap')
+                if 'tile_threshold' in fusion_params:
+                    tile_kwargs['tile_threshold'] = fusion_params.pop('tile_threshold')
+
+            # Fallback to worker-level (window) settings if not provided
+            tile_kwargs.setdefault('tile_enabled', self.tile_enabled if self.tile_enabled is not None else True)
+            tile_kwargs.setdefault('tile_block_size', self.tile_block_size if self.tile_block_size is not None else 1024)
+            tile_kwargs.setdefault('tile_overlap', self.tile_overlap if self.tile_overlap is not None else 256)
+            tile_kwargs.setdefault('tile_threshold', self.tile_threshold if self.tile_threshold is not None else 2048)
+
+            fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=True, **tile_kwargs)
             
             # 调用fuse方法执行融合
             fusion_result = fusion.fuse(aligned_images, **fusion_params)
