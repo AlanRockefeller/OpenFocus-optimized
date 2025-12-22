@@ -65,6 +65,39 @@ class SourceManager:
                 QMessageBox.Icon.Critical,
             )
 
+    def load_video_stack(self, video_path: str) -> None:
+        """Load image stack from a video file."""
+        window = self.window
+
+        current_scale = getattr(window, "current_scale_factor", 1.0)
+        dialog = DownsampleDialog(window, initial_scale=current_scale)
+        if not dialog.exec():
+            return
+
+        scale_factor = dialog.get_scale_factor()
+
+        window.current_folder_path = os.path.dirname(video_path)
+
+        try:
+            success, message, full_res_images, filenames = window.image_loader.load_from_video(
+                video_path, scale_factor=1.0
+            )
+
+            if not success:
+                show_warning_box(window, "Load Failed", "Failed to load video.", message)
+                return
+
+            load_options = self._build_load_options(full_res_images, filenames, scale_factor)
+            self._apply_load_options(load_options)
+        except Exception as exc:  # pylint: disable=broad-except
+            show_message_box(
+                window,
+                "Load Error",
+                "An error occurred while loading the video.",
+                f"Error: {str(exc)}",
+                QMessageBox.Icon.Critical,
+            )
+
     def prompt_and_load_stack(self) -> None:
         window = self.window
 
@@ -77,6 +110,24 @@ class SourceManager:
 
         if folder_path:
             self.load_image_stack(folder_path)
+
+    def prompt_and_load_video(self) -> None:
+        """Open a file dialog to select a video file and load it as image stack."""
+        window = self.window
+        from image_loader import ImageStackLoader
+
+        # Build video filter string
+        video_exts = " ".join([f"*{ext}" for ext in ImageStackLoader.SUPPORTED_VIDEO_FORMATS])
+        
+        video_path, _ = QFileDialog.getOpenFileName(
+            window,
+            "Select Video File",
+            "",
+            f"Video Files ({video_exts});;All Files (*)",
+        )
+
+        if video_path:
+            self.load_video_stack(video_path)
 
     def can_accept_drag(self, event: QDragEnterEvent) -> bool:
         if not event.mimeData().hasUrls():
@@ -101,6 +152,15 @@ class SourceManager:
             self.load_image_stack(paths[0])
             event.acceptProposedAction()
             return
+
+        # Check if a single video file was dropped
+        from image_loader import ImageStackLoader
+        if len(paths) == 1 and os.path.isfile(paths[0]):
+            ext = os.path.splitext(paths[0])[1].lower()
+            if ext in ImageStackLoader.SUPPORTED_VIDEO_FORMATS:
+                self.load_video_stack(paths[0])
+                event.acceptProposedAction()
+                return
 
         # Otherwise treat dropped items as a list of files
         filepaths = [p for p in paths if os.path.isfile(p)]

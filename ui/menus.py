@@ -7,10 +7,15 @@ def setup_menus(window: QMainWindow) -> None:
     menubar = window.menuBar()
     file_menu = menubar.addMenu("File")
 
-    open_action = QAction("Open", window)
+    open_action = QAction("Open Folder", window)
     open_action.setShortcut("Ctrl+O")
     open_action.triggered.connect(window.open_folder_dialog)
     file_menu.addAction(open_action)
+
+    open_video_action = QAction("Open Video", window)
+    open_video_action.setShortcut("Ctrl+Shift+O")
+    open_video_action.triggered.connect(window.open_video_dialog)
+    file_menu.addAction(open_video_action)
 
     save_action = QAction("Save", window)
     save_action.setShortcut("Ctrl+S")

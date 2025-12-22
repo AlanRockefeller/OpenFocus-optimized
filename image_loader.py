@@ -16,6 +16,9 @@ class ImageStackLoader:
     # 支持的图像格式
     SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
     
+    # 支持的视频格式
+    SUPPORTED_VIDEO_FORMATS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
+    
     def __init__(self):
         self.image_paths = []
         self.images = []
@@ -83,6 +86,79 @@ class ImageStackLoader:
             message += f" (failed: {failed_count})"
         
         return True, message, loaded_images, filenames
+
+    def load_from_video(self, video_path: str, scale_factor: float = 1.0) -> Tuple[bool, str, List[np.ndarray], List[str]]:
+        """
+        从视频文件加载图像栈（每一帧作为一张图片）
+        
+        Args:
+            video_path: 视频文件路径
+            scale_factor: 下采样比例 (0.0 - 1.0)
+            
+        Returns:
+            (成功标志, 消息, 图像列表, 文件名列表)
+        """
+        if not os.path.isfile(video_path):
+            return False, "Video file does not exist", [], []
+        
+        ext = os.path.splitext(video_path)[1].lower()
+        if ext not in self.SUPPORTED_VIDEO_FORMATS:
+            return False, f"Unsupported video format: {ext}", [], []
+        
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return False, "Failed to open video file", [], []
+        
+        loaded_images = []
+        filenames = []
+        frame_index = 0
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        
+        try:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # 如果需要下采样
+                if scale_factor != 1.0 and 0 < scale_factor < 1.0:
+                    width = int(frame.shape[1] * scale_factor)
+                    height = int(frame.shape[0] * scale_factor)
+                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+                
+                loaded_images.append(frame)
+                # 生成帧文件名，格式：视频名_frame_0001.png
+                filenames.append(f"{video_name}_frame_{frame_index:04d}.png")
+                frame_index += 1
+        finally:
+            cap.release()
+        
+        if not loaded_images:
+            return False, "No frames could be extracted from the video", [], []
+        
+        self.images = loaded_images
+        self.image_paths = [video_path] * len(loaded_images)  # 所有帧都来自同一个视频
+        
+        message = f"Loaded {len(loaded_images)} frame(s) from video"
+        if total_frames > 0 and len(loaded_images) < total_frames:
+            message += f" (expected: {total_frames})"
+        
+        return True, message, loaded_images, filenames
+    
+    def is_video_file(self, filepath: str) -> bool:
+        """
+        检查文件是否为支持的视频格式
+        
+        Args:
+            filepath: 文件路径
+            
+        Returns:
+            是否为视频文件
+        """
+        ext = os.path.splitext(filepath)[1].lower()
+        return ext in self.SUPPORTED_VIDEO_FORMATS
 
     def load_from_filepaths(self, filepaths: list[str], scale_factor: float = 1.0) -> Tuple[bool, str, List[np.ndarray], List[str]]:
         """

@@ -331,6 +331,10 @@ class OpenFocus(QMainWindow):
         """打开文件夹选择对话框"""
         self.source_manager.prompt_and_load_stack()
     
+    def open_video_dialog(self):
+        """打开视频文件选择对话框"""
+        self.source_manager.prompt_and_load_video()
+    
     def show_environment_info(self):
         """显示环境信息对话框"""
         dialog = EnvironmentInfoDialog(self)
