@@ -11,7 +11,9 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
-> 🎉 **2025.12.11**: Thanks to Rangj for providing the C++ implementation of the GFG-FGF fusion algorithm, which is now available in the software..
+> 🎉 **2025.12.11**: Added functionality to read image stacks in video format.
+ 
+> 🎉 **2025.12.11**: Thanks to Rangj for providing the C++ implementation of the GFG-FGF fusion algorithm, which is now available in the software.
 
 > 🎉 **2025.12.11**: We have fixed some bugs and added configuration options such as block-wise fusion to avoid OOM (Out of Memory) issues.
 
@@ -90,6 +92,7 @@ This project is released under the [MIT License](./LICENSE). Feel free to use, m
 <p align="center" style="font-size:1.25rem; font-weight:600;">
   If OpenFocus helps you, please consider leaving a ⭐ on the repository!
 </p>
+
 
 
 
