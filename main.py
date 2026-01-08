@@ -40,7 +40,7 @@ class OpenFocus(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("OpenFocus v1.0")
+        self.setWindowTitle("OpenFocus")
         self.resize(1600, 950)  # 增加默认窗口宽度和高度
         
         # 设置窗口图标
@@ -380,21 +380,33 @@ class OpenFocus(QMainWindow):
     
     def show_batch_processing_dialog(self):
         """显示批处理设置对话框"""
-        # 创建批处理设置对话框
         dialog = BatchProcessingDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            # 获取批处理设置
             folder_paths = dialog.folder_paths
             output_type, output_path = dialog.get_output_settings()
             processing_settings = dialog.get_processing_settings()
-            
-            # 开始批处理
-            self.batch_manager.start_batch_processing(
-                folder_paths=folder_paths,
-                output_type=output_type,
-                output_path=output_path,
-                processing_settings=processing_settings,
-            )
+            import_mode = dialog.get_import_mode()
+            split_method, split_param = dialog.get_split_settings()
+
+            if import_mode == "single_folder":
+                self.batch_manager.start_batch_processing(
+                    folder_paths=[],
+                    output_type=output_type,
+                    output_path=output_path,
+                    processing_settings=processing_settings,
+                    import_mode=import_mode,
+                    split_method=split_method,
+                    split_param=split_param,
+                    single_folder_images_with_times=dialog.single_folder_images_with_times,
+                )
+            else:
+                self.batch_manager.start_batch_processing(
+                    folder_paths=folder_paths,
+                    output_type=output_type,
+                    output_path=output_path,
+                    processing_settings=processing_settings,
+                    import_mode=import_mode,
+                )
 
     def show_tile_settings(self):
         """显示 Tile 设置对话框"""

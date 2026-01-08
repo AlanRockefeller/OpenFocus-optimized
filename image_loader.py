@@ -6,8 +6,16 @@
 import os
 import cv2
 import numpy as np
+from datetime import datetime
+from typing import List, Tuple, Optional, Dict, Any
+
+try:
+    from PIL import Image as PILImage
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 from PyQt6.QtGui import QPixmap, QImage
-from typing import List, Tuple, Optional
 
 
 class ImageStackLoader:
@@ -314,3 +322,214 @@ class ImageStackLoader:
             'channels': img.shape[2] if len(img.shape) > 2 else 1,
             'dtype': img.dtype
         }
+
+    def get_image_timestamp(self, filepath: str) -> Optional[float]:
+        """
+        获取图像的拍摄时间戳
+
+        Args:
+            filepath: 图像文件路径
+
+        Returns:
+            Unix时间戳（秒），如果无法获取则返回None
+        """
+        if not PIL_AVAILABLE:
+            return None
+
+        try:
+            with PILImage.open(filepath) as img:
+                exif_data = img._getexif()
+                if exif_data is None:
+                    return None
+
+                date_time_original = None
+                for tag_id, value in exif_data.items():
+                    tag_name = PILImage.ExifTags.TAGS.get(tag_id, str(tag_id))
+                    if tag_name == 'DateTimeOriginal':
+                        date_time_original = value
+                        break
+
+                if date_time_original:
+                    dt = datetime.strptime(date_time_original, '%Y:%m:%d %H:%M:%S')
+                    return dt.timestamp()
+        except Exception as e:
+            pass
+
+        return None
+
+    def load_images_with_timestamps(
+        self,
+        folder_path: str,
+        sort_by: str = 'timestamp'
+    ) -> Tuple[bool, str, List[Tuple[str, np.ndarray, Optional[float]]], List[str]]:
+        """
+        从文件夹加载所有图像并获取时间戳
+
+        Args:
+            folder_path: 文件夹路径
+            sort_by: 排序方式 ('timestamp' 或 'filename')
+
+        Returns:
+            (成功标志, 消息, [(路径, 图像, 时间戳)], 文件名列表)
+        """
+        if not os.path.isdir(folder_path):
+            return False, "Selected path is not a valid directory", [], []
+
+        image_files = []
+        for filename in os.listdir(folder_path):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in self.SUPPORTED_FORMATS:
+                full_path = os.path.join(folder_path, filename)
+                image_files.append((filename, full_path))
+
+        if not image_files:
+            return False, "No supported image files found in the folder", [], []
+
+        loaded_data = []
+        failed_count = 0
+
+        for filename, full_path in image_files:
+            try:
+                img = cv2.imread(full_path)
+                if img is not None:
+                    timestamp = self.get_image_timestamp(full_path)
+                    loaded_data.append((filename, full_path, img, timestamp))
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"Failed to load image {filename}: {e}")
+
+        if not loaded_data:
+            return False, "Could not load any image files", [], []
+
+        def get_sort_key(item):
+            if sort_by == 'timestamp':
+                ts = item[3]
+                if ts is not None:
+                    return ts
+                return float('inf')
+            return item[0]
+
+        loaded_data.sort(key=get_sort_key)
+
+        successful_count = len(loaded_data)
+        message = f"Loaded {successful_count} image(s)"
+        if failed_count > 0:
+            message += f" (failed: {failed_count})"
+
+        result = [(item[1], item[2], item[3]) for item in loaded_data]
+        filenames = [item[0] for item in loaded_data]
+
+        return True, message, result, filenames
+
+    def split_by_count(
+        self,
+        images_with_times: List[Tuple[str, np.ndarray, Optional[float]]],
+        count_per_stack: int
+    ) -> List[List[Tuple[str, np.ndarray, Optional[float]]]]:
+        """
+        按固定数量分割图像栈
+
+        Args:
+            images_with_times: [(路径, 图像, 时间戳)] 列表
+            count_per_stack: 每个栈的图片数量
+
+        Returns:
+            分割后的图像栈列表
+        """
+        if count_per_stack <= 0:
+            count_per_stack = 1
+
+        stacks = []
+        for i in range(0, len(images_with_times), count_per_stack):
+            stack = images_with_times[i:i + count_per_stack]
+            if stack:
+                stacks.append(stack)
+
+        return stacks
+
+    def split_by_time_threshold(
+        self,
+        images_with_times: list,
+        threshold_seconds: float
+    ) -> list:
+        """
+        按时间阈值分割图像栈
+
+        Args:
+            images_with_times: [(路径, 图像, 时间戳)] 列表
+            threshold_seconds: 时间阈值（秒），间隔超过此值则分割
+
+        Returns:
+            分割后的图像栈列表
+        """
+        if threshold_seconds <= 0:
+            threshold_seconds = 1.0
+
+        stacks = []
+        current_stack = []
+
+        for i, (path, img, timestamp) in enumerate(images_with_times):
+            if i == 0:
+                current_stack.append((path, img, timestamp))
+                continue
+
+            if timestamp is None:
+                current_stack.append((path, img, timestamp))
+                continue
+
+            prev_timestamp = images_with_times[i - 1][2]
+            if prev_timestamp is None:
+                current_stack.append((path, img, timestamp))
+                continue
+
+            time_diff = timestamp - prev_timestamp
+            if time_diff > threshold_seconds:
+                if current_stack:
+                    stacks.append(current_stack)
+                current_stack = [(path, img, timestamp)]
+            else:
+                current_stack.append((path, img, timestamp))
+
+        if current_stack:
+            stacks.append(current_stack)
+
+        return stacks
+
+    def get_stack_info(
+        self,
+        stacks: List[List[Tuple[str, np.ndarray, Optional[float]]]]
+    ) -> List[Dict[str, Any]]:
+        """
+        获取每个栈的信息
+
+        Args:
+            stacks: 分割后的图像栈列表
+
+        Returns:
+            每个栈的信息列表
+        """
+        info_list = []
+        for i, stack in enumerate(stacks):
+            count = len(stack)
+            first_img = stack[0][1]
+            height, width = first_img.shape[:2]
+
+            timestamps = [item[2] for item in stack if item[2] is not None]
+            if timestamps:
+                first_time = datetime.fromtimestamp(min(timestamps)).strftime('%H:%M:%S')
+                last_time = datetime.fromtimestamp(max(timestamps)).strftime('%H:%M:%S')
+                time_range = f"{first_time}-{last_time}"
+            else:
+                time_range = "Unknown"
+
+            info_list.append({
+                'stack_index': i,
+                'name': f"Stack {i + 1}",
+                'count': count,
+                'resolution': f"{width}x{height}",
+                'time_range': time_range
+            })
+
+        return info_list

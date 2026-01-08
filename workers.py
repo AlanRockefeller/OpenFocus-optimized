@@ -215,28 +215,30 @@ class RenderWorker(QThread):
 
 class BatchWorker(QThread):
     """批处理工作线程"""
-    
+
     progress_updated = pyqtSignal(int, int, str)  # 当前进度, 总数, 消息
     finished = pyqtSignal(dict)  # 处理结果
     error = pyqtSignal(str)  # 错误信息
-    
+
     def __init__(self, folder_paths, output_type, output_path, processing_settings, reg_downscale_width=None,
-                 tile_enabled=None, tile_block_size=None, tile_overlap=None, tile_threshold=None, thread_count: int = 4):
+                 tile_enabled=None, tile_block_size=None, tile_overlap=None, tile_threshold=None, thread_count: int = 4,
+                 import_mode="multiple_folders", split_method=None, split_param=None,
+                 single_folder_images_with_times=None):
         super().__init__()
         self.folder_paths = folder_paths
-        self.output_type = output_type  # 'subfolder', 'same', 'custom'
-        self.output_path = output_path  # 子文件夹名或自定义文件夹路径
-        self.processing_settings = processing_settings  # 包含格式、融合方法、配准方法等
+        self.output_type = output_type
+        self.output_path = output_path
+        self.processing_settings = processing_settings
         self.is_cancelled = False
-        
-        # 导入必要的模块
+        self.import_mode = import_mode
+        self.split_method = split_method
+        self.split_param = split_param
+        self.single_folder_images_with_times = single_folder_images_with_times or []
+
         from image_loader import ImageStackLoader
         self.image_loader = ImageStackLoader()
         from Registration import ImageRegistration
-        self.fusion = MultiFocusFusion()
-        # optional registration downscale width to pass into ImageRegistration
         self.reg_downscale_width = reg_downscale_width
-        # optional tile parameters (inherited from main window)
         self.tile_enabled = tile_enabled
         self.tile_block_size = tile_block_size
         self.tile_overlap = tile_overlap
@@ -249,36 +251,190 @@ class BatchWorker(QThread):
     def run(self):
         """执行批处理"""
         try:
-            success_count = 0
-            total_count = len(self.folder_paths)
-            failed_folders = []
-            
-            for i, folder_path in enumerate(self.folder_paths):
-                if self.is_cancelled:
-                    break
-                
-                folder_name = os.path.basename(folder_path)
-                self.progress_updated.emit(i, total_count, f"Processing folder {i+1}/{total_count}: {folder_name}")
-                
-                try:
-                    # 处理单个文件夹
-                    self.process_single_folder(folder_path)
-                    success_count += 1
-                except Exception as e:
-                    failed_folders.append(f"{folder_name}: {str(e)}")
-                    print(f"Error processing {folder_name}: {str(e)}")
-            
-            # 发送完成信号
-            results = {
-                'success': success_count,
-                'total': total_count,
-                'failed': failed_folders,
-                'cancelled': self.is_cancelled
-            }
-            self.finished.emit(results)
-            
+            if self.import_mode == "single_folder" and self.single_folder_images_with_times:
+                stacks = self._split_images_for_processing()
+                total_count = len(stacks)
+                success_count = 0
+                failed_stacks = []
+
+                original_paths = [item[0] for item in self.single_folder_images_with_times]
+                source_folder = os.path.dirname(original_paths[0]) if original_paths else ""
+                source_folder_name = os.path.basename(source_folder) if source_folder else "Output"
+
+                output_dir = self._get_output_path_for_single_folder(source_folder)
+                os.makedirs(output_dir, exist_ok=True)
+
+                for i, stack_images_with_times in enumerate(stacks):
+                    if self.is_cancelled:
+                        break
+
+                    stack_name = f"{source_folder_name}_{i + 1:03d}"
+                    self.progress_updated.emit(i, total_count, f"Processing {stack_name} ({i + 1}/{total_count})")
+
+                    try:
+                        self._process_single_stack(stack_images_with_times, output_dir, stack_name, i)
+                        success_count += 1
+                    except Exception as e:
+                        failed_stacks.append(f"{stack_name}: {str(e)}")
+                        print(f"Error processing {stack_name}: {str(e)}")
+
+                results = {
+                    'success': success_count,
+                    'total': total_count,
+                    'failed': failed_stacks,
+                    'cancelled': self.is_cancelled
+                }
+                self.finished.emit(results)
+            else:
+                success_count = 0
+                total_count = len(self.folder_paths)
+                failed_folders = []
+
+                for i, folder_path in enumerate(self.folder_paths):
+                    if self.is_cancelled:
+                        break
+
+                    folder_name = os.path.basename(folder_path)
+                    self.progress_updated.emit(i, total_count, f"Processing folder {i + 1}/{total_count}: {folder_name}")
+
+                    try:
+                        self.process_single_folder(folder_path)
+                        success_count += 1
+                    except Exception as e:
+                        failed_folders.append(f"{folder_name}: {str(e)}")
+                        print(f"Error processing {folder_name}: {str(e)}")
+
+                results = {
+                    'success': success_count,
+                    'total': total_count,
+                    'failed': failed_folders,
+                    'cancelled': self.is_cancelled
+                }
+                self.finished.emit(results)
+
         except Exception as e:
             self.error.emit(f"Batch processing failed: {str(e)}")
+
+    def _split_images_for_processing(self):
+        """分割单文件夹中的图像"""
+        if not self.single_folder_images_with_times:
+            return []
+
+        if self.split_method == "count":
+            return self.image_loader.split_by_count(
+                self.single_folder_images_with_times,
+                self.split_param or 5
+            )
+        elif self.split_method == "time_threshold":
+            return self.image_loader.split_by_time_threshold(
+                self.single_folder_images_with_times,
+                self.split_param or 5.0
+            )
+        else:
+            return [self.single_folder_images_with_times]
+
+    def _process_single_stack(self, stack_images_with_times, output_dir, stack_name, stack_index):
+        """处理单个图像栈（来自单文件夹分割）"""
+        images = [item[1] for item in stack_images_with_times]
+        original_paths = [item[0] for item in stack_images_with_times]
+
+        aligned_images = images.copy()
+        reg_methods = self.processing_settings.get('reg_methods', [])
+
+        if reg_methods:
+            align_homography = "homography" in reg_methods
+            align_ecc = "ecc" in reg_methods
+
+            if align_homography and align_ecc:
+                mode = "both"
+            elif align_homography:
+                mode = "homography"
+            elif align_ecc:
+                mode = "ecc"
+            else:
+                mode = None
+
+            if mode:
+                from Registration import ImageRegistration
+                if self.reg_downscale_width is not None:
+                    registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
+                else:
+                    registration = ImageRegistration(method=mode)
+                aligned_images = registration.process(images, output_path=None, thread_count=self.thread_count)
+
+        fusion_method = self.processing_settings.get('fusion_method')
+        if fusion_method:
+            fusion_params = self.processing_settings.get('fusion_params', {}).copy()
+            if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
+                fusion_params["model_path"] = resource_path("weights", "stackmffv4.pth")
+
+            tile_kwargs = {}
+            tile_kwargs.setdefault('tile_enabled', self.tile_enabled if self.tile_enabled is not None else True)
+            tile_kwargs.setdefault('tile_block_size', self.tile_block_size if self.tile_block_size is not None else 1024)
+            tile_kwargs.setdefault('tile_overlap', self.tile_overlap if self.tile_overlap is not None else 256)
+            tile_kwargs.setdefault('tile_threshold', self.tile_threshold if self.tile_threshold is not None else 2048)
+
+            fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=True, **tile_kwargs)
+            use_gpu = fusion.use_gpu
+
+            if fusion_method == "guided_filter":
+                kernel_size = fusion_params.get('kernel_size', 31)
+                if kernel_size % 2 == 0:
+                    kernel_size = max(1, kernel_size - 1)
+                result = fusion.fuse(
+                    input_source=aligned_images,
+                    img_resize=None,
+                    kernel_size=kernel_size,
+                    thread_count=self.thread_count,
+                )
+            elif fusion_method == "dct":
+                kernel_size = fusion_params.get('kernel_size', 7)
+                if kernel_size % 2 == 0:
+                    kernel_size = max(1, kernel_size - 1)
+                result = fusion.fuse(
+                    input_source=aligned_images,
+                    img_resize=None,
+                    block_size=8,
+                    kernel_size=kernel_size,
+                    thread_count=self.thread_count,
+                )
+            elif fusion_method == "dtcwt":
+                result = fusion.fuse(
+                    input_source=aligned_images,
+                    img_resize=None,
+                    thread_count=self.thread_count,
+                )
+            elif fusion_method == "gfgfgf":
+                kernel_size = fusion_params.get('kernel_size', 7)
+                if kernel_size % 2 == 0:
+                    kernel_size = max(1, kernel_size - 1)
+                result = fusion.fuse(
+                    input_source=aligned_images,
+                    img_resize=None,
+                    kernel_size=kernel_size,
+                    thread_count=self.thread_count,
+                )
+            elif fusion_method == "stackmffv4":
+                model_path = fusion_params.get('model_path', resource_path("weights", "stackmffv4.pth"))
+                result = fusion.fuse(
+                    input_source=aligned_images,
+                    img_resize=None,
+                    model_path=model_path,
+                    thread_count=self.thread_count,
+                )
+            else:
+                result = None
+
+            if result is not None:
+                output_format = self.processing_settings.get('format', 'jpg')
+                output_path = os.path.join(output_dir, f"{stack_name}.{output_format}")
+                cv2.imwrite(output_path, result)
+
+            if self.processing_settings.get('save_aligned'):
+                for idx, img in enumerate(aligned_images):
+                    aligned_filename = f"{stack_name}_aligned_{idx + 1:03d}.{output_format}"
+                    aligned_path = os.path.join(output_dir, aligned_filename)
+                    cv2.imwrite(aligned_path, img)
     
     def process_single_folder(self, folder_path):
         """处理单个文件夹"""
@@ -414,7 +570,31 @@ class BatchWorker(QThread):
             
             output_path = os.path.join(output_dir, filename)
             cv2.imwrite(output_path, image)
-    
+
+    def _get_output_path_for_single_folder(self, source_folder_path):
+        """获取单文件夹模式下的输出路径"""
+        if self.output_type == "subfolder":
+            output_dir = os.path.join(source_folder_path, self.output_path)
+        elif self.output_type == "same":
+            output_dir = source_folder_path
+        else:
+            output_dir = self.output_path
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+
+    def _get_output_path(self, folder_path, stack_name=None):
+        """获取输出路径"""
+        if self.output_type == "subfolder":
+            output_dir = os.path.join(folder_path, self.output_path)
+        elif self.output_type == "same":
+            output_dir = folder_path
+        else:
+            output_dir = self.output_path
+            if stack_name:
+                output_dir = os.path.join(output_dir, stack_name)
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+
     def cancel(self):
         """取消批处理"""
         self.is_cancelled = True

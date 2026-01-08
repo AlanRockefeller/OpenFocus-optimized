@@ -419,7 +419,9 @@ class BatchProcessingDialog(QDialog):
         # 存储选中的文件夹路径和对应的缩略图
         self.folder_paths = []
         self.folder_thumbnails = []
-        
+        self.single_folder_stacks = []
+        self.single_folder_images_with_times = []
+
         # 获取父窗口的融合和对齐设置
         self.parent_window = parent
         
@@ -531,10 +533,23 @@ class BatchProcessingDialog(QDialog):
     def init_ui(self):
         """初始化UI"""
         layout = QVBoxLayout(self)
-        
-        # 文件夹列表区域
-        folder_group = QGroupBox("Image Stack Folders")
-        folder_layout = QVBoxLayout(folder_group)
+
+        import_mode_group = QGroupBox("Import Mode")
+        import_mode_layout = QVBoxLayout(import_mode_group)
+
+        self.rb_multiple_folders = QRadioButton("Multiple Folders (one stack per folder)")
+        self.rb_multiple_folders.setChecked(True)
+        self.rb_multiple_folders.toggled.connect(self.on_import_mode_changed)
+        import_mode_layout.addWidget(self.rb_multiple_folders)
+
+        self.rb_single_folder = QRadioButton("Single Folder (auto-split into multiple stacks)")
+        self.rb_single_folder.toggled.connect(self.on_import_mode_changed)
+        import_mode_layout.addWidget(self.rb_single_folder)
+
+        layout.addWidget(import_mode_group)
+
+        self.folder_group = QGroupBox("Image Stack Folders")
+        folder_layout = QVBoxLayout(self.folder_group)
         
         # 路径输入框（参考demo.py的实现）
         self.path_input = QLineEdit()
@@ -556,12 +571,45 @@ class BatchProcessingDialog(QDialog):
         remove_folder_btn.clicked.connect(self.remove_selected_folders)
         folder_layout.addWidget(remove_folder_btn)
         
-        # 保存对齐后图像栈的选项
-        self.save_aligned_cb = QCheckBox("Save Aligned Image Stack")
-        self.save_aligned_cb.setChecked(False)  # 默认不保存
-        folder_layout.addWidget(self.save_aligned_cb)
-        
-        layout.addWidget(folder_group)
+        layout.addWidget(self.folder_group)
+
+        self.single_folder_group = QGroupBox("Single Folder Split Settings")
+        self.single_folder_group.setVisible(False)
+        single_folder_layout = QVBoxLayout(self.single_folder_group)
+
+        split_method_layout = QHBoxLayout()
+        split_method_layout.addWidget(QLabel("Split Method:"))
+        self.split_method_combo = QComboBox()
+        self.split_method_combo.addItems(["Fixed Count", "Time Threshold"])
+        self.split_method_combo.currentIndexChanged.connect(self.on_split_method_changed)
+        split_method_layout.addWidget(self.split_method_combo)
+        split_method_layout.addStretch()
+        single_folder_layout.addLayout(split_method_layout)
+
+        param_layout = QHBoxLayout()
+        self.param_label = QLabel("Images per Stack:")
+        param_layout.addWidget(self.param_label)
+
+        self.param_spinbox = QSpinBox()
+        self.param_spinbox.setRange(2, 1000)
+        self.param_spinbox.setValue(5)
+        self.param_spinbox.valueChanged.connect(self.update_single_folder_preview)
+        param_layout.addWidget(self.param_spinbox)
+
+        self.param_unit_label = QLabel("images")
+        param_layout.addWidget(self.param_unit_label)
+        param_layout.addStretch()
+        single_folder_layout.addLayout(param_layout)
+
+        self.preview_label = QLabel("Preview: 0 images → 0 stacks")
+        self.preview_label.setStyleSheet("color: #aaa; font-size: 12px;")
+        single_folder_layout.addWidget(self.preview_label)
+
+        add_single_folder_btn = QPushButton("Select Folder and Split")
+        add_single_folder_btn.clicked.connect(self.add_single_folder)
+        single_folder_layout.addWidget(add_single_folder_btn)
+
+        layout.addWidget(self.single_folder_group)
         
         # 保存格式选择
         format_group = QGroupBox("Output Format")
@@ -616,6 +664,11 @@ class BatchProcessingDialog(QDialog):
         output_layout.addLayout(custom_folder_layout)
         
         layout.addWidget(output_group)
+        
+        # 保存对齐后图像栈的选项
+        self.save_aligned_cb = QCheckBox("Save Aligned Image Stack")
+        self.save_aligned_cb.setChecked(False)
+        layout.addWidget(self.save_aligned_cb)
         
         # 处理选项信息显示（从主窗口获取）
         info_group = QGroupBox("Processing Options")
@@ -817,6 +870,90 @@ class BatchProcessingDialog(QDialog):
         self.custom_folder_path.setEnabled(custom_enabled)
         self.browse_btn.setEnabled(custom_enabled)
     
+    def on_import_mode_changed(self):
+        """导入模式改变时的处理"""
+        is_multiple = self.rb_multiple_folders.isChecked()
+        
+        self.folder_group.setVisible(is_multiple)
+        self.single_folder_group.setVisible(not is_multiple)
+    
+    def on_split_method_changed(self, index):
+        """分割方式改变时的处理"""
+        if index == 0:
+            self.param_label.setText("Images per Stack:")
+            self.param_spinbox.setRange(2, 1000)
+            self.param_spinbox.setValue(5)
+            self.param_unit_label.setText("images")
+        else:
+            self.param_label.setText("Time Threshold:")
+            self.param_spinbox.setRange(1, 3600)
+            self.param_spinbox.setValue(5)
+            self.param_unit_label.setText("seconds")
+        
+        self.update_single_folder_preview()
+    
+    def update_single_folder_preview(self):
+        """更新单文件夹预览"""
+        if not self.single_folder_images_with_times:
+            self.preview_label.setText("Preview: No folder selected")
+            return
+        
+        split_method = self.split_method_combo.currentIndex()
+        param_value = self.param_spinbox.value()
+        
+        from image_loader import ImageStackLoader
+        loader = ImageStackLoader()
+        
+        if split_method == 0:
+            stacks = loader.split_by_count(self.single_folder_images_with_times, param_value)
+            self.preview_label.setText(f"Preview: {len(self.single_folder_images_with_times)} images → {len(stacks)} stacks ({param_value} images each)")
+        else:
+            stacks = loader.split_by_time_threshold(self.single_folder_images_with_times, param_value)
+            self.preview_label.setText(f"Preview: {len(self.single_folder_images_with_times)} images → {len(stacks)} stacks (threshold: {param_value}s)")
+    
+    def add_single_folder(self):
+        """添加单个文件夹（自动分割）"""
+        from PyQt6.QtWidgets import QFileDialog
+        from image_loader import ImageStackLoader
+        
+        folder_path = QFileDialog.getExistingDirectory(
+            self, "Select Folder with Multiple Image Stacks", ""
+        )
+        
+        if not folder_path:
+            return
+        
+        loader = ImageStackLoader()
+        success, message, images_with_times, filenames = loader.load_images_with_timestamps(folder_path)
+        
+        if not success or not images_with_times:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Load Failed", f"Failed to load images: {message}")
+            return
+        
+        self.single_folder_images_with_times = images_with_times
+        self.single_folder_folder_path = folder_path
+        
+        self.update_single_folder_preview()
+    
+    def get_import_mode(self):
+        """获取导入模式"""
+        if self.rb_single_folder.isChecked():
+            return "single_folder"
+        return "multiple_folders"
+    
+    def get_split_settings(self):
+        """获取分割设置"""
+        if self.rb_multiple_folders.isChecked():
+            return None, None
+        
+        split_method = self.split_method_combo.currentIndex()
+        param_value = self.param_spinbox.value()
+        
+        if split_method == 0:
+            return "count", param_value
+        return "time_threshold", param_value
+    
     def browse_output_folder(self):
         """浏览输出文件夹"""
         from PyQt6.QtWidgets import QFileDialog
@@ -892,17 +1029,23 @@ class BatchProcessingDialog(QDialog):
     
     def start_batch_processing(self):
         """开始批处理"""
-        if not self.folder_paths:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "No Folders", "Please add at least one folder to process.")
-            return
-        
-        # 获取设置
+        from PyQt6.QtWidgets import QMessageBox
+
+        import_mode = self.get_import_mode()
+        split_method, split_param = self.get_split_settings()
+
+        if import_mode == "multiple_folders":
+            if not self.folder_paths:
+                QMessageBox.warning(self, "No Folders", "Please add at least one folder to process.")
+                return
+        else:
+            if not self.single_folder_images_with_times:
+                QMessageBox.warning(self, "No Folder", "Please select a folder first.")
+                return
+
         output_type, output_path = self.get_output_settings()
         processing_settings = self.get_processing_settings()
         
-        # 这里应该调用批处理函数
-        # 可以通过信号或返回值将设置传递给主窗口进行处理
         self.accept()
 
 

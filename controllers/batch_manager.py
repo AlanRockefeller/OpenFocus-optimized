@@ -24,6 +24,10 @@ class BatchManager:
         output_type: str,
         output_path: str,
         processing_settings: dict,
+        import_mode: str = "multiple_folders",
+        split_method: str = None,
+        split_param: float = None,
+        single_folder_images_with_times: list = None,
     ) -> None:
         if self._thread and self._thread.isRunning():
             self._show_message(
@@ -34,11 +38,15 @@ class BatchManager:
             )
             return
 
-        folder_paths = list(folder_paths)
-        if not folder_paths:
-            return
+        if import_mode == "multiple_folders":
+            folder_paths = list(folder_paths)
+            if not folder_paths:
+                return
+            total_items = len(folder_paths)
+        else:
+            total_items = 1
 
-        self._initialise_progress_dialog(len(folder_paths))
+        self._initialise_progress_dialog(total_items)
         # 禁用在批处理运行时不应被修改的 UI 控件
         try:
             self.window.slider_smooth.setEnabled(False)
@@ -72,6 +80,10 @@ class BatchManager:
             tile_overlap=getattr(self.window, "tile_overlap", None),
             tile_threshold=getattr(self.window, "tile_threshold", None),
             thread_count=getattr(self.window, "thread_count", 4),
+            import_mode=import_mode,
+            split_method=split_method,
+            split_param=split_param,
+            single_folder_images_with_times=single_folder_images_with_times,
         )
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
