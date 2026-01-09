@@ -1,3 +1,4 @@
+import concurrent.futures
 import importlib
 import os
 import numpy as np
@@ -87,13 +88,11 @@ class MultiFocusFusion:
         
         Args:
             algorithm (str): 融合算法名称,可选 'guided_filter', 'dct', 'dtcwt', 'stackmffv4'
-            use_gpu (bool): 是否使用GPU加速,默认为True
+            use_gpu (bool): 是否使用GPU加速(CUDA/MPS),默认为False
         """
         self._ensure_supported_algorithm(algorithm)
         self.algorithm = algorithm
-        if use_gpu:
-            print("Note: this build runs on CPU only; switching to CPU mode.")
-        self.use_gpu = False
+        self.use_gpu = bool(use_gpu)
         # Tile (tiled fusion) related instance-level settings
         # 当图片最大边大于 tile_threshold 时，可在 tile_enabled 为 True 时启用分块融合
         self.tile_enabled = bool(tile_enabled)
@@ -206,9 +205,10 @@ class MultiFocusFusion:
 
         import torch
 
-        if self.use_gpu and not torch.cuda.is_available():
-            print("Warning: CUDA is not available. Running StackMFF-V4 on CPU (slower).")
-            self.use_gpu = False
+        if self.use_gpu:
+            if not torch.cuda.is_available() and not torch.backends.mps.is_available():
+                print("Warning: No GPU acceleration available (CUDA/MPS). Running StackMFF-V4 on CPU (slower).")
+                self.use_gpu = False
     
     def fuse(self, 
              input_source: Union[str, List[np.ndarray]], 
@@ -462,23 +462,110 @@ class MultiFocusFusion:
             'threshold': int(self.tile_threshold),
         }
 
+    def _calculate_optimal_thread_count(
+        self,
+        h: int, w: int, channels: int,
+        num_images: int,
+        block_size: int,
+        user_thread_count: int = None
+    ) -> int:
+        """
+        根据系统内存和图像属性计算最优线程数（保守策略）。
+
+        内存估算:
+        - 单个tile的crops: num_images * block_size * block_size * channels * 4 bytes
+        - fused_tile: block_size * block_size * channels * 4 bytes
+        - weight2d: block_size * block_size * 4 bytes
+        """
+        try:
+            import psutil
+            avail_memory_mb = psutil.virtual_memory().available // (1024**2)
+        except Exception:
+            avail_memory_mb = 4096
+
+        tile_memory = (num_images + 2) * (block_size ** 2) * channels * 4 / (1024**2)
+
+        reserved_memory_mb = 2048
+        usable_memory_mb = max(tile_memory * 2, avail_memory_mb - reserved_memory_mb)
+
+        max_by_memory = max(1, int(usable_memory_mb / tile_memory))
+
+        max_workers = min(max_by_memory, user_thread_count or 8, os.cpu_count() or 4)
+
+        return max(1, max_workers)
+
+    def _compute_tile_weights(self, x0: int, y0: int, x1: int, y1: int,
+                               fw: int, fh: int, w: int, h: int,
+                               overlap: int) -> np.ndarray:
+        """
+        计算单个tile的羽化权重（可分离的2D权重）。
+
+        Args:
+            x0, y0, x1, y1: tile边界
+            fw, fh: 融合结果tile的宽和高
+            w, h: 原图宽和高
+            overlap: 重叠区域大小
+
+        Returns:
+            2D权重数组 (fh, fw), dtype=np.float32
+        """
+        left_exists = x0 > 0
+        right_exists = x1 < w
+        top_exists = y0 > 0
+        bottom_exists = y1 < h
+
+        left_o = overlap if left_exists else 0
+        right_o = overlap if right_exists else 0
+        top_o = overlap if top_exists else 0
+        bottom_o = overlap if bottom_exists else 0
+
+        left_o = min(left_o, fw - 1) if fw > 1 else 0
+        right_o = min(right_o, fw - 1) if fw > 1 else 0
+        top_o = min(top_o, fh - 1) if fh > 1 else 0
+        bottom_o = min(bottom_o, fh - 1) if fh > 1 else 0
+
+        if fw == 1:
+            wx = np.ones((1,), dtype=np.float32)
+        else:
+            ix = np.arange(fw, dtype=np.float32)
+            wx = np.ones((fw,), dtype=np.float32)
+            if left_o > 0:
+                wx_left = np.clip(ix / float(left_o), 0.0, 1.0)
+                wx = np.minimum(wx, wx_left)
+            if right_o > 0:
+                wx_right = np.clip((fw - 1 - ix) / float(right_o), 0.0, 1.0)
+                wx = np.minimum(wx, wx_right)
+
+        if fh == 1:
+            wy = np.ones((1,), dtype=np.float32)
+        else:
+            iy = np.arange(fh, dtype=np.float32)
+            wy = np.ones((fh,), dtype=np.float32)
+            if top_o > 0:
+                wy_top = np.clip(iy / float(top_o), 0.0, 1.0)
+                wy = np.minimum(wy, wy_top)
+            if bottom_o > 0:
+                wy_bottom = np.clip((fh - 1 - iy) / float(bottom_o), 0.0, 1.0)
+                wy = np.minimum(wy, wy_bottom)
+
+        return np.outer(wy, wx).astype(np.float32)
+
     def _fuse_tiled(self,
                     input_source: Union[List[np.ndarray], str],
                     algorithm: str,
                     img_resize: Optional[Tuple[int, int]] = None,
                     block_size: int = 1024,
                     overlap: int = 256,
+                    thread_count: int = None,
                     **kwargs) -> np.ndarray:
         """
         分块（滑动窗口）融合：当单张图像尺寸过大时调用。
 
         - 将图像切成若干 `block_size` 大小的块，块间以 `overlap` 重叠。
         - 对每个块调用对应算法的融合函数，最后对重叠区域简单平均融合以消除边界伪影。
+        - 支持多线程并行处理 tile，线程数根据系统内存自动计算（保守策略）。
         """
 
-        # 支持两种 input_source 类型：
-        # - 已加载的 List[np.ndarray]
-        # - 指向图片目录的 str（按文件懒加载）
         imgs = None
         img_dir = None
         if isinstance(input_source, list):
@@ -490,7 +577,7 @@ class MultiFocusFusion:
         elif isinstance(input_source, str):
             img_dir = input_source
             try:
-                import cv2  # 延迟导入
+                import cv2
             except Exception as exc:
                 raise RuntimeError("OpenCV is required to read image files for tiled fusion. Install with: pip install opencv-python") from exc
 
@@ -498,7 +585,6 @@ class MultiFocusFusion:
             files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith(exts)]
             if len(files) == 0:
                 raise ValueError(f"No image files found in directory: {img_dir}")
-            # 读取第一张图片以获取尺寸和通道数
             first_img = cv2.imread(os.path.join(img_dir, files[0]), cv2.IMREAD_UNCHANGED)
             if first_img is None:
                 raise RuntimeError(f"Unable to read image: {os.path.join(img_dir, files[0])}")
@@ -507,13 +593,23 @@ class MultiFocusFusion:
         else:
             raise ValueError("_fuse_tiled input_source must be a list of arrays or a directory path string")
 
-        # 累加器和权重
         acc = np.zeros((h, w, channels), dtype=np.float32)
         weight = np.zeros((h, w, 1), dtype=np.float32)
 
         step = max(1, block_size - overlap)
+        num_images = len(imgs) if imgs is not None else len(files)
 
-        # 选择调用的融合函数
+        optimal_threads = self._calculate_optimal_thread_count(
+            h, w, channels, num_images, block_size, thread_count
+        )
+
+        # Force serial execution for StackMFF v4 to avoid GPU OOM or model conflicts
+        if algorithm == 'stackmffv4':
+            print("Info: StackMFF-V4 algorithm detected. Forcing serial execution (single thread) to conserve memory.")
+            optimal_threads = 1
+
+        print(f"Tiled fusion: {optimal_threads} parallel workers (memory-optimized)")
+
         def call_algo(crops):
             if algorithm == 'guided_filter':
                 return self._fuse_guided_filter(crops, img_resize, **kwargs)
@@ -526,105 +622,67 @@ class MultiFocusFusion:
             elif algorithm == 'stackmffv4':
                 return self._fuse_stackmffv4(crops, img_resize, **kwargs)
             else:
-                # Fallback: try to call a matching _fuse_<algorithm> method if present
                 method_name = f"_fuse_{algorithm}"
                 method = getattr(self, method_name, None)
                 if callable(method):
                     return method(crops, img_resize, **kwargs)
                 raise ValueError(f"Unsupported algorithm for tiled fusion: {algorithm}")
 
-        # 遍历瓦片
+        tile_coords = []
+        max_start_y = h - block_size
+        max_start_x = w - block_size
         for y in range(0, h, step):
-            y0 = y
-            y1 = min(y0 + block_size, h)
+            y0 = min(y, max_start_y)
+            y1 = y0 + block_size
             for x in range(0, w, step):
-                x0 = x
-                x1 = min(x0 + block_size, w)
+                x0 = min(x, max_start_x)
+                x1 = x0 + block_size
+                tile_coords.append((x0, y0, x1, y1))
 
-                # 裁切每张输入图像。对于目录输入，按文件懒加载裁切而不是一次性加载所有图像。
-                if imgs is not None:
-                    crops = [img[y0:y1, x0:x1].copy() for img in imgs]
-                else:
-                    # img_dir 模式：读取文件并裁切
-                    crops = []
-                    for fname in files:
-                        fp = os.path.join(img_dir, fname)
-                        import cv2
-                        full = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
-                        if full is None:
-                            raise RuntimeError(f"Unable to read image: {fp}")
-                        # 如果读取到的图像尺寸小于 tile 边界（不应发生），则按可用尺寸裁切
-                        h_full, w_full = full.shape[:2]
-                        yy1 = min(y1, h_full)
-                        xx1 = min(x1, w_full)
-                        crop = full[y0:yy1, x0:xx1].copy()
-                        crops.append(crop)
-                # 调用融合算法对裁切块进行融合
-                fused_tile = call_algo(crops)
-                if fused_tile is None:
-                    raise RuntimeError("Fusion returned None for a tile")
+        def process_single_tile(coords):
+            x0, y0, x1, y1 = coords
 
-                # 确保形状一致 (h_tile, w_tile, channels)
-                if fused_tile.ndim == 2:
-                    fused_tile = fused_tile[:, :, np.newaxis]
-                fh, fw = fused_tile.shape[:2]
+            if imgs is not None:
+                crops = [img[y0:y1, x0:x1].copy() for img in imgs]
+            else:
+                crops = []
+                for fname in files:
+                    fp = os.path.join(img_dir, fname)
+                    full = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
+                    if full is None:
+                        raise RuntimeError(f"Unable to read image: {fp}")
+                    crops.append(full[y0:y1, x0:x1].copy())
 
-                # 为该瓦片生成线性羽化权重（可分离）
-                left_exists = x0 > 0
-                right_exists = x1 < w
-                top_exists = y0 > 0
-                bottom_exists = y1 < h
+            fused_tile = call_algo(crops)
+            if fused_tile is None:
+                raise RuntimeError("Fusion returned None for a tile")
 
-                # 有效重叠宽度
-                left_o = overlap if left_exists else 0
-                right_o = overlap if right_exists else 0
-                top_o = overlap if top_exists else 0
-                bottom_o = overlap if bottom_exists else 0
+            if fused_tile.ndim == 2:
+                fused_tile = fused_tile[:, :, np.newaxis]
+            fh, fw = fused_tile.shape[:2]
 
-                # 限制到瓦片尺寸，防止除以0
-                left_o = min(left_o, fw - 1) if fw > 1 else 0
-                right_o = min(right_o, fw - 1) if fw > 1 else 0
-                top_o = min(top_o, fh - 1) if fh > 1 else 0
-                bottom_o = min(bottom_o, fh - 1) if fh > 1 else 0
+            weight2d = self._compute_tile_weights(x0, y0, x1, y1, fw, fh, w, h, overlap)
 
-                # 计算1D权重wx, wy
-                if fw == 1:
-                    wx = np.ones((1,), dtype=np.float32)
-                else:
-                    ix = np.arange(fw, dtype=np.float32)
-                    wx = np.ones((fw,), dtype=np.float32)
-                    if left_o > 0:
-                        wx_left = np.clip(ix / float(left_o), 0.0, 1.0)
-                        wx = np.minimum(wx, wx_left)
-                    if right_o > 0:
-                        wx_right = np.clip((fw - 1 - ix) / float(right_o), 0.0, 1.0)
-                        wx = np.minimum(wx, wx_right)
+            return (x0, y0, fh, fw, fused_tile, weight2d)
 
-                if fh == 1:
-                    wy = np.ones((1,), dtype=np.float32)
-                else:
-                    iy = np.arange(fh, dtype=np.float32)
-                    wy = np.ones((fh,), dtype=np.float32)
-                    if top_o > 0:
-                        wy_top = np.clip(iy / float(top_o), 0.0, 1.0)
-                        wy = np.minimum(wy, wy_top)
-                    if bottom_o > 0:
-                        wy_bottom = np.clip((fh - 1 - iy) / float(bottom_o), 0.0, 1.0)
-                        wy = np.minimum(wy, wy_bottom)
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=optimal_threads) as executor:
+            futures = {executor.submit(process_single_tile, coords): coords 
+                       for coords in tile_coords}
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                x0, y0, fh, fw, fused_tile, weight2d = result
+                results[(x0, y0)] = result
 
-                weight2d = np.outer(wy, wx).astype(np.float32)
+        for x0, y0, fh, fw, fused_tile, weight2d in results.values():
+            w_exp = weight2d[:, :, np.newaxis]
+            acc[y0:y0+fh, x0:x0+fw, :channels] += fused_tile.astype(np.float32) * w_exp
+            weight[y0:y0+fh, x0:x0+fw, 0] += weight2d
 
-                # 将加权结果累加
-                w_exp = weight2d[:, :, np.newaxis]
-                acc[y0:y0+fh, x0:x0+fw, :channels] += fused_tile.astype(np.float32) * w_exp
-                weight[y0:y0+fh, x0:x0+fw, 0] += weight2d
-
-        # 归一化
         weight[weight == 0] = 1.0
         fused = acc / weight
         fused = np.clip(fused, 0, 255).astype(np.uint8)
 
-        # 如果原来是单通道，返回二维数组
         if channels == 1:
             return fused[:, :, 0]
         return fused
@@ -632,26 +690,34 @@ class MultiFocusFusion:
     def set_device(self, use_gpu: bool):
         """
         切换计算设备
-        
+
         Args:
             use_gpu (bool): 是否使用GPU
         """
-        if use_gpu:
-            print("Note: GPU execution is unavailable; ignoring the request.")
-        self.use_gpu = False
+        self.use_gpu = bool(use_gpu)
         self._validate_environment()
     
     def get_info(self) -> dict:
         """
         获取当前融合器信息
-        
+
         Returns:
             dict: 包含算法名称、设备类型等信息
         """
+        import torch
+        if self.use_gpu:
+            if torch.cuda.is_available():
+                device_name = 'CUDA'
+            elif torch.backends.mps.is_available():
+                device_name = 'MPS'
+            else:
+                device_name = 'CPU (GPU unavailable)'
+        else:
+            device_name = 'CPU'
         return {
             'algorithm': self.algorithm,
             'use_gpu': self.use_gpu,
-            'device': 'GPU' if self.use_gpu else 'CPU'
+            'device': device_name
         }
     
     def __repr__(self) -> str:

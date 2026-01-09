@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QDialog,
 )
-from PyQt6.QtCore import Qt, QSize, QUrl
+from PyQt6.QtCore import Qt, QUrl, QEvent
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QImage
 from image_loader import ImageStackLoader
 import cv2
@@ -53,6 +54,7 @@ class OpenFocus(QMainWindow):
         self.current_img_index = -1
         self.image_filenames = []  # 文件名列表
         self.raw_images = []  # 存储原始的numpy数组图像，用于配准和融合
+        self.base_images = []  # 存储首次加载的基准尺寸图像，用于恢复和resize计算
         self.fusion_result = None  # 存储最新的融合结果
         self.fusion_results = []  # 存储所有融合结果的历史记录
         self.registration_results = []  # 存储配准后的图像栈
@@ -92,6 +94,12 @@ class OpenFocus(QMainWindow):
         self.apply_dark_theme()
         self.init_ui()
 
+        # Install global event filter to handle Space key for panning
+        QApplication.instance().installEventFilter(self)
+
+        self._mouse_in_source_preview = False
+        self._mouse_in_result_preview = False
+
     def init_ui(self):
         setup_menus(self)
 
@@ -130,6 +138,11 @@ class OpenFocus(QMainWindow):
         self.result_slider = result_panel.slider
         self.lbl_result_info = result_panel.info_label
         self.result_slider.valueChanged.connect(self.update_result_view)
+
+        self.lbl_source_img.enterPreview.connect(self._on_enter_source_preview)
+        self.lbl_source_img.leavePreview.connect(self._on_leave_source_preview)
+        self.lbl_result_img.enterPreview.connect(self._on_enter_result_preview)
+        self.lbl_result_img.leavePreview.connect(self._on_leave_result_preview)
 
         self.view_splitter.addWidget(source_panel.widget)
         self.view_splitter.addWidget(result_panel.widget)
@@ -200,6 +213,37 @@ class OpenFocus(QMainWindow):
         self.main_splitter.setSizes([int(total_width * 0.75), int(total_width * 0.25)])
 
         main_layout.addWidget(self.main_splitter)
+
+    def eventFilter(self, obj, event):
+        """Global event filter to handle Space key for panning interaction"""
+        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
+            # Check if mouse is over source or result image
+            handled = False
+            
+            # Using underMouse() is safer than tracking enter/leave events which can be unreliable
+            # during rapid movement or with other widgets involved
+            if hasattr(self, 'lbl_source_img') and self.lbl_source_img and self.lbl_source_img.isVisible():
+                if self.lbl_source_img.underMouse():
+                    self.lbl_source_img.set_space_pressed(True)
+                    handled = True
+            
+            if hasattr(self, 'lbl_result_img') and self.lbl_result_img and self.lbl_result_img.isVisible():
+                if self.lbl_result_img.underMouse():
+                    self.lbl_result_img.set_space_pressed(True)
+                    handled = True
+            
+            if handled:
+                return True
+                
+        elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
+                if hasattr(self, 'lbl_source_img') and self.lbl_source_img:
+                    self.lbl_source_img.set_space_pressed(False)
+                
+                if hasattr(self, 'lbl_result_img') and self.lbl_result_img:
+                    self.lbl_result_img.set_space_pressed(False)
+        
+        return super().eventFilter(obj, event)
 
     # --- 逻辑控制 ---
 
@@ -378,9 +422,23 @@ class OpenFocus(QMainWindow):
         dialog = ContactInfoDialog(self)
         dialog.exec()
     
-    def show_batch_processing_dialog(self):
-        """显示批处理设置对话框"""
+    def show_batch_processing_dialog(self, preload_folder_paths: list[str] = None, scale_factor: float = 1.0):
+        """显示批处理设置对话框
+
+        Args:
+            preload_folder_paths: 可选，预加载的文件夹路径列表（用于拖入场景）
+            scale_factor: 缩放因子，用于预加载时缩放图像
+        """
+        from dialogs import BatchProcessingDialog
+
         dialog = BatchProcessingDialog(self)
+
+        if preload_folder_paths:
+            if len(preload_folder_paths) == 1:
+                dialog.preload_single_folder(preload_folder_paths[0], scale_factor)
+            else:
+                dialog.preload_multiple_folders(preload_folder_paths, scale_factor)
+
         if dialog.exec() == QDialog.DialogCode.Accepted:
             folder_paths = dialog.folder_paths
             output_type, output_path = dialog.get_output_settings()
@@ -449,6 +507,20 @@ class OpenFocus(QMainWindow):
         """Resize images through the transform manager."""
         self.transform_manager.resize_all_images()
 
+    def _on_enter_source_preview(self):
+        self._mouse_in_source_preview = True
+
+    def _on_leave_source_preview(self):
+        self._mouse_in_source_preview = False
+
+    def _on_enter_result_preview(self):
+        self._mouse_in_result_preview = True
+
+    def _on_leave_result_preview(self):
+        self._mouse_in_result_preview = False
+
+    def _is_mouse_in_preview(self) -> bool:
+        return self._mouse_in_source_preview or self._mouse_in_result_preview
 
 
 if __name__ == "__main__":

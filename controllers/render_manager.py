@@ -110,7 +110,7 @@ class RenderManager:
         registration_performed: bool,
         alignment_time: float,
         fusion_time: float,
-        use_gpu: bool,
+        device_name: str,
     ) -> None:
         window = self.window
 
@@ -192,7 +192,7 @@ class RenderManager:
 
                 info_lines.append(f"Fusion Method: {method_name}")
                 info_lines.append(f"Fusion Time: {fusion_time:.2f}s")
-                info_lines.append(f"Processing Unit: {'GPU' if use_gpu else 'CPU'}")
+                info_lines.append(f"Processing Unit: {device_name}")
             else:
                 info_lines.append("Fusion Method: None")
                 info_lines.append("Fusion Time: 0.00s")

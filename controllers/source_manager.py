@@ -5,7 +5,7 @@ import cv2
 import os
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QAction, QIcon, QDragEnterEvent, QDropEvent
-from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox, QDialog
 
 from dialogs import DownsampleDialog
 from utils import show_message_box, show_warning_box
@@ -16,7 +16,7 @@ from styles import MESSAGE_BOX_STYLE
 class LoadOptions:
     scale_factor: float
     filenames: list[str]
-    full_res_images: list[Any]
+    base_images: list[Any]
     working_images: list[Any]
 
 
@@ -47,7 +47,7 @@ class SourceManager:
 
         try:
             success, message, full_res_images, filenames = window.image_loader.load_from_folder(
-                folder_path, scale_factor=1.0
+                folder_path, scale_factor=scale_factor
             )
 
             if not success:
@@ -80,7 +80,7 @@ class SourceManager:
 
         try:
             success, message, full_res_images, filenames = window.image_loader.load_from_video(
-                video_path, scale_factor=1.0
+                video_path, scale_factor=scale_factor
             )
 
             if not success:
@@ -147,9 +147,40 @@ class SourceManager:
             return
         paths = [u.toLocalFile() for u in urls]
 
-        # If a single directory was dropped, keep existing behavior
+        # If a single directory was dropped, ask user how to import
         if len(paths) == 1 and os.path.isdir(paths[0]):
-            self.load_image_stack(paths[0])
+            from dialogs import FolderImportDialog
+            dialog = FolderImportDialog(paths[0], self.window)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                if dialog.is_single_stack():
+                    self.load_image_stack(paths[0])
+                    event.acceptProposedAction()
+                else:
+                    # 多组图像栈 - 先弹出下采样设置
+                    current_scale = getattr(self.window, "current_scale_factor", 1.0)
+                    dlg = DownsampleDialog(self.window, initial_scale=current_scale)
+                    if not dlg.exec():
+                        event.ignore()
+                        return
+                    scale = dlg.get_scale_factor()
+
+                    # 打开批处理对话框并预加载文件夹
+                    self.window.show_batch_processing_dialog(preload_folder_paths=[paths[0]], scale_factor=scale)
+                    event.acceptProposedAction()
+            else:
+                event.ignore()
+            return
+
+        # If multiple directories were dropped, ask user how to import
+        elif all(os.path.isdir(p) for p in paths):
+            current_scale = getattr(self.window, "current_scale_factor", 1.0)
+            dlg = DownsampleDialog(self.window, initial_scale=current_scale)
+            if not dlg.exec():
+                event.ignore()
+                return
+            scale = dlg.get_scale_factor()
+
+            self.window.show_batch_processing_dialog(preload_folder_paths=paths, scale_factor=scale)
             event.acceptProposedAction()
             return
 
@@ -241,27 +272,17 @@ class SourceManager:
         filenames: list[str],
         scale_factor: float,
     ) -> LoadOptions:
-        working_images = [self._resize_image(img, scale_factor) for img in full_res_images]
-
         return LoadOptions(
-            scale_factor=scale_factor,
+            scale_factor=1.0,
             filenames=list(filenames),
-            full_res_images=list(full_res_images),
-            working_images=working_images,
+            base_images=full_res_images,
+            working_images=full_res_images,
         )
-
-    def _resize_image(self, image: Any, scale_factor: float) -> Any:
-        if scale_factor == 1.0:
-            return image.copy()
-
-        width = int(image.shape[1] * scale_factor)
-        height = int(image.shape[0] * scale_factor)
-        return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
 
     def _apply_load_options(self, options: LoadOptions) -> None:
         window = self.window
 
-        window.full_res_images = options.full_res_images
+        window.base_images = options.base_images
         window.current_scale_factor = options.scale_factor
         window.raw_images = options.working_images
         window.image_filenames = options.filenames
@@ -284,7 +305,7 @@ class SourceManager:
         window.transform_manager.invalidate_processing_results(clear_output_view=True)
 
         window.raw_images = []
-        window.full_res_images = []
+        window.base_images = []
         window.stack_images = []
         window.image_filenames = []
         window.current_display_index = -1
@@ -352,7 +373,7 @@ class SourceManager:
 
         self._pop_sequence(window.image_filenames, row)
         self._pop_sequence(window.raw_images, row)
-        self._pop_sequence(getattr(window, "full_res_images", None), row)
+        self._pop_sequence(getattr(window, "base_images", None), row)
 
         if window.raw_images:
             new_index = min(row, len(window.raw_images) - 1)
@@ -383,7 +404,7 @@ class SourceManager:
         for row in rows:
             self._pop_sequence(window.image_filenames, row)
             self._pop_sequence(window.raw_images, row)
-            self._pop_sequence(getattr(window, "full_res_images", None), row)
+            self._pop_sequence(getattr(window, "base_images", None), row)
 
         if window.raw_images:
             target_index = min(min(rows), len(window.raw_images) - 1)

@@ -55,7 +55,7 @@ class EnvironmentInfoDialog(QDialog):
                 border: 1px solid #222;
                 padding: 8px 20px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -69,7 +69,7 @@ class EnvironmentInfoDialog(QDialog):
 
         # 标题
         title = QLabel("OpenFocus Environment Dependencies")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setFont(QFont("Arial", 14, QFont.Weight.Normal))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
@@ -136,15 +136,18 @@ class EnvironmentInfoDialog(QDialog):
         info_lines.append("-" * 60)
         info_lines.append("PyTorch (Required for StackMFF-V4)")
         try:
-            import torch  # noqa: F401
+            import torch
 
             info_lines.append(f"  ✓ Installed: Version {torch.__version__}")
             if torch.cuda.is_available():
                 info_lines.append(f"  ✓ CUDA available: {torch.cuda.get_device_name(0)}")
                 info_lines.append(f"  ✓ CUDA version: {torch.version.cuda}")
                 info_lines.append("  ✓ StackMFF-V4: GPU acceleration available")
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                info_lines.append("  ✓ MPS available (Apple Silicon)")
+                info_lines.append("  ✓ StackMFF-V4: GPU acceleration available")
             else:
-                info_lines.append("  ⚠ CUDA not available")
+                info_lines.append("  ⚠ No GPU acceleration (CUDA/MPS)")
                 info_lines.append("  ✓ StackMFF-V4: Available (CPU mode - slower)")
         except ImportError:
             info_lines.append("  ✗ Not installed")
@@ -226,7 +229,7 @@ class DurationDialog(QDialog):
                 border: 1px solid #222;
                 padding: 8px 20px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -239,7 +242,7 @@ class DurationDialog(QDialog):
                 border: 1px solid #555;
                 border-radius: 5px;
                 margin-top: 10px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -321,7 +324,7 @@ class HelpDialog(QDialog):
                 border: 1px solid #222;
                 padding: 8px 20px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -359,19 +362,19 @@ class RenderMethodHelpDialog(HelpDialog):
     def __init__(self, parent=None):
         help_text = """<h3>Render Methods</h3>
         
-    <p><b>Guided Filter</b><br/>
+    <p>Guided Filter<br/>
     Guided-filter fusion tuned for practical edge preservation. Ideal for simpler scenes or moderate focus variations, and you can fine-tune the kernel slider to balance sharpness and smoothness.</p>
 
-    <p><b>DCT</b><br/>
+    <p>DCT<br/>
     Frequency-domain fusion that evaluates block-wise DCT variance and keeps the sharpest contributor per region. It is fast, fully CPU-based, and works well when you need crisp edges without deploying neural models.</p>
 
-    <p><b>DTCWT</b><br/>
+    <p>DTCWT<br/>
     Dual-tree complex wavelet fusion that decomposes the stack across scales and orientations before recombining it. It is well suited to intricate, high-frequency content where retaining fine detail is critical.</p>
 
-    <p><b>GFG-FGF</b><br/>
+    <p>GFG-FGF<br/>
     GFG-FGF is a multi-focus image fusion algorithm based on a generalized four-neighborhood Gaussian gradient (GFG) operator combined with a fast guided filter (FGF). Feature extraction uses the GFG operator to capture high-frequency edge and gradient information. Information enhancement leverages the FGF together with the original image texture to smooth defocused regions while emphasizing focused areas. The fusion strategy constructs a pixel-wise decision map by selecting the maximum focus measure per pixel and then refines these decisions with FGF for edge-preserving smoothing, producing a weighted fusion that favors sharp, well-focused pixels.</p>
 
-    <p><b>StackMFF-V4</b><br/>
+    <p>StackMFF-V4<br/>
     A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>"""
         
         super().__init__("Fusion Help", help_text, parent)
@@ -383,10 +386,10 @@ class RegistrationHelpDialog(HelpDialog):
     def __init__(self, parent=None):
         help_text = """<h3>Registration Methods</h3>
         
-    <p><b>Align (Homography)</b><br/>
+    <p>Align (Homography)<br/>
     Uses feature-based homography transformation to align images. Detects SIFT features between consecutive frames and computes perspective transformation matrices. Ideal for most focus stacks that need global geometric correction.</p>
 
-    <p><b>Align (ECC)</b><br/>
+    <p>Align (ECC)<br/>
     Enhanced Correlation Coefficient alignment refines alignment at the sub-pixel level. Works well for fine adjustments or whenever feature detection is unreliable.</p>
 
     <p>Both options are independent—enable either one individually or turn on both to apply homography alignment first and then refine with ECC.</p>"""
@@ -400,9 +403,9 @@ class ContactInfoDialog(HelpDialog):
     def __init__(self, parent=None):
         contact_text = """<h3>Contact Information</h3>
         
-    <p><b>Email:</b> xiexinzhe@zju.edu.cn</p>
-    <p><b>Institution:</b> Zhejiang University</p>
-    <p><b>GitHub:</b> <a href="https://github.com/Xinzhe99/OpenFocus">https://github.com/Xinzhe99/OpenFocus</a></p>
+    <p>Email: xiexinzhe@zju.edu.cn</p>
+    <p>Institution: Zhejiang University</p>
+    <p>GitHub: <a href="https://github.com/Xinzhe99/OpenFocus">https://github.com/Xinzhe99/OpenFocus</a></p>
     <p>We warmly welcome contributors who would like to add new fusion methods and help OpenFocus grow.</p>"""
         
         super().__init__("Contact Us", contact_text, parent)
@@ -433,7 +436,7 @@ class BatchProcessingDialog(QDialog):
                 font-family: "Segoe UI", "Microsoft YaHei";
             }}
             QLabel {{
-                color: #ffffff;
+                color: #aaaaaa;
             }}
             QListWidget {{
                 background-color: #333;
@@ -454,7 +457,7 @@ class BatchProcessingDialog(QDialog):
             QComboBox {{
                 background-color: #fff;
                 color: #000;
-                font-weight: bold;
+                font-weight: normal;
                 border: 1px solid #555;
                 padding: 5px;
                 border-radius: 3px;
@@ -464,7 +467,7 @@ class BatchProcessingDialog(QDialog):
                 color: #000;
                 selection-background-color: {PRIMARY_BLUE};
                 selection-color: #fff;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -479,7 +482,7 @@ class BatchProcessingDialog(QDialog):
             QLineEdit {{
                 background-color: #fff;
                 color: #000;
-                font-weight: bold;
+                font-weight: normal;
                 border: 1px solid #555;
                 padding: 5px;
                 border-radius: 3px;
@@ -490,7 +493,7 @@ class BatchProcessingDialog(QDialog):
                 border: 1px solid #222;
                 padding: 8px 16px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -503,7 +506,7 @@ class BatchProcessingDialog(QDialog):
                 border: 1px solid #555;
                 border-radius: 5px;
                 margin-top: 10px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -577,6 +580,12 @@ class BatchProcessingDialog(QDialog):
         self.single_folder_group.setVisible(False)
         single_folder_layout = QVBoxLayout(self.single_folder_group)
 
+        # 显示选取的文件夹路径
+        self.single_folder_path_label = QLabel("Folder: (none)")
+        self.single_folder_path_label.setStyleSheet("color: #aaa; font-size: 12px;")
+        self.single_folder_path_label.setWordWrap(True)
+        single_folder_layout.addWidget(self.single_folder_path_label)
+
         split_method_layout = QHBoxLayout()
         split_method_layout.addWidget(QLabel("Split Method:"))
         self.split_method_combo = QComboBox()
@@ -593,6 +602,7 @@ class BatchProcessingDialog(QDialog):
         self.param_spinbox = QSpinBox()
         self.param_spinbox.setRange(2, 1000)
         self.param_spinbox.setValue(5)
+        self.param_spinbox.setStyleSheet("background-color: #fff; color: #000;")
         self.param_spinbox.valueChanged.connect(self.update_single_folder_preview)
         param_layout.addWidget(self.param_spinbox)
 
@@ -791,7 +801,33 @@ class BatchProcessingDialog(QDialog):
                             item.setIcon(QIcon(self.folder_thumbnails[-1]))
                         
                         self.folder_list.addItem(item)
-    
+
+    def add_folder_to_list(self, folder_path: str) -> None:
+        """添加文件夹到批处理列表（用于拖入场景）"""
+        if folder_path in self.folder_paths:
+            return
+
+        self.folder_paths.append(folder_path)
+
+        from image_loader import ImageStackLoader
+        loader = ImageStackLoader()
+        success, _, images, _ = loader.load_from_folder(folder_path)
+
+        if success and images:
+            thumbnail = loader.create_thumbnails([images[0]], thumb_size=60)[0]
+            self.folder_thumbnails.append(thumbnail)
+        else:
+            self.folder_thumbnails.append(None)
+
+        folder_name = os.path.basename(folder_path)
+        item_text = f"{folder_name}\n{folder_path}"
+
+        item = QListWidgetItem(item_text)
+        if self.folder_thumbnails[-1]:
+            item.setIcon(QIcon(self.folder_thumbnails[-1]))
+
+        self.folder_list.addItem(item)
+
     def add_single_folder_to_list(self, folder_list):
         """添加单个文件夹到列表"""
         from PyQt6.QtWidgets import QFileDialog
@@ -876,6 +912,8 @@ class BatchProcessingDialog(QDialog):
         
         self.folder_group.setVisible(is_multiple)
         self.single_folder_group.setVisible(not is_multiple)
+        
+        self.setFixedHeight(800)
     
     def on_split_method_changed(self, index):
         """分割方式改变时的处理"""
@@ -933,7 +971,12 @@ class BatchProcessingDialog(QDialog):
         
         self.single_folder_images_with_times = images_with_times
         self.single_folder_folder_path = folder_path
-        
+
+        # 更新路径显示
+        folder_name = os.path.basename(folder_path)
+        self.single_folder_path_label.setText(f"Folder: {folder_name}")
+        self.single_folder_path_label.setToolTip(folder_path)
+
         self.update_single_folder_preview()
     
     def get_import_mode(self):
@@ -1026,7 +1069,95 @@ class BatchProcessingDialog(QDialog):
             "reg_methods": reg_methods,
             "save_aligned": self.save_aligned_cb.isChecked()  # 是否保存对齐后的图像栈
         }
-    
+
+    def preload_single_folder(self, folder_path: str, scale_factor: float = 1.0) -> None:
+        """
+        预加载单个文件夹（用于拖入场景）
+        自动切换到单文件夹模式、加载文件夹、设置默认划分参数
+        """
+        import cv2
+        from image_loader import ImageStackLoader
+
+        # 1. 切换到单文件夹模式
+        self.rb_single_folder.setChecked(True)
+        self.on_import_mode_changed()
+
+        # 2. 设置默认划分方式：Fixed Count, 5张/组
+        self.split_method_combo.setCurrentIndex(0)  # Fixed Count
+        self.param_spinbox.setValue(5)
+        self.param_unit_label.setText("images")
+        self.on_split_method_changed(0)
+
+        # 3. 加载文件夹并应用缩放
+        loader = ImageStackLoader()
+        success, message, images_with_times, filenames = loader.load_images_with_timestamps(folder_path)
+
+        if not success or not images_with_times:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Load Failed", f"Failed to load images: {message}")
+            return
+
+        # 应用缩放
+        if scale_factor != 1.0 and 0 < scale_factor < 1.0:
+            scaled_images = []
+            for path, img, ts in images_with_times:
+                w = int(img.shape[1] * scale_factor)
+                h = int(img.shape[0] * scale_factor)
+                scaled_img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+                scaled_images.append((path, scaled_img, ts))
+            self.single_folder_images_with_times = scaled_images
+        else:
+            self.single_folder_images_with_times = images_with_times
+
+        self.single_folder_folder_path = folder_path
+
+        # 更新路径显示
+        folder_name = os.path.basename(folder_path)
+        self.single_folder_path_label.setText(f"Folder: {folder_name}")
+        self.single_folder_path_label.setToolTip(folder_path)
+
+        # 4. 更新preview
+        self.update_single_folder_preview()
+
+    def preload_multiple_folders(self, folder_paths: list[str], scale_factor: float = 1.0) -> None:
+        """预加载多个文件夹（用于拖入场景）
+
+        Args:
+            folder_paths: 文件夹路径列表
+            scale_factor: 缩放因子（统一应用到所有文件夹）
+        """
+        import cv2
+        from image_loader import ImageStackLoader
+
+        self.rb_multiple_folders.setChecked(True)
+        self.on_import_mode_changed()
+
+        loader = ImageStackLoader()
+        for folder_path in folder_paths:
+            if folder_path in self.folder_paths:
+                continue
+
+            self.folder_paths.append(folder_path)
+
+            success, message, full_res_images, filenames = loader.load_from_folder(
+                folder_path, scale_factor=scale_factor
+            )
+
+            if success and full_res_images:
+                thumbnail = loader.create_thumbnails([full_res_images[0]], thumb_size=60)[0]
+                self.folder_thumbnails.append(thumbnail)
+            else:
+                self.folder_thumbnails.append(None)
+
+            folder_name = os.path.basename(folder_path)
+            item_text = f"{folder_name}\n{folder_path}"
+
+            item = QListWidgetItem(item_text)
+            if self.folder_thumbnails[-1]:
+                item.setIcon(QIcon(self.folder_thumbnails[-1]))
+
+            self.folder_list.addItem(item)
+
     def start_batch_processing(self):
         """开始批处理"""
         from PyQt6.QtWidgets import QMessageBox
@@ -1104,7 +1235,7 @@ class DownsampleDialog(QDialog):
                 border: 1px solid #222;
                 padding: 8px 20px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -1135,10 +1266,9 @@ class DownsampleDialog(QDialog):
                 background-color: #444;
                 color: white;
                 border: 1px solid #222;
+                padding: 8px 16px;
                 border-radius: 4px;
-                font-weight: bold;
-                padding: 0px;
-                font-size: 16px;
+                font-weight: normal;
             }
             QPushButton:hover {
                 background-color: #555;
@@ -1216,16 +1346,16 @@ class TileHelpDialog(HelpDialog):
 
     def __init__(self, parent=None):
         help_text = """<h3>Tile Settings Help</h3>
-        <p><b>tile_enabled</b>: Enable or disable tiled processing. When enabled, large images
+        <p>tile_enabled: Enable or disable tiled processing. When enabled, large images
         will be processed in smaller blocks to reduce memory usage.</p>
 
-        <p><b>tile_block_size</b>: Size (in pixels) of each square tile block. Typical values
+        <p>tile_block_size: Size (in pixels) of each square tile block. Typical values
         are 512–2048 depending on memory and speed tradeoffs.</p>
 
-        <p><b>tile_overlap</b>: Overlap (in pixels) between adjacent tiles used to avoid seams
+        <p>tile_overlap: Overlap (in pixels) between adjacent tiles used to avoid seams
         when combining results. A positive overlap helps smooth boundaries.</p>
 
-        <p><b>tile_threshold</b>: If the image's longest side is larger than this threshold,
+        <p>tile_threshold: If the image's longest side is larger than this threshold,
         tiled processing will be considered. Smaller images are processed as a whole.</p>"""
 
         super().__init__("Tile Settings Help", help_text, parent)
@@ -1264,7 +1394,7 @@ class TileSettingsDialog(QDialog):
                 border: 1px solid #222;
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -1422,7 +1552,7 @@ class RegistrationSettingsDialog(QDialog):
                 border: 1px solid #222;
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -1490,11 +1620,11 @@ class RegistrationSettingsDialog(QDialog):
 
     def show_help(self):
         help_text = """<h3>Downscale Width</h3>
-        <p><b>downscale_width</b> controls the width used for preprocessing (downsampling)
+        <p>downscale_width controls the width used for preprocessing (downsampling)
         when extracting features for registration. A smaller value speeds up feature detection
         and reduces memory usage at the cost of some geometric precision.</p>
 
-        <p><b>Recommended:</b> use <code>1024</code> for large images (>=2048px),
+        <p>Recommended: use <code>1024</code> for large images (>=2048px),
         use <code>1600</code> for medium images, and keep it higher only if you need
         maximum alignment precision and have sufficient CPU/GPU resources.</p>
 
@@ -1537,7 +1667,7 @@ class ThreadSettingsDialog(QDialog):
                 border: 1px solid #222;
                 padding: 6px 12px;
                 border-radius: 4px;
-                font-weight: bold;
+                font-weight: normal;
             }}
             QPushButton:hover {{
                 background-color: #555;
@@ -1596,10 +1726,10 @@ class ThreadSettingsDialog(QDialog):
 
         <h4>Current multithreading support</h4>
         <ul>
-        <li><b>GFG-FGF</b>: supports user-controlled threads (default cap: 8)</li>
-        <li><b>Guided Filter Fusion (GFF)</b>: supports user-controlled threads (default cap: 4)</li>
-        <li><b>Registration</b>: parallel feature extraction/warping uses thread_count when provided</li>
-        <li><b>DCT, DTCWT, StackMFF-V4</b>: currently ignore this setting (no thread control)</li>
+        <li>GFG-FGF: supports user-controlled threads (default cap: 8)</li>
+        <li>Guided Filter Fusion (GFF): supports user-controlled threads (default cap: 4)</li>
+        <li>Registration: parallel feature extraction/warping uses thread_count when provided</li>
+        <li>DCT, DTCWT, StackMFF-V4: currently ignore this setting (no thread control)</li>
         </ul>
 
         <p>Algorithms that do not consume this value will safely ignore it. For best
@@ -1624,3 +1754,100 @@ class ThreadSettingsDialog(QDialog):
         if self.parent_window:
             setattr(self.parent_window, "thread_count", val)
         self.accept()
+
+
+class FolderImportDialog(QDialog):
+    """文件夹导入选择对话框 - 让用户选择是单组图像栈还是多组图像栈"""
+
+    def __init__(self, folder_path: str, parent=None):
+        super().__init__(parent)
+        self.folder_path = folder_path
+        self.parent_window = parent
+        self.setWindowTitle("Import Folder")
+        self.resize(500, 200)
+
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: #2b2b2b;
+                color: #ffffff;
+                font-family: "Segoe UI", "Microsoft YaHei";
+            }}
+            QLabel {{
+                color: #ffffff;
+            }}
+            QRadioButton {{
+                spacing: 10px;
+                color: #ffffff;
+            }}
+            QRadioButton::indicator {{
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border: 2px solid #888;
+                background-color: #333;
+            }}
+            QRadioButton::indicator:checked {{
+                background: qradialgradient(cx:0.5, cy:0.5, radius:0.4, fx:0.5, fy:0.5, stop:0 #fff, stop:0.7 #fff, stop:0.71 #333, stop:1 #333);
+            }}
+            QRadioButton::indicator:hover {{
+                border: 2px solid #aaa;
+            }}
+            QPushButton {{
+                background-color: #444;
+                color: white;
+                border: 1px solid #222;
+                padding: 8px 20px;
+                border-radius: 4px;
+                font-weight: normal;
+            }}
+            QPushButton:hover {{
+                background-color: #555;
+            }}
+            QPushButton:pressed {{
+                background-color: #333;
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+
+        folder_name = os.path.basename(folder_path)
+        folder_display = QLabel(f"Folder: {folder_name}")
+        folder_display.setStyleSheet("font-size: 14px;")
+        layout.addWidget(folder_display)
+
+        path_label = QLabel(folder_path)
+        path_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        layout.addWidget(path_label)
+
+        layout.addSpacing(20)
+
+        option_label = QLabel("How should this folder be imported?")
+        option_label.setStyleSheet("font-size: 13px;")
+        layout.addWidget(option_label)
+
+        self.rb_single = QRadioButton("Single Image Stack (load as one stack)")
+        self.rb_single.setChecked(True)
+        layout.addWidget(self.rb_single)
+
+        self.rb_batch = QRadioButton("Multiple Image Stacks (open batch processing)")
+        layout.addWidget(self.rb_batch)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.ok_button = QPushButton("OK")
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(self.accept)
+        btn_layout.addWidget(self.ok_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_button)
+
+        layout.addLayout(btn_layout)
+
+    def is_single_stack(self) -> bool:
+        """返回 True 表示单组图像栈，False 表示多组图像栈（批处理）"""
+        return self.rb_single.isChecked()

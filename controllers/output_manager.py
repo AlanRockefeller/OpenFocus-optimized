@@ -31,10 +31,19 @@ class OutputManager:
             window.fusion_results.insert(0, window.fusion_result.copy())
 
         item = QListWidgetItem(fusion_filename)
-        pixmap = window.lbl_result_img.pixmap()
-        if pixmap is not None:
-            icon = QIcon(pixmap.scaled(40, 40, aspectRatioMode=Qt.AspectRatioMode.KeepAspectRatio, transformMode=Qt.TransformationMode.SmoothTransformation))
-            item.setIcon(icon)
+
+        if window.fusion_result is not None:
+            try:
+                rgb_image = cv2.cvtColor(window.fusion_result.copy(), cv2.COLOR_BGR2RGB)
+                h, w = rgb_image.shape[:2]
+                bytes_per_line = 3 * w
+                q_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(q_image)
+                icon = QIcon(pixmap.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                item.setIcon(icon)
+            except Exception:
+                pass
+
         window.output_list.insertItem(0, item)
         window.output_list.setCurrentRow(0)
         self.update_output_count()

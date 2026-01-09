@@ -22,8 +22,8 @@ class TransformManager:
 
         window.raw_images = [cv2.rotate(img, rotation_code) for img in window.raw_images]
 
-        if getattr(window, "full_res_images", None):
-            window.full_res_images = [cv2.rotate(img, rotation_code) for img in window.full_res_images]
+        if getattr(window, "base_images", None):
+            window.base_images = [cv2.rotate(img, rotation_code) for img in window.base_images]
 
         self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
         self.reload_image_stack()
@@ -37,8 +37,8 @@ class TransformManager:
 
         window.raw_images = [cv2.flip(img, flip_code) for img in window.raw_images]
 
-        if getattr(window, "full_res_images", None):
-            window.full_res_images = [cv2.flip(img, flip_code) for img in window.full_res_images]
+        if getattr(window, "base_images", None):
+            window.base_images = [cv2.flip(img, flip_code) for img in window.base_images]
 
         self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
         self.reload_image_stack()
@@ -46,7 +46,7 @@ class TransformManager:
     def resize_all_images(self) -> None:
         """Resize working images according to the down-sample dialog."""
         window = self.window
-        if not getattr(window, "full_res_images", None):
+        if not window.raw_images:
             show_warning_box(window, "No Images", "No images to resize.")
             return
 
@@ -55,23 +55,23 @@ class TransformManager:
         if not dialog.exec():
             return
 
-        scale_factor = dialog.get_scale_factor()
-        if abs(scale_factor - current_scale) < 0.001:
+        new_scale = dialog.get_scale_factor()
+        if abs(new_scale - current_scale) < 0.001:
             return
 
         try:
-            if scale_factor == 1.0:
-                window.raw_images = [img.copy() for img in window.full_res_images]
+            if new_scale == 1.0:
+                window.raw_images = [img.copy() for img in window.base_images]
             else:
+                new_width = int(window.base_images[0].shape[1] * new_scale)
+                new_height = int(window.base_images[0].shape[0] * new_scale)
                 resized = []
-                for img in window.full_res_images:
-                    width = int(img.shape[1] * scale_factor)
-                    height = int(img.shape[0] * scale_factor)
-                    resized_img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+                for img in window.raw_images:
+                    resized_img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
                     resized.append(resized_img)
                 window.raw_images = resized
 
-            window.current_scale_factor = scale_factor
+            window.current_scale_factor = new_scale
 
             self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
             self.reload_image_stack()
@@ -79,7 +79,7 @@ class TransformManager:
             show_success_box(
                 window,
                 "Success",
-                f"Images resized to {int(scale_factor * 100)}%. Existing outputs preserved.",
+                f"Images resized to {int(new_scale * 100)}%. Existing outputs preserved.",
             )
         except Exception as exc:  # pylint: disable=broad-except
             show_error_box(

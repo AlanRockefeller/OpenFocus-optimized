@@ -12,7 +12,7 @@ from utils import resource_path
 class RenderWorker(QThread):
     """后台执行图像配准和融合的线程（从 main.py 抽离）"""
 
-    finished_signal = pyqtSignal(object, object, bool, float, float, bool)
+    finished_signal = pyqtSignal(object, object, bool, float, float, str)
     error_signal = pyqtSignal(str)
 
     def __init__(
@@ -147,13 +147,14 @@ class RenderWorker(QThread):
 
                 fusion = MultiFocusFusion(
                     algorithm=algorithm,
-                    use_gpu=False,
+                    use_gpu=True,
                     tile_enabled=(self.tile_enabled if self.tile_enabled is not None else True),
                     tile_block_size=(self.tile_block_size if self.tile_block_size is not None else 1024),
                     tile_overlap=(self.tile_overlap if self.tile_overlap is not None else 256),
                     tile_threshold=(self.tile_threshold if self.tile_threshold is not None else 2048),
                 )
-                use_gpu = fusion.use_gpu
+                info = fusion.get_info()
+                device_name = info['device']
 
                 kernel_size_value = max(1, int(self.kernel_slider_value))
                 if kernel_size_value % 2 == 0:
@@ -204,7 +205,7 @@ class RenderWorker(QThread):
                 registration_performed,
                 alignment_time,
                 fusion_time,
-                use_gpu,
+                device_name,
             )
         except Exception as e:  # pragma: no cover - 运行时异常路径
             self.error_signal.emit(str(e))
@@ -375,7 +376,6 @@ class BatchWorker(QThread):
             tile_kwargs.setdefault('tile_threshold', self.tile_threshold if self.tile_threshold is not None else 2048)
 
             fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=True, **tile_kwargs)
-            use_gpu = fusion.use_gpu
 
             if fusion_method == "guided_filter":
                 kernel_size = fusion_params.get('kernel_size', 31)

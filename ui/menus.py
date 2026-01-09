@@ -57,12 +57,6 @@ def setup_menus(window: QMainWindow) -> None:
 
     file_menu.addSeparator()
 
-    batch_action = QAction("Batch Processing", window)
-    batch_action.triggered.connect(window.show_batch_processing_dialog)
-    file_menu.addAction(batch_action)
-
-    file_menu.addSeparator()
-
     exit_action = QAction("Exit", window)
     exit_action.setShortcut("Ctrl+Q")
     exit_action.triggered.connect(window.close)
@@ -118,6 +112,13 @@ def setup_menus(window: QMainWindow) -> None:
     window.del_input_label_action.triggered.connect(window.label_manager.delete_input_labels)
     window.del_input_label_action.setEnabled(False)
     delete_label_menu.addAction(window.del_input_label_action)
+
+    # Batch 菜单
+    batch_menu = menubar.addMenu("Batch")
+
+    batch_action = QAction("Batch Processing", window)
+    batch_action.triggered.connect(window.show_batch_processing_dialog)
+    batch_menu.addAction(batch_action)
 
     # Settings 菜单（添加在 Edit 和 Help 之间）
     settings_menu = menubar.addMenu("Settings")

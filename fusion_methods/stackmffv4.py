@@ -10,8 +10,30 @@ import os
 import re
 import glob
 import numpy as np
-from typing import Union, List, Tuple, Optional
 import cv2
+
+# ================= 全局缓存变量 =================
+_GLOBAL_MODEL = None
+_GLOBAL_DEVICE = None
+
+# 缓存可用的加速器类型（模块加载时检测一次）
+_MPS_AVAILABLE = None
+_CUDA_AVAILABLE = None
+
+
+def _detect_accelerators():
+    """检测系统可用的加速器类型，模块加载时执行一次"""
+    global _MPS_AVAILABLE, _CUDA_AVAILABLE
+    try:
+        import torch
+        _MPS_AVAILABLE = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        _CUDA_AVAILABLE = torch.cuda.is_available()
+    except Exception:
+        _MPS_AVAILABLE = False
+        _CUDA_AVAILABLE = False
+
+
+_detect_accelerators()
 
 def _stackmffv4_impl(input_source, img_resize, model_path, use_gpu):
     """
@@ -29,16 +51,23 @@ def _stackmffv4_impl(input_source, img_resize, model_path, use_gpu):
     if torch is None or F is None:
         raise ImportError("PyTorch not installed")
     from network import StackMFF_V4
-    
-    # 设置设备
-    if use_gpu and torch.cuda.is_available():
+
+    if use_gpu and _MPS_AVAILABLE:
+        device = torch.device('mps')
+    elif use_gpu and _CUDA_AVAILABLE:
         device = torch.device('cuda')
-        print("Running AI fusion on the GPU...")
     else:
         device = torch.device('cpu')
-        print("Running AI fusion on the CPU...")
-    
-    # 加载图像
+
+    device_name = device.type.upper()
+    if device.type == 'cuda':
+        device_name = 'CUDA'
+
+    print(f"Running AI fusion on {device_name}...")
+
+    color_images = []
+    gray_tensors = []
+
     if isinstance(input_source, str):
         def get_image_suffix(input_stack_path):
             filenames = os.listdir(input_stack_path)
@@ -52,9 +81,7 @@ def _stackmffv4_impl(input_source, img_resize, model_path, use_gpu):
         img_stack_path_list = glob.glob(os.path.join(input_source, glob_format))
         img_stack_path_list.sort(
             key=lambda x: int(str(re.findall(r"\d+", x.split(os.sep)[-1])[-1])))
-        
-        color_images = []
-        gray_tensors = []
+
         for img_path in img_stack_path_list:
             bgr_img = cv2.imread(img_path)
             if img_resize:
@@ -64,11 +91,12 @@ def _stackmffv4_impl(input_source, img_resize, model_path, use_gpu):
             gray_tensor = torch.from_numpy(gray_img.astype(np.float32) / 255.0)
             gray_tensors.append(gray_tensor)
     else:
-        color_images = []
-        gray_tensors = []
-        for img in input_source:
-            if img_resize:
-                img = cv2.resize(img, img_resize)
+        bgr_images = list(input_source)
+        if not bgr_images:
+            raise ValueError("Empty image list")
+        if img_resize:
+            bgr_images = [cv2.resize(img, img_resize) for img in bgr_images]
+        for img in bgr_images:
             color_images.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             gray_tensor = torch.from_numpy(gray_img.astype(np.float32) / 255.0)
@@ -79,56 +107,61 @@ def _stackmffv4_impl(input_source, img_resize, model_path, use_gpu):
         raise ValueError("At least two images are required for fusion")
 
     print(f"Loaded {num_images} images")
-    
-    # 堆叠灰度图像张量
-    image_stack = torch.stack(gray_tensors)  # [N, H, W]
+
+    image_stack = torch.stack(gray_tensors)
     original_size = image_stack.shape[-2:]
+
+    global _GLOBAL_MODEL, _GLOBAL_DEVICE
+
+    if _GLOBAL_MODEL is None:
+        print("Loading StackMFF-V4 model (once)...")
+        model = StackMFF_V4()
+        try:
+            state_dict = torch.load(model_path, map_location=device, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(model_path, map_location=device)
+        if any(key.startswith('module.') for key in state_dict.keys()):
+            state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        _GLOBAL_MODEL = model
+        _GLOBAL_DEVICE = device
+    else:
+        model = _GLOBAL_MODEL
+        if _GLOBAL_DEVICE != device:
+            model.to(device)
+            _GLOBAL_DEVICE = device
     
-    # 加载模型
-    model = StackMFF_V4()
-    try:
-        state_dict = torch.load(model_path, map_location=device, weights_only=True)
-    except TypeError:
-        # Older PyTorch versions do not support the weights_only flag
-        state_dict = torch.load(model_path, map_location=device)
-    # 处理 DataParallel 的 'module.' 前缀
-    if any(key.startswith('module.') for key in state_dict.keys()):
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-    
-    # 将图像尺寸调整为32的倍数
     def resize_to_multiple_of_32(image):
         h, w = image.shape[-2:]
         new_h = ((h - 1) // 32 + 1) * 32
         new_w = ((w - 1) // 32 + 1) * 32
+        if new_h == h and new_w == w:
+            return image, (h, w)
         resized = F.interpolate(image, size=(new_h, new_w), mode='bilinear', align_corners=False)
         return resized, (h, w)
-    
-    # 模型推理
+
     with torch.no_grad():
-        resized_stack, _ = resize_to_multiple_of_32(image_stack.unsqueeze(0))
-        resized_stack = resized_stack.to(device)
-        
-        fused_image, focus_indices = model(resized_stack)
-        
-        # 转换为 numpy 并调整到原始尺寸
-        fused_image = cv2.resize(
-            fused_image.cpu().numpy().squeeze(),
-            (original_size[1], original_size[0])
-        )
-        focus_indices = cv2.resize(
-            focus_indices.cpu().numpy().squeeze().astype(np.float32),
-            (original_size[1], original_size[0]),
-            interpolation=cv2.INTER_NEAREST
-        ).astype(int)
-    
-    # 根据焦点索引生成彩色融合图像
-    height, width = fused_image.shape
-    focus_indices = np.clip(focus_indices, 0, num_images - 1)
-    color_array = np.stack(color_images, axis=0)  # [N, H, W, 3]
-    fused_color = color_array[focus_indices, np.arange(height)[:, None], np.arange(width)]
+        input_tensor = image_stack.unsqueeze(0).to(device)
+        resized_input, _ = resize_to_multiple_of_32(input_tensor)
+
+        _, focus_indices = model(resized_input)
+
+        focus_indices = focus_indices.squeeze().cpu().numpy()
+
+        del input_tensor, resized_input
+
+    h, w = original_size
+    focus_map = cv2.resize(
+        focus_indices.astype(np.float32),
+        (w, h),
+        interpolation=cv2.INTER_NEAREST
+    ).astype(int)
+
+    focus_map = np.clip(focus_map, 0, num_images - 1)
+    color_array = np.stack(color_images, axis=0)
+    fused_color = color_array[focus_map, np.arange(h)[:, None], np.arange(w)]
     fused_color_bgr = cv2.cvtColor(fused_color.astype(np.uint8), cv2.COLOR_RGB2BGR)
-    
+
     return fused_color_bgr

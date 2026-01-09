@@ -250,3 +250,6 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     components.output_list._delete_shortcut = delete_output_shortcut
 
     window.update_slider_availability()
+
+    components.cb_align_ecc.installEventFilter(window)
+    components.cb_align_homography.installEventFilter(window)
