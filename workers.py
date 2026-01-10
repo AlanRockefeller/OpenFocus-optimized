@@ -36,12 +36,18 @@ class RenderWorker(QThread):
         tile_threshold=None,
         reg_downscale_width=None,
         thread_count: int = 4,
+        roi_rect=None,
+        roi_mode="crop", # 'crop' or 'paste'
+        roi_base_index=0,
     ):
         super().__init__()
         self.raw_images = raw_images
         self.aligned_images = aligned_images
         self.is_images_aligned = is_images_aligned
         self.last_alignment_options = last_alignment_options
+        self.roi_rect = roi_rect
+        self.roi_mode = roi_mode
+        self.roi_base_index = roi_base_index
 
         # 配准选项
         self.need_align_homography = need_align_homography
@@ -128,6 +134,35 @@ class RenderWorker(QThread):
                         processed_images = self.raw_images.copy()
                         registration_performed = False
 
+            # --- ROI Cropping Logic ---
+            base_full_image = None # For 'paste' mode
+            roi_original_rect_int = None
+
+            if self.roi_rect is not None and len(processed_images) > 0:
+                rx, ry, rw, rh = int(self.roi_rect.x()), int(self.roi_rect.y()), int(self.roi_rect.width()), int(self.roi_rect.height())
+                h, w = processed_images[0].shape[:2]
+                rx = max(0, min(rx, w))
+                ry = max(0, min(ry, h))
+                rw = max(1, min(rw, w - rx))
+                rh = max(1, min(rh, h - ry))
+                
+                roi_original_rect_int = (rx, ry, rw, rh) # x, y, w, h
+                
+                # If paste mode, save the base frame before cropping
+                if self.roi_mode == "paste":
+                    idx = max(0, min(self.roi_base_index, len(processed_images) - 1))
+                    base_full_image = processed_images[idx].copy()
+                
+                cropped_stack = []
+                for img in processed_images:
+                    if img.ndim == 3:
+                        crop = img[ry:ry+rh, rx:rx+rw, :]
+                    else:
+                        crop = img[ry:ry+rh, rx:rx+rw]
+                    cropped_stack.append(crop)
+                processed_images = cropped_stack
+            # --------------------------
+
             fusion_result = None
             if self.need_fusion:
                 fusion_start_time = time.time()
@@ -196,6 +231,30 @@ class RenderWorker(QThread):
                         model_path=model_path,
                         thread_count=self.thread_count,
                     )
+
+                # --- ROI Paste Logic ---
+                if self.roi_mode == "paste" and base_full_image is not None and fusion_result is not None and roi_original_rect_int is not None:
+                    rx, ry, rw, rh = roi_original_rect_int
+                    
+                    # Ensure dimensions match (fusion result might vary slightly or be float range?)
+                    # Usually fusion result matches input size (ROI size)
+                    fused_patch = fusion_result
+                    
+                    # Handle channels. Base might be RGB, fused might be grayscale if input was? 
+                    # Assuming consistency.
+                    
+                    # Simply paste
+                    if base_full_image.ndim == 3 and fused_patch.ndim == 3:
+                        base_full_image[ry:ry+rh, rx:rx+rw, :] = fused_patch[:rh, :rw, :]
+                    elif base_full_image.ndim == 2 and fused_patch.ndim == 2:
+                        base_full_image[ry:ry+rh, rx:rx+rw] = fused_patch[:rh, :rw]
+                    elif base_full_image.ndim == 3 and fused_patch.ndim == 2:
+                         # Broadcast grayscale patch to RGB base
+                         for c in range(3):
+                             base_full_image[ry:ry+rh, rx:rx+rw, c] = fused_patch[:rh, :rw]
+                    
+                    fusion_result = base_full_image
+                 # -----------------------
 
                 fusion_time = time.time() - fusion_start_time
 

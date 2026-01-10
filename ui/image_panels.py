@@ -9,9 +9,11 @@ from PyQt6.QtWidgets import (
     QSlider,
     QVBoxLayout,
     QWidget,
+    QPushButton,
 )
 
 from widgets.magnifier_label import MagnifierLabel
+from locales import trans
 
 
 @dataclass
@@ -21,6 +23,7 @@ class SourcePanel:
     control_bar: QWidget
     slider: QSlider
     info_label: QLabel
+    roi_btn: QPushButton
 
 
 @dataclass
@@ -69,8 +72,15 @@ def create_source_panel() -> SourcePanel:
     slider.setRange(0, 0)
     slider.setEnabled(False)
 
+    roi_btn = QPushButton(trans.t('btn_roi'))
+    roi_btn.setCheckable(True)
+    # roi_btn.setFixedWidth(40) # Allow auto-width for longer text
+    roi_btn.setToolTip("Select Region of Interest to preview")
+    roi_btn.setStyleSheet("QPushButton { background-color: #333; color: #aaa; border: 1px solid #444; border-radius: 2px; padding: 0 5px; } QPushButton:checked { background-color: #0078d7; color: white; border-color: #005a9e; }")
+
     control_layout.addWidget(info_label)
     control_layout.addWidget(slider)
+    control_layout.addWidget(roi_btn)
 
     control_bar.setVisible(False)
 
@@ -84,6 +94,7 @@ def create_source_panel() -> SourcePanel:
         control_bar=control_bar,
         slider=slider,
         info_label=info_label,
+        roi_btn=roi_btn,
     )
 
 

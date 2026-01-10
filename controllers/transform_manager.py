@@ -5,6 +5,7 @@ from PyQt6.QtGui import QFont
 
 from dialogs import DownsampleDialog
 from utils import show_error_box, show_success_box, show_warning_box
+from locales import trans
 
 
 class TransformManager:
@@ -105,10 +106,11 @@ class TransformManager:
                 window.add_label_action.setEnabled(False)
                 window.resize_action.setEnabled(False)
                 window.lbl_source_img.clear()
-                window.lbl_source_img.setText(
-                    "Drag images here to add source files\nor use the image menu"
-                )
+                window.lbl_source_img.setText(trans.t('drag_hint'))
                 window.lbl_source_img.setFont(QFont("Microsoft YaHei", 16))
+                
+                if hasattr(window, "update_loaded_status"):
+                    window.update_loaded_status()
                 return
 
             pixmaps = window.image_loader.create_pixmaps(window.raw_images, max_size=None)
@@ -131,6 +133,10 @@ class TransformManager:
                 window.stack_slider.setValue(target_index)
                 window.stack_slider.blockSignals(False)
                 window.file_list.setCurrentRow(target_index)
+                
+            if hasattr(window, "update_loaded_status"):
+                window.update_loaded_status()
+
         except Exception as exc:  # pylint: disable=broad-except
             show_error_box(
                 window,

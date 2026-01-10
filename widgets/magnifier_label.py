@@ -1,15 +1,19 @@
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap, QPen, QRegion
 from PyQt6.QtWidgets import QLabel
+
+from locales import trans
 
 
 class MagnifierLabel(QLabel):
-    """Image label that supports zooming and a press-and-hold magnifier."""
+    """Image label that supports zooming, a press-and-hold magnifier, and ROI selection."""
 
     enterPreview = pyqtSignal()
     leavePreview = pyqtSignal()
+    roiChanged = pyqtSignal(QRectF)  # Emits normalized ROI (0-1) or base coords? Let's use base coords (pixels)
+    roiDeleted = pyqtSignal()
 
     def __init__(self, text: Optional[str] = "", parent=None):
         super().__init__(parent)
@@ -40,7 +44,102 @@ class MagnifierLabel(QLabel):
         
         # Cache for smooth panning
         self._cached_scaled_pixmap: Optional[QPixmap] = None
-        self._current_input_pixmap_key = None # To track base pixmap changes if needed (id?)
+        self._current_input_pixmap_key = None 
+
+        # ROI Selection State
+        self._roi_mode = False
+        self._roi_rect: Optional[QRectF] = None  # In base image coordinates
+        self._roi_state = "none"  # none, creating, moving, resizing_tl, resizing_tr, etc.
+        self._roi_start_pos = QPointF()
+        self._roi_original_rect = QRectF()
+        self._roi_handle_size = 8
+        self._hovering_handle = None  # None or handle ID string
+
+    @property
+    def roi_mode(self):
+        return self._roi_mode
+
+    @roi_mode.setter
+    def roi_mode(self, enabled: bool):
+        self._roi_mode = enabled
+        if not enabled:
+            # self._roi_rect = None # Keep the rect even if mode disabled? Maybe clear. 
+            # Usually switching tools clears state or persists. Let's persist but hide? 
+            # Prompt says "In this mode...". Let's clear rect if we exit mode? 
+            # Or maybe just hide interactions. Let's clear for now to avoid confusion.
+            self._roi_rect = None
+            self.roiDeleted.emit()
+        self.update()
+
+    def get_roi_rect(self) -> Optional[QRectF]:
+        """Returns the current ROI in base image coordinates."""
+        return self._roi_rect
+
+    def set_roi_rect(self, rect: Optional[QRectF]):
+        self._roi_rect = rect
+        self.update()
+
+    # ... existing helpers ...
+
+    def _get_layout_params(self):
+        """Calculate layout parameters: scale, offset_x, offset_y."""
+        if self._base_pixmap is None or self._base_pixmap.isNull():
+            return 1.0, 0.0, 0.0
+
+        label_width = max(1, self.width())
+        label_height = max(1, self.height())
+        
+        # We need to replicate logic from _update_scaled_pixmap to be consistent
+        if self._cached_scaled_pixmap:
+             scaled_w = self._cached_scaled_pixmap.width()
+             scaled_h = self._cached_scaled_pixmap.height()
+        else:
+            target_width = int(label_width * self._zoom_factor)
+            target_height = int(label_height * self._zoom_factor)
+            # This is an approximation if cache is missing, but usually cache exists after paint
+            # For exactness we might need to recalc aspect ratio scaling here
+            pix_w = self._base_pixmap.width()
+            pix_h = self._base_pixmap.height()
+            r = min(target_width / pix_w, target_height / pix_h) if (pix_w >0 and pix_h >0) else 1.0
+            scaled_w = pix_w * r
+            scaled_h = pix_h * r
+            
+        scale = scaled_w / self._base_pixmap.width() if self._base_pixmap.width() > 0 else 1.0
+        
+        base_x = (label_width - scaled_w) / 2.0
+        base_y = (label_height - scaled_h) / 2.0
+        
+        x = base_x + self._pan_offset.x()
+        y = base_y + self._pan_offset.y()
+        
+        return scale, x, y
+
+    def _map_from_base(self, point: QPointF) -> QPointF:
+        scale, dx, dy = self._get_layout_params()
+        return QPointF(point.x() * scale + dx, point.y() * scale + dy)
+
+    def _map_to_base(self, point: QPointF) -> QPointF:
+        scale, dx, dy = self._get_layout_params()
+        if scale == 0: return QPointF(0,0)
+        return QPointF((point.x() - dx) / scale, (point.y() - dy) / scale)
+
+    def _get_handle_rects(self, widget_roi: QRectF):
+        """Get handles in widget coordinates."""
+        s = self._roi_handle_size
+        hs = s / 2
+        l, t, r, b = widget_roi.left(), widget_roi.top(), widget_roi.right(), widget_roi.bottom()
+        
+        # Add delete button rect (top-right corner attached)
+        del_btn_size = 16
+        del_rect = QRectF(r, t - del_btn_size, del_btn_size, del_btn_size)
+        
+        return {
+            "tl": QRectF(l - hs, t - hs, s, s),
+            "tr": QRectF(r - hs, t - hs, s, s),
+            "bl": QRectF(l - hs, b - hs, s, s),
+            "br": QRectF(r - hs, b - hs, s, s),
+            "del": del_rect
+        }
 
     def _get_zoom_indicator_opacity(self):
         return self._zoom_indicator_opacity
@@ -174,7 +273,75 @@ class MagnifierLabel(QLabel):
             self._cached_scaled_pixmap = None
             self._update_scaled_pixmap()
 
+    def keyPressEvent(self, event):
+        if self._roi_mode and (event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace):
+            if self._roi_rect is not None:
+                self._roi_rect = None
+                self._roi_state = "none"
+                self.roiDeleted.emit()
+                self.update()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
+        # Ensure we get keyboard focus when clicked
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+        if self._roi_mode and event.button() == Qt.MouseButton.LeftButton:
+            if self._base_pixmap is None:
+                return
+
+            pos = event.position()
+            base_pos = self._map_to_base(pos)
+            
+            # Check interactions if ROI exists
+            if self._roi_rect is not None:
+                # Check handles
+                scale, _, _ = self._get_layout_params()
+                screen_roi = QRectF(
+                   (self._roi_rect.x() * scale) + self._get_layout_params()[1],
+                   (self._roi_rect.y() * scale) + self._get_layout_params()[2],
+                   self._roi_rect.width() * scale,
+                   self._roi_rect.height() * scale
+                )
+                handles = self._get_handle_rects(screen_roi)
+                
+                # Check delete button first
+                if "del" in handles and handles["del"].contains(pos):
+                    self._roi_rect = None
+                    self._roi_state = "none"
+                    self.roiDeleted.emit()
+                    self.update()
+                    event.accept()
+                    return
+
+                for name, rect in handles.items():
+                    if name == "del": continue
+                    if rect.contains(pos):
+                        self._roi_state = f"resizing_{name}"
+                        self._roi_start_pos = base_pos
+                        self._roi_original_rect = self._roi_rect
+                        event.accept()
+                        return
+                
+                # Check inside
+                if screen_roi.contains(pos):
+                    self._roi_state = "moving"
+                    self._roi_start_pos = base_pos
+                    self._roi_original_rect = self._roi_rect
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    event.accept()
+                    return
+            
+            # Start new ROI (only if not clicking delete button)
+            self._roi_state = "creating"
+            self._roi_start_pos = base_pos
+            self._roi_rect = None
+            # Do NOT emit roiDeleted here, otherwise it toggles the button off!
+            event.accept()
+            return
+
         if self._is_panning:
             super().mousePressEvent(event)
             return
@@ -210,6 +377,85 @@ class MagnifierLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._roi_mode:
+            pos = event.position()
+            base_pos = self._map_to_base(pos)
+            
+            if self._roi_state == "creating":
+                x = min(self._roi_start_pos.x(), base_pos.x())
+                y = min(self._roi_start_pos.y(), base_pos.y())
+                w = abs(base_pos.x() - self._roi_start_pos.x())
+                h = abs(base_pos.y() - self._roi_start_pos.y())
+                self._roi_rect = QRectF(x, y, w, h)
+                self.update()
+                return
+
+            elif self._roi_state == "moving":
+                dx = base_pos.x() - self._roi_start_pos.x()
+                dy = base_pos.y() - self._roi_start_pos.y()
+                r = self._roi_original_rect
+                self._roi_rect = QRectF(r.x() + dx, r.y() + dy, r.width(), r.height())
+                self.update()
+                return
+
+            elif self._roi_state.startswith("resizing_"):
+                # Handle resizing
+                corner = self._roi_state.split("_")[1]
+                r = self._roi_original_rect
+                dx = base_pos.x() - self._roi_start_pos.x()
+                dy = base_pos.y() - self._roi_start_pos.y()
+                
+                new_l, new_t, new_r, new_b = r.left(), r.top(), r.right(), r.bottom()
+                
+                if "l" in corner: new_l += dx
+                if "t" in corner: new_t += dy
+                if "r" in corner: new_r += dx
+                if "b" in corner: new_b += dy
+                
+                self._roi_rect = QRectF(QPointF(new_l, new_t), QPointF(new_r, new_b)).normalized()
+                self.update()
+                return
+
+            # Update hovering state
+            if self._roi_rect:
+                scale, _, _ = self._get_layout_params()
+                screen_roi = QRectF(
+                   (self._roi_rect.x() * scale) + self._get_layout_params()[1],
+                   (self._roi_rect.y() * scale) + self._get_layout_params()[2],
+                   self._roi_rect.width() * scale,
+                   self._roi_rect.height() * scale
+                )
+                handles = self._get_handle_rects(screen_roi)
+                cursor = Qt.CursorShape.CrossCursor
+                
+                # Check delete button hover
+                if "del" in handles and handles["del"].contains(pos):
+                    self.setCursor(Qt.CursorShape.PointingHandCursor)
+                    # We need to track hover state for redraw, let's use a member variable
+                    if self._hovering_handle != "del":
+                        self._hovering_handle = "del"
+                        self.update() # To redraw button highlight
+                    return 
+
+                # Check resize handles
+                for name, rect in handles.items():
+                    if name == "del": continue
+                    if rect.contains(pos):
+                        if name in ["tl", "br"]: cursor = Qt.CursorShape.SizeFDiagCursor
+                        else: cursor = Qt.CursorShape.SizeBDiagCursor
+                        break
+                else: 
+                     if screen_roi.contains(pos):
+                         cursor = Qt.CursorShape.SizeAllCursor
+                
+                self._hovering_handle = None # Reset if not on button
+                self.setCursor(cursor)
+                self.update() # optional: to clear button highlight if needed, but might flicker
+            else:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+                
+            return
+
         if self._is_panning:
             if self._base_pixmap is not None and not self._base_pixmap.isNull():
                 if event.buttons() & Qt.MouseButton.LeftButton:
@@ -236,6 +482,19 @@ class MagnifierLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._roi_mode:
+            if self._roi_state != "none":
+                if self._roi_rect and (self._roi_rect.width() < 5 or self._roi_rect.height() < 5):
+                     # Too small, discard
+                     self._roi_rect = None
+                     # self.roiDeleted.emit() # Don't exit mode just for small drag
+                elif self._roi_rect:
+                    self.roiChanged.emit(self._roi_rect)
+                
+                self._roi_state = "none"
+                self.update()
+            return
+
         if event.button() == Qt.MouseButton.RightButton and self._is_panning:
             self._is_panning = False
             self._update_cursor()
@@ -380,6 +639,102 @@ class MagnifierLabel(QLabel):
                 painter.setFont(font)
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(text_bg_rect, Qt.AlignmentFlag.AlignCenter, f"{self._magnifier_zoom:.1f}x")
+
+        if self._roi_mode and self._base_pixmap is not None and not self._base_pixmap.isNull():
+            overlay_color = QColor(0, 0, 0, 150)
+            
+            if self._roi_rect is None:
+                painter.fillRect(self.rect(), overlay_color)
+                painter.setPen(Qt.GlobalColor.white)
+                font = QFont()
+                font.setPointSize(12)
+                painter.setFont(font)
+                painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, trans.t("drag_roi_hint"))
+            else:
+                scale, dx, dy = self._get_layout_params()
+                rx = self._roi_rect.x() * scale + dx
+                ry = self._roi_rect.y() * scale + dy
+                rw = self._roi_rect.width() * scale
+                rh = self._roi_rect.height() * scale
+                screen_roi = QRectF(rx, ry, rw, rh)
+                
+                # Dim outside (using clip region for performance)
+                full_region = QRegion(self.rect())
+                roi_region = QRegion(screen_roi.toRect())
+                dim_region = full_region.subtracted(roi_region)
+                
+                painter.save()
+                painter.setClipRegion(dim_region)
+                painter.fillRect(self.rect(), overlay_color)
+                painter.restore()
+                    
+                # Border
+                painter.setPen(QPen(QColor(0, 120, 215), 2))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(screen_roi)
+                
+                # Handles
+                painter.setBrush(Qt.GlobalColor.white)
+                painter.setPen(Qt.GlobalColor.black)
+                handles = self._get_handle_rects(screen_roi)
+                
+                # Draw resize handles
+                for name, rect in handles.items():
+                    if name == "del": continue
+                    painter.drawRect(rect)
+                    
+                # Draw delete button
+                if "del" in handles:
+                    del_rect = handles["del"]
+                    is_hover = (self._hovering_handle == "del")
+                    
+                    # Background
+                    painter.setBrush(QColor(232, 17, 35) if is_hover else QColor(200, 50, 50))
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.drawRect(del_rect)
+                    
+                    # 'X' symbol
+                    painter.setPen(QPen(Qt.GlobalColor.white, 2))
+                    painter.drawLine(int(del_rect.left() + 4), int(del_rect.top() + 4), 
+                                     int(del_rect.right() - 4), int(del_rect.bottom() - 4))
+                    painter.drawLine(int(del_rect.left() + 4), int(del_rect.bottom() - 4), 
+                                     int(del_rect.right() - 4), int(del_rect.top() + 4))
+
+                # Draw ROI Info
+                font = QFont()
+                font.setFamily("Consolas")
+                font.setPointSize(9)
+                font.setBold(True)
+                painter.setFont(font)
+                fm = painter.fontMetrics()
+                
+                # 1. Top-Left: Coordinates (x, y)
+                coord_str = f"{int(self._roi_rect.x())}, {int(self._roi_rect.y())}"
+                cw = fm.horizontalAdvance(coord_str) + 12
+                ch = fm.height() + 4
+                
+                # Position above-left
+                cx = screen_roi.left()
+                cy = screen_roi.top() - ch - 2
+                if cy < 0: cy = screen_roi.top() + 2 # Flip inside if blocked
+                
+                coord_bg = QRectF(cx, cy, cw, ch)
+                painter.fillRect(coord_bg, QColor(0, 0, 0, 180))
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(coord_bg, Qt.AlignmentFlag.AlignCenter, coord_str)
+
+                # 2. Bottom-Center: Resolution W x H
+                res_str = f"{int(self._roi_rect.width())} x {int(self._roi_rect.height())}"
+                rw = fm.horizontalAdvance(res_str) + 12
+                rh = ch
+                
+                rx = screen_roi.center().x() - rw / 2
+                ry = screen_roi.bottom() + 2
+                if ry + rh > self.height(): ry = screen_roi.bottom() - rh - 2 # Flip inside if blocked
+                
+                res_bg = QRectF(rx, ry, rw, rh)
+                painter.fillRect(res_bg, QColor(0, 0, 0, 180))
+                painter.drawText(res_bg, Qt.AlignmentFlag.AlignCenter, res_str)
 
         self._draw_zoom_indicator(painter)
 

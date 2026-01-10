@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from styles import PRIMARY_BLUE
 from utils import resource_path
+from locales import trans
 
 
 class EnvironmentInfoDialog(QDialog):
@@ -32,7 +33,7 @@ class EnvironmentInfoDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Environment Information")
+        self.setWindowTitle(trans.t('dialog_env_title'))
         self.resize(600, 500)
 
         # 应用深色主题
@@ -68,7 +69,7 @@ class EnvironmentInfoDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # 标题
-        title = QLabel("OpenFocus Environment Dependencies")
+        title = QLabel(trans.t('env_subtitle'))
         title.setFont(QFont("Arial", 14, QFont.Weight.Normal))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -80,7 +81,7 @@ class EnvironmentInfoDialog(QDialog):
         layout.addWidget(self.text_edit)
 
         # 关闭按钮
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(trans.t('btn_close'))
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
@@ -91,12 +92,12 @@ class EnvironmentInfoDialog(QDialog):
         """检测环境依赖"""
         info_lines = []
         info_lines.append("=" * 60)
-        info_lines.append("OpenFocus Environment Check")
+        info_lines.append(trans.t('env_subtitle') if trans.current_lang == 'en' else "OpenFocus Environment Check")
         info_lines.append("=" * 60)
         info_lines.append("")
 
         # Python 版本
-        info_lines.append(f"Python Version: {sys.version}")
+        info_lines.append(f"{trans.t('env_python')}: {sys.version}")
         info_lines.append("")
 
         # 检测 OpenCV
@@ -105,9 +106,9 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import cv2 as cv_check  # noqa: F401
 
-            info_lines.append(f"  ✓ Installed: Version {cv_check.__version__}")
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(cv_check.__version__)}")
         except ImportError:
-            info_lines.append("  ✗ Not installed")
+            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
         info_lines.append("")
 
         # 检测 NumPy
@@ -116,9 +117,9 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import numpy as np_check  # noqa: F401
 
-            info_lines.append(f"  ✓ Installed: Version {np_check.__version__}")
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(np_check.__version__)}")
         except ImportError:
-            info_lines.append("  ✗ Not installed")
+            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
         info_lines.append("")
 
         # 检测 PyQt6
@@ -127,9 +128,9 @@ class EnvironmentInfoDialog(QDialog):
         try:
             from PyQt6.QtCore import PYQT_VERSION_STR  # noqa: F401
 
-            info_lines.append(f"  ✓ Installed: Version {PYQT_VERSION_STR}")
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(PYQT_VERSION_STR)}")
         except ImportError:
-            info_lines.append("  ✗ Not installed")
+            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
         info_lines.append("")
 
         # 检测 PyTorch (StackMFF-V4)
@@ -138,20 +139,20 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import torch
 
-            info_lines.append(f"  ✓ Installed: Version {torch.__version__}")
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(torch.__version__)}")
             if torch.cuda.is_available():
-                info_lines.append(f"  ✓ CUDA available: {torch.cuda.get_device_name(0)}")
-                info_lines.append(f"  ✓ CUDA version: {torch.version.cuda}")
-                info_lines.append("  ✓ StackMFF-V4: GPU acceleration available")
+                info_lines.append(f"  ✓ {trans.t('env_cuda_avail').format(torch.cuda.get_device_name(0))}")
+                info_lines.append(f"  ✓ {trans.t('env_cuda_ver').format(torch.version.cuda)}")
+                info_lines.append(f"  ✓ {trans.t('env_gpu_accel')}")
             elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                info_lines.append("  ✓ MPS available (Apple Silicon)")
-                info_lines.append("  ✓ StackMFF-V4: GPU acceleration available")
+                info_lines.append(f"  ✓ {trans.t('env_mps_avail')}")
+                info_lines.append(f"  ✓ {trans.t('env_gpu_accel')}")
             else:
-                info_lines.append("  ⚠ No GPU acceleration (CUDA/MPS)")
-                info_lines.append("  ✓ StackMFF-V4: Available (CPU mode - slower)")
+                info_lines.append(f"  ⚠ {trans.t('env_no_gpu')}")
+                info_lines.append(f"  ✓ {trans.t('env_cpu_mode')}")
         except ImportError:
-            info_lines.append("  ✗ Not installed")
-            info_lines.append("  ✗ StackMFF-V4 fusion not available")
+            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+            info_lines.append(f"  ✗ {trans.t('env_stackmff_unavailable')}")
         info_lines.append("")
 
         # 检测 DTCWT
@@ -160,23 +161,23 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import dtcwt  # noqa: F401
 
-            info_lines.append(f"  ✓ Installed: Version {dtcwt.__version__}")
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(dtcwt.__version__)}")
         except ImportError:
-            info_lines.append("  ✗ Not installed (DTCWT fusion unavailable)")
+            info_lines.append(f"  ✗ {trans.t('env_dtcwt_unavailable')}")
         info_lines.append("")
 
         # 总结
         info_lines.append("=" * 60)
-        info_lines.append("Summary")
+        info_lines.append(trans.t('env_summary'))
         info_lines.append("=" * 60)
-        info_lines.append("Core Dependencies:")
-        info_lines.append("  - OpenCV, NumPy, PyQt6: Required for basic functionality")
+        info_lines.append(trans.t('env_core_dep'))
+        info_lines.append(f"  {trans.t('env_core_desc')}")
         info_lines.append("")
-        info_lines.append("GPU Acceleration (Optional):")
-        info_lines.append("  - PyTorch: Enables StackMFF-V4 (CPU fallback available but slower)")
+        info_lines.append(trans.t('env_gpu_opt'))
+        info_lines.append(f"  {trans.t('env_gpu_desc')}")
         info_lines.append("")
-        info_lines.append("Fusion Algorithms:")
-        info_lines.append("  - DTCWT library: Required for DTCWT fusion")
+        info_lines.append(trans.t('env_fusion_alg'))
+        info_lines.append(f"  {trans.t('env_fusion_desc')}")
         info_lines.append("")
 
         # 显示信息
@@ -344,7 +345,7 @@ class HelpDialog(QDialog):
         layout.addWidget(self.text_browser)
 
         # 关闭按钮
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(trans.t('btn_close'))
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
@@ -377,7 +378,7 @@ class RenderMethodHelpDialog(HelpDialog):
     <p>StackMFF-V4<br/>
     A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>"""
         
-        super().__init__("Fusion Help", help_text, parent)
+        super().__init__(trans.t('help_render_title'), help_text, parent)
 
 
 class RegistrationHelpDialog(HelpDialog):
@@ -401,14 +402,16 @@ class ContactInfoDialog(HelpDialog):
     """联系信息对话框"""
 
     def __init__(self, parent=None):
-        contact_text = """<h3>Contact Information</h3>
+        contact_text = f"""
+        <style>a {{ color: #ffffff; }}</style>
+        <h3>{trans.t('contact_info_title')}</h3>
         
-    <p>Email: xiexinzhe@zju.edu.cn</p>
-    <p>Institution: Zhejiang University</p>
-    <p>GitHub: <a href="https://github.com/Xinzhe99/OpenFocus">https://github.com/Xinzhe99/OpenFocus</a></p>
-    <p>We warmly welcome contributors who would like to add new fusion methods and help OpenFocus grow.</p>"""
+    <p>{trans.t('contact_email')}: xiexinzhe@zju.edu.cn</p>
+    <p>{trans.t('contact_institution')}: {trans.t('contact_zju')}</p>
+    <p>{trans.t('contact_github')}: <a href="https://github.com/Xinzhe99/OpenFocus">https://github.com/Xinzhe99/OpenFocus</a></p>
+    <p>{trans.t('contact_welcome')}</p>"""
         
-        super().__init__("Contact Us", contact_text, parent)
+        super().__init__(trans.t('dialog_contact_title'), contact_text, parent)
 
 
 class BatchProcessingDialog(QDialog):
@@ -416,7 +419,7 @@ class BatchProcessingDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Batch Processing")
+        self.setWindowTitle(trans.t('batch_title'))
         self.resize(800, 800)  # 增加高度以容纳更多文件夹
         
         # 存储选中的文件夹路径和对应的缩略图
@@ -537,30 +540,30 @@ class BatchProcessingDialog(QDialog):
         """初始化UI"""
         layout = QVBoxLayout(self)
 
-        import_mode_group = QGroupBox("Import Mode")
+        import_mode_group = QGroupBox(trans.t('batch_import_mode'))
         import_mode_layout = QVBoxLayout(import_mode_group)
 
-        self.rb_multiple_folders = QRadioButton("Multiple Folders (one stack per folder)")
+        self.rb_multiple_folders = QRadioButton(trans.t('batch_mode_multi'))
         self.rb_multiple_folders.setChecked(True)
         self.rb_multiple_folders.toggled.connect(self.on_import_mode_changed)
         import_mode_layout.addWidget(self.rb_multiple_folders)
 
-        self.rb_single_folder = QRadioButton("Single Folder (auto-split into multiple stacks)")
+        self.rb_single_folder = QRadioButton(trans.t('batch_mode_single'))
         self.rb_single_folder.toggled.connect(self.on_import_mode_changed)
         import_mode_layout.addWidget(self.rb_single_folder)
 
         layout.addWidget(import_mode_group)
 
-        self.folder_group = QGroupBox("Image Stack Folders")
+        self.folder_group = QGroupBox(trans.t('batch_stack_folders'))
         folder_layout = QVBoxLayout(self.folder_group)
         
         # 路径输入框（参考demo.py的实现）
         self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText("Type a path and press Enter to refresh")
+        self.path_input.setPlaceholderText(trans.t('batch_path_placeholder'))
         folder_layout.addWidget(self.path_input)
         
         # 添加文件夹按钮
-        add_folder_btn = QPushButton("Add Folders")
+        add_folder_btn = QPushButton(trans.t('batch_btn_add'))
         add_folder_btn.clicked.connect(self.add_folders)
         folder_layout.addWidget(add_folder_btn)
         
@@ -570,33 +573,33 @@ class BatchProcessingDialog(QDialog):
         folder_layout.addWidget(self.folder_list)
         
         # 移除文件夹按钮
-        remove_folder_btn = QPushButton("Remove Selected")
+        remove_folder_btn = QPushButton(trans.t('batch_btn_remove'))
         remove_folder_btn.clicked.connect(self.remove_selected_folders)
         folder_layout.addWidget(remove_folder_btn)
         
         layout.addWidget(self.folder_group)
 
-        self.single_folder_group = QGroupBox("Single Folder Split Settings")
+        self.single_folder_group = QGroupBox(trans.t('batch_single_split_settings'))
         self.single_folder_group.setVisible(False)
         single_folder_layout = QVBoxLayout(self.single_folder_group)
 
         # 显示选取的文件夹路径
-        self.single_folder_path_label = QLabel("Folder: (none)")
+        self.single_folder_path_label = QLabel(trans.t('batch_folder_none'))
         self.single_folder_path_label.setStyleSheet("color: #aaa; font-size: 12px;")
         self.single_folder_path_label.setWordWrap(True)
         single_folder_layout.addWidget(self.single_folder_path_label)
 
         split_method_layout = QHBoxLayout()
-        split_method_layout.addWidget(QLabel("Split Method:"))
+        split_method_layout.addWidget(QLabel(trans.t('batch_split_method')))
         self.split_method_combo = QComboBox()
-        self.split_method_combo.addItems(["Fixed Count", "Time Threshold"])
+        self.split_method_combo.addItems([trans.t('batch_split_fixed'), trans.t('batch_split_time')])
         self.split_method_combo.currentIndexChanged.connect(self.on_split_method_changed)
         split_method_layout.addWidget(self.split_method_combo)
         split_method_layout.addStretch()
         single_folder_layout.addLayout(split_method_layout)
 
         param_layout = QHBoxLayout()
-        self.param_label = QLabel("Images per Stack:")
+        self.param_label = QLabel(trans.t('batch_images_per_stack'))
         param_layout.addWidget(self.param_label)
 
         self.param_spinbox = QSpinBox()
@@ -606,26 +609,26 @@ class BatchProcessingDialog(QDialog):
         self.param_spinbox.valueChanged.connect(self.update_single_folder_preview)
         param_layout.addWidget(self.param_spinbox)
 
-        self.param_unit_label = QLabel("images")
+        self.param_unit_label = QLabel(trans.t('batch_unit_images'))
         param_layout.addWidget(self.param_unit_label)
         param_layout.addStretch()
         single_folder_layout.addLayout(param_layout)
 
-        self.preview_label = QLabel("Preview: 0 images → 0 stacks")
+        self.preview_label = QLabel(trans.t('batch_preview_default'))
         self.preview_label.setStyleSheet("color: #aaa; font-size: 12px;")
         single_folder_layout.addWidget(self.preview_label)
 
-        add_single_folder_btn = QPushButton("Select Folder and Split")
+        add_single_folder_btn = QPushButton(trans.t('batch_btn_select_split'))
         add_single_folder_btn.clicked.connect(self.add_single_folder)
         single_folder_layout.addWidget(add_single_folder_btn)
 
         layout.addWidget(self.single_folder_group)
         
         # 保存格式选择
-        format_group = QGroupBox("Output Format")
+        format_group = QGroupBox(trans.t('batch_output_format'))
         format_layout = QHBoxLayout(format_group)
         
-        format_layout.addWidget(QLabel("Format:"))
+        format_layout.addWidget(QLabel(trans.t('batch_format_label')))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["JPG", "PNG", "BMP", "TIFF"])
         format_layout.addWidget(self.format_combo)
@@ -634,29 +637,29 @@ class BatchProcessingDialog(QDialog):
         layout.addWidget(format_group)
         
         # 输出方式选择
-        output_group = QGroupBox("Output Location")
+        output_group = QGroupBox(trans.t('batch_output_location'))
         output_layout = QVBoxLayout(output_group)
         
         # 选项1：在源文件夹中创建子文件夹
-        self.rb_subfolder = QRadioButton("Create subfolder in source folder")
+        self.rb_subfolder = QRadioButton(trans.t('batch_out_subfolder'))
         self.rb_subfolder.setChecked(True)
         self.rb_subfolder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_subfolder)
         
         # 子文件夹名称输入
         subfolder_layout = QHBoxLayout()
-        subfolder_layout.addWidget(QLabel("Subfolder Name:"))
+        subfolder_layout.addWidget(QLabel(trans.t('batch_subfolder_name')))
         self.subfolder_name = QLineEdit("OpenFocus_Output")
         subfolder_layout.addWidget(self.subfolder_name)
         output_layout.addLayout(subfolder_layout)
         
         # 选项2：与源文件夹相同
-        self.rb_same_folder = QRadioButton("Same as source folder")
+        self.rb_same_folder = QRadioButton(trans.t('batch_out_same'))
         self.rb_same_folder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_same_folder)
         
         # 选项3：指定文件夹
-        self.rb_custom_folder = QRadioButton("Specify output folder")
+        self.rb_custom_folder = QRadioButton(trans.t('batch_out_custom'))
         self.rb_custom_folder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_custom_folder)
         
@@ -666,7 +669,7 @@ class BatchProcessingDialog(QDialog):
         self.custom_folder_path.setEnabled(False)
         custom_folder_layout.addWidget(self.custom_folder_path)
         
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton(trans.t('batch_btn_browse'))
         browse_btn.clicked.connect(self.browse_output_folder)
         browse_btn.setEnabled(False)
         self.browse_btn = browse_btn
@@ -676,12 +679,12 @@ class BatchProcessingDialog(QDialog):
         layout.addWidget(output_group)
         
         # 保存对齐后图像栈的选项
-        self.save_aligned_cb = QCheckBox("Save Aligned Image Stack")
+        self.save_aligned_cb = QCheckBox(trans.t('batch_save_aligned'))
         self.save_aligned_cb.setChecked(False)
         layout.addWidget(self.save_aligned_cb)
         
         # 处理选项信息显示（从主窗口获取）
-        info_group = QGroupBox("Processing Options")
+        info_group = QGroupBox(trans.t('batch_proc_options'))
         info_layout = QVBoxLayout(info_group)
         
         # 获取当前选中的融合方法
@@ -695,40 +698,40 @@ class BatchProcessingDialog(QDialog):
             slider_widget = getattr(self.parent_window, "slider_smooth", None)
 
             if rb_a and rb_a.isChecked():
-                fusion_method = "Guided Filter"
+                fusion_method = trans.t('radio_guided_filter')
                 if slider_widget:
                     kernel_size_value = slider_widget.value()
             elif rb_b and rb_b.isChecked():
-                fusion_method = "DCT"
+                fusion_method = trans.t('radio_dct')
                 if slider_widget:
                     kernel_size_value = slider_widget.value()
             elif rb_c and rb_c.isChecked():
-                fusion_method = "DTCWT"
+                fusion_method = trans.t('radio_dtcwt')
             elif getattr(self.parent_window, 'rb_gfg', None) and self.parent_window.rb_gfg.isChecked():
-                fusion_method = "GFG-FGF"
+                fusion_method = trans.t('radio_gfg')
                 if slider_widget:
                     kernel_size_value = slider_widget.value()
             elif rb_d and rb_d.isChecked():
-                fusion_method = "StackMFF-V4"
+                fusion_method = trans.t('radio_stackmff')
         
         # 获取当前选中的配准方法
         reg_methods = []
         if self.parent_window:
             if self.parent_window.cb_align_homography.isChecked():
-                reg_methods.append("Homography")
+                reg_methods.append(trans.t('check_align_homography'))
             if self.parent_window.cb_align_ecc.isChecked():
-                reg_methods.append("ECC")
+                reg_methods.append(trans.t('check_align_ecc'))
         
         reg_method_str = ", ".join(reg_methods) if reg_methods else "None"
         
-        info_layout.addWidget(QLabel(f"Fusion Method: {fusion_method}"))
-        info_layout.addWidget(QLabel(f"Registration Methods: {reg_method_str}"))
+        info_layout.addWidget(QLabel(trans.t('batch_lbl_fusion').format(fusion_method)))
+        info_layout.addWidget(QLabel(trans.t('batch_lbl_reg').format(reg_method_str)))
         
         if kernel_size_value is not None:
             kernel_size = max(1, int(kernel_size_value))
             if kernel_size % 2 == 0:
                 kernel_size = max(1, kernel_size - 1)
-            info_layout.addWidget(QLabel(f"Kernel Size: {kernel_size}"))
+            info_layout.addWidget(QLabel(trans.t('batch_lbl_kernel').format(kernel_size)))
         
         layout.addWidget(info_group)
         
@@ -736,11 +739,11 @@ class BatchProcessingDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
-        start_btn = QPushButton("Start Batch Processing")
+        start_btn = QPushButton(trans.t('batch_btn_start'))
         start_btn.clicked.connect(self.start_batch_processing)
         button_layout.addWidget(start_btn)
         
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(trans.t('batch_btn_cancel'))
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
@@ -918,22 +921,22 @@ class BatchProcessingDialog(QDialog):
     def on_split_method_changed(self, index):
         """分割方式改变时的处理"""
         if index == 0:
-            self.param_label.setText("Images per Stack:")
+            self.param_label.setText(trans.t('batch_images_per_stack'))
             self.param_spinbox.setRange(2, 1000)
             self.param_spinbox.setValue(5)
-            self.param_unit_label.setText("images")
+            self.param_unit_label.setText(trans.t('batch_unit_images'))
         else:
-            self.param_label.setText("Time Threshold:")
+            self.param_label.setText(trans.t('batch_time_threshold'))
             self.param_spinbox.setRange(1, 3600)
             self.param_spinbox.setValue(5)
-            self.param_unit_label.setText("seconds")
+            self.param_unit_label.setText(trans.t('batch_unit_seconds'))
         
         self.update_single_folder_preview()
     
     def update_single_folder_preview(self):
         """更新单文件夹预览"""
         if not self.single_folder_images_with_times:
-            self.preview_label.setText("Preview: No folder selected")
+            self.preview_label.setText(trans.t('batch_preview_no_folder'))
             return
         
         split_method = self.split_method_combo.currentIndex()
@@ -944,10 +947,10 @@ class BatchProcessingDialog(QDialog):
         
         if split_method == 0:
             stacks = loader.split_by_count(self.single_folder_images_with_times, param_value)
-            self.preview_label.setText(f"Preview: {len(self.single_folder_images_with_times)} images → {len(stacks)} stacks ({param_value} images each)")
+            self.preview_label.setText(trans.t('batch_preview_fmt_count').format(len(self.single_folder_images_with_times), len(stacks), param_value))
         else:
             stacks = loader.split_by_time_threshold(self.single_folder_images_with_times, param_value)
-            self.preview_label.setText(f"Preview: {len(self.single_folder_images_with_times)} images → {len(stacks)} stacks (threshold: {param_value}s)")
+            self.preview_label.setText(trans.t('batch_preview_fmt_time').format(len(self.single_folder_images_with_times), len(stacks), param_value))
     
     def add_single_folder(self):
         """添加单个文件夹（自动分割）"""
@@ -1185,7 +1188,7 @@ class DownsampleDialog(QDialog):
 
     def __init__(self, parent=None, initial_scale=1.0):
         super().__init__(parent)
-        self.setWindowTitle("Downsample Settings")
+        self.setWindowTitle(trans.t('ds_title'))
         self.resize(400, 150)
         self.scale_percent = int(initial_scale * 100)
 
@@ -1245,7 +1248,7 @@ class DownsampleDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # 说明文字
-        info_label = QLabel("Set image loading scale (Downsampling):")
+        info_label = QLabel(trans.t('ds_label'))
         layout.addWidget(info_label)
 
         # 控件布局
@@ -1266,9 +1269,10 @@ class DownsampleDialog(QDialog):
                 background-color: #444;
                 color: white;
                 border: 1px solid #222;
-                padding: 8px 16px;
+                padding: 0px;
                 border-radius: 4px;
-                font-weight: normal;
+                font-weight: bold;
+                font-size: 18px;
             }
             QPushButton:hover {
                 background-color: #555;
@@ -1315,7 +1319,7 @@ class DownsampleDialog(QDialog):
         layout.addLayout(controls_layout)
 
         # 提示信息
-        hint_label = QLabel("Use lower values for large images to save memory and speed up processing.")
+        hint_label = QLabel(trans.t('ds_hint'))
         hint_label.setStyleSheet("color: #aaa; font-size: 11px; font-style: italic;")
         hint_label.setWordWrap(True)
         layout.addWidget(hint_label)
@@ -1324,11 +1328,11 @@ class DownsampleDialog(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        self.ok_button = QPushButton("OK")
+        self.ok_button = QPushButton(trans.t('btn_ok'))
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.accept)
 
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = QPushButton(trans.t('btn_cancel'))
         self.cancel_button.clicked.connect(self.reject)
 
         button_layout.addWidget(self.ok_button)
@@ -1367,7 +1371,7 @@ class TileSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
-        self.setWindowTitle("Tile Settings")
+        self.setWindowTitle(trans.t("dialog_tile_title"))
         self.resize(420, 260)
 
         # 应用与其他对话框一致的深色样式
@@ -1406,15 +1410,15 @@ class TileSettingsDialog(QDialog):
         # Group for tile options
         from PyQt6.QtWidgets import QGroupBox
 
-        group = QGroupBox("Tile Options")
+        group = QGroupBox(trans.t("dialog_tile_group"))
         g_layout = QVBoxLayout(group)
 
         # tile_enabled (radio buttons)
         enabled_layout = QHBoxLayout()
-        enabled_label = QLabel("Tile Enabled:")
+        enabled_label = QLabel(trans.t("dialog_tile_enabled_label"))
         enabled_layout.addWidget(enabled_label)
-        self.rb_enabled = QRadioButton("Enabled")
-        self.rb_disabled = QRadioButton("Disabled")
+        self.rb_enabled = QRadioButton(trans.t("dialog_tile_enabled"))
+        self.rb_disabled = QRadioButton(trans.t("dialog_tile_disabled"))
         enabled_layout.addWidget(self.rb_enabled)
         enabled_layout.addWidget(self.rb_disabled)
         enabled_layout.addStretch()
@@ -1422,7 +1426,7 @@ class TileSettingsDialog(QDialog):
 
         # tile_block_size
         block_layout = QHBoxLayout()
-        block_layout.addWidget(QLabel("Tile Block Size:"))
+        block_layout.addWidget(QLabel(trans.t("dialog_tile_block_size")))
         self.spin_block = QSpinBox()
         self.spin_block.setRange(64, 16384)
         self.spin_block.setSingleStep(1)
@@ -1435,7 +1439,7 @@ class TileSettingsDialog(QDialog):
 
         # tile_overlap
         overlap_layout = QHBoxLayout()
-        overlap_layout.addWidget(QLabel("Tile Overlap:"))
+        overlap_layout.addWidget(QLabel(trans.t("dialog_tile_overlap")))
         self.spin_overlap = QSpinBox()
         self.spin_overlap.setRange(0, 4096)
         self.spin_overlap.setSingleStep(1)
@@ -1448,7 +1452,7 @@ class TileSettingsDialog(QDialog):
 
         # tile_threshold
         threshold_layout = QHBoxLayout()
-        threshold_layout.addWidget(QLabel("Tile Threshold:"))
+        threshold_layout.addWidget(QLabel(trans.t("dialog_tile_threshold")))
         self.spin_threshold = QSpinBox()
         self.spin_threshold.setRange(256, 131072)
         self.spin_threshold.setSingleStep(1)
@@ -1475,9 +1479,9 @@ class TileSettingsDialog(QDialog):
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
 
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(trans.t("btn_ok"))
         ok_btn.clicked.connect(self.on_accept)
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(trans.t("btn_cancel"))
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
@@ -1502,7 +1506,8 @@ class TileSettingsDialog(QDialog):
             self.rb_enabled.setChecked(True)
 
     def show_help(self):
-        dlg = TileHelpDialog(self)
+        help_text = trans.t("dialog_tile_help_text")
+        dlg = HelpDialog(trans.t("dialog_tile_help_title"), help_text, parent=self)
         dlg.exec()
 
     def on_accept(self):
@@ -1526,7 +1531,7 @@ class RegistrationSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
-        self.setWindowTitle("Registration Settings")
+        self.setWindowTitle(trans.t("dialog_reg_title"))
         self.resize(360, 140)
 
         self.setStyleSheet(f"""
@@ -1563,10 +1568,10 @@ class RegistrationSettingsDialog(QDialog):
 
         from PyQt6.QtWidgets import QGroupBox
 
-        group = QGroupBox("Registration Options")
+        group = QGroupBox(trans.t("dialog_reg_group"))
         g_layout = QHBoxLayout(group)
 
-        lbl = QLabel("Downscale Width:")
+        lbl = QLabel(trans.t("dialog_reg_downscale"))
         lbl.setMinimumWidth(120)
         g_layout.addWidget(lbl)
 
@@ -1593,9 +1598,9 @@ class RegistrationSettingsDialog(QDialog):
         help_btn.clicked.connect(self.show_help)
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(trans.t("btn_ok"))
         ok_btn.clicked.connect(self.on_accept)
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(trans.t("btn_cancel"))
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
@@ -1619,18 +1624,8 @@ class RegistrationSettingsDialog(QDialog):
         self.accept()
 
     def show_help(self):
-        help_text = """<h3>Downscale Width</h3>
-        <p>downscale_width controls the width used for preprocessing (downsampling)
-        when extracting features for registration. A smaller value speeds up feature detection
-        and reduces memory usage at the cost of some geometric precision.</p>
-
-        <p>Recommended: use <code>1024</code> for large images (>=2048px),
-        use <code>1600</code> for medium images, and keep it higher only if you need
-        maximum alignment precision and have sufficient CPU/GPU resources.</p>
-
-        <p>Lowering this value accelerates registration and reduces memory use; increasing
-        it can improve accuracy on very detailed images but increases runtime.</p>"""
-        dlg = HelpDialog("Registration Setting Help", help_text, parent=self)
+        help_text = trans.t("dialog_reg_help_text")
+        dlg = HelpDialog(trans.t("dialog_reg_help_title"), help_text, parent=self)
         dlg.exec()
 
 
@@ -1640,7 +1635,7 @@ class ThreadSettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
-        self.setWindowTitle("Thread Count Settings")
+        self.setWindowTitle(trans.t("dialog_thread_title"))
         self.resize(420, 160)
 
         # Apply the same dark dialog styling as TileSettingsDialog
@@ -1678,10 +1673,10 @@ class ThreadSettingsDialog(QDialog):
 
         from PyQt6.QtWidgets import QGroupBox
 
-        group = QGroupBox("Thread Count")
+        group = QGroupBox(trans.t("dialog_thread_group"))
         g_layout = QHBoxLayout(group)
 
-        lbl = QLabel("Thread Count (threads):")
+        lbl = QLabel(trans.t("dialog_thread_label"))
         lbl.setMinimumWidth(140)
         g_layout.addWidget(lbl)
 
@@ -1708,9 +1703,9 @@ class ThreadSettingsDialog(QDialog):
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
 
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(trans.t("btn_ok"))
         ok_btn.clicked.connect(self.on_accept)
-        cancel_btn = QPushButton("Cancel")
+        cancel_btn = QPushButton(trans.t("btn_cancel"))
         cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(ok_btn)
         btn_layout.addWidget(cancel_btn)
@@ -1720,25 +1715,8 @@ class ThreadSettingsDialog(QDialog):
         self.load_defaults()
 
     def show_help(self):
-        help_text = """<h3>Thread Count Settings</h3>
-        <p>This setting controls the number of worker threads used by algorithms that
-        support multithreading. Set to a value appropriate for your CPU (commonly 2–16).</p>
-
-        <h4>Current multithreading support</h4>
-        <ul>
-        <li>GFG-FGF: supports user-controlled threads (default cap: 8)</li>
-        <li>Guided Filter Fusion (GFF): supports user-controlled threads (default cap: 4)</li>
-        <li>Registration: parallel feature extraction/warping uses thread_count when provided</li>
-        <li>DCT, DTCWT, StackMFF-V4: currently ignore this setting (no thread control)</li>
-        </ul>
-
-        <p>Algorithms that do not consume this value will safely ignore it. For best
-        performance, avoid setting thread count higher than your physical core count.</p>
-
-        <p>Note: installing <code>opencv-contrib-python</code> can provide faster
-        implementations for some operations (e.g. guided filter).</p>
-        """
-        dlg = HelpDialog("Application Settings Help", help_text, parent=self)
+        help_text = trans.t("dialog_thread_help_text")
+        dlg = HelpDialog(trans.t("dialog_thread_help_title"), help_text, parent=self)
         dlg.exec()
 
     def load_defaults(self):
@@ -1763,7 +1741,7 @@ class FolderImportDialog(QDialog):
         super().__init__(parent)
         self.folder_path = folder_path
         self.parent_window = parent
-        self.setWindowTitle("Import Folder")
+        self.setWindowTitle(trans.t('import_folder_title'))
         self.resize(500, 200)
 
         self.setStyleSheet(f"""
@@ -1811,7 +1789,7 @@ class FolderImportDialog(QDialog):
         layout = QVBoxLayout(self)
 
         folder_name = os.path.basename(folder_path)
-        folder_display = QLabel(f"Folder: {folder_name}")
+        folder_display = QLabel(trans.t('import_folder_display').format(folder_name))
         folder_display.setStyleSheet("font-size: 14px;")
         layout.addWidget(folder_display)
 
@@ -1821,15 +1799,15 @@ class FolderImportDialog(QDialog):
 
         layout.addSpacing(20)
 
-        option_label = QLabel("How should this folder be imported?")
+        option_label = QLabel(trans.t('import_choice_label'))
         option_label.setStyleSheet("font-size: 13px;")
         layout.addWidget(option_label)
 
-        self.rb_single = QRadioButton("Single Image Stack (load as one stack)")
+        self.rb_single = QRadioButton(trans.t('import_option_single'))
         self.rb_single.setChecked(True)
         layout.addWidget(self.rb_single)
 
-        self.rb_batch = QRadioButton("Multiple Image Stacks (open batch processing)")
+        self.rb_batch = QRadioButton(trans.t('import_option_batch'))
         layout.addWidget(self.rb_batch)
 
         layout.addStretch()
@@ -1837,12 +1815,12 @@ class FolderImportDialog(QDialog):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
-        self.ok_button = QPushButton("OK")
+        self.ok_button = QPushButton(trans.t('btn_ok'))
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.accept)
         btn_layout.addWidget(self.ok_button)
 
-        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button = QPushButton(trans.t('btn_cancel'))
         self.cancel_button.clicked.connect(self.reject)
         btn_layout.addWidget(self.cancel_button)
 

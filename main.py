@@ -16,6 +16,7 @@ from PyQt6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QImage
 from image_loader import ImageStackLoader
 import cv2
 from styles import GLOBAL_DARK_STYLE
+from locales import trans
 from dialogs import EnvironmentInfoDialog, ContactInfoDialog, BatchProcessingDialog, TileSettingsDialog, ThreadSettingsDialog
 from utils import (
     show_message_box,
@@ -99,6 +100,19 @@ class OpenFocus(QMainWindow):
 
         self._mouse_in_source_preview = False
         self._mouse_in_result_preview = False
+        
+        # Connect language change signal
+        trans.languageChanged.connect(self.update_ui_text)
+        
+        # Set initial text for drag hint if needed (it is set in image_panels or loaded later, 
+        # but let's Ensure it matches current lang if empty)
+        # Note: image_panels create_source_panel sets initial text. 
+        # We might want to update it here or in update_ui_text called initially?
+        # Let's call update_ui_text once to sync everything if needed, or just leave it.
+        # Actually image_panels.py uses hardcoded text. 
+        # I should probably update image_panels.py too, or just override text here.
+        if hasattr(self, 'lbl_source_img'):
+             self.lbl_source_img.setText(trans.t('drag_hint'))
 
     def init_ui(self):
         setup_menus(self)
@@ -132,6 +146,11 @@ class OpenFocus(QMainWindow):
         self.lbl_stack_info = source_panel.info_label
         self.stack_slider.valueChanged.connect(self.update_source_view)
 
+        # ROI Button
+        self.btn_preview_roi = source_panel.roi_btn
+        self.btn_preview_roi.toggled.connect(self.toggle_roi_mode)
+        self.lbl_source_img.roiDeleted.connect(lambda: self.btn_preview_roi.setChecked(False))
+
         result_panel = create_result_panel()
         self.lbl_result_img = result_panel.image_label
         self.result_control_bar = result_panel.control_bar
@@ -157,6 +176,7 @@ class OpenFocus(QMainWindow):
         # B. 右侧控制面板
         # ---------------------------------------------------------
         right_panel_components = create_right_panel()
+        self.right_panel_components = right_panel_components
         self.right_splitter = right_panel_components.splitter
         self.btn_reset = right_panel_components.btn_reset
         self.btn_render = right_panel_components.btn_render
@@ -176,6 +196,12 @@ class OpenFocus(QMainWindow):
         self.file_list = right_panel_components.file_list
         self.output_label = right_panel_components.output_label
         self.output_list = right_panel_components.output_list
+        
+        # Status labels
+        self.lbl_status_loaded = right_panel_components.lbl_status_loaded
+        self.lbl_status_resolution = right_panel_components.lbl_status_resolution
+        self.lbl_status_gpu = right_panel_components.lbl_status_gpu
+        self.lbl_status_memory = right_panel_components.lbl_status_memory
 
         self.main_splitter.addWidget(right_panel_components.widget)
         bind_right_panel(self, right_panel_components)
@@ -185,6 +211,11 @@ class OpenFocus(QMainWindow):
         # 确保分割器已经添加了子部件后再设置折叠属性
         # 使用QTimer来延迟设置折叠属性，确保所有子部件都已正确添加
         from PyQt6.QtCore import QTimer
+        
+        # Timer for system status updates
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._update_dynamic_status)
+        self.status_timer.start(2000) # Update every 2 seconds
 
         def set_splitter_properties():
             try:
@@ -215,7 +246,20 @@ class OpenFocus(QMainWindow):
         main_layout.addWidget(self.main_splitter)
 
     def eventFilter(self, obj, event):
-        """Global event filter to handle Space key for panning interaction"""
+        """Global event filter to handle Space key and Delete key interactions."""
+        # Handle Delete/Backspace for ROI
+        if event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+                # Check if mouse is over source image and ROI mode is active
+                if hasattr(self, 'lbl_source_img') and self.lbl_source_img:
+                    # Check if widget is visible and under mouse
+                    if self.lbl_source_img.isVisible() and self.lbl_source_img.underMouse():
+                         # If ROI exists, delete it and consume event
+                         if self.lbl_source_img.get_roi_rect() is not None:
+                             self.lbl_source_img.set_roi_rect(None)
+                             self.lbl_source_img.roiDeleted.emit()
+                             return True # Event handled, do not propagate to list widget
+
         if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
             # Check if mouse is over source or result image
             handled = False
@@ -245,6 +289,78 @@ class OpenFocus(QMainWindow):
         
         return super().eventFilter(obj, event)
 
+    # --- Status Display ---
+    def update_loaded_status(self):
+        """Update loaded images count and resolution info."""
+        count = len(self.stack_images)
+        if count > 0:
+            # Calculate average size (approximate from QPixmap or numpy array if available)
+            # self.raw_images stores numpy arrays
+            total_size_mb = 0
+            if self.raw_images:
+                # height * width * channels * 1 byte (uint8) / 1024 / 1024
+                # assuming 3 channels uint8
+                try:
+                    total_size_bytes = sum(img.nbytes for img in self.raw_images)
+                    avg_size_mb = (total_size_bytes / count) / (1024 * 1024)
+                    self.lbl_status_loaded.setText(trans.t('status_loaded_fmt').format(count, avg_size_mb))
+                    
+                    h, w = self.raw_images[0].shape[:2]
+                    self.lbl_status_resolution.setText(trans.t('status_res_fmt').format(w, h))
+                except Exception:
+                    self.lbl_status_loaded.setText(trans.t('status_loaded').format(count))
+                    self.lbl_status_resolution.setText(trans.t('status_res').format('-'))
+            else:
+                self.lbl_status_loaded.setText(trans.t('status_loaded').format(count))
+                self.lbl_status_resolution.setText(trans.t('status_res').format('-'))
+        else:
+            self.lbl_status_loaded.setText(trans.t('status_loaded').format(0))
+            self.lbl_status_resolution.setText(trans.t('status_res').format('-'))
+
+    def _update_dynamic_status(self):
+        """Update GPU and Memory status."""
+        # Memory
+        try:
+            import ctypes
+            
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            
+            used_gb = (stat.ullTotalPhys - stat.ullAvailPhys) / (1024**3)
+            total_gb = stat.ullTotalPhys / (1024**3)
+            self.lbl_status_memory.setText(trans.t('status_ram_fmt').format(used_gb, total_gb))
+        except Exception:
+            self.lbl_status_memory.setText(trans.t('status_ram').format('N/A'))
+
+        # GPU
+        try:
+            import torch
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                self.lbl_status_gpu.setText(trans.t('status_gpu').format('CUDA'))
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                self.lbl_status_gpu.setText(trans.t('status_gpu').format('MPS'))
+            else:
+                self.lbl_status_gpu.setText(trans.t('status_gpu').format('N/A'))
+        except ImportError:
+            self.lbl_status_gpu.setText(trans.t('status_gpu').format('N/A'))
+        except Exception:
+            self.lbl_status_gpu.setText(trans.t('status_gpu').format('Err'))
+
     # --- 逻辑控制 ---
 
     def reset_to_default(self):
@@ -269,6 +385,11 @@ class OpenFocus(QMainWindow):
         # 重置图像显示缩放与放大镜状态
         self.lbl_source_img.reset_view()
         self.lbl_result_img.reset_view()
+        
+        # 恢复空状态提示 (如果当前没有加载图像)
+        if hasattr(self, 'stack_images') and not self.stack_images:
+            self.lbl_source_img.setText(trans.t('drag_hint'))
+            self.lbl_source_img.setFont(QFont("Microsoft YaHei", 16))
     
 
 
@@ -412,6 +533,19 @@ class OpenFocus(QMainWindow):
         self.source_manager.refresh_current_source_view()
         self.output_manager.refresh_current_result_view()
 
+    def toggle_roi_mode(self, enabled: bool):
+        """Toggle ROI selection mode on the source image label."""
+        if hasattr(self, 'lbl_source_img'):
+            self.lbl_source_img.roi_mode = enabled
+            if enabled:
+                # Disable conflicting interactions if any?
+                # Usually we want panning to still work with Right click or space, which magnifier_label handles
+                pass
+            else:
+                 # Clear ROI on exit? 
+                 # Handled by roi_mode setter for now
+                 pass
+
     def apply_dark_theme(self):
         # 使用 styles.py 中定义的全局样式
         self.setStyleSheet(GLOBAL_DARK_STYLE)
@@ -521,6 +655,73 @@ class OpenFocus(QMainWindow):
 
     def _is_mouse_in_preview(self) -> bool:
         return self._mouse_in_source_preview or self._mouse_in_result_preview
+
+    # --- Language ---
+    
+    def set_language(self, lang_code: str) -> None:
+        """Switch application language."""
+        trans.set_language(lang_code)
+
+    def update_ui_text(self) -> None:
+        """Update all UI strings based on current language."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        
+        # Update Menus
+        if hasattr(self, 'ui_objs'):
+             for key, obj in self.ui_objs.items():
+                t_key = obj.property("trans_key")
+                if not t_key:
+                    t_key = key
+                
+                text = trans.t(t_key)
+                if isinstance(obj, QMenu):
+                    obj.setTitle(text)
+                elif isinstance(obj, QAction):
+                    obj.setText(text)
+        
+        # Update Right Panel
+        c = self.right_panel_components
+        c.method_group.setTitle(trans.t('group_fusion'))
+        c.rb_a.setText(trans.t('radio_guided_filter'))
+        c.rb_b.setText(trans.t('radio_dct'))
+        c.rb_c.setText(trans.t('radio_dtcwt'))
+        c.rb_gfg.setText(trans.t('radio_gfg'))
+        c.rb_d.setText(trans.t('radio_stackmff'))
+        
+        c.registration_group.setTitle(trans.t('group_registration'))
+        c.cb_align_ecc.setText(trans.t('check_align_ecc'))
+        c.cb_align_homography.setText(trans.t('check_align_homography'))
+        
+        c.lbl_kernel.setText(trans.t('label_kernel'))
+        c.btn_reset.setText(trans.t('btn_reset'))
+        c.btn_render.setText(trans.t('btn_render'))
+        
+        # ROI Button
+        if hasattr(self, 'btn_preview_roi'):
+            self.btn_preview_roi.setText(trans.t('btn_roi'))
+
+        # Lists labels
+        count = self.file_list.count()
+        c.source_images_label.setText(trans.t('label_source_images').format(count))
+        
+        out_count = self.output_list.count()
+        c.output_label.setText(trans.t('label_output').format(out_count))
+        
+        # Status
+        self.update_loaded_status()
+        self._update_dynamic_status()
+        
+        # Drag hint
+        if not self.stack_images:
+            if hasattr(self, 'lbl_source_img'):
+                self.lbl_source_img.setText(trans.t('drag_hint'))
+
+        # Update language checked state
+        if 'action_lang_en' in self.ui_objs:
+            is_en = trans.current_lang == 'en'
+            self.ui_objs['action_lang_en'].setChecked(is_en)
+            self.ui_objs['action_lang_zh'].setChecked(not is_en)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 import traceback
 from typing import Any, List, Optional
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
 
 from utils import show_custom_message_box, show_message_box, show_warning_box
 from multi_focus_fusion import is_stackmffv4_available
 from workers import RenderWorker
+from roi_dialog import ROIRenderOptionsDialog # Import the new dialog
+from locales import trans
 
 
 class RenderManager:
@@ -23,7 +25,7 @@ class RenderManager:
             return
 
         window.btn_render.setEnabled(False)
-        window.btn_render.setText("⏳ Processing...")
+        window.btn_render.setText(trans.t('btn_render_processing'))
         QApplication.processEvents()
 
         # 禁用在处理过程中不应被修改的 UI 控件
@@ -77,6 +79,23 @@ class RenderManager:
             window.btn_render.setText("▶ Start Render")
             return
 
+        # Handle ROI options
+        roi_rect = window.lbl_source_img.get_roi_rect() if window.btn_preview_roi.isChecked() else None
+        roi_mode = "crop"
+        roi_base_index = 0
+
+        if roi_rect is not None:
+             dialog = ROIRenderOptionsDialog(len(window.raw_images), window)
+             if dialog.exec() == QDialog.DialogCode.Accepted:
+                 roi_mode = dialog.mode
+                 roi_base_index = dialog.base_frame_index
+             else:
+                 # User cancelled the ROI dialog -> cancel render? 
+                 # Or just render crop? Let's cancel to be safe.
+                 window.btn_render.setEnabled(True)
+                 window.btn_render.setText(trans.t('btn_render'))
+                 return
+
         self.worker = RenderWorker(
             window.raw_images,
             window.aligned_images,
@@ -97,6 +116,9 @@ class RenderManager:
             tile_threshold=getattr(window, "tile_threshold", None),
             reg_downscale_width=getattr(window, "reg_downscale_width", None),
             thread_count=getattr(window, "thread_count", 4),
+            roi_rect=roi_rect,
+            roi_mode=roi_mode,
+            roi_base_index=roi_base_index,
         )
 
         self.worker.finished_signal.connect(self.on_render_finished)
@@ -145,12 +167,13 @@ class RenderManager:
                 else:
                     print("No operation selected. Please select registration options or fusion method.")
 
-            if registration_performed:
+            # Only cache aligned images if we performed a FULL registration (no ROI cropping)
+            if registration_performed and not getattr(self.worker, 'roi_rect', None):
                 window.aligned_images = processed_images
                 window.is_images_aligned = True
                 window.last_alignment_options = (
-                    window.cb_align_homography.isChecked(),
-                    window.cb_align_ecc.isChecked(),
+                    self.worker.need_align_homography,
+                    self.worker.need_align_ecc,
                 )
 
             total_time = alignment_time + fusion_time
@@ -160,15 +183,15 @@ class RenderManager:
             if registration_performed:
                 align_methods = []
                 if window.cb_align_homography.isChecked():
-                    align_methods.append("Homography")
+                    align_methods.append(trans.t("check_align_homography"))
                 if window.cb_align_ecc.isChecked():
-                    align_methods.append("ECC (Enabled)")
-                align_method_str = ", ".join(align_methods) if align_methods else "None"
-                info_lines.append(f"Alignment Method: {align_method_str}")
-                info_lines.append(f"Alignment Time: {alignment_time:.2f}s")
+                    align_methods.append(trans.t("check_align_ecc"))
+                align_method_str = ", ".join(align_methods) if align_methods else trans.t("val_none")
+                info_lines.append(trans.t("info_align_method").format(align_method_str))
+                info_lines.append(trans.t("info_align_time").format(alignment_time))
             else:
-                info_lines.append("Alignment Method: None (using cached results)")
-                info_lines.append("Alignment Time: 0.00s")
+                info_lines.append(trans.t("info_align_none_cached"))
+                info_lines.append(trans.t("info_align_time").format(0.0))
 
             if (
                 window.rb_a.isChecked()
@@ -178,31 +201,31 @@ class RenderManager:
                 or window.rb_d.isChecked()
             ):
                 if window.rb_a.isChecked():
-                    method_name = "Guided Filter"
+                    method_name = trans.t("radio_guided_filter")
                 elif window.rb_b.isChecked():
-                    method_name = "DCT"
+                    method_name = trans.t("radio_dct")
                 elif window.rb_c.isChecked():
-                    method_name = "DTCWT"
+                    method_name = trans.t("radio_dtcwt")
                 elif window.rb_gfg.isChecked():
-                    method_name = "GFG-FGF"
+                    method_name = trans.t("radio_gfg")
                 elif window.rb_d.isChecked():
-                    method_name = "StackMFF-V4"
+                    method_name = trans.t("radio_stackmff")
                 else:
-                    method_name = "Guided Filter"
+                    method_name = trans.t("radio_guided_filter")
 
-                info_lines.append(f"Fusion Method: {method_name}")
-                info_lines.append(f"Fusion Time: {fusion_time:.2f}s")
-                info_lines.append(f"Processing Unit: {device_name}")
+                info_lines.append(trans.t("info_fusion_method").format(method_name))
+                info_lines.append(trans.t("info_fusion_time").format(fusion_time))
+                info_lines.append(trans.t("info_proc_unit").format(device_name))
             else:
-                info_lines.append("Fusion Method: None")
-                info_lines.append("Fusion Time: 0.00s")
+                info_lines.append(trans.t("info_fusion_none"))
+                info_lines.append(trans.t("info_fusion_time").format(0.0))
 
-            info_lines.append(f"Total Time: {total_time:.2f}s")
+            info_lines.append(trans.t("info_total_time").format(total_time))
 
             show_custom_message_box(
                 window,
-                "Processing Completed",
-                "Processing completed successfully!",
+                trans.t("dialog_completed_title"),
+                trans.t("dialog_completed_msg"),
                 "\n".join(info_lines),
                 QMessageBox.Icon.Information,
             )
@@ -210,8 +233,8 @@ class RenderManager:
         except Exception as exc:
             show_message_box(
                 window,
-                "Error",
-                "An error occurred during processing:",
+                trans.t("msg_error"),
+                trans.t("msg_proc_error"),
                 str(exc),
                 QMessageBox.Icon.Critical,
             )
@@ -242,19 +265,19 @@ class RenderManager:
                 pass
 
             window.btn_render.setEnabled(True)
-            window.btn_render.setText("▶ Start Render")
+            window.btn_render.setText(trans.t('btn_render'))
             self.worker = None
 
     def on_render_error(self, error_message: str) -> None:
         window = self.window
 
         window.btn_render.setEnabled(True)
-        window.btn_render.setText("▶ Start Render")
+        window.btn_render.setText(trans.t('btn_render'))
 
         show_message_box(
             window,
-            "Error",
-            "An error occurred during processing:",
+            trans.t("msg_error"),
+            trans.t("msg_proc_error"),
             error_message,
             QMessageBox.Icon.Critical,
         )

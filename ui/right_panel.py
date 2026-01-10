@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QGridLayout,
     QLabel,
     QListWidget,
     QPushButton,
@@ -25,6 +26,7 @@ from styles import (
     OUTPUT_LIST_STYLE,
     SOURCE_LIST_STYLE,
 )
+from locales import trans
 
 
 @dataclass
@@ -45,10 +47,22 @@ class RightPanelComponents:
     slider_smooth: QSlider
     smooth_value_label: QLabel
     smooth_widget: QWidget
+    
+    # Groups
+    method_group: QGroupBox
+    registration_group: QGroupBox
+    lbl_kernel: QLabel
+
     source_images_label: QLabel
     file_list: QListWidget
     output_label: QLabel
     output_list: QListWidget
+    
+    # Status Panel Labels
+    lbl_status_loaded: QLabel
+    lbl_status_resolution: QLabel
+    lbl_status_gpu: QLabel
+    lbl_status_memory: QLabel
 
 
 def create_right_panel() -> RightPanelComponents:
@@ -69,18 +83,18 @@ def create_right_panel() -> RightPanelComponents:
 
     method_registration_layout = QHBoxLayout()
 
-    method_group = QGroupBox("Fusion")
+    method_group = QGroupBox(trans.t('group_fusion'))
     method_layout = QVBoxLayout(method_group)
-    rb_a = QRadioButton("Guided Filter")
+    rb_a = QRadioButton(trans.t('radio_guided_filter'))
     rb_a.setChecked(True)
     rb_a.setAutoExclusive(False)
-    rb_b = QRadioButton("DCT")
+    rb_b = QRadioButton(trans.t('radio_dct'))
     rb_b.setAutoExclusive(False)
-    rb_c = QRadioButton("DTCWT")
+    rb_c = QRadioButton(trans.t('radio_dtcwt'))
     rb_c.setAutoExclusive(False)
-    rb_gfg = QRadioButton("GFG-FGF")
+    rb_gfg = QRadioButton(trans.t('radio_gfg'))
     rb_gfg.setAutoExclusive(False)
-    rb_d = QRadioButton("StackMFF-V4")
+    rb_d = QRadioButton(trans.t('radio_stackmff'))
     rb_d.setAutoExclusive(False)
 
     method_layout.addWidget(rb_a)
@@ -99,11 +113,11 @@ def create_right_panel() -> RightPanelComponents:
     method_help_layout.addWidget(btn_method_help)
     method_layout.addLayout(method_help_layout)
 
-    registration_group = QGroupBox("Registration")
+    registration_group = QGroupBox(trans.t('group_registration'))
     registration_layout = QVBoxLayout(registration_group)
-    cb_align_ecc = QCheckBox("Align (ECC)")
+    cb_align_ecc = QCheckBox(trans.t('check_align_ecc'))
     cb_align_ecc.setChecked(True)
-    cb_align_homography = QCheckBox("Align (Homography)")
+    cb_align_homography = QCheckBox(trans.t('check_align_homography'))
     cb_align_homography.setChecked(False)
 
     registration_layout.addWidget(cb_align_ecc)
@@ -127,7 +141,8 @@ def create_right_panel() -> RightPanelComponents:
     smooth_layout = QVBoxLayout(smooth_widget)
     smooth_layout.setContentsMargins(0, 5, 0, 5)
     smooth_top = QHBoxLayout()
-    smooth_top.addWidget(QLabel(" Kernel:"))
+    lbl_kernel = QLabel(trans.t('label_kernel'))
+    smooth_top.addWidget(lbl_kernel)
     smooth_top.addStretch()
     lbl_smooth_value = QLabel("31")
     smooth_top.addWidget(lbl_smooth_value)
@@ -141,9 +156,9 @@ def create_right_panel() -> RightPanelComponents:
     config_layout.addWidget(smooth_widget)
 
     button_bar = QHBoxLayout()
-    btn_reset = QPushButton("Reset Default")
+    btn_reset = QPushButton(trans.t('btn_reset'))
     btn_reset.setStyleSheet(HOVER_HIGHLIGHT_BUTTON_STYLE)
-    btn_render = QPushButton("▶ Start Render")
+    btn_render = QPushButton(trans.t('btn_render'))
     btn_render.setFixedHeight(40)
     btn_render.setStyleSheet(HOVER_HIGHLIGHT_BUTTON_STYLE)
     button_bar.addWidget(btn_reset)
@@ -156,7 +171,7 @@ def create_right_panel() -> RightPanelComponents:
     source_list_widget = QWidget()
     source_list_layout = QVBoxLayout(source_list_widget)
     source_list_layout.setContentsMargins(10, 10, 10, 10)
-    source_images_label = QLabel("Source Images: 0")
+    source_images_label = QLabel(trans.t('label_source_images').format(0))
     source_list_layout.addWidget(source_images_label)
     file_list = QListWidget()
     file_list.setIconSize(QSize(40, 40))
@@ -171,7 +186,7 @@ def create_right_panel() -> RightPanelComponents:
     output_list_widget = QWidget()
     output_list_layout = QVBoxLayout(output_list_widget)
     output_list_layout.setContentsMargins(10, 10, 10, 10)
-    output_label = QLabel("Output: 0")
+    output_label = QLabel(trans.t('label_output').format(0))
     output_list_layout.addWidget(output_label)
     output_list = QListWidget()
     output_list.setIconSize(QSize(40, 40))
@@ -185,6 +200,39 @@ def create_right_panel() -> RightPanelComponents:
     right_splitter.setStretchFactor(0, 1)
     right_splitter.setStretchFactor(1, 3)
     right_splitter.setStretchFactor(2, 3)
+
+    # Status Panel -----------------------------------------
+    status_widget = QFrame()
+    status_widget.setStyleSheet("""
+        QFrame {
+            background-color: #252526; 
+            border-top: 1px solid #3e3e42;
+        }
+        QLabel {
+            color: #cccccc; 
+            font-size: 11px;
+            font-family: Consolas, "Segoe UI", monospace;
+        }
+    """)
+    status_layout = QGridLayout(status_widget)
+    status_layout.setContentsMargins(10, 8, 10, 8)
+    status_layout.setHorizontalSpacing(15)
+    status_layout.setVerticalSpacing(4)
+
+    lbl_status_loaded = QLabel(trans.t('status_loaded').format(0))
+    lbl_status_gpu = QLabel(trans.t('status_gpu').format('-'))
+    lbl_status_resolution = QLabel(trans.t('status_res').format('-'))
+    lbl_status_memory = QLabel(trans.t('status_ram').format('-'))
+
+    status_layout.addWidget(lbl_status_loaded, 0, 0)
+    status_layout.addWidget(lbl_status_gpu, 0, 1)
+    status_layout.addWidget(lbl_status_resolution, 1, 0)
+    status_layout.addWidget(lbl_status_memory, 1, 1)
+    
+    status_layout.setColumnStretch(0, 1)
+    status_layout.setColumnStretch(1, 1)
+
+    right_layout.addWidget(status_widget)
 
     return RightPanelComponents(
         widget=right_panel,
@@ -203,10 +251,19 @@ def create_right_panel() -> RightPanelComponents:
         slider_smooth=slider_smooth,
         smooth_value_label=lbl_smooth_value,
         smooth_widget=smooth_widget,
+        
+        method_group=method_group,
+        registration_group=registration_group,
+        lbl_kernel=lbl_kernel,
+
         source_images_label=source_images_label,
         file_list=file_list,
         output_label=output_label,
         output_list=output_list,
+        lbl_status_loaded=lbl_status_loaded,
+        lbl_status_resolution=lbl_status_resolution,
+        lbl_status_gpu=lbl_status_gpu,
+        lbl_status_memory=lbl_status_memory,
     )
 
 

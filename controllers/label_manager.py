@@ -26,6 +26,7 @@ from utils import (
     show_success_box,
     show_warning_box,
 )
+from locales import trans
 
 
 class LabelManager:
@@ -51,7 +52,7 @@ class LabelManager:
         window = self.window
 
         if not self._registered_enabled:
-            show_warning_box(window, "No Labels", "Registered stack labels are not enabled.")
+            show_warning_box(window, trans.t('msg_no_reg_labels'), trans.t('msg_reg_labels_disabled'))
             return
 
         self._registered_enabled = False
@@ -62,13 +63,13 @@ class LabelManager:
         elif window.registration_results and window.current_result_index >= 0:
             window.update_result_view(window.current_result_index)
 
-        show_success_box(window, "Success", "Labels removed from Registered Stack.")
+        show_success_box(window, trans.t('msg_success'), trans.t('msg_reg_labels_removed'))
 
     def delete_input_labels(self) -> None:
         window = self.window
 
         if not self._input_enabled:
-            show_warning_box(window, "No Labels", "Input stack labels are not enabled.")
+            show_warning_box(window, trans.t('msg_no_input_labels'), trans.t('msg_input_labels_disabled'))
             return
 
         self._input_enabled = False
@@ -77,7 +78,7 @@ class LabelManager:
         if window.stack_images and window.current_display_index >= 0:
             window.update_source_view(window.current_display_index)
 
-        show_success_box(window, "Success", "Labels removed from Input Stack.")
+        show_success_box(window, trans.t('msg_success'), trans.t('msg_input_labels_removed'))
 
     def reset_labels(self) -> None:
         """Disable all labels and update menu state."""
@@ -132,7 +133,7 @@ class LabelManager:
         window = self.window
 
         dialog = QDialog(window)
-        dialog.setWindowTitle("Add Label Configuration")
+        dialog.setWindowTitle(trans.t('add_label_title'))
         dialog.setFixedSize(500, 650)
 
         from styles import ADD_LABEL_DIALOG_STYLE  # Local import to avoid circular deps
@@ -151,70 +152,70 @@ class LabelManager:
         form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
         self.target_stack_combo = QComboBox()
-        self.target_stack_combo.addItems(["Input Image Stack", "Registered Image Stack"])
+        self.target_stack_combo.addItems([trans.t('label_target_input'), trans.t('label_target_registered')])
         self.target_stack_combo.setCurrentIndex(1)
         self.target_stack_combo.setMinimumWidth(200)
         self.target_stack_combo.setStyleSheet(WHITE_COMBOBOX_STYLE)
-        form_layout.addRow("Target Stack:", self.target_stack_combo)
+        form_layout.addRow(trans.t('label_target_stack'), self.target_stack_combo)
 
         self.format_edit = QLineEdit("{value}")
         self.format_edit.setMinimumWidth(200)
         self.format_edit.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Format String:", self.format_edit)
+        form_layout.addRow(trans.t('label_format'), self.format_edit)
 
         self.starting_value_spin = QSpinBox()
         self.starting_value_spin.setRange(0, 9999)
         self.starting_value_spin.setValue(1)
         self.starting_value_spin.setMinimumWidth(200)
         self.starting_value_spin.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Starting Value:", self.starting_value_spin)
+        form_layout.addRow(trans.t('label_start_val'), self.starting_value_spin)
 
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(1, 9999)
         self.interval_spin.setValue(1)
         self.interval_spin.setMinimumWidth(200)
         self.interval_spin.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Interval:", self.interval_spin)
+        form_layout.addRow(trans.t('label_interval'), self.interval_spin)
 
         self.x_location_spin = QSpinBox()
         self.x_location_spin.setRange(0, 9999)
         self.x_location_spin.setValue(20)
         self.x_location_spin.setMinimumWidth(200)
         self.x_location_spin.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("X Location:", self.x_location_spin)
+        form_layout.addRow(trans.t('label_x'), self.x_location_spin)
 
         self.y_location_spin = QSpinBox()
         self.y_location_spin.setRange(0, 9999)
         self.y_location_spin.setValue(80)
         self.y_location_spin.setMinimumWidth(200)
         self.y_location_spin.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Y Location:", self.y_location_spin)
+        form_layout.addRow(trans.t('label_y'), self.y_location_spin)
 
         self.font_size_spin = QSpinBox()
         self.font_size_spin.setRange(1, 100)
         self.font_size_spin.setValue(80)
         self.font_size_spin.setMinimumWidth(200)
         self.font_size_spin.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Font Size:", self.font_size_spin)
+        form_layout.addRow(trans.t('label_font_size'), self.font_size_spin)
 
         self.font_family_combo = QFontComboBox()
         self.font_family_combo.setEditable(True)
         self.font_family_combo.setCurrentFont(QFont("Arial"))
         self.font_family_combo.setMinimumWidth(200)
         self.font_family_combo.setStyleSheet(WHITE_COMBOBOX_STYLE)
-        form_layout.addRow("Font Family:", self.font_family_combo)
+        form_layout.addRow(trans.t('label_font_family'), self.font_family_combo)
 
         self.text_edit = QLineEdit("")
         self.text_edit.setMinimumWidth(200)
         self.text_edit.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Custom Text:", self.text_edit)
+        form_layout.addRow(trans.t('label_custom_text'), self.text_edit)
 
         self.range_edit = QLineEdit("All")
         self.range_edit.setMinimumWidth(200)
         self.range_edit.setStyleSheet("background-color: #fff; color: #000; font-weight: normal;")
-        form_layout.addRow("Range:", self.range_edit)
+        form_layout.addRow(trans.t('label_range'), self.range_edit)
 
-        self.transparent_bg_checkbox = QCheckBox("Transparent Background")
+        self.transparent_bg_checkbox = QCheckBox(trans.t('label_transparent_bg'))
         self.transparent_bg_checkbox.setChecked(True)
         form_layout.addRow("", self.transparent_bg_checkbox)
 
@@ -226,7 +227,7 @@ class LabelManager:
         bg_color_layout.setContentsMargins(0, 0, 0, 0)
         bg_color_layout.setSpacing(10)
 
-        self.bg_color_button = QPushButton("Choose Background Color")
+        self.bg_color_button = QPushButton(trans.t('label_choose_bg'))
         self.bg_color_button.setMinimumWidth(150)
         self.bg_color_button.setMaximumWidth(bg_button_width)
         self.bg_color_button.setFixedHeight(color_button_height)
@@ -238,13 +239,13 @@ class LabelManager:
 
         bg_color_layout.addWidget(self.bg_color_button)
         bg_color_layout.addStretch()
-        form_layout.addRow("Background Color:", bg_color_layout)
+        form_layout.addRow(trans.t('label_bg_color'), bg_color_layout)
 
         font_color_layout = QHBoxLayout()
         font_color_layout.setContentsMargins(0, 0, 0, 0)
         font_color_layout.setSpacing(10)
 
-        self.font_color_button = QPushButton("Choose Font Color")
+        self.font_color_button = QPushButton(trans.t('label_choose_font_color'))
         self.font_color_button.setMinimumWidth(130)
         self.font_color_button.setMaximumWidth(font_button_width)
         self.font_color_button.setFixedHeight(color_button_height)
@@ -256,7 +257,7 @@ class LabelManager:
 
         font_color_layout.addWidget(self.font_color_button)
         font_color_layout.addStretch()
-        form_layout.addRow("Font Color:", font_color_layout)
+        form_layout.addRow(trans.t('label_font_color'), font_color_layout)
 
         layout.addLayout(form_layout)
         layout.addSpacing(20)
@@ -264,9 +265,9 @@ class LabelManager:
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        ok_button = QPushButton("OK")
+        ok_button = QPushButton(trans.t('btn_ok'))
         ok_button.setMinimumWidth(80)
-        cancel_button = QPushButton("Cancel")
+        cancel_button = QPushButton(trans.t('btn_cancel'))
         cancel_button.setMinimumWidth(80)
 
         ok_button.clicked.connect(dialog.accept)
@@ -348,9 +349,9 @@ class LabelManager:
 
         show_success_box(
             window,
-            "Configuration Saved",
-            "Label configuration saved successfully!",
-            "The labels are now visible on the selected stack and will be included when saving.",
+            trans.t('msg_config_saved_title'),
+            trans.t('msg_config_saved_text'),
+            trans.t('msg_config_saved_info'),
         )
 
     def _clear_dialog_state(self) -> None:
