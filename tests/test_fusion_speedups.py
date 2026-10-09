@@ -194,3 +194,28 @@ def test_stackmffv4_inference_optimization_preserves_focus_map():
         _, opt_idx = optimized(x)
     agreement = (ref_idx == opt_idx).float().mean().item()
     assert agreement >= 0.999, f"focus maps agree on only {agreement:.4%}"
+
+
+# --------------------------------------------------------------------------
+# Parallel image decoding
+# --------------------------------------------------------------------------
+
+def test_parallel_load_keeps_file_order_and_counts_failures(tmp_path):
+    from core.image_loader import ImageStackLoader
+
+    frames = _textured_stack(n=12, size=(40, 50))
+    for i, frame in enumerate(frames):
+        cv2.imwrite(str(tmp_path / f"f{i:02d}.png"), frame)
+    (tmp_path / "f05b.png").write_bytes(b"not an image")
+
+    ok, message, images, names = ImageStackLoader().load_from_folder(str(tmp_path))
+    assert ok and "failed: 1" in message
+    assert names == [f"f{i:02d}.png" for i in range(12)]
+    for got, want in zip(images, frames):
+        assert np.array_equal(got, want)
+
+    paths = [str(tmp_path / n) for n in ("f03.png", "missing.png", "f01.png")]
+    ok, message, images, names = ImageStackLoader().load_from_filepaths(paths)
+    assert ok and "failed: 1" in message
+    assert names == ["f03.png", "f01.png"]
+    assert np.array_equal(images[0], frames[3])

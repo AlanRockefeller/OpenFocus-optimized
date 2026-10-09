@@ -6,6 +6,7 @@
 import os
 import cv2
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import List, Tuple, Optional, Dict, Any
 
@@ -159,6 +160,61 @@ def _collapse_repeats(paths: list) -> list:
     return out
 
 
+# OpenCV's and Pillow's decoders release the GIL, so a stack's files decode
+# in parallel; results are still consumed strictly in file order.
+_DECODE_WORKERS = min(8, os.cpu_count() or 1)
+
+
+def _decode_all(decode, paths: list) -> list:
+    """decode(path) for every path, in order, on a thread pool.
+
+    A failure is returned in place of its result, so one unreadable file is
+    counted as failed by the caller instead of aborting the whole stack.
+    """
+    def safe(path):
+        try:
+            return decode(path)
+        except Exception as exc:
+            return exc
+
+    if len(paths) < 2:
+        return [safe(path) for path in paths]
+    with ThreadPoolExecutor(max_workers=_DECODE_WORKERS) as executor:
+        return list(executor.map(safe, paths))
+
+
+def _downscale(img: np.ndarray, scale_factor: float) -> np.ndarray:
+    if scale_factor != 1.0 and 0 < scale_factor < 1.0:
+        width = int(img.shape[1] * scale_factor)
+        height = int(img.shape[0] * scale_factor)
+        img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
+    return img
+
+
+def _decode_image(path: str) -> Optional[np.ndarray]:
+    """One still image, EXIF-oriented; None when no decoder can read it."""
+    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8),
+                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+    if img is None:
+        # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
+        img = _read_via_pil(path)
+    if img is not None:
+        img = apply_exif_orientation(path, img)
+    return img
+
+
+def _decode_source(path: str, scale_factor: float):
+    """Decode one stack source: ("pages", [...]) for a multi-page TIFF,
+    else ("image", img or None)."""
+    pages = _read_tiff_pages(path)
+    if pages is not None:
+        return "pages", [_downscale(page, scale_factor) for page in pages]
+    img = _decode_image(path)
+    if img is not None:
+        img = _downscale(img, scale_factor)
+    return "image", img
+
+
 class ImageStackLoader:
     """图像栈加载器"""
 
@@ -173,6 +229,14 @@ class ImageStackLoader:
         self.thumbnail_size = (600, 400)
         # µm/px auto-detected from the stack's TIFF metadata (None = unknown)
         self.px_size_um = None
+
+    def _note_stack_metadata(self, path: str) -> None:
+        """Take EXIF and the µm/px calibration from the first loaded file."""
+        if not self.source_exif:
+            self.source_exif = _read_exif_bytes(path)
+        if self.px_size_um is None:
+            from utils.scalebar import detect_px_size_um
+            self.px_size_um = detect_px_size_um(path)
 
     def load_from_folder(self, folder_path: str, scale_factor: float = 1.0) -> Tuple[bool, str, List[np.ndarray], List[str]]:
         if not os.path.isdir(folder_path):
@@ -199,43 +263,25 @@ class ImageStackLoader:
         # one (every later export would carry the wrong scale bar).
         self.px_size_um = None
 
-        for filename, full_path in image_files:
+        decoded = _decode_all(lambda path: _decode_source(path, scale_factor),
+                              [full_path for _, full_path in image_files])
+        for (filename, full_path), result in zip(image_files, decoded):
             try:
-                pages = _read_tiff_pages(full_path)
-                if pages is not None:
+                if isinstance(result, Exception):
+                    raise result
+                kind, data = result
+                if kind == "pages":
                     # One multi-page TIFF = one whole stack
-                    if not self.source_exif:
-                        self.source_exif = _read_exif_bytes(full_path)
-                    if self.px_size_um is None:
-                        from utils.scalebar import detect_px_size_um
-                        self.px_size_um = detect_px_size_um(full_path)
+                    self._note_stack_metadata(full_path)
                     stem = os.path.splitext(filename)[0]
-                    for page_no, page in enumerate(pages, start=1):
-                        if scale_factor != 1.0 and 0 < scale_factor < 1.0:
-                            width = int(page.shape[1] * scale_factor)
-                            height = int(page.shape[0] * scale_factor)
-                            page = cv2.resize(page, (width, height), interpolation=cv2.INTER_AREA)
+                    for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
-                img = cv2.imdecode(np.fromfile(full_path, dtype=np.uint8),
-                                cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-                if img is None:
-                    # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
-                    img = _read_via_pil(full_path)
-                if img is not None:
-                    if not self.source_exif:
-                        self.source_exif = _read_exif_bytes(full_path)
-                    if self.px_size_um is None:
-                        from utils.scalebar import detect_px_size_um
-                        self.px_size_um = detect_px_size_um(full_path)
-                    img = apply_exif_orientation(full_path, img)
-                    if scale_factor != 1.0 and 0 < scale_factor < 1.0:
-                        width = int(img.shape[1] * scale_factor)
-                        height = int(img.shape[0] * scale_factor)
-                        img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-                    loaded_images.append(img)
+                if data is not None:
+                    self._note_stack_metadata(full_path)
+                    loaded_images.append(data)
                     filenames.append(filename)
                 else:
                     failed_count += 1
@@ -319,51 +365,31 @@ class ImageStackLoader:
         self.px_size_um = None
         self.source_exif = b""
 
-        for full_path in sources:
+        decoded = _decode_all(
+            lambda path: (_decode_source(path, scale_factor)
+                          if os.path.exists(path) else None),
+            sources)
+        for full_path, result in zip(sources, decoded):
             try:
-                if not os.path.exists(full_path):
+                if result is None:  # path does not exist
                     failed_count += 1
                     continue
-
-                pages = _read_tiff_pages(full_path)
-                if pages is not None:
-                    if not self.source_exif:
-                        self.source_exif = _read_exif_bytes(full_path)
-                    if self.px_size_um is None:
-                        from utils.scalebar import detect_px_size_um
-                        self.px_size_um = detect_px_size_um(full_path)
+                if isinstance(result, Exception):
+                    raise result
+                kind, data = result
+                if kind == "pages":
+                    self._note_stack_metadata(full_path)
                     stem = os.path.splitext(os.path.basename(full_path))[0]
-                    for page_no, page in enumerate(pages, start=1):
-                        if scale_factor != 1.0 and 0 < scale_factor < 1.0:
-                            width = int(page.shape[1] * scale_factor)
-                            height = int(page.shape[0] * scale_factor)
-                            page = cv2.resize(page, (width, height), interpolation=cv2.INTER_AREA)
+                    for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
-                img = cv2.imdecode(np.fromfile(full_path, dtype=np.uint8),
-                                cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-                if img is None:
-                    # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
-                    img = _read_via_pil(full_path)
-                if img is not None:
-                    if not self.source_exif:
-                        self.source_exif = _read_exif_bytes(full_path)
-                    if self.px_size_um is None:
-                        from utils.scalebar import detect_px_size_um
-                        self.px_size_um = detect_px_size_um(full_path)
-                    img = apply_exif_orientation(full_path, img)
-                if img is None:
+                if data is None:
                     failed_count += 1
                     continue
-
-                if scale_factor != 1.0 and 0 < scale_factor < 1.0:
-                    width = int(img.shape[1] * scale_factor)
-                    height = int(img.shape[0] * scale_factor)
-                    img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
-
-                loaded_images.append(img)
+                self._note_stack_metadata(full_path)
+                loaded_images.append(data)
                 filenames.append(os.path.basename(full_path))
             except Exception as e:
                 failed_count += 1
@@ -489,15 +515,13 @@ class ImageStackLoader:
         loaded_data = []
         failed_count = 0
 
-        for filename, full_path in image_files:
+        decoded = _decode_all(_decode_image,
+                              [full_path for _, full_path in image_files])
+        for (filename, full_path), img in zip(image_files, decoded):
             try:
-                img = cv2.imdecode(np.fromfile(full_path, dtype=np.uint8),
-                                cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-                if img is None:
-                    # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
-                    img = _read_via_pil(full_path)
+                if isinstance(img, Exception):
+                    raise img
                 if img is not None:
-                    img = apply_exif_orientation(full_path, img)
                     timestamp = self.get_image_timestamp(full_path)
                     loaded_data.append((filename, full_path, img, timestamp))
                 else:
