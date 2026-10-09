@@ -508,7 +508,8 @@ class MultiFocusFusion:
             input_source,
             img_resize,
             N,
-            self.use_gpu
+            self.use_gpu,
+            thread_count=kwargs.get('thread_count'),
         )
     
     def _fuse_stackmffv4(self,
