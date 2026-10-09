@@ -91,3 +91,68 @@ def test_dtcwt_blocked_filters_are_bit_identical():
         # Transposed (row-filter) views take the same path.
         assert np.array_equal(blocked(X.T[:, :48], *args),
                               original(X.T[:, :48], *args)), name
+
+
+# --------------------------------------------------------------------------
+# Guided filter
+# --------------------------------------------------------------------------
+
+def _reference_gff(images, kernel_size=31):
+    """The pre-optimization guided-filter fusion (whole stack in memory)."""
+    def gf(I, p, r, eps):
+        k = (2 * r + 1, 2 * r + 1)
+        mean_I = cv2.boxFilter(I, cv2.CV_32F, k)
+        mean_p = cv2.boxFilter(p, cv2.CV_32F, k)
+        mean_Ip = cv2.boxFilter(I * p, cv2.CV_32F, k)
+        cov_Ip = mean_Ip - mean_I * mean_p
+        mean_II = cv2.boxFilter(I * I, cv2.CV_32F, k)
+        var_I = mean_II - mean_I * mean_I
+        a = cov_Ip / (var_I + eps)
+        b = mean_p - a * mean_I
+        return cv2.boxFilter(a, cv2.CV_32F, k) * I + cv2.boxFilter(b, cv2.CV_32F, k)
+
+    flt = [img.astype(np.float32) / 255.0 for img in images]
+    bases = [cv2.blur(f, (kernel_size, kernel_size), borderType=cv2.BORDER_REFLECT)
+             for f in flt]
+    sal = []
+    for f in flt:
+        lap = np.abs(cv2.Laplacian(np.sum(f, axis=2), cv2.CV_32F, ksize=1,
+                                   borderType=cv2.BORDER_REFLECT))
+        sal.append(cv2.GaussianBlur(lap, (0, 0), sigmaX=5, sigmaY=5,
+                                    borderType=cv2.BORDER_REFLECT))
+    idx = np.argmax(np.stack(sal, axis=0), axis=0)
+    h, w = idx.shape
+    bn = np.zeros((h, w, 3), np.float32)
+    bd = np.zeros((h, w), np.float32)
+    dn = np.zeros((h, w, 3), np.float32)
+    dd = np.zeros((h, w), np.float32)
+    for k, f in enumerate(flt):
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+        mask = (idx == k).astype(np.float32)
+        wb = gf(gray, mask, 45, 0.3)
+        wd = gf(gray, mask, 7, 10e-6)
+        bn += bases[k] * wb[:, :, None]
+        bd += wb
+        dn += (f - bases[k]) * wd[:, :, None]
+        dd += wd
+    bd[bd < 1e-6] = 1e-6
+    dd[dd < 1e-6] = 1e-6
+    fused = bn / bd[:, :, None] + dn / dd[:, :, None]
+    return np.clip(fused * 255, 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("thread_count", [1, 4])
+def test_guided_filter_is_bit_identical_to_reference(thread_count):
+    from fusion_methods.gff import gff_impl
+
+    frames = _textured_stack(n=6)
+    # A frame that never wins any pixel is skipped by the new code; its
+    # weights were exactly zero before, so the output must not move.
+    frames.append(cv2.GaussianBlur(frames[0], (0, 0), 8))
+    # A near-duplicate frame creates exact saliency ties, which np.argmax
+    # resolves to the earliest frame; the streaming argmax must agree.
+    twin = frames[1].copy()
+    twin[:8, :8] = 0
+    frames.append(twin)
+    fused = gff_impl(frames, None, kernel_size=31, thread_count=thread_count)
+    assert np.array_equal(fused, _reference_gff(frames))
