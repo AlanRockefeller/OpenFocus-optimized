@@ -35,7 +35,9 @@ def _synthetic_thirds(h=240, w=320):
 
 
 class TestComputeFocusIndex:
-    @pytest.mark.parametrize("method", ["guided_filter", "dct", "gfgfgf", "dtcwt"])
+    @pytest.mark.parametrize("method", ["guided_filter", "dct", "gfgfgf",
+                                        "dtcwt", "openfocus_a",
+                                        "openfocus_b", "openfocus_c"])
     def test_thirds_identified(self, method):
         idx = compute_focus_index(_synthetic_thirds(), method)
         assert idx.shape == (240, 320)
@@ -55,7 +57,8 @@ class TestComputeFocusIndex:
 
     def test_supported_list_complete(self):
         assert set(SUPPORTED_METHODS) == {
-            "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4"}
+            "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+            "openfocus_a", "openfocus_b", "openfocus_c"}
 
     def test_cancellation(self):
         def cancel():

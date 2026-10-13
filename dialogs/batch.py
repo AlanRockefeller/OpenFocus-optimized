@@ -323,54 +323,40 @@ class BatchProcessingDialog(QDialog):
         info_group = QGroupBox(trans.t('batch_proc_options'))
         info_layout = QVBoxLayout(info_group)
         
-        # 获取当前选中的融合方法
+        # 获取当前选中的融合方法（下拉单选）
         fusion_method = "None"
         kernel_size_value = None
         if self.parent_window:
-            rb_a = getattr(self.parent_window, "rb_a", None)
-            rb_b = getattr(self.parent_window, "rb_b", None)
-            rb_c = getattr(self.parent_window, "rb_c", None)
-            rb_d = getattr(self.parent_window, "rb_d", None)
-            slider_widget = getattr(self.parent_window, "slider_smooth", None)
+            code = self.parent_window.current_fusion_method()
+            label_map = {
+                "guided_filter": 'radio_guided_filter',
+                "dct": 'radio_dct',
+                "dtcwt": 'radio_dtcwt',
+                "gfgfgf": 'radio_gfg',
+                "stackmffv4": 'radio_stackmff',
+                "openfocus_a": 'radio_openfocus_a',
+                "openfocus_b": 'radio_openfocus_b',
+                "openfocus_c": 'radio_openfocus_c',
+            }
+            if code in label_map:
+                fusion_method = trans.t(label_map[code])
+            if code in ("guided_filter", "dct", "gfgfgf",
+                        "openfocus_a", "openfocus_b", "openfocus_c"):
+                slider_widget = getattr(self.parent_window, "slider_smooth", None)
+                if slider_widget:
+                    kernel_size_value = slider_widget.value()
 
-            if rb_a and rb_a.isChecked():
-                fusion_method = trans.t('radio_guided_filter')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-            elif rb_b and rb_b.isChecked():
-                fusion_method = trans.t('radio_dct')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-            elif rb_c and rb_c.isChecked():
-                fusion_method = trans.t('radio_dtcwt')
-            elif getattr(self.parent_window, 'rb_gfg', None) and self.parent_window.rb_gfg.isChecked():
-                fusion_method = trans.t('radio_gfg')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-            elif rb_d and rb_d.isChecked():
-                fusion_method = trans.t('radio_stackmff')
-            elif getattr(self.parent_window, 'rb_ofa', None) and self.parent_window.rb_ofa.isChecked():
-                fusion_method = trans.t('radio_openfocus_a')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-            elif getattr(self.parent_window, 'rb_ofb', None) and self.parent_window.rb_ofb.isChecked():
-                fusion_method = trans.t('radio_openfocus_b')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-            elif getattr(self.parent_window, 'rb_ofc', None) and self.parent_window.rb_ofc.isChecked():
-                fusion_method = trans.t('radio_openfocus_c')
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
-        
-        # 获取当前选中的配准方法
-        reg_methods = []
+        # 获取当前选中的配准方法（下拉单选）
+        reg_method_str = "None"
         if self.parent_window:
-            if self.parent_window.cb_align_homography.isChecked():
-                reg_methods.append(trans.t('check_align_homography'))
-            if self.parent_window.cb_align_ecc.isChecked():
-                reg_methods.append(trans.t('check_align_ecc'))
-        
-        reg_method_str = ", ".join(reg_methods) if reg_methods else "None"
+            am = self.parent_window.current_alignment_method()
+            align_map = {
+                "homography": 'check_align_homography',
+                "ecc": 'check_align_ecc',
+                "openfocus": 'check_align_of',
+            }
+            if am in align_map:
+                reg_method_str = trans.t(align_map[am])
         
         info_layout.addWidget(QLabel(trans.t('batch_lbl_fusion').format(fusion_method)))
         info_layout.addWidget(QLabel(trans.t('batch_lbl_reg').format(reg_method_str)))
@@ -689,15 +675,11 @@ class BatchProcessingDialog(QDialog):
         """获取处理设置"""
         format_str = self.format_combo.currentText().lower()
         
-        # 获取融合方法设置
+        # 获取融合方法设置（下拉单选）
         fusion_method = None
         fusion_params = {}
-        
+
         if self.parent_window:
-            rb_a = getattr(self.parent_window, "rb_a", None)
-            rb_b = getattr(self.parent_window, "rb_b", None)
-            rb_c = getattr(self.parent_window, "rb_c", None)
-            rb_d = getattr(self.parent_window, "rb_d", None)
             slider_widget = getattr(self.parent_window, "slider_smooth", None)
 
             def _sanitized_kernel_value() -> int:
@@ -708,43 +690,20 @@ class BatchProcessingDialog(QDialog):
                     value = max(1, value - 1)
                 return value
 
-            if rb_a and rb_a.isChecked():
-                fusion_method = "guided_filter"
+            fusion_method = self.parent_window.current_fusion_method()
+            if fusion_method in ("guided_filter", "dct", "gfgfgf",
+                                 "openfocus_a", "openfocus_b", "openfocus_c"):
                 fusion_params["kernel_size"] = _sanitized_kernel_value()
-            elif rb_b and rb_b.isChecked():
-                fusion_method = "dct"
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            elif rb_c and rb_c.isChecked():
-                fusion_method = "dtcwt"
-            elif getattr(self.parent_window, 'rb_gfg', None) and self.parent_window.rb_gfg.isChecked():
-                fusion_method = "gfgfgf"
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            elif rb_d and rb_d.isChecked():
-                fusion_method = "stackmffv4"
-            elif getattr(self.parent_window, 'rb_ofa', None) and self.parent_window.rb_ofa.isChecked():
-                fusion_method = "openfocus_a"
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            elif getattr(self.parent_window, 'rb_ofb', None) and self.parent_window.rb_ofb.isChecked():
-                fusion_method = "openfocus_b"
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            elif getattr(self.parent_window, 'rb_ofc', None) and self.parent_window.rb_ofc.isChecked():
-                fusion_method = "openfocus_c"
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            if fusion_method:
-                fusion_params["base_frame"] = (
-                    "last" if getattr(self.parent_window,
-                                      "base_frame_correct", False) else "none")
+            fusion_params["base_frame"] = (
+                "last" if getattr(self.parent_window,
+                                  "base_frame_correct", False) else "none")
 
-        # 获取配准方法设置
+        # 获取配准方法设置（下拉单选：none 时不做配准）
         reg_methods = []
         if self.parent_window:
-            if getattr(self.parent_window, 'cb_align_of', None) and \
-                    self.parent_window.cb_align_of.isChecked():
-                reg_methods.append("openfocus")
-            if self.parent_window.cb_align_homography.isChecked():
-                reg_methods.append("homography")
-            if self.parent_window.cb_align_ecc.isChecked():
-                reg_methods.append("ecc")
+            am = self.parent_window.current_alignment_method()
+            if am != "none":
+                reg_methods = [am]
         
         # 获取JPG质量设置
         jpg_quality = 100

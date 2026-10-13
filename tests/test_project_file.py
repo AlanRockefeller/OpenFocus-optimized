@@ -39,10 +39,13 @@ class _Labels:
 
 def _window(paths, folder, scale=1.0):
     w = type("FakeWindow", (), {})()
-    w.rb_a = _Radio(True)
-    w.rb_b = w.rb_c = w.rb_gfg = w.rb_d = _Radio(False)
-    w.cb_align_homography = _Radio(False)
-    w.cb_align_ecc = _Radio(False)
+    # 下拉单选契约：current_*_method / set_*_method（真实窗口同款）
+    w._fusion = "guided_filter"
+    w._alignment = "none"
+    w.current_fusion_method = lambda: w._fusion
+    w.current_alignment_method = lambda: w._alignment
+    w.set_fusion_method = lambda code: setattr(w, "_fusion", code)
+    w.set_alignment_method = lambda code: setattr(w, "_alignment", code)
     w.slider_smooth = _Slider()
     w.chk_quick_preview = None
     w.raw_images = [np.zeros((8, 8, 3), np.uint8) for _ in paths]

@@ -178,7 +178,7 @@ import ui.styles  # noqa: E402  (import order, see above)
 from PyQt6.QtCore import QRectF  # noqa: E402
 from PyQt6.QtGui import QAction  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QCheckBox, QListWidget, QPushButton, QRadioButton, QSlider, QWidget,
+    QCheckBox, QComboBox, QListWidget, QPushButton, QRadioButton, QSlider, QWidget,
 )
 
 from locales import trans  # noqa: E402
@@ -323,12 +323,25 @@ def _render_window(frames):
     w.wipe_active = False
     w.btn_render = QPushButton("Render")
     w.btn_reset = QPushButton("Reset")
-    w.rb_a = QRadioButton()
-    w.rb_a.setChecked(True)
-    for attr in ("rb_b", "rb_c", "rb_gfg", "rb_d"):
-        setattr(w, attr, QRadioButton())
-    w.cb_align_homography = QCheckBox()
-    w.cb_align_ecc = QCheckBox()
+    # 下拉单选的融合/对齐选择 + 统一读取助手（与真实窗口同契约）
+    from ui.right_panel import FUSION_ITEMS, ALIGN_ITEMS
+
+    w.combo_fusion = QComboBox()
+    for code, _key, _hint in FUSION_ITEMS:
+        w.combo_fusion.addItem(code, code)
+    w.combo_fusion.setCurrentIndex(0)
+    w.combo_align = QComboBox()
+    for code, _key, _hint in ALIGN_ITEMS:
+        w.combo_align.addItem(code, code)
+    # 桩默认 none（等价旧测试里三个对齐框全不勾），对齐路径走“无配准”分支
+    w.combo_align.setCurrentIndex(
+        max(0, w.combo_align.findData("none")))
+    w.current_fusion_method = lambda: w.combo_fusion.currentData()
+    w.current_alignment_method = lambda: w.combo_align.currentData()
+    w.set_fusion_method = lambda code: w.combo_fusion.setCurrentIndex(
+        max(0, w.combo_fusion.findData(code)))
+    w.set_alignment_method = lambda code: w.combo_align.setCurrentIndex(
+        max(0, w.combo_align.findData(code)))
     w.chk_quick_preview = QCheckBox()
     w.slider_smooth = QSlider()
     w.slider_smooth.setValue(31)
@@ -540,7 +553,7 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
     assert len(rm._compare_queue) == 6
     assert rm._compare_current == "guided_filter"
     assert not w.btn_render.isEnabled()
-    assert not w.cb_align_homography.isEnabled()
+    assert not w.combo_align.isEnabled()
 
     running = rm.worker
     rm.start_compare_all()  # second click cancels
@@ -563,7 +576,7 @@ def test_compare_all_cancel_between_renders_unlocks_the_ui(qapp, monkeypatch):
 
     assert rm._compare_queue == [] and rm._compare_mode is False
     assert w.btn_render.isEnabled()
-    assert w.cb_align_homography.isEnabled() and w.slider_smooth.isEnabled()
+    assert w.combo_align.isEnabled() and w.slider_smooth.isEnabled()
 
 
 def test_roi_reset_clears_rect_button_and_state(qapp):

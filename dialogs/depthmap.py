@@ -43,12 +43,16 @@ _METHOD_KEYS = (
     ("dtcwt", "radio_dtcwt"),
     ("gfgfgf", "radio_gfg"),
     ("stackmffv4", "radio_stackmff"),
+    ("openfocus_a", "radio_openfocus_a"),
+    ("openfocus_b", "radio_openfocus_b"),
+    ("openfocus_c", "radio_openfocus_c"),
 )
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
 
 # 打开对话框时自动计算的方法（秒级）；dtcwt/stackmffv4 分钟级，不自动跑
-_FAST_AUTO_METHODS = {"guided_filter", "dct", "gfgfgf"}
+_FAST_AUTO_METHODS = {"guided_filter", "dct", "gfgfgf",
+                      "openfocus_a", "openfocus_b", "openfocus_c"}
 
 # 对话框关闭时仍在跑的 worker 放这里保活：QThread 对象被销毁而线程仍在
 # 运行会直接 abort 整个进程（AI 推理可达数分钟，用户关窗很正常）。
@@ -382,9 +386,16 @@ class DepthMapDialog(QDialog):
 
     def _current_window_method(self):
         w = self.window_main
-        checks = (("rb_gfg", "gfgfgf"), ("rb_d", "stackmffv4"),
-                  ("rb_c", "dtcwt"), ("rb_b", "dct"))
-        for attr, code in checks:
+        # 下拉单选后统一走 current_fusion_method()；旧窗口/测试桩可能
+        # 没有该助手，退回逐个探测属性
+        helper = getattr(w, "current_fusion_method", None)
+        if callable(helper):
+            code = helper()
+            if code in {c for c, _k in _METHOD_KEYS}:
+                return code
+            return "guided_filter"
+        for attr, code in (("rb_gfg", "gfgfgf"), ("rb_d", "stackmffv4"),
+                           ("rb_c", "dtcwt"), ("rb_b", "dct")):
             rb = getattr(w, attr, None)
             if rb is not None and rb.isChecked():
                 return code
