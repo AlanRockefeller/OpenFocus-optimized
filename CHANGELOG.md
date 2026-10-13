@@ -3,6 +3,14 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.48] — 2026-10-14
+
+### Fixed
+- Test-only: the depth-dialog "switch recomputes" test raced the first
+  worker's teardown and went red on both CI platforms (v1.47's shipped
+  binaries are unaffected — the feature itself works). The test now waits
+  for the worker to finish before switching
+
 ## [v1.47] — 2026-10-14
 
 ### Improved

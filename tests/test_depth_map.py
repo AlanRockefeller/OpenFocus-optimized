@@ -273,11 +273,19 @@ class TestReviewFixes:
 
         dlg = dm.DepthMapDialog(_Stub())
         assert started.wait(5), "auto-compute did not start on open"
+        # 等首个计算完成（线程退出）：计算进行中切换方法会跳过自动重算
+        # （一次只允许一个 worker），CI 慢机上此处不等待就是时序脆弱点
+        deadline = time.time() + 10
+        while (dlg._worker is not None and dlg._worker.isRunning()
+               and time.time() < deadline):
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
         n_on_open = len(calls)
 
         # 切换到另一个秒级方法 → 自动重算
         dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("gfgfgf"))
-        deadline = time.time() + 5
+        deadline = time.time() + 10
         while len(calls) == n_on_open and time.time() < deadline:
             app.processEvents()
             time.sleep(0.02)
