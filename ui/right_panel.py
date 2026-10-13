@@ -29,8 +29,9 @@ from locales import trans
 from widgets.output_list import OutputListWidget
 
 # 融合算法下拉项：(算法代码, i18n 键, 提示 i18n 键或 None)。
-# 顺序即下拉顺序；代码与 MultiFocusFusion.SUPPORTED_ALGORITHMS 一致。
+# "none" = 仅对齐不融合（v1.41 下拉化前的老能力：只跑配准、输出对齐帧）。
 FUSION_ITEMS = (
+    ("none", "radio_no_fusion", "radio_no_fusion_hint"),
     ("guided_filter", "radio_guided_filter", None),
     ("dct", "radio_dct", None),
     ("dtcwt", "radio_dtcwt", None),
@@ -192,15 +193,15 @@ def create_right_panel() -> RightPanelComponents:
     chk_quick_preview = QCheckBox(trans.t('chk_quick_preview'))
     chk_quick_preview.setToolTip(trans.t('chk_quick_preview_hint'))
     chk_quick_preview.setStyleSheet("color: #aaa;")
-    config_layout.addWidget(chk_quick_preview)
-
-    # 基底校正（消除亮度漂移）：与快速预览同区的独立开关，默认不勾选。
-    # 它是所有融合方法共用的输出后处理，不属于融合算法选择本身。
+    # 快速预览 + 消除亮度漂移同一行（都是输出侧开关）
+    toggle_row = QHBoxLayout()
+    toggle_row.addWidget(chk_quick_preview)
     chk_base_correct = QCheckBox(trans.t('chk_base_correct'))
     chk_base_correct.setChecked(False)
     chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
     chk_base_correct.setStyleSheet("color: #aaa;")
-    config_layout.addWidget(chk_base_correct)
+    toggle_row.addWidget(chk_base_correct)
+    config_layout.addLayout(toggle_row)
 
     # 反转帧序（倒序栈）：远→近扫的栈勾选后按规范方向处理，仅影响
     # OpenFocus A/B/C 的 base 参考端 / 末帧先验 / 深度图标签方向

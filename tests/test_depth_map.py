@@ -60,6 +60,30 @@ class TestComputeFocusIndex:
             "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
             "openfocus_a", "openfocus_b", "openfocus_c"}
 
+    def test_openfocus_depth_maps_differ(self):
+        """A/B/C 的深度侧写照各自的融合管线（v1.43 前三者共用一张图，
+        是缺陷）：A=方差权重连续质心，B=方差硬 argmax，C=带通能量 argmax。"""
+        rng = np.random.default_rng(11)
+        h, w = 160, 240
+        tex = np.clip(128 + rng.normal(0, 30, (h, w, 3)), 0, 255)
+        # 两帧都有纹理（重叠聚焦）：f0 左 2/3 强，f1 右 2/3 强
+        f0 = tex.copy()
+        f0[:, int(w * 2 / 3):] = cv2.GaussianBlur(tex, (0, 0), 4)[:, int(w * 2 / 3):]
+        f1 = tex.copy()
+        f1[:, :int(w / 3)] = cv2.GaussianBlur(tex, (0, 0), 4)[:, :int(w / 3)]
+        frames = [f0.astype(np.uint8), f1.astype(np.uint8)]
+        a = compute_focus_index(frames, "openfocus_a")
+        b = compute_focus_index(frames, "openfocus_b")
+        c = compute_focus_index(frames, "openfocus_c")
+        # B 是硬拾取：只有 0/1 两个值
+        assert set(np.unique(np.round(b, 3))) <= {0.0, 1.0}
+        # A 是加权质心：重叠区出现中间值
+        mid = a[:, int(w / 3):int(w * 2 / 3)]
+        assert 0.15 < float(mid.mean()) < 0.85
+        assert float(np.unique(np.round(a, 3)).size) > float(np.unique(np.round(b, 3)).size)
+        # C 的带通能量选择与 B 的方差统计不同（至少不是逐位相同）
+        assert not np.allclose(b, c, atol=1e-6)
+
     def test_cancellation(self):
         def cancel():
             return True
