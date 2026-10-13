@@ -72,7 +72,7 @@ Full details, including the portable mode and the log folder, are in the [User M
 ## 💻 Command Line Usage
 Beyond the GUI, OpenFocus ships as a pip-installable CLI on [PyPI](https://pypi.org/project/openfocus/) — Windows, macOS and Linux, no Python GUI stack required:
 ```bash
-pip install openfocus          # classical algorithms (guided filter, DCT, DTCWT, GFG-FGF)
+pip install openfocus          # all 8 fusion methods (4 classical + Helicon-derived OpenFocus A/B/C)
 pip install "openfocus[ai]"    # + the AI (StackMFF-V4) model, weights included
 openfocus --input ./stack_folder --output ./result/fused.png
 ```

@@ -572,6 +572,10 @@ def _of_estimate_similarity(ref_hp, cur_hp,
         return _of_ncc_score(ref_hp, fixed)
 
     best = (-1.0, 0.0, 1.0, 0.0, 0.0)
+    # 平移-only 基准：模糊与缩放在 NCC 上天然相似，无显著增益时坚持
+    # s=1 的简约解（否则失焦帧会被误判出假旋转/假缩放）
+    base_ncc, base_dx, base_dy = _eval(0.0, 1.0)
+    best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
     for th in np.arange(-rot_bound, rot_bound + 1e-6, 1.0):
         for sc in (0.95, 1.0, 1.05):
             if not (scale_range[0] - 1e-9 <= sc <= scale_range[1] + 1e-9):
@@ -579,6 +583,9 @@ def _of_estimate_similarity(ref_hp, cur_hp,
             ncc, dx, dy = _eval(th, sc)
             if ncc > best[0]:
                 best = (ncc, th, sc, dx, dy)
+    # 非平凡 (θ, s) 必须显著优于平移-only 基准（≥0.05 NCC）才采纳
+    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
+        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
     if best[1] == 0.0 and best[2] == 1.0 and best[0] >= 0.97:
         # 常见情形：纯平移已高度吻合——跳过两级精修（省一半耗时）
         return best
@@ -596,6 +603,9 @@ def _of_estimate_similarity(ref_hp, cur_hp,
                     improved = True
         if not improved:
             break
+    # 精修后复检：非平凡解仍须显著优于平移-only 基准
+    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
+        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
     return best
 
 

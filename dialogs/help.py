@@ -93,7 +93,10 @@ class RenderMethodHelpDialog(HelpDialog):
     GFG-FGF is a multi-focus image fusion algorithm based on a generalized four-neighborhood Gaussian gradient (GFG) operator combined with a fast guided filter (FGF). Feature extraction uses the GFG operator to capture high-frequency edge and gradient information. Information enhancement leverages the FGF together with the original image texture to smooth defocused regions while emphasizing focused areas. The fusion strategy constructs a pixel-wise decision map by selecting the maximum focus measure per pixel and then refines these decisions with FGF for edge-preserving smoothing, producing a weighted fusion that favors sharp, well-focused pixels.</p>
 
     <p>StackMFF-V4<br/>
-    A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>"""
+    A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>
+
+    <p>OpenFocus A / B / C<br/>
+    The Helicon Focus method family, reverse-engineered and verified against the original software's output (0.5&ndash;4% MAE on benchmark stacks). <b>A</b> is a variance-weighted average with a last-frame prior &mdash; fast and colour-stable on short stacks. <b>B</b> is a variance depth-map pick that selects the sharpest frame per pixel &mdash; the best choice for smooth surfaces and microscopy. <b>C</b> is a Laplacian-pyramid per-band blend with a natural look on textured subjects. The kernel slider sets the variance window (default radius 5, matching Helicon's fixed window); fused output is insensitive to it, while depth maps get sharper labels.</p>"""
         
         super().__init__(trans.t('help_render_title'), help_text, parent)
 
