@@ -150,12 +150,15 @@ class MultiFocusFusion:
     - 'stackmffv4': StackMFF-V4 神经网络融合
     """
     
-    SUPPORTED_ALGORITHMS = ['guided_filter', 'dct', 'dtcwt', 'gfgfgf', 'stackmffv4']
-    
+    SUPPORTED_ALGORITHMS = ['guided_filter', 'dct', 'dtcwt', 'gfgfgf',
+                            'stackmffv4', 'openfocus_a', 'openfocus_b',
+                            'openfocus_c']
+
     def __init__(self, algorithm: str = 'guided_filter', use_gpu: bool = False,
                  tile_enabled: bool = True, tile_block_size: int = 1024,
                  tile_overlap: int = 256, tile_threshold: int = 2048,
-                 stackmffv4_batch_size: int = 2):
+                 stackmffv4_batch_size: int = 2,
+                 base_frame: str = "none"):
         """
         初始化融合器
         
@@ -175,6 +178,11 @@ class MultiFocusFusion:
         self.tile_threshold = int(tile_threshold)
         # StackMFF V4 批量处理大小
         self.stackmffv4_batch_size = max(1, int(stackmffv4_batch_size))
+        # 基底校正（消除亮度漂移）：'none' | 'last' | 'first'。
+        # 验证：OpenFocus 全系方法的输出都是"细节层来自融合决策 +
+        # 基底低频来自参考帧"——out += LP(I_base) − LP(out)，σ≈32，
+        # 消除帧间曝光/亮度漂移（延时与手持栈刚需）。
+        self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
         self._validate_environment()
     
     def _ensure_supported_algorithm(self, algorithm: str) -> None:
@@ -225,6 +233,97 @@ class MultiFocusFusion:
 
         thread_count = kwargs.get('thread_count', None)
         return gfgfgf_impl(input_source, img_resize, kernel_size=kernel_size, thread_count=thread_count)
+
+    def _fuse_openfocus_a(self,
+                          input_source: Union[str, List[np.ndarray]],
+                          img_resize: Optional[Tuple[int, int]] = None,
+                          kernel_size: int = 7,
+                          **kwargs) -> np.ndarray:
+        """OpenFocus - A：方差加权平均（末帧先验），OpenFocus Method A 复现。"""
+        from fusion_methods.openfocus_ab import openfocus_a_impl
+        kernel_size = max(1, int(kernel_size or 7))
+        if kernel_size % 2 == 0:
+            kernel_size = max(1, kernel_size - 1)
+        return openfocus_a_impl(input_source, img_resize,
+                                kernel_size=kernel_size,
+                                thread_count=kwargs.get('thread_count', None))
+
+    def _fuse_openfocus_b(self,
+                          input_source: Union[str, List[np.ndarray]],
+                          img_resize: Optional[Tuple[int, int]] = None,
+                          kernel_size: int = 7,
+                          **kwargs) -> np.ndarray:
+        """OpenFocus - B：方差深度图选择，OpenFocus Method B 复现。"""
+        from fusion_methods.openfocus_ab import openfocus_b_impl
+        kernel_size = max(1, int(kernel_size or 7))
+        if kernel_size % 2 == 0:
+            kernel_size = max(1, kernel_size - 1)
+        return openfocus_b_impl(input_source, img_resize,
+                                kernel_size=kernel_size,
+                                thread_count=kwargs.get('thread_count', None))
+
+    def _fuse_openfocus_c(self,
+                          input_source: Union[str, List[np.ndarray]],
+                          img_resize: Optional[Tuple[int, int]] = None,
+                          kernel_size: int = 7,
+                          **kwargs) -> np.ndarray:
+        """OpenFocus - C：拉普拉斯金字塔融合，OpenFocus Method C 复现。"""
+        from fusion_methods.openfocus_ab import openfocus_c_impl
+        kernel_size = max(1, int(kernel_size or 7))
+        if kernel_size % 2 == 0:
+            kernel_size = max(1, kernel_size - 1)
+        return openfocus_c_impl(input_source, img_resize,
+                                kernel_size=kernel_size,
+                                thread_count=kwargs.get('thread_count', None))
+
+    # ------------------------------------------------------------------
+    # 基底校正（消除亮度漂移）
+    # ------------------------------------------------------------------
+    BASE_CORRECTION_SIGMA = 32.0
+
+    def _base_frame_image(self, input_source) -> Optional[np.ndarray]:
+        """取基底参考帧（末帧/首帧），统一到 float32 0-255 域。"""
+        frame = None
+        if isinstance(input_source, (list, tuple)):
+            if not input_source:
+                return None
+            frame = input_source[-1] if self.base_frame == "last" else input_source[0]
+        elif isinstance(input_source, str) and os.path.isdir(input_source):
+            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(input_source))
+                     if f.lower().endswith(exts)]
+            if not files:
+                return None
+            name = files[-1] if self.base_frame == "last" else files[0]
+            import cv2
+            data = np.fromfile(os.path.join(input_source, name), dtype=np.uint8)
+            frame = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+            if frame is None:
+                return None
+        if frame is None:
+            return None
+        if frame.dtype == np.uint16:
+            return (frame.astype(np.float32) * (255.0 / 65535.0))
+        return frame.astype(np.float32)
+
+    def _apply_base_correction(self, fused, input_source):
+        """out += LP(I_base) − LP(out)：细节层不动，基底低频对齐参考帧。
+
+        OpenFocus 全系方法的公共结构（实测）：消除帧间曝光/亮度漂移。
+        self.base_frame == 'none'（默认）时原样返回。
+        """
+        if fused is None or self.base_frame == "none":
+            return fused
+        base = self._base_frame_image(input_source)
+        if base is None or base.shape[:2] != fused.shape[:2]:
+            return fused
+        import cv2
+        out = fused if fused.dtype == np.float32 else fused.astype(np.float32)
+        sigma = self.BASE_CORRECTION_SIGMA
+        low_out = cv2.GaussianBlur(out, (0, 0), sigma)
+        low_base = cv2.GaussianBlur(base, (0, 0), sigma)
+        corrected = out + (low_base - low_out)
+        return np.clip(corrected, 0, 255).astype(fused.dtype)
 
     def _validate_dct_environment(self) -> None:
         """验证DCT融合依赖"""
@@ -352,7 +451,7 @@ class MultiFocusFusion:
                 # 防止外部 kwargs 中含有会与内部指定值冲突的同名参数
                 kws.pop('block_size', None)
                 kws.pop('overlap', None)
-                return self._fuse_tiled(
+                return self._apply_base_correction(self._fuse_tiled(
                     input_source,
                     algorithm=self.algorithm,
                     img_resize=img_resize,
@@ -361,7 +460,7 @@ class MultiFocusFusion:
                     should_cancel=should_cancel,
                     progress_callback=progress_callback,
                     **kws,
-                )
+                ), input_source)
 
         # 情况2: 传入的是目录路径，进行懒加载判断（只读取第一张图片以判断尺寸）
         if isinstance(input_source, str) and os.path.isdir(input_source):
@@ -390,7 +489,7 @@ class MultiFocusFusion:
                     kws = dict(kwargs)
                     kws.pop('block_size', None)
                     kws.pop('overlap', None)
-                    return self._fuse_tiled(
+                    return self._apply_base_correction(self._fuse_tiled(
                         input_source,
                         algorithm=self.algorithm,
                         img_resize=img_resize,
@@ -399,7 +498,7 @@ class MultiFocusFusion:
                         should_cancel=should_cancel,
                         progress_callback=progress_callback,
                         **kws,
-                    )
+                    ), input_source)
 
         if self.algorithm == 'guided_filter':
             result = self._fuse_guided_filter(input_source, img_resize, **kwargs)
@@ -411,6 +510,12 @@ class MultiFocusFusion:
             result = self._fuse_gfgfgf(input_source, img_resize, **kwargs)
         elif self.algorithm == 'stackmffv4':
             result = self._fuse_stackmffv4(input_source, img_resize, **kwargs)
+        elif self.algorithm == 'openfocus_a':
+            result = self._fuse_openfocus_a(input_source, img_resize, **kwargs)
+        elif self.algorithm == 'openfocus_b':
+            result = self._fuse_openfocus_b(input_source, img_resize, **kwargs)
+        elif self.algorithm == 'openfocus_c':
+            result = self._fuse_openfocus_c(input_source, img_resize, **kwargs)
         else:
             result = None
         # The back-ends cannot be interrupted mid-computation, but returning a
@@ -419,7 +524,7 @@ class MultiFocusFusion:
         if should_cancel is not None and should_cancel():
             from core.registration import RegistrationCancelled
             raise RegistrationCancelled()
-        return result
+        return self._apply_base_correction(result, input_source)
     
     def _fuse_guided_filter(self, 
                             input_source: Union[str, List[np.ndarray]], 
@@ -787,6 +892,12 @@ class MultiFocusFusion:
                 return self._fuse_dtcwt(crops, img_resize, **algo_kwargs)
             elif algorithm == 'gfgfgf':
                 return self._fuse_gfgfgf(crops, img_resize, **algo_kwargs)
+            elif algorithm == 'openfocus_a':
+                return self._fuse_openfocus_a(crops, img_resize, **algo_kwargs)
+            elif algorithm == 'openfocus_b':
+                return self._fuse_openfocus_b(crops, img_resize, **algo_kwargs)
+            elif algorithm == 'openfocus_c':
+                return self._fuse_openfocus_c(crops, img_resize, **algo_kwargs)
             else:
                 method_name = f"_fuse_{algorithm}"
                 method = getattr(self, method_name, None)

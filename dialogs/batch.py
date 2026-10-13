@@ -349,6 +349,18 @@ class BatchProcessingDialog(QDialog):
                     kernel_size_value = slider_widget.value()
             elif rb_d and rb_d.isChecked():
                 fusion_method = trans.t('radio_stackmff')
+            elif getattr(self.parent_window, 'rb_ofa', None) and self.parent_window.rb_ofa.isChecked():
+                fusion_method = trans.t('radio_openfocus_a')
+                if slider_widget:
+                    kernel_size_value = slider_widget.value()
+            elif getattr(self.parent_window, 'rb_ofb', None) and self.parent_window.rb_ofb.isChecked():
+                fusion_method = trans.t('radio_openfocus_b')
+                if slider_widget:
+                    kernel_size_value = slider_widget.value()
+            elif getattr(self.parent_window, 'rb_ofc', None) and self.parent_window.rb_ofc.isChecked():
+                fusion_method = trans.t('radio_openfocus_c')
+                if slider_widget:
+                    kernel_size_value = slider_widget.value()
         
         # 获取当前选中的配准方法
         reg_methods = []
@@ -709,10 +721,26 @@ class BatchProcessingDialog(QDialog):
                 fusion_params["kernel_size"] = _sanitized_kernel_value()
             elif rb_d and rb_d.isChecked():
                 fusion_method = "stackmffv4"
-        
+            elif getattr(self.parent_window, 'rb_ofa', None) and self.parent_window.rb_ofa.isChecked():
+                fusion_method = "openfocus_a"
+                fusion_params["kernel_size"] = _sanitized_kernel_value()
+            elif getattr(self.parent_window, 'rb_ofb', None) and self.parent_window.rb_ofb.isChecked():
+                fusion_method = "openfocus_b"
+                fusion_params["kernel_size"] = _sanitized_kernel_value()
+            elif getattr(self.parent_window, 'rb_ofc', None) and self.parent_window.rb_ofc.isChecked():
+                fusion_method = "openfocus_c"
+                fusion_params["kernel_size"] = _sanitized_kernel_value()
+            if fusion_method:
+                fusion_params["base_frame"] = (
+                    "last" if getattr(self.parent_window,
+                                      "base_frame_correct", False) else "none")
+
         # 获取配准方法设置
         reg_methods = []
         if self.parent_window:
+            if getattr(self.parent_window, 'cb_align_of', None) and \
+                    self.parent_window.cb_align_of.isChecked():
+                reg_methods.append("openfocus")
             if self.parent_window.cb_align_homography.isChecked():
                 reg_methods.append("homography")
             if self.parent_window.cb_align_ecc.isChecked():

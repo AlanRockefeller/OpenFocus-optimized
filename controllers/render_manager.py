@@ -36,6 +36,9 @@ class RenderManager:
         "dct": "DCT",
         "dtcwt": "DTCWT",
         "gfgfgf": "GFG-FGF",
+        "openfocus_a": "OpenFocus A",
+        "openfocus_b": "OpenFocus B",
+        "openfocus_c": "OpenFocus C",
         "stackmffv4": "AI",
     }
 
@@ -77,6 +80,9 @@ class RenderManager:
             window.rb_b.setEnabled(True)
             window.rb_c.setEnabled(True)
             window.rb_gfg.setEnabled(True)
+            window.rb_ofa.setEnabled(True)
+            window.rb_ofb.setEnabled(True)
+            window.rb_ofc.setEnabled(True)
         except Exception:
             pass
         # StackMFF-V4 availability is owned by the torch probe: blanket-enabling
@@ -134,7 +140,8 @@ class RenderManager:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_render_need_images_text"))
             return
 
-        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf"]
+        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf",
+                   "openfocus_a", "openfocus_b", "openfocus_c"]
         if is_stackmffv4_available():
             methods.append("stackmffv4")
 
@@ -238,6 +245,8 @@ class RenderManager:
 
         need_align_homography = window.cb_align_homography.isChecked()
         need_align_ecc = window.cb_align_ecc.isChecked()
+        need_align_openfocus = getattr(
+            getattr(window, "cb_align_of", None), "isChecked", lambda: False)()
 
         need_fusion = (
             force_algorithm is not None
@@ -246,6 +255,12 @@ class RenderManager:
             or window.rb_c.isChecked()
             or window.rb_gfg.isChecked()
             or window.rb_d.isChecked()
+            or (getattr(window, "rb_ofa", None) is not None
+                and window.rb_ofa.isChecked())
+            or (getattr(window, "rb_ofb", None) is not None
+                and window.rb_ofb.isChecked())
+            or (getattr(window, "rb_ofc", None) is not None
+                and window.rb_ofc.isChecked())
         )
 
         kernel_slider_value = window.slider_smooth.value()
@@ -306,7 +321,7 @@ class RenderManager:
             # 告诉Worker图像已经对齐
             effective_aligned_images = window.roi_aligned_images
             effective_is_aligned = True
-            effective_last_alignment_options = (False, True)  # 表示ECC已完成
+            effective_last_alignment_options = (False, True, False)  # 表示ECC已完成
         elif self._preview_mode:
             # Quick preview: downscale the stack so the draft render finishes
             # in a fraction of the time; alignment always reruns on the small
@@ -316,10 +331,13 @@ class RenderManager:
             effective_need_align_ecc = need_align_ecc
             effective_aligned_images = source_images
             effective_is_aligned = False
-            effective_last_alignment_options = (False, False)
-        elif (need_align_homography or need_align_ecc) and not window.is_images_aligned \
+            effective_last_alignment_options = (False, False, False)
+        elif (need_align_homography or need_align_ecc) \
+                and not window.is_images_aligned \
                 and getattr(window, "align_cache_enabled", True):
-            # Try the on-disk registration cache before re-aligning
+            # Try the on-disk registration cache before re-aligning.
+            # (OpenFocus-only alignment is excluded: its result is a cheap
+            # translation — re-running costs less than a cache-key mismatch.)
             from utils import align_cache
             cached = align_cache.load_aligned(
                 getattr(window, "current_folder_path", ""),
@@ -336,7 +354,8 @@ class RenderManager:
                 effective_need_align_ecc = need_align_ecc
                 effective_aligned_images = cached
                 effective_is_aligned = True
-                effective_last_alignment_options = (need_align_homography, need_align_ecc)
+                effective_last_alignment_options = (
+                    need_align_homography, need_align_ecc, need_align_openfocus)
             else:
                 source_images = stack_images
                 effective_need_align_homography = need_align_homography
@@ -372,7 +391,8 @@ class RenderManager:
             # this, never against "source".
             "source_ref": window.raw_images,
             "alignment_options": (
-                effective_need_align_homography, effective_need_align_ecc),
+                effective_need_align_homography, effective_need_align_ecc,
+                need_align_openfocus),
             "preview": self._preview_mode,
             "roi": roi_rect is not None,
             "filenames": list(stack_filenames),
@@ -405,6 +425,16 @@ class RenderManager:
             roi_base_index=roi_base_index,
             use_gpu=getattr(window, "use_gpu", True),
             algorithm_override=force_algorithm,
+            need_align_openfocus=getattr(
+                getattr(window, "cb_align_of", None), "isChecked", lambda: False)(),
+            rb_ofa_checked=getattr(window, "rb_ofa", None) is not None
+                and window.rb_ofa.isChecked(),
+            rb_ofb_checked=getattr(window, "rb_ofb", None) is not None
+                and window.rb_ofb.isChecked(),
+            rb_ofc_checked=getattr(window, "rb_ofc", None) is not None
+                and window.rb_ofc.isChecked(),
+            base_frame="last" if getattr(window, "base_frame_correct", False)
+                else "none",
         )
 
         self._progress_first_t = None

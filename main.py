@@ -158,6 +158,8 @@ class OpenFocus(QMainWindow):
         self.stackmffv4_batch_size = STACKMFFV4_BATCH_SIZE
         # GPU 加速开关（Settings 菜单可切换，QSettings 持久化）
         self.use_gpu = True
+        # 基底校正（消除亮度漂移）：默认关闭，右面板开关控制
+        self.base_frame_correct = False
         # 恢复持久化设置与最近文件（语言需在菜单构建前应用）
         load_window_settings(self)
         load_drag_export_format(self)
@@ -639,10 +641,17 @@ class OpenFocus(QMainWindow):
         self.rb_c.setChecked(False)
         self.rb_gfg.setChecked(False)
         self.rb_d.setChecked(False)
-        
-        # 重置配准选项 - 默认选中 ECC，不选中 Homography
+        self.rb_ofa.setChecked(False)
+        self.rb_ofb.setChecked(False)
+        self.rb_ofc.setChecked(False)
+
+        # 重置配准选项 - 默认选中 ECC，不选中 Homography/OpenFocus
         self.cb_align_homography.setChecked(False)
         self.cb_align_ecc.setChecked(True)
+        self.cb_align_of.setChecked(False)
+
+        # 基底校正默认关闭
+        self.chk_base_correct.setChecked(False)
         
         # 重置滑块值到默认值
         self.slider_smooth.setValue(31)
@@ -852,6 +861,11 @@ class OpenFocus(QMainWindow):
     def set_auto_download(self, enabled: bool) -> None:
         """Settings menu: download updates in the background while idle."""
         self.update_manager.set_auto_download(enabled)
+        self.persist_settings()
+
+    def set_base_correct(self, enabled: bool) -> None:
+        """右面板开关：消除亮度漂移（基底校正到末帧）。"""
+        self.base_frame_correct = bool(enabled)
         self.persist_settings()
 
     def _show_update_result(self, state: str, tag: str, page_url: str,
@@ -1218,6 +1232,14 @@ class OpenFocus(QMainWindow):
                 # GFG-FGF 默认使用 kernel=7
                 self.slider_smooth.setValue(7)
             self.current_kernel_mode = "gfg"
+        elif (self.rb_ofa.isChecked() or self.rb_ofb.isChecked()
+              or self.rb_ofc.isChecked()):
+            # OpenFocus A/B/C：滑块作为方差窗口尺寸（对结果不敏感，
+            # 分析实测 r=1..4 输出差异 <0.1%），默认 7
+            self.smooth_widget.setEnabled(True)
+            if self.current_kernel_mode != "ofab":
+                self.slider_smooth.setValue(7)
+            self.current_kernel_mode = "ofab"
         else:
             self.smooth_widget.setEnabled(False)
             self.current_kernel_mode = None
@@ -2096,10 +2118,25 @@ class OpenFocus(QMainWindow):
         c.rb_c.setText(trans.t('radio_dtcwt'))
         c.rb_gfg.setText(trans.t('radio_gfg'))
         c.rb_d.setText(trans.t('radio_stackmff'))
-        
+        if getattr(c, 'rb_ofa', None) is not None:
+            c.rb_ofa.setText(trans.t('radio_openfocus_a'))
+            c.rb_ofa.setToolTip(trans.t('radio_openfocus_a_hint'))
+        if getattr(c, 'rb_ofb', None) is not None:
+            c.rb_ofb.setText(trans.t('radio_openfocus_b'))
+            c.rb_ofb.setToolTip(trans.t('radio_openfocus_b_hint'))
+        if getattr(c, 'rb_ofc', None) is not None:
+            c.rb_ofc.setText(trans.t('radio_openfocus_c'))
+            c.rb_ofc.setToolTip(trans.t('radio_openfocus_c_hint'))
+        if getattr(c, 'chk_base_correct', None) is not None:
+            c.chk_base_correct.setText(trans.t('chk_base_correct'))
+            c.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+
         c.registration_group.setTitle(trans.t('group_registration'))
         c.cb_align_ecc.setText(trans.t('check_align_ecc'))
         c.cb_align_homography.setText(trans.t('check_align_homography'))
+        if getattr(c, 'cb_align_of', None) is not None:
+            c.cb_align_of.setText(trans.t('check_align_of'))
+            c.cb_align_of.setToolTip(trans.t('check_align_of_hint'))
         
         c.lbl_kernel.setText(trans.t('label_kernel'))
         c.btn_reset.setText(trans.t('btn_reset'))

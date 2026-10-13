@@ -15,8 +15,9 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple
 
-VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4"]
-VALID_ALIGN = ["none", "homography", "ecc", "both"]
+VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+                 "openfocus_a", "openfocus_b", "openfocus_c"]
+VALID_ALIGN = ["none", "homography", "ecc", "both", "openfocus"]
 VALID_FORMATS = [".png", ".jpg", ".webp", ".bmp", ".tif", ".tiff"]
 
 EXIT_OK = 0
@@ -44,9 +45,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", "-d", default=None,
                         help="Batch mode: fuse every input folder, writing <folder>.<ext> here")
     parser.add_argument("--method", "-m", default="guided_filter", choices=VALID_METHODS,
-                        help="Fusion method (default: guided_filter)")
+                        help="Fusion method (default: guided_filter); openfocus_a/b/c are implemented "
+                             "from OpenFocus (A = variance-weighted average, B = variance depth-map pick, "
+                             "C = Laplacian pyramid)")
     parser.add_argument("--align", "-a", default="none", choices=VALID_ALIGN,
-                        help="Registration applied before fusion (default: none)")
+                        help="Registration applied before fusion (default: none); openfocus = fast bounded "
+                             "phase correlation with brightness equalization")
+    parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
+                        help="Base correction after fusion: match the output's low frequencies to the "
+                             "last/first frame (removes brightness/exposure drift, default: none)")
     parser.add_argument("--kernel", "-k", type=int, default=None,
                         help="Kernel size for guided_filter/dct/gfgfgf (forced odd)")
     parser.add_argument("--threads", "-t", type=int, default=4,
@@ -170,7 +177,8 @@ def _fuse_stack(images, args):
         images = reg.process(images, output_path=None, thread_count=args.threads)
         print(f"Registration ({args.align}) done in {time.time() - t0:.1f}s")
 
-    fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu)
+    fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu,
+                         base_frame=getattr(args, "base_frame", "none"))
     if args.tile_size:
         fusion_kwargs["tile_block_size"] = args.tile_size
     if args.method == "stackmffv4":
@@ -183,6 +191,8 @@ def _fuse_stack(images, args):
     if args.method == "guided_filter":
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 31)
     elif args.method in ("dct", "gfgfgf"):
+        fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 7)
+    elif args.method in ("openfocus_a", "openfocus_b", "openfocus_c"):
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 7)
     elif args.method == "stackmffv4":
         fuse_kwargs["model_path"] = _find_model_path()
