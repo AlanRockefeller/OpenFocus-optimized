@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openfocus"
-description = "Multi-focus image fusion from the command line: registration (ECC / homography) plus five fusion algorithms in one pip-installable tool"
+description = "Multi-focus image fusion from the command line: registration (ECC / homography / fast phase correlation) plus eight fusion algorithms — four classical, three implemented from OpenFocus (OpenFocus A/B/C) and a neural model — in one pip-installable tool"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Xinzhe Xie", email = "xiexinzheyyy@163.com" }]
 license = { text = "MIT" }
-keywords = ["image-fusion", "focus-stacking", "multifocus", "microscopy", "photography"]
+keywords = ["image-fusion", "focus-stacking", "multifocus", "microscopy", "photography", "OpenFocus", "depth-map"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
