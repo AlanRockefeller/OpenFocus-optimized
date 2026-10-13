@@ -1290,30 +1290,37 @@ class OpenFocus(QMainWindow):
         method = self.current_fusion_method()
         if method == "guided_filter":
             self.smooth_widget.setEnabled(True)
+            self.slider_smooth.setRange(1, 51)
             if self.current_kernel_mode != "guided":
                 self.slider_smooth.setValue(31)
             self.current_kernel_mode = "guided"
         elif method == "dct":
             self.smooth_widget.setEnabled(True)
+            self.slider_smooth.setRange(1, 51)
             if self.current_kernel_mode != "dct":
                 self.slider_smooth.setValue(7)
             self.current_kernel_mode = "dct"
         elif method == "gfgfgf":
             # GFG-FGF uses the initial mean/blur kernel controlled by the same slider
             self.smooth_widget.setEnabled(True)
+            self.slider_smooth.setRange(1, 51)
             if self.current_kernel_mode != "gfg":
                 # GFG-FGF 默认使用 kernel=7
                 self.slider_smooth.setValue(7)
             self.current_kernel_mode = "gfg"
         elif method in ("openfocus_a", "openfocus_b", "openfocus_c"):
-            # OpenFocus A/B/C：滑块作为方差窗口尺寸（对结果不敏感，
-            # 逆向实测 r=1..4 输出差异 <0.1%），默认 7
+            # OpenFocus A/B/C：滑块作为方差窗口半径（kernel = 2r+1）。
+            # 判别性探针（报告 §6.7/§6.8）：Helicon 事实窗口 ≈ 半宽 5px
+            # 且不随 Radius 变化；真实栈深度一致性 r5 最优（kitchen ±3
+            # 95.3% vs r2 92.7%）。默认 kernel=11（r=5），范围 1–21。
             self.smooth_widget.setEnabled(True)
+            self.slider_smooth.setRange(1, 21)
             if self.current_kernel_mode != "ofab":
-                self.slider_smooth.setValue(7)
+                self.slider_smooth.setValue(11)
             self.current_kernel_mode = "ofab"
         else:
             self.smooth_widget.setEnabled(False)
+            self.slider_smooth.setRange(1, 51)
             self.current_kernel_mode = None
         # 滑块含义标签随算法切换（每个算法的 kernel 含义不同）
         label_key = self._KERNEL_LABELS.get(self.current_kernel_mode,
