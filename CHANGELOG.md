@@ -3,7 +3,7 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v1.49] — 2026-10-14
 
 ### Fixed
 - **Similarity estimator parsimony rule**: on defocus frames, blur mimics
