@@ -77,61 +77,43 @@ class ExportManager:
     # ------------------------------------------------------------------
     # Filename helpers
     # ------------------------------------------------------------------
+    _FUSION_FILE_TAGS = {
+        "guided_filter": "GuidedFilter",
+        "dct": "DCT",
+        "dtcwt": "DTCWT",
+        "gfgfgf": "GFGFGF",
+        "stackmffv4": "StackMFFV4",
+        "openfocus_a": "OpenFocusA",
+        "openfocus_b": "OpenFocusB",
+        "openfocus_c": "OpenFocusC",
+    }
+    _ALIGN_FILE_TAGS = {
+        "homography": "Homography",
+        "ecc": "ECC",
+        "openfocus": "OpenFocusAlign",
+    }
+
+    def _fusion_tag(self) -> str:
+        return self._FUSION_FILE_TAGS.get(
+            self.window.current_fusion_method(), "None")
+
+    def _align_tag(self) -> str:
+        return self._ALIGN_FILE_TAGS.get(
+            self.window.current_alignment_method(), "NoAlign")
+
     def generate_default_filename(self) -> str:
-        window = self.window
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        if window.rb_a.isChecked():
-            fusion_method = "GuidedFilter"
-        elif window.rb_b.isChecked():
-            fusion_method = "DCT"
-        elif window.rb_c.isChecked():
-            fusion_method = "DTCWT"
-        elif window.rb_gfg.isChecked():
-            fusion_method = "GFGFGF"
-        elif window.rb_d.isChecked():
-            fusion_method = "StackMFFV4"
-        else:
-            fusion_method = "None"
-
-        reg_methods = []
-        if window.cb_align_homography.isChecked():
-            reg_methods.append("Homography")
-        if window.cb_align_ecc.isChecked():
-            reg_methods.append("ECC")
-        reg_method_str = "+".join(reg_methods) if reg_methods else "NoAlign"
-
-        return f"OpenFocus_{timestamp}_{fusion_method}_{reg_method_str}"
+        return (f"OpenFocus_{timestamp}_{self._fusion_tag()}_"
+                f"{self._align_tag()}")
 
     def generate_default_foldername(self) -> str:
         window = self.window
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        if window.rb_a.isChecked():
-            fusion_method = "GuidedFilter"
-        elif window.rb_b.isChecked():
-            fusion_method = "DCT"
-        elif window.rb_c.isChecked():
-            fusion_method = "DTCWT"
-        elif window.rb_gfg.isChecked():
-            fusion_method = "GFGFGF"
-        elif window.rb_d.isChecked():
-            fusion_method = "StackMFFV4"
-        else:
-            fusion_method = "None"
-
-        reg_methods = []
-        if window.cb_align_homography.isChecked():
-            reg_methods.append("Homography")
-        if window.cb_align_ecc.isChecked():
-            reg_methods.append("ECC")
-        reg_method_str = "+".join(reg_methods) if reg_methods else "NoAlign"
-
         folder_basename = "OpenFocus_Stack"
         if getattr(window, "current_folder_path", None):
             folder_basename = os.path.basename(window.current_folder_path)
 
-        return f"{folder_basename}_{timestamp}_{fusion_method}_{reg_method_str}"
+        return f"{folder_basename}_{timestamp}_{self._fusion_tag()}_{self._align_tag()}"
 
     # ------------------------------------------------------------------
     # Export helpers

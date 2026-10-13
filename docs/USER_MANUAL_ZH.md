@@ -691,7 +691,7 @@ python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
 
 #### 融合结果模糊或有重影
 
-- 启用图像配准（ECC 和单应性可以同时勾选）
+- 启用图像配准（下拉单选：单应性 / ECC / OpenFocus 快速，任选其一）
 - 确认融合前图像已正确对齐
 - 尝试其他融合算法
 - 增大核大小获得更平滑的结果

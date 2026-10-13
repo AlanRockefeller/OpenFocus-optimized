@@ -3,6 +3,39 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.41] — 2026-10-13
+
+### Changed — algorithm selection is now dropdown, single-choice
+UI feedback round on the v1.39 panel layout:
+- **Fusion method is a dropdown** (was 8 radio buttons): exactly one method
+  is always selected — same single-choice semantics as the CLI's `-m`
+- **Alignment is a dropdown too** (was three combinable checkboxes):
+  `No alignment / Homography / ECC / OpenFocus (fast)` — one registration
+  method per render. The old chain (OpenFocus → ECC/Homography refinement)
+  is gone; pick ECC or Homography when you need sub-pixel work
+- **"Remove brightness drift" moved out of the fusion group** — it is a
+  post-processing switch shared by every method, so it now lives next to
+  *Quick preview* (still off by default)
+- Render/batch/export/batch-dialog/project files all read the selection
+  through `window.current_fusion_method()` / `current_alignment_method()`;
+  `.ofproj` files saved by v1.39/v1.40 migrate (old checkbox pair → the
+  single closest alignment method)
+
+### Fixed
+- **Default export filenames said "None" for OpenFocus A/B/C** results
+  (the filename mapper predated the new methods); now tagged
+  OpenFocusA/OpenFocusB/OpenFocusC, and alignment shows the single choice
+- Registration help dialog still described the removed
+  "enable both to chain" behaviour and omitted the OpenFocus method
+
+### Added — depth maps cover the OpenFocus-derived methods
+- The depth-map feature now offers **openfocus_a/b/c** (dialog + core):
+  their measure is the window local variance the implementation work
+  validated to 99.5% depth-map agreement with OpenFocus, with the kernel
+  slider as the variance window — the map now mirrors what those fusion
+  methods actually decide per pixel. Fast (auto-computed on open like
+  the other second-scale measures)
+
 ## [v1.40] — 2026-10-13
 
 ### Fixed — OpenFocus-parity audit of the v1.39 ports (three real defects)

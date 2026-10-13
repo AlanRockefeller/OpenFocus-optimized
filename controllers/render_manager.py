@@ -76,13 +76,7 @@ class RenderManager:
         except Exception:
             pass
         try:
-            window.rb_a.setEnabled(True)
-            window.rb_b.setEnabled(True)
-            window.rb_c.setEnabled(True)
-            window.rb_gfg.setEnabled(True)
-            window.rb_ofa.setEnabled(True)
-            window.rb_ofb.setEnabled(True)
-            window.rb_ofc.setEnabled(True)
+            window.combo_fusion.setEnabled(True)
         except Exception:
             pass
         # StackMFF-V4 availability is owned by the torch probe: blanket-enabling
@@ -90,14 +84,8 @@ class RenderManager:
         hook = getattr(window, "refresh_method_availability", None)
         if callable(hook):
             hook()
-        else:
-            try:
-                window.rb_d.setEnabled(True)
-            except Exception:
-                pass
         try:
-            window.cb_align_homography.setEnabled(True)
-            window.cb_align_ecc.setEnabled(True)
+            window.combo_align.setEnabled(True)
         except Exception:
             pass
         try:
@@ -220,16 +208,11 @@ class RenderManager:
         except Exception:
             pass
         try:
-            window.rb_a.setEnabled(False)
-            window.rb_b.setEnabled(False)
-            window.rb_c.setEnabled(False)
-            window.rb_gfg.setEnabled(False)
-            window.rb_d.setEnabled(False)
+            window.combo_fusion.setEnabled(False)
         except Exception:
             pass
         try:
-            window.cb_align_homography.setEnabled(False)
-            window.cb_align_ecc.setEnabled(False)
+            window.combo_align.setEnabled(False)
         except Exception:
             pass
         try:
@@ -243,24 +226,17 @@ class RenderManager:
         except Exception:
             pass
 
-        need_align_homography = window.cb_align_homography.isChecked()
-        need_align_ecc = window.cb_align_ecc.isChecked()
-        need_align_openfocus = getattr(
-            getattr(window, "cb_align_of", None), "isChecked", lambda: False)()
+        fusion_method = window.current_fusion_method()
+        alignment_method = window.current_alignment_method()
+        need_align_homography = alignment_method == "homography"
+        need_align_ecc = alignment_method == "ecc"
+        need_align_openfocus = alignment_method == "openfocus"
 
         need_fusion = (
             force_algorithm is not None
-            or window.rb_a.isChecked()
-            or window.rb_b.isChecked()
-            or window.rb_c.isChecked()
-            or window.rb_gfg.isChecked()
-            or window.rb_d.isChecked()
-            or (getattr(window, "rb_ofa", None) is not None
-                and window.rb_ofa.isChecked())
-            or (getattr(window, "rb_ofb", None) is not None
-                and window.rb_ofb.isChecked())
-            or (getattr(window, "rb_ofc", None) is not None
-                and window.rb_ofc.isChecked())
+            or fusion_method in (
+                "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+                "openfocus_a", "openfocus_b", "openfocus_c")
         )
 
         kernel_slider_value = window.slider_smooth.value()
@@ -269,13 +245,14 @@ class RenderManager:
         if kernel_slider_value % 2 == 0:
             kernel_slider_value = max(1, kernel_slider_value - 1)
 
-        if force_algorithm is None and window.rb_d.isChecked() and not is_stackmffv4_available():
+        if force_algorithm is None and fusion_method == "stackmffv4" \
+                and not is_stackmffv4_available():
             show_warning_box(
                 window,
                 trans.t("msg_stackmff_unavailable_title"),
                 trans.t("msg_stackmff_unavailable_text"),
             )
-            window.rb_d.setChecked(False)
+            window.set_fusion_method("guided_filter")
             self._restore_ui_controls()
             return
 
@@ -407,11 +384,11 @@ class RenderManager:
             effective_need_align_homography,
             effective_need_align_ecc,
             need_fusion,
-            window.rb_a.isChecked(),
-            window.rb_b.isChecked(),
-            window.rb_c.isChecked(),
-            window.rb_gfg.isChecked(),
-            window.rb_d.isChecked(),
+            fusion_method == "guided_filter",
+            fusion_method == "dct",
+            fusion_method == "dtcwt",
+            fusion_method == "gfgfgf",
+            fusion_method == "stackmffv4",
             kernel_slider_value,
             tile_enabled=getattr(window, "tile_enabled", None),
             tile_block_size=getattr(window, "tile_block_size", None),
@@ -425,14 +402,10 @@ class RenderManager:
             roi_base_index=roi_base_index,
             use_gpu=getattr(window, "use_gpu", True),
             algorithm_override=force_algorithm,
-            need_align_openfocus=getattr(
-                getattr(window, "cb_align_of", None), "isChecked", lambda: False)(),
-            rb_ofa_checked=getattr(window, "rb_ofa", None) is not None
-                and window.rb_ofa.isChecked(),
-            rb_ofb_checked=getattr(window, "rb_ofb", None) is not None
-                and window.rb_ofb.isChecked(),
-            rb_ofc_checked=getattr(window, "rb_ofc", None) is not None
-                and window.rb_ofc.isChecked(),
+            need_align_openfocus=need_align_openfocus,
+            rb_ofa_checked=fusion_method == "openfocus_a",
+            rb_ofb_checked=fusion_method == "openfocus_b",
+            rb_ofc_checked=fusion_method == "openfocus_c",
             base_frame="last" if getattr(window, "base_frame_correct", False)
                 else "none",
         )
@@ -624,44 +597,28 @@ class RenderManager:
             if preview:
                 info_lines.append(trans.t("info_preview_quality"))
             if registration_performed:
-                align_methods = []
-                if window.cb_align_homography.isChecked():
-                    align_methods.append(trans.t("check_align_homography"))
-                if window.cb_align_ecc.isChecked():
-                    align_methods.append(trans.t("check_align_ecc"))
-                align_method_str = ", ".join(align_methods) if align_methods else trans.t("val_none")
+                alignment_method = window.current_alignment_method()
+                label_map = {
+                    "homography": trans.t("check_align_homography"),
+                    "ecc": trans.t("check_align_ecc"),
+                    "openfocus": trans.t("check_align_of"),
+                }
+                align_method_str = label_map.get(alignment_method,
+                                                 trans.t("val_none"))
                 info_lines.append(trans.t("info_align_method").format(align_method_str))
                 info_lines.append(trans.t("info_align_time").format(alignment_time))
             else:
                 info_lines.append(trans.t("info_align_none_cached"))
                 info_lines.append(trans.t("info_align_time").format(0.0))
 
-            if (
-                window.rb_a.isChecked()
-                or window.rb_b.isChecked()
-                or window.rb_c.isChecked()
-                or window.rb_gfg.isChecked()
-                or window.rb_d.isChecked()
-            ):
-                if window.rb_a.isChecked():
-                    method_name = trans.t("radio_guided_filter")
-                elif window.rb_b.isChecked():
-                    method_name = trans.t("radio_dct")
-                elif window.rb_c.isChecked():
-                    method_name = trans.t("radio_dtcwt")
-                elif window.rb_gfg.isChecked():
-                    method_name = trans.t("radio_gfg")
-                elif window.rb_d.isChecked():
-                    method_name = trans.t("radio_stackmff")
-                else:
-                    method_name = trans.t("radio_guided_filter")
-
-                info_lines.append(trans.t("info_fusion_method").format(method_name))
-                info_lines.append(trans.t("info_fusion_time").format(fusion_time))
-                info_lines.append(trans.t("info_proc_unit").format(device_name))
-            else:
-                info_lines.append(trans.t("info_fusion_none"))
-                info_lines.append(trans.t("info_fusion_time").format(0.0))
+            fusion_method = window.current_fusion_method()
+            # 对比渲染时显示的是队列里实际渲染的方法，而非当前下拉选择
+            compare_method = getattr(self, "_compare_current", None)
+            method_name = self.ALGORITHM_DISPLAY.get(
+                compare_method or fusion_method, trans.t("radio_guided_filter"))
+            info_lines.append(trans.t("info_fusion_method").format(method_name))
+            info_lines.append(trans.t("info_fusion_time").format(fusion_time))
+            info_lines.append(trans.t("info_proc_unit").format(device_name))
 
             info_lines.append(trans.t("info_total_time").format(total_time))
 

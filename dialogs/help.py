@@ -103,15 +103,26 @@ class RegistrationHelpDialog(HelpDialog):
 
     def __init__(self, parent=None):
         help_text = """<h3>Registration Methods</h3>
-        
+
+    <p>Alignment is a single choice (dropdown): pick exactly one method per
+    render, or "No alignment" to fuse the frames as loaded.</p>
+
+    <p>No alignment<br/>
+    Skips registration entirely — fastest, and correct when the stack is
+    already registered (fixed-rig captures).</p>
+
     <p>Align (Homography)<br/>
     Uses feature-based homography transformation to align images. Detects SIFT features between consecutive frames and computes perspective transformation matrices. Ideal for most focus stacks that need global geometric correction.</p>
 
     <p>Align (ECC)<br/>
     Enhanced Correlation Coefficient alignment refines alignment at the sub-pixel level. Works well for fine adjustments or whenever feature detection is unreliable.</p>
 
-    <p>Both options are independent—enable either one individually or turn on both to apply homography alignment first and then refine with ECC.</p>"""
-        
+    <p>Align (OpenFocus, fast)<br/>
+    Bounded phase-correlation translation with per-frame brightness
+    equalization (implemented from OpenFocus). Milliseconds per
+    frame; auto-crops to the valid overlap. Choose ECC or Homography instead
+    when you need sub-pixel or non-translation correction.</p>"""
+
         super().__init__(trans.t("help_registration_title"), help_text, parent)
 
 

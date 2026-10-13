@@ -12,6 +12,11 @@ activity measure, so the exported map matches the fusion the user sees:
                  activity level the fusion uses, on the gray channel)
 - stackmffv4:    the model's own focus-index output (tiled with the same
                  memory budget as AI fusion)
+- openfocus_a/b/c: argmax of the window local variance — the measure the
+                 OpenFocus implementation work validated to 99.5% depth-map
+                 agreement (blur(x²) − blur(x)² on the gray channel); the
+                 kernel slider is the variance window, exactly as in the
+                 OpenFocus A/B/C fusion
 
 The fusion pipeline itself is untouched; these are faithful mirrors of the
 measures, factored out so they are testable and reusable (dialog, CLI).
@@ -25,7 +30,8 @@ from typing import Callable, List, Optional, Sequence
 import cv2
 import numpy as np
 
-SUPPORTED_METHODS = ("guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4")
+SUPPORTED_METHODS = ("guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+                     "openfocus_a", "openfocus_b", "openfocus_c")
 
 
 class DepthMapCancelled(Exception):
@@ -284,6 +290,34 @@ def _measure_stackmffv4(images, progress, should_cancel,
 
 
 # --------------------------------------------------------------------------
+# openfocus_a/b/c — window local variance (the OpenFocus-validated measure)
+# --------------------------------------------------------------------------
+def _measure_openfocus(images, progress, should_cancel, kernel_size=7):
+    """argmax of blur(x²) − blur(x)² on the gray channel.
+
+    与 fusion_methods/openfocus_ab.py 的 B 方法度量一致（验证：与
+    OpenFocus 深度图 99.5% 逐像素重合）。kernel 滑块即方差窗口；流式
+    argmax（见 _measure_gff）：严格 > 保持 np.argmax 的首胜语义。
+    """
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    k = max(1, int(kernel_size))
+    best_val = best_idx = None
+    for idx, bgr in enumerate(images):
+        _tick(progress, idx, len(images), should_cancel)
+        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
+        mean = cv2.blur(gray, (k, k))
+        var = cv2.blur(gray * gray, (k, k)) - mean * mean
+        if best_val is None:
+            best_val, best_idx = var, np.zeros(var.shape, np.int32)
+        else:
+            hit = var > best_val
+            best_val[hit] = var[hit]
+            best_idx[hit] = idx
+    return best_idx
+
+
+# --------------------------------------------------------------------------
 # public entry
 # --------------------------------------------------------------------------
 def compute_focus_index(images: Sequence[np.ndarray],
@@ -319,6 +353,10 @@ def compute_focus_index(images: Sequence[np.ndarray],
     elif method == "stackmffv4":
         idx = _measure_stackmffv4(images, progress_callback, should_cancel,
                                   model_path=model_path, use_gpu=use_gpu)
+    elif method in ("openfocus_a", "openfocus_b", "openfocus_c"):
+        # 三者共用窗口方差度量（各自融合管线的清晰度度量相同）
+        idx = _measure_openfocus(images, progress_callback, should_cancel,
+                                 kernel_size=kernel_size)
     else:
         raise ValueError(f"Unsupported method for depth maps: {method}")
     return _norm_index(idx, n)

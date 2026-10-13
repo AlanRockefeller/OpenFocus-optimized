@@ -19,16 +19,8 @@ def _collect_state(window) -> Dict[str, Any]:
     """Snapshot everything restorable from the main window."""
     from constants import APP_VERSION
     settings = {
-        "fusion_method": (
-            "guided_filter" if window.rb_a.isChecked()
-            else "dct" if window.rb_b.isChecked()
-            else "dtcwt" if window.rb_c.isChecked()
-            else "gfgfgf" if window.rb_gfg.isChecked()
-            else "stackmffv4" if window.rb_d.isChecked()
-            else "guided_filter"
-        ),
-        "align_homography": window.cb_align_homography.isChecked(),
-        "align_ecc": window.cb_align_ecc.isChecked(),
+        "fusion_method": window.current_fusion_method(),
+        "alignment_method": window.current_alignment_method(),
         "kernel_size": window.slider_smooth.value(),
         "thread_count": getattr(window, "thread_count", 4),
         "tile_enabled": getattr(window, "tile_enabled", True),
@@ -225,13 +217,18 @@ def _apply_after_load(window, state: Dict[str, Any]) -> None:
     settings = state.get("settings", {})
 
     method = settings.get("fusion_method")
-    for code, rb in (("guided_filter", window.rb_a), ("dct", window.rb_b),
-                     ("dtcwt", window.rb_c), ("gfgfgf", window.rb_gfg),
-                     ("stackmffv4", window.rb_d)):
-        rb.setChecked(code == method)
+    if method:
+        window.set_fusion_method(method)
 
-    window.cb_align_homography.setChecked(bool(settings.get("align_homography", False)))
-    window.cb_align_ecc.setChecked(bool(settings.get("align_ecc", False)))
+    # 对齐方法：新格式是 alignment_method 单选代码；旧格式（v1.39 及以前）
+    # 是 align_homography/align_ecc 两个布尔，按 ECC > Homography 优先迁移
+    alignment = settings.get("alignment_method")
+    if alignment not in ("none", "homography", "ecc", "openfocus"):
+        alignment = (
+            "ecc" if settings.get("align_ecc")
+            else "homography" if settings.get("align_homography")
+            else "none")
+    window.set_alignment_method(alignment)
 
     kernel = int(settings.get("kernel_size", 31) or 31)
     if kernel % 2 == 0:

@@ -86,10 +86,6 @@ class TestRecovery:
         """Minimal object satisfying utils.project_file._collect_state."""
         from utils.validators import LabelAdder
 
-        class _RB:
-            def __init__(self, checked): self._c = checked
-            def isChecked(self): return self._c
-
         class _Mgr:
             export_state = lambda self: {}
             import_state = lambda self, s: None
@@ -99,11 +95,14 @@ class TestRecovery:
 
         w = _W()
         w.raw_images = [np.zeros((10, 10, 3), np.uint8) for _ in range(n)]
-        w.rb_a, w.rb_b, w.rb_c, w.rb_gfg, w.rb_d = (
-            _RB(True), _RB(False), _RB(False), _RB(False), _RB(False))
-        w.cb_align_homography, w.cb_align_ecc = _RB(False), _RB(True)
+        # 下拉单选契约（与真实窗口一致）
+        w._fusion, w._alignment = "guided_filter", "ecc"
+        w.current_fusion_method = lambda: w._fusion
+        w.current_alignment_method = lambda: w._alignment
+        w.set_fusion_method = lambda code: setattr(w, "_fusion", code)
+        w.set_alignment_method = lambda code: setattr(w, "_alignment", code)
         w.slider_smooth = type("S", (), {"value": lambda s: 21})()
-        w.chk_quick_preview = _RB(False)
+        w.chk_quick_preview = type("Q", (), {"isChecked": lambda s: False})()
         w.current_display_index = 0
         w.image_filenames = [f"f{i}.png" for i in range(n)]
         w.current_folder_path = stack_dir

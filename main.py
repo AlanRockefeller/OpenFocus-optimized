@@ -323,13 +323,11 @@ class OpenFocus(QMainWindow):
         self.chk_quick_preview = right_panel_components.chk_quick_preview
         self.btn_method_help = right_panel_components.btn_method_help
         self.btn_reg_help = right_panel_components.btn_reg_help
-        self.rb_a = right_panel_components.rb_a
-        self.rb_b = right_panel_components.rb_b
-        self.rb_c = right_panel_components.rb_c
-        self.rb_gfg = right_panel_components.rb_gfg
-        self.rb_d = right_panel_components.rb_d
-        self.cb_align_homography = right_panel_components.cb_align_homography
-        self.cb_align_ecc = right_panel_components.cb_align_ecc
+        # 融合/对齐算法均为下拉单选；window.current_fusion_method() /
+        # current_alignment_method() 是统一的读取入口
+        self.combo_fusion = right_panel_components.combo_fusion
+        self.combo_align = right_panel_components.combo_align
+        self.chk_base_correct = right_panel_components.chk_base_correct
         self.slider_smooth = right_panel_components.slider_smooth
         self.lbl_smooth_value = right_panel_components.smooth_value_label
         self.smooth_widget = right_panel_components.smooth_widget
@@ -635,20 +633,11 @@ class OpenFocus(QMainWindow):
 
     def reset_to_default(self):
         """重置到默认状态"""
-        # 重置渲染方法 - 默认选中方法A
-        self.rb_a.setChecked(True)
-        self.rb_b.setChecked(False)
-        self.rb_c.setChecked(False)
-        self.rb_gfg.setChecked(False)
-        self.rb_d.setChecked(False)
-        self.rb_ofa.setChecked(False)
-        self.rb_ofb.setChecked(False)
-        self.rb_ofc.setChecked(False)
+        # 重置渲染方法 - 默认 Guided Filter
+        self.set_fusion_method("guided_filter")
 
-        # 重置配准选项 - 默认选中 ECC，不选中 Homography/OpenFocus
-        self.cb_align_homography.setChecked(False)
-        self.cb_align_ecc.setChecked(True)
-        self.cb_align_of.setChecked(False)
+        # 重置配准选项 - 默认 ECC
+        self.set_alignment_method("ecc")
 
         # 基底校正默认关闭
         self.chk_base_correct.setChecked(False)
@@ -693,17 +682,26 @@ class OpenFocus(QMainWindow):
         """Re-apply the cached torch-probe result to the method controls.
 
         Other code paths (render restore, batch restore) blanket-enable the
-        fusion radios, which silently re-armed StackMFF-V4 on machines without
+        fusion combo, which silently re-armed StackMFF-V4 on machines without
         torch until the next restart."""
         available = getattr(self, '_stackmff_available', None)
         if available is None:
             return
-        if available:
-            self.rb_d.setEnabled(True)
-            self.rb_d.setToolTip("")
-        else:
-            self.rb_d.setEnabled(False)
-            self.rb_d.setToolTip(trans.t("msg_stackmff_unavailable_text"))
+        combo = self.combo_fusion
+        i = combo.findData("stackmffv4")
+        if i < 0:
+            return
+        # 下拉项级禁用：模型项 setEnabled(False) 让它在弹出列表里置灰
+        item = combo.model().item(i)
+        if item is None:
+            return
+        item.setEnabled(bool(available))
+        combo.setItemData(
+            i,
+            trans.t("msg_stackmff_unavailable_text") if not available else "",
+            Qt.ItemDataRole.ToolTipRole)
+        if not available and combo.currentData() == "stackmffv4":
+            self.set_fusion_method("guided_filter")
 
     # --- Update check ---
 
@@ -1184,17 +1182,33 @@ class OpenFocus(QMainWindow):
                 )
     
     
-    def handle_method_selection(self, selected_button):
-        """处理融合方法选择，实现互斥但可取消"""
-        # 如果点击的是已选中的按钮，则取消选中
-        if selected_button.isChecked():
-            # 取消其他按钮的选中状态
-            for btn in [self.rb_a, self.rb_b, self.rb_c, self.rb_gfg, self.rb_d]:
-                if btn != selected_button:
-                    btn.setChecked(False)
-        # 如果点击时未选中，则什么也不做（已经自动取消选中）
-    
-    # handle_align_exclusive 已移除，因为不再需要互斥逻辑
+    def current_fusion_method(self) -> str:
+        """当前选中的融合算法代码（下拉单选的唯一读取入口）。"""
+        from ui.right_panel import FUSION_ITEMS
+        code = self.combo_fusion.currentData()
+        codes = {c for c, _k, _h in FUSION_ITEMS}
+        return code if code in codes else "guided_filter"
+
+    def current_alignment_method(self) -> str:
+        """当前选中的对齐算法代码：none | homography | ecc | openfocus。"""
+        code = self.combo_align.currentData()
+        return code if code in ("none", "homography", "ecc", "openfocus") else "ecc"
+
+    def set_fusion_method(self, code: str) -> None:
+        i = self.combo_fusion.findData(code)
+        if i >= 0:
+            self.combo_fusion.setCurrentIndex(i)
+
+    def set_alignment_method(self, code: str) -> None:
+        i = self.combo_align.findData(code)
+        if i >= 0:
+            self.combo_align.setCurrentIndex(i)
+
+    def handle_method_selection(self, *_args):
+        """融合算法下拉切换（单选语义由下拉框保证，这里做联动刷新）。"""
+        # update_slider_availability 已通过信号连接；保留此槽位给
+        # 未来按方法变化的 UI 联动
+        pass
 
     def handle_kernel_slider_change(self, value):
         """确保核大小始终为奇数，并更新显示标签"""
@@ -1215,25 +1229,25 @@ class OpenFocus(QMainWindow):
         # Guided Filter/DCT: 共享 kernel 滑块
         # DTCWT / StackMFF-V4: 不使用滑块
 
-        if self.rb_a.isChecked():
+        method = self.current_fusion_method()
+        if method == "guided_filter":
             self.smooth_widget.setEnabled(True)
             if self.current_kernel_mode != "guided":
                 self.slider_smooth.setValue(31)
             self.current_kernel_mode = "guided"
-        elif self.rb_b.isChecked():
+        elif method == "dct":
             self.smooth_widget.setEnabled(True)
             if self.current_kernel_mode != "dct":
                 self.slider_smooth.setValue(7)
             self.current_kernel_mode = "dct"
-        elif self.rb_gfg.isChecked():
+        elif method == "gfgfgf":
             # GFG-FGF uses the initial mean/blur kernel controlled by the same slider
             self.smooth_widget.setEnabled(True)
             if self.current_kernel_mode != "gfg":
                 # GFG-FGF 默认使用 kernel=7
                 self.slider_smooth.setValue(7)
             self.current_kernel_mode = "gfg"
-        elif (self.rb_ofa.isChecked() or self.rb_ofb.isChecked()
-              or self.rb_ofc.isChecked()):
+        elif method in ("openfocus_a", "openfocus_b", "openfocus_c"):
             # OpenFocus A/B/C：滑块作为方差窗口尺寸（对结果不敏感，
             # 分析实测 r=1..4 输出差异 <0.1%），默认 7
             self.smooth_widget.setEnabled(True)
@@ -2113,30 +2127,25 @@ class OpenFocus(QMainWindow):
         # Update Right Panel
         c = self.right_panel_components
         c.method_group.setTitle(trans.t('group_fusion'))
-        c.rb_a.setText(trans.t('radio_guided_filter'))
-        c.rb_b.setText(trans.t('radio_dct'))
-        c.rb_c.setText(trans.t('radio_dtcwt'))
-        c.rb_gfg.setText(trans.t('radio_gfg'))
-        c.rb_d.setText(trans.t('radio_stackmff'))
-        if getattr(c, 'rb_ofa', None) is not None:
-            c.rb_ofa.setText(trans.t('radio_openfocus_a'))
-            c.rb_ofa.setToolTip(trans.t('radio_openfocus_a_hint'))
-        if getattr(c, 'rb_ofb', None) is not None:
-            c.rb_ofb.setText(trans.t('radio_openfocus_b'))
-            c.rb_ofb.setToolTip(trans.t('radio_openfocus_b_hint'))
-        if getattr(c, 'rb_ofc', None) is not None:
-            c.rb_ofc.setText(trans.t('radio_openfocus_c'))
-            c.rb_ofc.setToolTip(trans.t('radio_openfocus_c_hint'))
+        # 下拉框重翻译：按 (代码, i18n 键, 提示键) 重建条目文本
+        from ui.right_panel import FUSION_ITEMS, ALIGN_ITEMS
+        for i, (_code, key, hint_key) in enumerate(FUSION_ITEMS):
+            if i < c.combo_fusion.count():
+                c.combo_fusion.setItemText(i, trans.t(key))
+                if hint_key:
+                    c.combo_fusion.setItemData(
+                        i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
         if getattr(c, 'chk_base_correct', None) is not None:
             c.chk_base_correct.setText(trans.t('chk_base_correct'))
             c.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
 
         c.registration_group.setTitle(trans.t('group_registration'))
-        c.cb_align_ecc.setText(trans.t('check_align_ecc'))
-        c.cb_align_homography.setText(trans.t('check_align_homography'))
-        if getattr(c, 'cb_align_of', None) is not None:
-            c.cb_align_of.setText(trans.t('check_align_of'))
-            c.cb_align_of.setToolTip(trans.t('check_align_of_hint'))
+        for i, (_code, key, hint_key) in enumerate(ALIGN_ITEMS):
+            if i < c.combo_align.count():
+                c.combo_align.setItemText(i, trans.t(key))
+                if hint_key:
+                    c.combo_align.setItemData(
+                        i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
         
         c.lbl_kernel.setText(trans.t('label_kernel'))
         c.btn_reset.setText(trans.t('btn_reset'))
