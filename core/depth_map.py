@@ -1,26 +1,25 @@
 """Focus-position (pseudo-depth) index maps.
 
 Computes, per pixel, which frame of the stack is in focus — the "depth"
-signal every fusion algorithm derives internally — using each method's own
-activity measure, so the exported map matches the fusion the user sees:
+signal the fusion itself decides on — using each method's own activity
+measure, so the exported map matches the fusion the user sees. Only
+methods whose pipeline actually decides a per-pixel focus index are
+offered: weighted-average fusions (guided_filter, openfocus_a) have no
+per-pixel decision and are deliberately absent.
 
-- guided_filter: argmax of Gaussian(|Laplacian(channel sum)|) (gff saliency)
 - dct:           block-variance winner + double median filter (dct's own
                  consistency pass), upsampled from the block grid
-- gfgfgf:        argmax of the guided-filtered blur-difference AFM
 - dtcwt:         argmax of the per-pixel DTCWT high-pass energy (the wavelet
                  activity level the fusion uses, on the gray channel)
+- gfgfgf:        argmax of the guided-filtered blur-difference AFM
 - stackmffv4:    the model's own focus-index output (tiled with the same
                  memory budget as AI fusion)
-- openfocus_a:    weighted-centroid depth — the variance weights of A's
-                  average (with the +1 last-frame prior) as a continuous
-                  focus-position surface
-- openfocus_b:    argmax of the window local variance — the measure the
-                  Helicon reverse-engineering validated to 99.5% depth-map
-                  agreement (blur(x²) − blur(x)²); the kernel slider is
-                  the variance window, exactly as in B's fusion
-- openfocus_c:    argmax of the finest Laplacian-band energy (gray −
-                  blur(σ1), the pyramid's own decision signal)
+- openfocus_b:   argmax of the window local variance — the measure the
+                 Helicon reverse-engineering validated to 99.5% depth-map
+                 agreement (blur(x²) − blur(x)²); the kernel slider is
+                 the variance window, exactly as in B's fusion
+- openfocus_c:   argmax of the finest Laplacian-band energy (gray −
+                 blur(σ1), the pyramid's own decision signal)
 
 The fusion pipeline itself is untouched; these are faithful mirrors of the
 measures, factored out so they are testable and reusable (dialog, CLI).
@@ -34,8 +33,9 @@ from typing import Callable, List, Optional, Sequence
 import cv2
 import numpy as np
 
-SUPPORTED_METHODS = ("guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
-                     "openfocus_a", "openfocus_b", "openfocus_c")
+# 与融合下拉同序（仅保留"按索引决策"的方法；加权平均类无逐像素决策）
+SUPPORTED_METHODS = ("dct", "dtcwt", "gfgfgf", "stackmffv4",
+                     "openfocus_b", "openfocus_c")
 
 
 class DepthMapCancelled(Exception):
@@ -65,30 +65,6 @@ def _tick(progress: Optional[Callable], i: int, n: int,
             progress(i, n)
         except Exception:
             pass
-
-
-# --------------------------------------------------------------------------
-# guided_filter — gff's saliency measure
-# --------------------------------------------------------------------------
-def _measure_gff(images: Sequence[np.ndarray], progress, should_cancel):
-    sigma = 5.0  # gff.DEFAULT_SIGMA_R
-    # 流式 argmax：不物化 n×H×W 的显著性栈（40×6K×4K = 3.8GB），只保留
-    # 逐像素当前最优值/索引；严格 > 保持与 np.argmax 相同的首胜语义
-    best_val = best_idx = None
-    for idx, bgr in enumerate(images):
-        _tick(progress, idx, len(images), should_cancel)
-        img_sum = np.sum(bgr.astype(np.float32), axis=2)
-        lap = np.abs(cv2.Laplacian(img_sum, cv2.CV_32F, ksize=1,
-                                   borderType=cv2.BORDER_REFLECT))
-        sal = cv2.GaussianBlur(lap, (0, 0), sigmaX=sigma, sigmaY=sigma,
-                               borderType=cv2.BORDER_REFLECT)
-        if best_val is None:
-            best_val, best_idx = sal, np.zeros(sal.shape, np.int32)
-        else:
-            hit = sal > best_val
-            best_val[hit] = sal[hit]
-            best_idx[hit] = idx
-    return best_idx
 
 
 # --------------------------------------------------------------------------
@@ -143,7 +119,7 @@ def _measure_gfgfgf(images, progress, should_cancel, kernel_size=7,
         kernel_size += 1
     g_msz, g_gsz, g_eps, threshold = kernel_size, 5, 0.3, 0.005
     n = len(images)
-    # 流式 argmax（见 _measure_gff）：AFM 栈不物化
+    # 流式 argmax：AFM 栈不物化
     best_val = best_idx = None
     for idx, bgr in enumerate(images):
         _tick(progress, idx, n, should_cancel)
@@ -179,7 +155,7 @@ def _measure_dtcwt(images, progress, should_cancel, nlevels=4):
     transform = dtcwt_lib.Transform2d()
     n = len(images)
     h, w = images[0].shape[:2]
-    # 流式 argmax（见 _measure_gff）：能量栈不物化
+    # 流式 argmax：能量栈不物化
     best_val = best_idx = None
     for idx, bgr in enumerate(images):
         _tick(progress, idx, n, should_cancel)
@@ -321,38 +297,6 @@ def _measure_openfocus(images, progress, should_cancel, kernel_size=7):
     return best_idx
 
 
-def _measure_openfocus_a(images, progress, should_cancel, kernel_size=7):
-    """A：方差权重加权的连续帧位质心（A 是加权平均，没有硬拾取）。
-
-    D = Σ wᵢ·i / Σ wᵢ，wᵢ = gauss(var)；分母带 +1 的末帧先验（与融合
-    一致：平坦区权重全零时精确退化为末帧）。输出连续深度面——直观
-    展示 A 从哪些帧"拉"聚焦信息。
-    """
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    k = max(1, int(kernel_size))
-    n = len(images)
-    wsum = None
-    widx = None
-    for idx, bgr in enumerate(images):
-        _tick(progress, idx, n, should_cancel)
-        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
-        mean = cv2.blur(gray, (k, k))
-        var = np.maximum(
-            cv2.blur(gray * gray, (k, k)) - mean * mean, 0.0)
-        w = cv2.GaussianBlur(var, (0, 0), 2.0)
-        if wsum is None:
-            wsum = w.copy()
-            widx = w * idx
-        else:
-            wsum += w
-            widx += w * idx
-    # +1 末帧先验（与融合的 (ΣwI + I_last)/(Σw + 1) 同构）
-    wsum += 1.0
-    widx += float(n - 1)
-    return widx / wsum
-
-
 def _measure_openfocus_c(images, progress, should_cancel, kernel_size=7):
     """C：最细带通层能量 argmax（金字塔法按频带决策的深度侧写）。
 
@@ -401,9 +345,7 @@ def compute_focus_index(images: Sequence[np.ndarray],
         # 与融合管线同口径：0-65535 -> 0-255 float（详见 normalize_fuse_input）
         images = [f.astype(np.float32) * (255.0 / 65535.0) for f in images]
     n = len(images)
-    if method == "guided_filter":
-        idx = _measure_gff(images, progress_callback, should_cancel)
-    elif method == "dct":
+    if method == "dct":
         idx = _measure_dct(images, progress_callback, should_cancel,
                            kernel_size=kernel_size, block_size=block_size)
     elif method == "gfgfgf":
@@ -414,10 +356,6 @@ def compute_focus_index(images: Sequence[np.ndarray],
     elif method == "stackmffv4":
         idx = _measure_stackmffv4(images, progress_callback, should_cancel,
                                   model_path=model_path, use_gpu=use_gpu)
-    elif method == "openfocus_a":
-        # A 是加权平均：连续质心深度（含末帧先验）
-        idx = _measure_openfocus_a(images, progress_callback, should_cancel,
-                                   kernel_size=kernel_size)
     elif method == "openfocus_b":
         idx = _measure_openfocus(images, progress_callback, should_cancel,
                                  kernel_size=kernel_size)

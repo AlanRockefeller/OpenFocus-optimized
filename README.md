@@ -13,6 +13,8 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> 🎉 **2026.10.14**: **v1.44** — **consistency sweep**: depth maps now list only index-deciding methods (weighted-average fusions removed — they have no per-pixel decision), the kernel slider states its meaning per algorithm (Guided-filter radius / DCT median / GFG kernel / variance window), Compare-All and all method-name displays follow the fusion-dropdown order in your language, and a real startup bug from the kernel-label work is fixed.
+
 > 🎉 **2026.10.13**: **v1.43** — **alignment overhaul + fixes round**: root-caused the failing OpenFocus alignment (an OpenCV `phaseCorrelate` input-mutation bug corrupting the reference frame + a translation-only model where Helicon uses a bounded similarity transform) and rewrote it as bounded rotation/scale/translation search — verified on known perturbations; restored the **alignment-only** output mode; depth maps for *OpenFocus A/B/C* are now three genuinely different maps; *Quick preview* and *Remove brightness drift* share a row.
 
 > 🎉 **2026.10.13**: **v1.42** — **Dust map (flat-field) correction**: one defocused white-field shot removes static dust specks and vignetting from the whole stack before registration (Tools → Dust Map, CLI `--dust-map`); plus explicit **stack-order control** for the OpenFocus A/B/C family (`--sort asc|desc|off`) and a resolved reverse-engineering question: Helicon never reorders stacks — its depth-map export polarity was the red herring (evidence in `tools/helicon_repro/validate_autosort.py`).

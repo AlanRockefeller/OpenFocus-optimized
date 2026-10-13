@@ -3,6 +3,33 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.44] — 2026-10-14
+
+### Changed — consistency sweep: depth maps, ordering, parameter semantics
+- **Depth maps now list only index-deciding methods** (DCT, DTCWT,
+  GFG-FGF, StackMFF-V4, OpenFocus B/C). Weighted-average fusions
+  (Guided Filter, OpenFocus A) have no per-pixel decision, so offering a
+  depth map for them was misleading — removed from the dialog and the
+  CLI (`--depth-map` with those methods now explains why it is
+  unavailable). The dialog order matches the fusion dropdown, and the
+  dialog opens on the current fusion method when it has a depth map
+- **The kernel slider states what it means per algorithm**: the label now
+  reads Guided-filter radius / DCT median kernel / GFG initial kernel /
+  Variance window (px) and switches with the method — same slider, but
+  no more guessing what the number does. The depth-map dialog shows the
+  same per-method kernel line
+- **Compare-All follows the fusion-dropdown order** (StackMFF-V4 before
+  the OpenFocus family, was appended last), and the compare progress /
+  output-list tags / info lines use the localized method names instead
+  of hardcoded English
+
+### Fixed
+- **Real-window construction depended on an unwired attribute**: the new
+  per-algorithm kernel label referenced `window.lbl_kernel`, which main
+  never assigned — the app failed to start (tests passed because their
+  stub windows define the attribute). The label is now wired like every
+  other control
+
 ## [v1.43] — 2026-10-13
 
 ### Fixed — the OpenFocus alignment actually failed on real stacks (root cause)
