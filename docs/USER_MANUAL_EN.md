@@ -352,7 +352,7 @@ Access additional settings via **Settings 鈫?Registration**:
 
 ## 8. Image Fusion Methods
 
-OpenFocus offers five fusion algorithms. Each has different characteristics suitable for various image types.
+OpenFocus offers eight fusion algorithms (plus an alignment-only mode). Each has different characteristics suitable for various image types.
 
 ### Guided Filter (Default)
 
@@ -392,11 +392,33 @@ OpenFocus offers five fusion algorithms. Each has different characteristics suit
 - **Requirements**: PyTorch installation, optional CUDA GPU
 - **Note**: May be unavailable if PyTorch is not installed
 
+### OpenFocus A / B / C (implemented from OpenFocus)
+
+- **Algorithm**: The OpenFocus method family, reproduced and verified
+  against the original software's output (0.5–4% MAE across benchmark
+  stacks)
+- **OpenFocus A**: variance-weighted average with a last-frame prior —
+  fast, colour-stable on short stacks
+- **OpenFocus B**: variance depth-map pick — selects the sharpest frame
+  per pixel; best on smooth surfaces and microscopy
+- **OpenFocus C**: Laplacian-pyramid per-band blend — natural look on
+  textured subjects, boosts local contrast
+- **Parameters**: Variance window (kernel slider); results are
+  radius-insensitive per the implementation work measurements
+
+### Alignment only (no fusion)
+
+Select **Alignment only (no fusion)** as the method to register the stack
+and send the aligned frames to the output list without fusing — handy to
+inspect registration quality or export aligned frames.
+
 ### Selecting a Fusion Method
 
 1. In the right panel, locate the **Fusion** group
-2. Select one or more methods by checking the corresponding boxes
-3. Adjust kernel size if applicable
+2. Pick a method from the **dropdown** (exactly one is always selected;
+   the first entry registers without fusing)
+3. Adjust kernel size if applicable — the label shows what the kernel
+   means for the selected method
 4. Click **Start Render** to process
 
 ### Algorithm Comparison Guide
@@ -408,6 +430,9 @@ OpenFocus offers five fusion algorithms. Each has different characteristics suit
 | DTCWT | Medium | Very Good | Complex scenes |
 | GFG-FGF | Fast | Good | Focus regions |
 | AI Fusion (StackMFF-V4) | Slow (GPU) | Excellent | Best quality |
+| OpenFocus A | Very Fast | Very Good | Short stacks, colour stability |
+| OpenFocus B | Very Fast | Very Good | Smooth surfaces, microscopy |
+| OpenFocus C | Fast | Very Good | Textured subjects, natural look |
 
 ### Quick Preview (Draft Render)
 
