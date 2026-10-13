@@ -691,6 +691,10 @@ class BatchWorker(QThread):
 
         output_format = self.processing_settings.get('format', 'jpg')
         fusion_method = self.processing_settings.get('fusion_method')
+        if fusion_method == "none":
+            # 仅对齐批处理：跳过融合，输出=对齐后的帧（save_aligned 由
+            # 批处理对话框强制开启）
+            fusion_method = None
         if fusion_method:
             fusion_params = self.processing_settings.get('fusion_params', {}).copy()
             if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
@@ -858,6 +862,9 @@ class BatchWorker(QThread):
         
         # 3. 图像融合
         fusion_method = self.processing_settings.get('fusion_method')
+        if fusion_method == "none":
+            # 仅对齐批处理：跳过融合（输出=对齐后的帧）
+            fusion_method = None
         if fusion_method:
             fusion_params = self.processing_settings.get('fusion_params', {})
             if fusion_method == "stackmffv4" and "model_path" not in fusion_params:

@@ -3,6 +3,15 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.45] — 2026-10-14
+
+### Fixed
+- **Batch jobs with "Alignment only (no fusion)" crashed**: the fusion
+  string `'none'` was handed straight to the fusion constructor. Batch now
+  skips the fusion step and always saves the aligned frames for that mode
+  (otherwise the job would produce no output at all), and the batch
+  options panel shows the localized method name
+
 ## [v1.44] — 2026-10-14
 
 ### Changed — consistency sweep: depth maps, ordering, parameter semantics
