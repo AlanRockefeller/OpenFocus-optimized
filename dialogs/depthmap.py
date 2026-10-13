@@ -463,6 +463,14 @@ class DepthMapDialog(QDialog):
     def _on_method_changed(self):
         """预览图还是旧方法的——明确告诉用户，避免拿错图。"""
         self._update_kernel_info()
+        method = self.method_combo.currentData()
+        if (hasattr(self, "status_lbl") and hasattr(self, "_index01")
+                and method in _FAST_AUTO_METHODS and self._images()
+                and not (self._worker and self._worker.isRunning())):
+            # 秒级方法切换即自动重算（与打开对话框时自动计算一致）；
+            # 慢速方法（DTCWT/AI）仍由用户决定
+            self._compute()
+            return
         if (self._index01 is not None and self._map_method is not None
                 and self.method_combo.currentData() != self._map_method
                 and not (self._worker and self._worker.isRunning())):

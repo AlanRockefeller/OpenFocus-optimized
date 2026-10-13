@@ -242,3 +242,54 @@ class TestReviewFixes:
             app.processEvents()
             time.sleep(0.02)
         assert worker not in dm._ORPHAN_WORKERS
+
+    def test_switching_to_fast_method_auto_computes(self, monkeypatch, qapp):
+        """切换到秒级方法时自动重算（与打开即算一致）——v1.44 前切换后
+        只给一条"按计算刷新"提示，秒级方法也要手动点。"""
+        import threading
+        import os as _os
+        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QWidget
+        app = qapp  # noqa: F841
+        import dialogs.depthmap as dm
+        from core import depth_map
+
+        calls = []
+        started = threading.Event()
+
+        def counting_compute(images, method, **kw):
+            calls.append(method)
+            started.set()
+            return np.zeros(images[0].shape[:2], np.float32)
+
+        monkeypatch.setattr(depth_map, "compute_focus_index", counting_compute)
+
+        class _Stub(QWidget):
+            raw_images = [np.zeros((32, 32, 3), np.uint8) for _ in range(2)]
+            ui_theme = "dark"
+            use_gpu = False
+            fusion_result = None
+            slider_smooth = type("S", (), {"value": lambda s: 7})()
+
+        dlg = dm.DepthMapDialog(_Stub())
+        assert started.wait(5), "auto-compute did not start on open"
+        n_on_open = len(calls)
+
+        # 切换到另一个秒级方法 → 自动重算
+        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("gfgfgf"))
+        deadline = time.time() + 5
+        while len(calls) == n_on_open and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert len(calls) > n_on_open, "fast method switch did not auto-compute"
+        assert calls[-1] == "gfgfgf"
+
+        # 切换到慢速方法（dtcwt）→ 不自动算，只提示
+        n_before = len(calls)
+        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("dtcwt"))
+        deadline = time.time() + 3
+        while len(calls) > n_before and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert len(calls) == n_before, "slow method must not auto-compute"
+        dlg.reject()
