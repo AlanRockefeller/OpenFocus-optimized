@@ -41,6 +41,26 @@ class RenderManager:
         "openfocus_c": "OpenFocus C",
         "stackmffv4": "AI",
     }
+    # UI 展示（进度/输出列表/信息行）走 i18n 标签；ALGORITHM_DISPLAY 仅作
+    # 非代码兜底与文件名无关
+    ALGO_TRANS_KEY = {
+        "guided_filter": "radio_guided_filter",
+        "dct": "radio_dct",
+        "dtcwt": "radio_dtcwt",
+        "gfgfgf": "radio_gfg",
+        "stackmffv4": "radio_stackmff",
+        "openfocus_a": "radio_openfocus_a",
+        "openfocus_b": "radio_openfocus_b",
+        "openfocus_c": "radio_openfocus_c",
+        "none": "radio_no_fusion",
+    }
+
+    @classmethod
+    def algo_display_name(cls, code: str) -> str:
+        key = cls.ALGO_TRANS_KEY.get(code)
+        if key:
+            return trans.t(key)
+        return cls.ALGORITHM_DISPLAY.get(code, code)
 
     def __init__(self, window: Any):
         self.window = window
@@ -128,10 +148,11 @@ class RenderManager:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_render_need_images_text"))
             return
 
-        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf",
+        # 与融合下拉同序（stackmffv4 在 openfocus 族之前）
+        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
                    "openfocus_a", "openfocus_b", "openfocus_c"]
-        if is_stackmffv4_available():
-            methods.append("stackmffv4")
+        if not is_stackmffv4_available():
+            methods.remove("stackmffv4")
 
         self._compare_queue = list(methods)
         self._compare_total = len(methods)
@@ -148,7 +169,7 @@ class RenderManager:
             trans.t("msg_compare_progress").format(
                 i=self._compare_total - len(self._compare_queue) + 1,
                 n=self._compare_total,
-                method=self.ALGORITHM_DISPLAY.get(method, method)),
+                method=self.algo_display_name(method)),
             5000)
         self.start_render(force_algorithm=method)
 
@@ -490,7 +511,7 @@ class RenderManager:
                     item = window.output_list.item(0)
                     if item is not None:
                         item.setText(
-                            f"{item.text()} — {self.ALGORITHM_DISPLAY.get(method, method)}")
+                            f"{item.text()} — {self.algo_display_name(method)}")
 
                 # New output: refresh the wipe B-side history, keep selection
                 if getattr(window, "wipe_active", False):
@@ -619,9 +640,8 @@ class RenderManager:
             else:
                 # 对比渲染时显示的是队列里实际渲染的方法，而非当前下拉选择
                 compare_method = getattr(self, "_compare_current", None)
-                method_name = self.ALGORITHM_DISPLAY.get(
-                    compare_method or fusion_method,
-                    trans.t("radio_guided_filter"))
+                method_name = self.algo_display_name(
+                    compare_method or fusion_method)
                 info_lines.append(trans.t("info_fusion_method").format(method_name))
                 info_lines.append(trans.t("info_fusion_time").format(fusion_time))
                 info_lines.append(trans.t("info_proc_unit").format(device_name))

@@ -332,6 +332,7 @@ class OpenFocus(QMainWindow):
         # 帧序方向：False=asc（文件序，默认）/ True=desc（倒序栈）
         self.stack_reverse_order = False
         self.slider_smooth = right_panel_components.slider_smooth
+        self.lbl_kernel = right_panel_components.lbl_kernel
         self.lbl_smooth_value = right_panel_components.smooth_value_label
         self.smooth_widget = right_panel_components.smooth_widget
         self.source_images_label = right_panel_components.source_images_label
@@ -1273,9 +1274,17 @@ class OpenFocus(QMainWindow):
 
         self.lbl_smooth_value.setText(str(adjusted))
 
+    # 滑块含义按算法不同：模式 → (i18n 标签键, 默认值)
+    _KERNEL_LABELS = {
+        "guided": "label_kernel_guided",
+        "dct": "label_kernel_dct",
+        "gfg": "label_kernel_gfg",
+        "ofab": "label_kernel_of",
+    }
+
     def update_slider_availability(self):
-        """根据选中的融合方法更新滑块的可用性和默认值"""
-        # Guided Filter/DCT: 共享 kernel 滑块
+        """根据选中的融合方法更新滑块的可用性、默认值和含义标签"""
+        # Guided Filter/DCT: 共享 kernel 滑块（含义不同！）
         # DTCWT / StackMFF-V4: 不使用滑块
 
         method = self.current_fusion_method()
@@ -1306,6 +1315,10 @@ class OpenFocus(QMainWindow):
         else:
             self.smooth_widget.setEnabled(False)
             self.current_kernel_mode = None
+        # 滑块含义标签随算法切换（每个算法的 kernel 含义不同）
+        label_key = self._KERNEL_LABELS.get(self.current_kernel_mode,
+                                            "label_kernel")
+        self.lbl_kernel.setText(trans.t(label_key))
     
     def update_result_view(self, index):
         """更新Output区域显示的图像（用于配准结果或ROI模式下的对齐图像）"""
@@ -2199,7 +2212,8 @@ class OpenFocus(QMainWindow):
                     c.combo_align.setItemData(
                         i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
         
-        c.lbl_kernel.setText(trans.t('label_kernel'))
+        # 滑块含义标签由 update_slider_availability 按当前算法写入
+        self.update_slider_availability()
         c.btn_reset.setText(trans.t('btn_reset'))
         # Keep the cancel/progress affordance while a render runs — the
         # retranslation must not reset it to the idle "Render" label.

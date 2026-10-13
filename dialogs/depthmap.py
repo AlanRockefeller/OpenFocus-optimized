@@ -37,13 +37,13 @@ from utils import colormap as cmap
 from utils.image_utils import imwrite_auto
 from utils.settings_store import get_last_dialog_dir, get_settings, set_last_dialog_dir
 
+# 仅收录"按索引决策"的融合方法（与融合下拉同序；加权平均类无逐像素
+# 决策，不提供深度图——guided_filter / openfocus_a 不在此列）
 _METHOD_KEYS = (
-    ("guided_filter", "radio_guided_filter"),
     ("dct", "radio_dct"),
     ("dtcwt", "radio_dtcwt"),
     ("gfgfgf", "radio_gfg"),
     ("stackmffv4", "radio_stackmff"),
-    ("openfocus_a", "radio_openfocus_a"),
     ("openfocus_b", "radio_openfocus_b"),
     ("openfocus_c", "radio_openfocus_c"),
 )
@@ -51,8 +51,7 @@ _METHOD_KEYS = (
 _DEFAULT_METHOD_COLORMAP = "turbo"
 
 # 打开对话框时自动计算的方法（秒级）；dtcwt/stackmffv4 分钟级，不自动跑
-_FAST_AUTO_METHODS = {"guided_filter", "dct", "gfgfgf",
-                      "openfocus_a", "openfocus_b", "openfocus_c"}
+_FAST_AUTO_METHODS = {"dct", "gfgfgf", "openfocus_b", "openfocus_c"}
 
 # 对话框关闭时仍在跑的 worker 放这里保活：QThread 对象被销毁而线程仍在
 # 运行会直接 abort 整个进程（AI 推理可达数分钟，用户关窗很正常）。
@@ -291,6 +290,12 @@ class DepthMapDialog(QDialog):
         self.method_combo.setCurrentIndex(max(0, i))
         form.addRow(trans.t("depth_method"), self.method_combo)
 
+        # kernel 含义随方法不同（与主面板滑块同源语义）——只读说明行
+        self.lbl_kernel_info = QLabel("")
+        self.lbl_kernel_info.setStyleSheet("color: #999;")
+        form.addRow("", self.lbl_kernel_info)
+        self._update_kernel_info()
+
         self.map_combo = QComboBox()
         self._fill_colormaps()
         form.addRow(trans.t("depth_colormap"), self.map_combo)
@@ -386,20 +391,18 @@ class DepthMapDialog(QDialog):
 
     def _current_window_method(self):
         w = self.window_main
-        # 下拉单选后统一走 current_fusion_method()；旧窗口/测试桩可能
-        # 没有该助手，退回逐个探测属性
+        keys = {code for code, _k in _METHOD_KEYS}
+        # 当前融合方法有深度侧写就用它；否则回退到列表第一项
         helper = getattr(w, "current_fusion_method", None)
         if callable(helper):
             code = helper()
-            if code in {c for c, _k in _METHOD_KEYS}:
-                return code
-            return "guided_filter"
+            return code if code in keys else _METHOD_KEYS[0][0]
         for attr, code in (("rb_gfg", "gfgfgf"), ("rb_d", "stackmffv4"),
                            ("rb_c", "dtcwt"), ("rb_b", "dct")):
             rb = getattr(w, attr, None)
             if rb is not None and rb.isChecked():
                 return code
-        return "guided_filter"
+        return _METHOD_KEYS[0][0]
 
     def _load_custom_schemes(self):
         try:
@@ -459,10 +462,28 @@ class DepthMapDialog(QDialog):
     # ------------------------------------------------------------------
     def _on_method_changed(self):
         """预览图还是旧方法的——明确告诉用户，避免拿错图。"""
+        self._update_kernel_info()
         if (self._index01 is not None and self._map_method is not None
                 and self.method_combo.currentData() != self._map_method
                 and not (self._worker and self._worker.isRunning())):
             self.status_lbl.setText(trans.t("depth_map_stale"))
+
+    _KERNEL_INFO_KEYS = {"dct": "label_kernel_dct",
+                         "gfgfgf": "label_kernel_gfg",
+                         "openfocus_b": "label_kernel_of",
+                         "openfocus_c": "label_kernel_of"}
+
+    def _update_kernel_info(self):
+        """kernel 在不同方法里含义不同（与主面板滑块同源）——只读展示。"""
+        key = self._KERNEL_INFO_KEYS.get(self.method_combo.currentData())
+        if not key:
+            self.lbl_kernel_info.setText("")
+            return
+        slider = getattr(self.window_main, "slider_smooth", None)
+        k = int(slider.value()) if slider is not None else 7
+        if k % 2 == 0:
+            k += 1
+        self.lbl_kernel_info.setText(f"{trans.t(key)} {k}")
 
     def _update_overlay_availability(self):
         base = getattr(self.window_main, "fusion_result", None) if self.window_main else None

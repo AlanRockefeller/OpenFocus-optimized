@@ -1,4 +1,4 @@
-﻿# OpenFocus User Manual
+# OpenFocus User Manual
 
 ## Table of Contents
 
@@ -188,10 +188,12 @@ text. The CLI supports it via `--scale-bar` (auto calibration) and
 
 ### Depth Map (Focus Position)
 
-Tools 鈫?Depth Map鈥?opens a viewer that computes, per pixel, which frame of
-the stack is in focus 鈥?the pseudo-depth signal every fusion method derives
-internally 鈥?using the selected method's own activity measure (all five
-methods are supported; for DTCWT it is the wavelet high-pass energy). The
+Tools 鈥?Depth Map鈥?opens a viewer that computes, per pixel, which frame of
+the stack is in focus 鈥?the pseudo-depth signal the fusion itself decides
+on 鈥?using the selected method's own activity measure. Only
+index-deciding methods are offered (DCT, DTCWT, GFG-FGF, StackMFF-V4,
+OpenFocus B/C); weighted-average fusions (Guided Filter, OpenFocus A)
+have no per-pixel decision and are not listed. The
 map is shown pseudo-colored with a legend (frame 0 鈫?N-1) and can be
 customized live:
 

@@ -250,8 +250,15 @@ def _save_depth(args, fused_out: str) -> None:
     out_dir = os.path.dirname(os.path.abspath(path))
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
+    from core.depth_map import SUPPORTED_METHODS as _DEPTH_METHODS
+    if args.method not in _DEPTH_METHODS:
+        raise RuntimeError(
+            f"--depth-map is not available for method '{args.method}': "
+            "depth/index maps exist only for index-deciding methods ("
+            + ", ".join(_DEPTH_METHODS) + "). Weighted-average fusions "
+            "(guided_filter, openfocus_a) have no per-pixel decision.")
     kernel = None
-    if args.method in ("dct", "gfgfgf"):
+    if args.method in ("dct", "gfgfgf", "openfocus_b", "openfocus_c"):
         kernel = _normalize_kernel(args.kernel, 7)
     idx = compute_focus_index(
         frames, args.method, kernel_size=kernel,
