@@ -3,6 +3,14 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.47] — 2026-10-14
+
+### Improved
+- **Depth-map dialog: switching between second-scale methods now recomputes
+  automatically**, matching the auto-compute-on-open behaviour. Slow
+  methods (DTCWT, StackMFF-V4) still wait for an explicit Compute, and a
+  running computation is never interrupted by a switch
+
 ## [v1.46] — 2026-10-14
 
 ### Changed — variance window spec from the discriminative-probe identification
