@@ -234,9 +234,7 @@ class RenderManager:
 
         need_fusion = (
             force_algorithm is not None
-            or fusion_method in (
-                "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
-                "openfocus_a", "openfocus_b", "openfocus_c")
+            or fusion_method != "none"
         )
 
         kernel_slider_value = window.slider_smooth.value()
@@ -614,13 +612,19 @@ class RenderManager:
                 info_lines.append(trans.t("info_align_time").format(0.0))
 
             fusion_method = window.current_fusion_method()
-            # 对比渲染时显示的是队列里实际渲染的方法，而非当前下拉选择
-            compare_method = getattr(self, "_compare_current", None)
-            method_name = self.ALGORITHM_DISPLAY.get(
-                compare_method or fusion_method, trans.t("radio_guided_filter"))
-            info_lines.append(trans.t("info_fusion_method").format(method_name))
-            info_lines.append(trans.t("info_fusion_time").format(fusion_time))
-            info_lines.append(trans.t("info_proc_unit").format(device_name))
+            if fusion_method == "none" and not compare:
+                # 仅对齐模式：只跑配准，融合时间不适用
+                info_lines.append(trans.t("info_fusion_none"))
+                info_lines.append(trans.t("info_align_time").format(alignment_time))
+            else:
+                # 对比渲染时显示的是队列里实际渲染的方法，而非当前下拉选择
+                compare_method = getattr(self, "_compare_current", None)
+                method_name = self.ALGORITHM_DISPLAY.get(
+                    compare_method or fusion_method,
+                    trans.t("radio_guided_filter"))
+                info_lines.append(trans.t("info_fusion_method").format(method_name))
+                info_lines.append(trans.t("info_fusion_time").format(fusion_time))
+                info_lines.append(trans.t("info_proc_unit").format(device_name))
 
             info_lines.append(trans.t("info_total_time").format(total_time))
 

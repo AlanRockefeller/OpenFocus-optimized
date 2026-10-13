@@ -260,3 +260,61 @@ class TestOpenFocusAlignment:
         # identical frames: no crop beyond the tiny margin
         assert out[0].shape == out[1].shape
         assert np.array_equal(out[0], out[1])
+
+    def test_inputs_not_mutated(self):
+        """Regression (v1.43): cv2.phaseCorrelate mutates its input arrays
+        in this OpenCV build — the reference frame degraded frame over
+        frame, which is why alignment "did not align" on real stacks."""
+        from core.registration import ImageRegistration
+        base, f1 = self._shifted_stack()
+        snap0, snap1 = base.copy(), f1.copy()
+        reg = ImageRegistration(method="openfocus")
+        reg.process([base, f1], output_path=None, thread_count=2)
+        assert np.array_equal(base, snap0)
+        assert np.array_equal(f1, snap1)
+
+    def test_recovers_known_rotation(self):
+        from core.registration import ImageRegistration
+        base = make_two_focus_stack((140, 180))[0]
+        h, w = base.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), 2.5, 1.0)
+        f1 = cv2.warpAffine(base, M, (w, h))
+        reg = ImageRegistration(method="openfocus")
+        out = reg.process([base, f1], output_path=None, thread_count=2)
+        m = np.abs(out[1].astype(int)[8:-8, 8:-8]
+                   - out[0].astype(int)[8:-8, 8:-8]).mean()
+        un = np.abs(f1.astype(int)[8:-8, 8:-8]
+                    - base.astype(int)[8:-8, 8:-8]).mean()
+        assert m < un * 0.45
+
+    def test_recovers_known_scale(self):
+        from core.registration import ImageRegistration
+        base = make_two_focus_stack((140, 180))[0]
+        h, w = base.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), 0, 1.06)
+        f1 = cv2.warpAffine(base, M, (w, h))
+        reg = ImageRegistration(method="openfocus")
+        out = reg.process([base, f1], output_path=None, thread_count=2)
+        m = np.abs(out[1].astype(int)[8:-8, 8:-8]
+                   - out[0].astype(int)[8:-8, 8:-8]).mean()
+        un = np.abs(f1.astype(int)[8:-8, 8:-8]
+                    - base.astype(int)[8:-8, 8:-8]).mean()
+        assert m < un * 0.45
+
+    def test_fixed_rig_stack_stays_identity(self):
+        """死区：固定机位栈的亚像素噪声不得触发变形（也不再被裁边）。"""
+        from core.registration import ImageRegistration
+        rng = np.random.default_rng(2)
+        base = make_two_focus_stack((120, 160))[0]
+        frames = [base] + [
+            np.clip(base.astype(np.int16)
+                    + rng.integers(-2, 3, base.shape), 0, 255).astype(np.uint8)
+            for _ in range(3)]
+        reg = ImageRegistration(method="openfocus")
+        out = reg.process([f.copy() for f in frames], output_path=None,
+                          thread_count=2)
+        # 无真实运动 → 只裁 2px 安全边；输出与输入几乎一致
+        assert out[0].shape[0] >= frames[0].shape[0] - 4
+        assert out[0].shape[1] >= frames[0].shape[1] - 4
+        assert np.abs(out[1].astype(int)[2:-2, 2:-2]
+                      - out[0].astype(int)[2:-2, 2:-2]).mean() < 3.0

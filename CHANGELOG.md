@@ -3,6 +3,42 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.43] — 2026-10-13
+
+### Fixed — the OpenFocus alignment actually failed on real stacks (root cause)
+- **`cv2.phaseCorrelate` mutates its input arrays** in the bundled OpenCV
+  build: the reference frame silently degraded frame over frame, so every
+  estimate after the first few was computed against a corrupted reference —
+  alignment "did not align". All call sites now pass copies; a regression
+  test pins input immutability
+- The alignment model was translation-only while OpenFocus's is a bounded
+  **similarity transform**. Rewritten as a bounded grid search (rotation
+  ±8°, scale 0.95–1.05) scored by overlap NCC (the phase-correlation
+  response does not discriminate rotation), with Hann-windowed phase
+  correlation for the sub-pixel residual translation; defocused /
+  weak-texture frames fall back to chaining against the previous frame
+  (adjacent frames blur alike); a motion dead zone keeps fixed-rig stacks
+  untouched (no more sub-pixel noise warps). Verified on known
+  perturbations of a real frame: shift 40→6.3 MAE, rotation 2.5° 23→2.3,
+  scale 1.06 21→5.4, defocus+shift 33→14.2; the fixed-rig kitchen stack
+  estimates ≤0.09px per frame and stays identity. Cost: ~0.1–0.3s/frame
+  (was milliseconds, but wrong)
+
+### Restored — alignment-only output
+- The fusion dropdown gains **"Alignment only (no fusion)"**: registers
+  the stack and shows the aligned frames in the output list. This is the
+  capability the old radio group had (all radios unchecked) that the
+  v1.41 dropdown accidentally removed
+
+### Changed
+- *Quick preview* and *Remove brightness drift* now share one row
+- **Depth maps for OpenFocus A/B/C are three different maps**, each
+  mirroring its pipeline: A = variance-weighted frame centroid
+  (continuous, with the +1 last-frame prior), B = window-variance argmax
+  (the OpenFocus-validated hard pick), C = finest Laplacian-band energy
+  argmax. Previously all three showed B's map — a real defect, not a
+  display quirk
+
 ## [v1.42] — 2026-10-13
 
 ### Added — dust map (flat-field correction) and stack-order control

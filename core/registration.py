@@ -481,21 +481,139 @@ class RegistrationCancelled(Exception):
     """Raised when a render cancellation flag fires mid-registration."""
 
 
-# ========== OpenFocus 快速对齐（有界相位相关，复刻自 OpenFocus 分析） ==========
+# ========== OpenFocus 对齐：有界相似变换（平移+旋转+缩放） ==========
+
+_OF_EST_WIDTH = 480  # 估计阶段长边上限（旋转/缩放网格在低分辨率上搜索）
+
+
+def _of_gray_hp(img, est_width):
+    """灰度 + 高通（减去 σ2.5 低通），并降采样到估计分辨率。"""
+    if img.ndim == 2:
+        g = img.astype(np.float32)
+    else:
+        take = min(img.shape[2], 3)
+        if take == 1:
+            g = img[:, :, 0].astype(np.float32)
+        else:
+            m = np.array([0.114, 0.587, 0.299], np.float32)
+            g = cv2.transform(img[:, :, :take].astype(np.float32),
+                              m.reshape(1, -1))
+            g = g if g.ndim == 2 else g[:, :, 0]
+    g = g - cv2.GaussianBlur(g, (0, 0), 2.5)
+    h, w = g.shape[:2]
+    if max(h, w) > est_width:
+        s = est_width / float(max(h, w))
+        g = cv2.resize(g, (max(16, int(round(w * s))),
+                           max(16, int(round(h * s)))),
+                       interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(g, np.float32)
+
+
+_HANN_CACHE = {}
+
+
+def _of_hann_cache(w, h):
+    key = (w, h)
+    win = _HANN_CACHE.get(key)
+    if win is None:
+        win = cv2.createHanningWindow((w, h), cv2.CV_32F)
+        if len(_HANN_CACHE) > 16:
+            _HANN_CACHE.clear()
+        _HANN_CACHE[key] = win
+    return win
+
+
+def _of_ncc_score(ref_hp, fixed):
+    """重叠区归一化互相关：旋转/缩放候选的判别评分。
+
+    平移用 Hann 窗相位相关（亚像素）取整后裁重叠区；NCC 在正确校正
+    时 →1，旋转错 0.5° 以上急剧下降（判别度远好于相位相关响应值）。
+    返回 (ncc, dx, dy)。
+    """
+    h, w = ref_hp.shape[:2]
+    win = _of_hann_cache(w, h)
+    try:
+        # 关键：本机构建的 OpenCV phaseCorrelate 会原地修改输入数组
+        # （实测同一数组的 digest 在每次调用后变化）——参考图会被逐帧
+        # 污染，这正是 v1.39 "对齐不了"的根因。必须传副本。
+        (dx, dy), _resp = cv2.phaseCorrelate(
+            ref_hp.copy(), fixed.copy(), win)
+    except cv2.error:
+        return -1.0, 0.0, 0.0
+    ix, iy = int(round(dx)), int(round(dy))
+    xs0, xs1 = max(0, -ix), min(w, w - ix)
+    ys0, ys1 = max(0, -iy), min(h, h - iy)
+    if xs1 - xs0 < w // 3 or ys1 - ys0 < h // 3:
+        return -1.0, dx, dy
+    a = ref_hp[ys0:ys1, xs0:xs1]
+    b = fixed[ys0 + iy:ys1 + iy, xs0 + ix:xs1 + ix]
+    a = a - a.mean()
+    b = b - b.mean()
+    den = float(np.sqrt(float((a * a).sum()) * float((b * b).sum())))
+    ncc = float((a * b).sum()) / den if den > 1e-9 else -1.0
+    return ncc, dx, dy
+
+
+def _of_estimate_similarity(ref_hp, cur_hp,
+                            rot_bound=8.0, scale_range=(0.95, 1.05)):
+    """有界网格搜索 cur→ref 的相似变换（旋转+缩放），NCC 评分。
+
+    返回 (ncc, theta_deg, scale, dx, dy)：
+    theta/scale 满足 warpAffine(cur, getRotationMatrix2D(center, theta,
+    scale)) ≈ ref（内容层面），(dx, dy) 是残差平移（phaseCorrelate 语义：
+    校正后内容仍需移动的量）。
+    """
+    h, w = ref_hp.shape[:2]
+    cy, cx = h / 2.0, w / 2.0
+
+    def _eval(theta, scale):
+        M = cv2.getRotationMatrix2D((cx, cy), theta, scale)
+        fixed = cv2.warpAffine(cur_hp, M, (w, h))
+        return _of_ncc_score(ref_hp, fixed)
+
+    best = (-1.0, 0.0, 1.0, 0.0, 0.0)
+    for th in np.arange(-rot_bound, rot_bound + 1e-6, 1.0):
+        for sc in (0.95, 1.0, 1.05):
+            if not (scale_range[0] - 1e-9 <= sc <= scale_range[1] + 1e-9):
+                continue
+            ncc, dx, dy = _eval(th, sc)
+            if ncc > best[0]:
+                best = (ncc, th, sc, dx, dy)
+    if best[1] == 0.0 and best[2] == 1.0 and best[0] >= 0.97:
+        # 常见情形：纯平移已高度吻合——跳过两级精修（省一半耗时）
+        return best
+    # 两级精修：角度 0.25°、缩放 0.01
+    for _ in range(2):
+        th0, sc0 = best[1], best[2]
+        improved = False
+        for th in np.arange(max(-rot_bound, th0 - 1.0),
+                            min(rot_bound, th0 + 1.0) + 1e-9, 0.25):
+            for sc in np.arange(max(scale_range[0], sc0 - 0.02),
+                                min(scale_range[1], sc0 + 0.02) + 1e-9, 0.01):
+                ncc, dx, dy = _eval(th, sc)
+                if ncc > best[0] + 1e-6:
+                    best = (ncc, th, sc, dx, dy)
+                    improved = True
+        if not improved:
+            break
+    return best
+
 
 def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                           downscale_width=None, thread_count: int = 4,
                           should_cancel=None, equalize_brightness=True,
                           max_shift_ratio=0.25):
     """
-    OpenFocus 快速对齐：有界相位相关 + 亮度均衡 + 自动裁边。
+    OpenFocus 快速对齐：有界相似变换（平移+旋转+缩放）+ 亮度均衡 + 自动裁边。
 
     复刻 OpenFocus 的对齐档位（docs/OpenFocus_REPRODUCTION_REPORT.md）：
-    焦点堆栈的呼吸效应本质是小幅全局位移——标准化互功率谱（Hann 窗）
-    的相位相关峰值给出亚像素平移，实测单帧 <10ms，比 ECC 快约 50 倍。
-    每帧低频亮度先均衡到参考帧（对应 OpenFocus 的 AdjustBrightness），
-    位移钳制在 max_shift_ratio 以内（对应其 -va/-ha 上限），
-    最后按各帧有效区交集自动裁边（AutoCrop）。
+    呼吸效应 = 小幅全局相似变换（平移+旋转+缩放，受上限约束）。旋转/缩放
+    用有界网格搜索（重叠区 NCC 判别评分——相位相关响应值对旋转不敏感），
+    平移用 Hann 窗相位相关亚像素估计；失焦/弱纹理帧对参考帧置信不足时
+    链到上一帧（相邻帧模糊程度更接近）；低置信或运动分量低于死区时视为
+    无运动（保护固定机位栈不被噪声抖动）。每帧低频亮度均衡到参考帧
+    （OpenFocus AdjustBrightness），位移钳制在 max_shift_ratio 内
+    （对应其 -va/-ha 上限），最后按有效区交集自动裁边（AutoCrop）。
     """
     if img_filenames is None and isinstance(input_source, str):
         valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
@@ -514,6 +632,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
     n = len(images)
     h, w = images[0].shape[:2]
     max_shift = (int(w * max_shift_ratio), int(h * max_shift_ratio))
+    est_width = min(_OF_EST_WIDTH, max(320, w))
 
     def _gray_float(img):
         if img.ndim == 2:
@@ -523,8 +642,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
             if take == 1:
                 g = img[:, :, 0]
             else:
-                m = (np.array([0.114, 0.587, 0.299], np.float32) *
-                     np.array([1.0 if img.dtype == np.uint8 else 1.0] * 3, np.float32))
+                m = np.array([0.114, 0.587, 0.299], np.float32)
                 g = cv2.transform(img[:, :, :take].astype(np.float32),
                                   m.reshape(1, -1))
                 g = g if g.ndim == 2 else g[:, :, 0]
@@ -534,19 +652,41 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
     ref_low = cv2.GaussianBlur(ref_gray, (0, 0), 32.0)
     ref_low_mean = float(ref_low.mean()) or 1.0
     gains = [1.0]
-    try:
-        window = cv2.createHanningWindow(
-            (w, h), cv2.CV_32F) if hasattr(cv2, "createHanningWindow") else None
-    except Exception:
-        window = None
 
-    transforms = [np.eye(3, dtype=np.float64)]
-    print("Aligning %d images using OpenFocus phase correlation (fast)..." % n)
+    ref_hp = _of_gray_hp(images[0], est_width)
+    eh, ew = ref_hp.shape[:2]
+
+    def _compose_full(ncc_pack):
+        """估计分辨率下的校正参数 → 全分辨率 3x3（warpAffine 直接可用）。
+
+        warpAffine 的 M 是内容正向变换（实测：[I|+10] 把内容右移 10px；
+        getRotationMatrix2D(θ,s) 的搜索语义已在网格中验证）。完整校正 =
+        先施加旋转/缩放 Rs，再把内容平移 −d（d 为相位相关的残差内容
+        位移）。矩阵复合：M_total = [I|−d]·Rs_full；d 从估计分辨率按
+        比例换算回全分辨率。
+        """
+        _ncc, theta, scale, dx, dy = ncc_pack
+        Rs = np.eye(3)
+        Rs[:2, :] = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), theta, scale)
+        sx, sy = ew / float(w), eh / float(h)
+        d_full = np.array([-dx / sx, -dy / sy])
+        M = np.eye(3)
+        M[:2, :2] = Rs[:2, :2]
+        M[:2, 2] = Rs[:2, :2] @ d_full + Rs[:2, 2]
+        return M
+
+    # 死区：低于这些分量视为无运动（固定机位栈的噪声保护）
+    dead_t, dead_rot, dead_scale = 0.15, 0.05, 1e-3
+    min_ncc = 0.06          # 低于此视为无可靠对应关系
+    chain_ncc = 0.10        # 对参考帧置信不足 → 链到上一帧重估
+
+    corrections = [np.eye(3, dtype=np.float64)]  # cur→ref 的校正矩阵
+    prev_hp = ref_hp
+    print("Aligning %d images using OpenFocus (bounded similarity)..." % n)
     for i in range(1, n):
         if should_cancel is not None and should_cancel():
             raise RegistrationCancelled()
         cur_gray = _gray_float(images[i])
-        # 亮度均衡：低频增益匹配参考帧（曝光漂移栈上相位相关更稳）
         gain = 1.0
         if equalize_brightness:
             cur_low = cv2.GaussianBlur(cur_gray, (0, 0), 32.0)
@@ -555,35 +695,44 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                 gain = float(np.clip(ref_low_mean / cur_mean, 0.5, 2.0))
                 cur_gray = cur_gray * gain
         gains.append(gain)
-        try:
-            if window is not None:
-                (dx, dy), response = cv2.phaseCorrelate(
-                    ref_gray, cur_gray, window)
-            else:
-                (dx, dy), response = cv2.phaseCorrelate(ref_gray, cur_gray)
-        except cv2.error:
-            dx = dy = 0.0
-            response = 0.0
-        if response < 0.05:
-            # 弱纹理/失焦帧上相位相关会出现伪峰（实测 response 比正常
-            # 低一个数量级：0.011 vs 0.10+）——低于置信阈值视为无位移
-            dx = dy = 0.0
-        # 有界钳制（对应 OpenFocus 的位移上限参数）
-        dx = float(np.clip(dx, -max_shift[0], max_shift[0]))
-        dy = float(np.clip(dy, -max_shift[1], max_shift[1]))
-        # phaseCorrelate 返回"当前帧相对参考的位移 d"；warpAffine 的语义是
-        # dst(x) = src(x − t)，要消除 d 必须取 t = −d。
-        H = np.eye(3, dtype=np.float64)
-        H[0, 2] = -dx
-        H[1, 2] = -dy
-        transforms.append(H)
-        print("  frame %d/%d: shift (%+.2f, %+.2f)" % (i, n - 1, dx, dy))
+
+        cur_hp = _of_gray_hp(images[i], est_width)
+        est = _of_estimate_similarity(ref_hp, cur_hp)
+        chained = False
+        if est[0] < chain_ncc and i >= 2:
+            # 失焦/弱纹理帧：与相邻帧（模糊程度接近）更相关——链式估计
+            est2 = _of_estimate_similarity(prev_hp, cur_hp)
+            if est2[0] > est[0] + 0.02:
+                M = corrections[i - 1] @ _compose_full(est2)
+                chained = True
+                est = (est2[0],) + est[1:]
+        if not chained:
+            M = _compose_full(est)
+
+        ncc = est[0]
+        if ncc < min_ncc:
+            M = np.eye(3)
+        # 有界钳制（平移，对应 OpenFocus 的位移上限参数）
+        tx = float(np.clip(M[0, 2], -max_shift[0], max_shift[0]))
+        ty = float(np.clip(M[1, 2], -max_shift[1], max_shift[1]))
+        M[0, 2] = tx
+        M[1, 2] = ty
+        # 死区：整体运动可忽略 → 恒等（不产生裁边/插值损失）
+        rot_deg = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
+        scale_now = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
+        if (abs(tx) < dead_t and abs(ty) < dead_t
+                and abs(rot_deg) < dead_rot
+                and abs(scale_now - 1.0) < dead_scale):
+            M = np.eye(3)
+        corrections.append(M)
+        prev_hp = cur_hp
+        print("  frame %d/%d: rot %+.2f° scale %.3f shift (%+.2f, %+.2f)"
+              " ncc %.2f%s" % (i, n - 1, rot_deg, scale_now, tx, ty, ncc,
+                               " (chained)" if chained else ""))
 
     def _warp(args):
-        idx, img, H, gain = args
-        # phaseCorrelate 返回"当前帧相对参考的位移"——把当前帧平移回参考位置
-        M = H[:2, :]
-        warped = cv2.warpAffine(img, M, (w, h),
+        idx, img, M, gain = args
+        warped = cv2.warpAffine(img, M[:2, :], (w, h),
                                 flags=cv2.INTER_LANCZOS4
                                 | cv2.WARP_FILL_OUTLIERS,
                                 borderMode=cv2.BORDER_REFLECT)
@@ -599,7 +748,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
     aligned[0] = images[0]
     with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(thread_count or 4))) as pool:
-        futures = [pool.submit(_warp, (i, images[i], transforms[i], gains[i]))
+        futures = [pool.submit(_warp, (i, images[i], corrections[i], gains[i]))
                    for i in range(1, n)]
         for future in concurrent.futures.as_completed(futures):
             if should_cancel is not None and should_cancel():
@@ -609,8 +758,13 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
             idx, warped = future.result()
             aligned[idx] = warped
 
+    # 有效区 = 各帧"正向映射矩形"（corrections 的逆）的交集内接框：
+    # dst(x) = cur(A·x) 有效 ⟺ A·x ∈ 源图 ⟺ x ∈ A⁻¹(源图矩形)
+    fwd = [np.linalg.inv(M) if M is not None else None for M in corrections]
     top, bottom, left, right = _compute_valid_region_from_transforms(
-        transforms, (h, w))
+        fwd, (h, w))
+    if top >= bottom or left >= right:
+        top, bottom, left, right = 0, h, 0, w
     aligned = [img[top:bottom, left:right] for img in aligned]
 
     if output_path:
@@ -620,7 +774,6 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
             fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
             cv2.imwrite(os.path.join(output_path, fname), img)
     return aligned
-
 
 # ========== ECC对齐算法实现（高精度） ==========
 

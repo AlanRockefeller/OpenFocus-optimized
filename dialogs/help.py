@@ -118,10 +118,10 @@ class RegistrationHelpDialog(HelpDialog):
     Enhanced Correlation Coefficient alignment refines alignment at the sub-pixel level. Works well for fine adjustments or whenever feature detection is unreliable.</p>
 
     <p>Align (OpenFocus, fast)<br/>
-    Bounded phase-correlation translation with per-frame brightness
-    equalization (implemented from OpenFocus). Milliseconds per
-    frame; auto-crops to the valid overlap. Choose ECC or Homography instead
-    when you need sub-pixel or non-translation correction.</p>"""
+    Bounded similarity registration (translation + rotation + scale,
+    implemented from OpenFocus) with per-frame brightness
+    equalization and auto-crop. Sub-second per frame. Choose ECC or
+    Homography for non-rigid or extreme geometry.</p>"""
 
         super().__init__(trans.t("help_registration_title"), help_text, parent)
 

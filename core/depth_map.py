@@ -12,11 +12,15 @@ activity measure, so the exported map matches the fusion the user sees:
                  activity level the fusion uses, on the gray channel)
 - stackmffv4:    the model's own focus-index output (tiled with the same
                  memory budget as AI fusion)
-- openfocus_a/b/c: argmax of the window local variance — the measure the
-                 OpenFocus implementation work validated to 99.5% depth-map
-                 agreement (blur(x²) − blur(x)² on the gray channel); the
-                 kernel slider is the variance window, exactly as in the
-                 OpenFocus A/B/C fusion
+- openfocus_a:    weighted-centroid depth — the variance weights of A's
+                  average (with the +1 last-frame prior) as a continuous
+                  focus-position surface
+- openfocus_b:    argmax of the window local variance — the measure the
+                  OpenFocus implementation work validated to 99.5% depth-map
+                  agreement (blur(x²) − blur(x)²); the kernel slider is
+                  the variance window, exactly as in B's fusion
+- openfocus_c:    argmax of the finest Laplacian-band energy (gray −
+                  blur(σ1), the pyramid's own decision signal)
 
 The fusion pipeline itself is untouched; these are faithful mirrors of the
 measures, factored out so they are testable and reusable (dialog, CLI).
@@ -290,14 +294,14 @@ def _measure_stackmffv4(images, progress, should_cancel,
 
 
 # --------------------------------------------------------------------------
-# openfocus_a/b/c — window local variance (the OpenFocus-validated measure)
+# openfocus_a/b/c — 各自融合管线的"焦点位置"可视化（三种不同的图）
 # --------------------------------------------------------------------------
 def _measure_openfocus(images, progress, should_cancel, kernel_size=7):
-    """argmax of blur(x²) − blur(x)² on the gray channel.
+    """B：argmax of blur(x²) − blur(x)² on the gray channel.
 
     与 fusion_methods/openfocus_ab.py 的 B 方法度量一致（验证：与
-    OpenFocus 深度图 99.5% 逐像素重合）。kernel 滑块即方差窗口；流式
-    argmax（见 _measure_gff）：严格 > 保持 np.argmax 的首胜语义。
+    OpenFocus 深度图 99.5% 逐像素重合）——硬拾取的逐像素获胜帧。kernel
+    滑块即方差窗口；流式 argmax（严格 > 保持 np.argmax 首胜语义）。
     """
     if kernel_size % 2 == 0:
         kernel_size += 1
@@ -313,6 +317,63 @@ def _measure_openfocus(images, progress, should_cancel, kernel_size=7):
         else:
             hit = var > best_val
             best_val[hit] = var[hit]
+            best_idx[hit] = idx
+    return best_idx
+
+
+def _measure_openfocus_a(images, progress, should_cancel, kernel_size=7):
+    """A：方差权重加权的连续帧位质心（A 是加权平均，没有硬拾取）。
+
+    D = Σ wᵢ·i / Σ wᵢ，wᵢ = gauss(var)；分母带 +1 的末帧先验（与融合
+    一致：平坦区权重全零时精确退化为末帧）。输出连续深度面——直观
+    展示 A 从哪些帧"拉"聚焦信息。
+    """
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    k = max(1, int(kernel_size))
+    n = len(images)
+    wsum = None
+    widx = None
+    for idx, bgr in enumerate(images):
+        _tick(progress, idx, n, should_cancel)
+        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
+        mean = cv2.blur(gray, (k, k))
+        var = np.maximum(
+            cv2.blur(gray * gray, (k, k)) - mean * mean, 0.0)
+        w = cv2.GaussianBlur(var, (0, 0), 2.0)
+        if wsum is None:
+            wsum = w.copy()
+            widx = w * idx
+        else:
+            wsum += w
+            widx += w * idx
+    # +1 末帧先验（与融合的 (ΣwI + I_last)/(Σw + 1) 同构）
+    wsum += 1.0
+    widx += float(n - 1)
+    return widx / wsum
+
+
+def _measure_openfocus_c(images, progress, should_cancel, kernel_size=7):
+    """C：最细带通层能量 argmax（金字塔法按频带决策的深度侧写）。
+
+    band = gray − blur(gray, σ1)（拉普拉斯金字塔最细层的同款构造），
+    W = blur(|band|, window)，逐像素取能量最大帧——与 B 的窗口方差
+    （二阶统计）不同，这是带通能量的选择行为。
+    """
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    k = max(1, int(kernel_size))
+    best_val = best_idx = None
+    for idx, bgr in enumerate(images):
+        _tick(progress, idx, len(images), should_cancel)
+        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
+        band = gray - cv2.GaussianBlur(gray, (0, 0), 1.0)
+        energy = cv2.blur(np.abs(band), (k, k))
+        if best_val is None:
+            best_val, best_idx = energy, np.zeros(energy.shape, np.int32)
+        else:
+            hit = energy > best_val
+            best_val[hit] = energy[hit]
             best_idx[hit] = idx
     return best_idx
 
@@ -353,10 +414,16 @@ def compute_focus_index(images: Sequence[np.ndarray],
     elif method == "stackmffv4":
         idx = _measure_stackmffv4(images, progress_callback, should_cancel,
                                   model_path=model_path, use_gpu=use_gpu)
-    elif method in ("openfocus_a", "openfocus_b", "openfocus_c"):
-        # 三者共用窗口方差度量（各自融合管线的清晰度度量相同）
+    elif method == "openfocus_a":
+        # A 是加权平均：连续质心深度（含末帧先验）
+        idx = _measure_openfocus_a(images, progress_callback, should_cancel,
+                                   kernel_size=kernel_size)
+    elif method == "openfocus_b":
         idx = _measure_openfocus(images, progress_callback, should_cancel,
                                  kernel_size=kernel_size)
+    elif method == "openfocus_c":
+        idx = _measure_openfocus_c(images, progress_callback, should_cancel,
+                                   kernel_size=kernel_size)
     else:
         raise ValueError(f"Unsupported method for depth maps: {method}")
     return _norm_index(idx, n)
