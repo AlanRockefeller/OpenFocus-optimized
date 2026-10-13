@@ -7,9 +7,12 @@
   硬拾取优于软混合（实验证明），平局取首帧。
 - Method A（加权平均）：w = gauss(var)，分母带 +1 的末帧先验
   （平坦区权重全零时精确退化为末帧——复现实验误差 0.00）。
-- Method C（金字塔）：7 层拉普拉斯金字塔逐带能量软混合，
-  最粗带（基带）整带取末帧——实测的 OpenFocus 行为
-  （"低频来自参考帧 + 高频按频段独立决策"，输出高频能量 ~1.24×输入）。
+- Method C（金字塔）：7 层拉普拉斯金字塔逐带 max-pick 硬拾取
+  （|带|高斯 σ3 权重取 argmax；实测 max-pick 明显优于软归一混合），
+  bicubic ×2 + σ0.6 展开，最粗带（基带）整带取末帧——实测的
+  OpenFocus 行为（"低频来自参考帧 + 高频按频段独立决策"，输出高频能量
+  ~1.24×输入）。对 OpenFocus 原输出基准：stackA 0.51% / stackB 6.5% /
+  stackC 3.4%（tools/OpenFocus_repro/audit_port_v139.py 可复跑）。
 
 约定：输入为 0-255 域的 BGR 帧列表（uint8 或 float32），
 输出经 fuse_output_dtype 归一（与 gff/dct 相同的位深契约）。
@@ -115,12 +118,17 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 7,
     wsum = np.zeros((h, w, 1), dtype=np.float32)
     for i, frame in enumerate(frames_f):
         w2d = weights[i][:, :, np.newaxis]
-        acc += frame * w2d
+        # 2D 灰度帧统一到 (h, w, 1)：直接 (h,w)*(h,w,1) 会广播成 (h,w,w)
+        f3 = frame[:, :, np.newaxis] if frame.ndim == 2 else frame
+        acc += f3 * w2d
         wsum += w2d
     # 末帧先验（+1）：平坦区权重全零时输出精确等于末帧
-    acc += frames_f[-1]
+    last = frames_f[-1]
+    acc += last[:, :, np.newaxis] if last.ndim == 2 else last
     wsum += 1.0
     fused = acc / wsum
+    if last.ndim == 2:
+        fused = fused[:, :, 0]
     return np.clip(fused, 0, 255).astype(fuse_output_dtype(frames))
 
 
@@ -145,9 +153,9 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 7,
     depth = np.argmax(var, axis=0).astype(np.float32)
     # 深度图平滑：先中值去噪点，再高斯做边界过渡（约 ±3 帧），
     # 最后取整——硬拾取（软混合经实验证明反而偏离 OpenFocus 输出）。
-    depth_u8 = np.clip(depth, 0, 255).astype(np.uint8)
-    depth_u8 = cv2.medianBlur(depth_u8, 3)
-    depth = depth_u8.astype(np.float32)
+    # 注意用 float32 做中值：转 uint8 会在帧数 >256 时截断深度索引
+    # （显微深栈可达数百帧）；对整数输入两者结果逐位一致。
+    depth = cv2.medianBlur(np.ascontiguousarray(depth, np.float32), 3)
     depth = cv2.GaussianBlur(depth, (0, 0), sigmaX=1.2)
     idx = np.clip(np.rint(depth), 0, n - 1).astype(np.int32)
 
@@ -175,22 +183,26 @@ def _pyramid_gauss(img: np.ndarray, levels: int) -> List[np.ndarray]:
 
 
 def _pyramid_expand(band: np.ndarray, shape) -> np.ndarray:
-    """2× 上采样（最近邻重复 + σ=1 模糊），裁到目标形状。
+    """2× 上采样（bicubic 插值 + σ=0.6 模糊），裁到目标形状。
 
-    band 可以是 (h, w) 或 (h, w, C)；cv2 对 (h,w) 2D 直接可用。
+    最终验证配方（reproduce_and_compare.repro_C）：PIL BICUBIC + gauss
+    σ0.6；此处用 cv2.INTER_CUBIC 等价实现（审计实测三栈 MAE 与 PIL 版
+    逐点一致），避免融合热路径依赖 Pillow。
+    band 可以是 (h, w) 或 (h, w, C)。
     """
-    up = np.repeat(np.repeat(band, 2, axis=0), 2, axis=1)
-    up = up[:shape[0], :shape[1]]
-    return cv2.GaussianBlur(up, (0, 0), 1.0)
+    up = cv2.resize(band, (band.shape[1] * 2, band.shape[0] * 2),
+                    interpolation=cv2.INTER_CUBIC)
+    return cv2.GaussianBlur(up[:shape[0], :shape[1]], (0, 0), 0.6)
 
 
 def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
                      thread_count: int = None, levels: int = 7):
     """OpenFocus - C：拉普拉斯金字塔融合（复现 OpenFocus Method C）。
 
-    每个带通层的权重 = |亮度带| 的高斯平滑（wsigma=1），
-    软归一化混合 (Σ W·band)/(Σ W)，能量全零处回退末帧；
-    最粗的基带整带取末帧（亮度基准）。
+    每个带通层的权重 = |亮度带| 的高斯平滑（wsigma=3），逐像素取
+    argmax 硬拾取（max-pick）——实验实测 max-pick 明显优于
+    软归一混合（stackA 上 0.51% vs 1.35% MAE）；最粗的基带整带取
+    末帧（亮度基准）。
     层数自适应：min(levels, log2(min(H,W))-1)，小图不产生退化带。
     """
     frames = _collect_images(input_source)
@@ -204,7 +216,6 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
     # 小图保护：每层减半，至少留 2px；levels 至少 2（一层带通 + 基带）
     usable = max(2, min(levels, int(np.log2(max(2, min(h, w)))) - 1))
     pyrs = [_pyramid_gauss(f, usable) for f in frames_f]
-    n = len(frames_f)
 
     out_bands = []
     for k in range(usable):
@@ -223,7 +234,7 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
             out_bands.append(band[-1].copy())
             continue
 
-        # 权重：亮度域带通幅值，σ=1 平滑（对应 OpenFocus 的 opacity filter）。
+        # 权重：亮度域带通幅值，σ=3 平滑（对应 OpenFocus 的 opacity filter）。
         # 注意：cv2.GaussianBlur 会把 (N,h,w) 当成多通道图跨 N 轴混合，
         # 必须逐帧模糊。
         if band.ndim == 4:
@@ -231,19 +242,16 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
                                    np.float32)).sum(axis=3)
         else:
             lum = band
-        W = np.stack([cv2.GaussianBlur(np.abs(w), (0, 0), 1.0)
+        W = np.stack([cv2.GaussianBlur(np.abs(w), (0, 0), 3.0)
                       for w in lum], axis=0)
-        tot = W.sum(axis=0)
-        # 软归一化混合；能量全零处回退末帧
-        with np.errstate(invalid="ignore", divide="ignore"):
-            if band.ndim == 4:
-                mixed = (W[:, :, :, np.newaxis] * band).sum(axis=0) / \
-                    np.maximum(tot, 1e-9)[:, :, np.newaxis]
-            else:
-                mixed = (W * band).sum(axis=0) / np.maximum(tot, 1e-9)
-        flat = tot <= 1e-9
-        if flat.any():
-            mixed[flat] = band[-1][flat]
+        # max-pick 硬拾取：逐像素选能量最大帧（无除法，平坦带贡献≈0，
+        # 无需除零回退）
+        idx = W.argmax(axis=0)
+        if band.ndim == 4:
+            mixed = np.take_along_axis(
+                band, idx[np.newaxis, :, :, np.newaxis], axis=0)[0]
+        else:
+            mixed = np.take_along_axis(band, idx[np.newaxis], axis=0)[0]
         out_bands.append(mixed.astype(np.float32))
 
     # 自顶向下重建：expand + 累加

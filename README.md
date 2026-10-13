@@ -13,6 +13,8 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> 🎉 **2026.10.13**: **v1.40** — **OpenFocus-parity audit of the v1.39 ports**: fixed *OpenFocus - A* crashing on grayscale stacks, *OpenFocus - B* corrupting >256-frame stacks (uint8 depth clip), and aligned *OpenFocus - C* to the validated max-pick recipe (measurably closer to OpenFocus on deep stacks: balls 5.09% vs 6.23% MAE). Added a OpenFocus-benchmark regression suite (`tests/test_OpenFocus_regression.py`) that locks A/B/C to measured MAE budgets against the original software's output.
+
 > 🎉 **2026.10.13**: **v1.39** — **the OpenFocus algorithm family, implemented and verified**: *OpenFocus - A* (variance-weighted average), *OpenFocus - B* (variance depth-map pick), *OpenFocus - C* (Laplacian pyramid), a **Remove brightness drift** post-correction (off by default), and a **fast OpenFocus alignment** (bounded phase correlation + brightness equalization, milliseconds per frame). All verified against OpenFocus's own output (99.5% depth-map agreement, 0.95–4.1% MAE on the StackMFF test set) and available in the GUI, batch and CLI (`-m openfocus_a|b|c`, `-a openfocus`, `--base-frame`).
 
 > 🎉 **2026.10.08**: **v1.37** — **Undo/Redo (Ctrl+Z)** for every stack operation, **per-frame enable/disable** (untick a frame to exclude it from fusion without deleting it), **drag to reorder** the stack, Recent Projects, new shortcuts (Ctrl+R render, Ctrl+Shift+R compare all, Ctrl+Shift+B batch, Ctrl+M depth map), SHA-256-verified one-click updates, and CLI pipeline flags (`--dry-run`, `--resume`, `--json`, `--json-progress`, `--config` per-folder overrides).

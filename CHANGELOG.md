@@ -3,6 +3,40 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.40] — 2026-10-13
+
+### Fixed — OpenFocus-parity audit of the v1.39 ports (three real defects)
+A parameter-level audit against the validated reproduction configs
+(`tools/OpenFocus_repro/audit_port_v139.py`, rerunnable) re-checked every
+constant and decision rule of the v1.39 ports against OpenFocus's own output:
+
+- **OpenFocus - A crashed (or silently garbled) grayscale stacks**: the
+  weighted-average loop broadcast a 2-D `(h,w)` frame against `(h,w,1)`
+  weights — non-square stacks raised `ValueError`, square stacks produced a
+  wrong `(h,w,w)` array. B/C already supported 2-D; A now does too
+- **OpenFocus - B corrupted stacks deeper than 256 frames**: the depth map
+  was cast to `uint8` before the median filter, clipping index 259 (say) to
+  255 — microscopy stacks of hundreds of frames silently picked the wrong
+  source pixels. Depth smoothing now stays float32 (bit-identical output for
+  ≤256-frame stacks)
+- **OpenFocus - C decision rule deviated from the validated recipe**: v1.39
+  shipped a soft-normalized blend (σ=1 weights, nearest-neighbour expand);
+  the FINAL validated configuration is a per-band **max-pick** (σ=3 weights,
+  bicubic ×2 + σ0.6 expand, coarsest band = last frame). On fresh OpenFocus
+  Method-C references rendered for the 25–32-frame real stacks, max-pick
+  measures closer to OpenFocus (keyboard 3.48% vs 3.68%, balls 5.09% vs
+  6.23%); on the synthetic set both agree with the published numbers
+  (0.51% / 6.55% / 3.39%). The code now matches
+  docs/OpenFocus_REPRODUCTION_REPORT.md exactly
+
+### Added — OpenFocus-benchmark regression harness
+- `tests/test_OpenFocus_regression.py`: locks A/B/C to measured MAE budgets
+  against the local OpenFocus reference library and the StackMFF Mobile Depth
+  stacks (auto-skips when the benchmarks are absent, so CI stays green);
+  plus a >256-frame depth-index regression in `tests/test_openfocus_ab.py`
+- New OpenFocus Method-C references for keyboard/balls/kitchen collected with
+  the original binary (deep-stack regime, 12–32 frames)
+
 ## [v1.39] — 2026-10-13
 
 ### Added — the OpenFocus algorithm family, implemented and verified

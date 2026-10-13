@@ -44,6 +44,33 @@ class TestOpenFocusAB:
         out = openfocus_b_impl([frame, frame.copy()], None, 7)
         assert np.array_equal(out, frame)
 
+    def test_b_deep_stack_over_256_frames(self):
+        """Regression (v1.40): depth indices must survive >256-frame stacks.
+
+        v1.39 cast the depth map to uint8 before the median filter, so a
+        260-frame stack clipped index 259 down to 255 and silently picked
+        the wrong (blurred) frame. Float32 median keeps every index.
+        """
+        from fusion_methods.openfocus_ab import openfocus_b_impl
+        rng = np.random.default_rng(7)
+        base = rng.uniform(40, 60, (48, 64)).astype(np.float32)
+        base = cv2.GaussianBlur(base, (0, 0), 3.0)  # blurred everywhere
+        frames = [cv2.cvtColor(np.clip(base + i * 0.01, 0, 255)
+                               .astype(np.uint8), cv2.COLOR_GRAY2BGR)
+                  for i in range(259)]
+        # last frame is the only sharp one -> argmax must reach index 259
+        sharp = np.clip(base + rng.normal(0, 12, base.shape), 0, 255)
+        sharp = cv2.GaussianBlur(sharp, (0, 0), 0.5).astype(np.uint8)
+        frames.append(cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR))
+        out = openfocus_b_impl(frames, None, 7)
+        # interior (away from the boundary transition) must equal the sharp
+        # frame's pixels, not the clipped-to-255 blurred one
+        interior = out[8:-8, 8:-8].astype(int)
+        sharp_i = frames[-1][8:-8, 8:-8].astype(int)
+        clipped_i = frames[255][8:-8, 8:-8].astype(int)
+        assert np.abs(interior - sharp_i).mean() < np.abs(interior - clipped_i).mean()
+        assert np.abs(interior - sharp_i).mean() < 1.0
+
     def test_a_flat_region_degrades_to_last_frame(self):
         """The +1 last-frame prior: zero weights (flat) -> exact last frame."""
         from fusion_methods.openfocus_ab import openfocus_a_impl
