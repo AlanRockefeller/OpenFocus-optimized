@@ -225,6 +225,43 @@ class TestBatchWorkerBitDepth:
         assert 8000 < float(saved.mean()) < 58000, f"batch output blown out: {saved.mean()}"
 
 
+    def test_multi_folder_batch_alignment_only(self, tmp_path):
+        """fusion_method='none' batch: registration runs, the aligned frames
+        are saved, and no fusion is attempted ('none' used to be handed to
+        the MultiFocusFusion constructor and crash the batch)."""
+        pytest.importorskip("PyQt6")
+        from PyQt6.QtWidgets import QApplication
+        from core.workers import BatchWorker
+
+        QApplication.instance() or QApplication([])
+
+        folder = tmp_path / "stack"
+        folder.mkdir()
+        base = np.full((48, 64, 3), 100, np.uint8)
+        f0, f1 = base.copy(), np.roll(base, 4, axis=1)
+        assert cv2.imwrite(str(folder / "f1.png"), f0)
+        assert cv2.imwrite(str(folder / "f2.png"), f1)
+
+        worker = BatchWorker([str(folder)], "same", str(folder), {
+            "reg_methods": [],
+            "fusion_method": "none",
+            "fusion_params": {},
+            "format": "png",
+            "save_aligned": True,
+        }, thread_count=2, use_gpu=False)
+        worker.process_single_folder(str(folder))
+
+        # 与源文件同名冲突时改名 "_registered" 保存（防覆盖保护）
+        aligned1 = cv2.imread(str(folder / "f1_registered.png"),
+                              cv2.IMREAD_UNCHANGED)
+        aligned2 = cv2.imread(str(folder / "f2_registered.png"),
+                              cv2.IMREAD_UNCHANGED)
+        assert aligned1 is not None and aligned2 is not None, \
+            "alignment-only batch wrote no aligned frames"
+        assert not (folder / "stack.png").exists(), \
+            "alignment-only batch must not write a fused result"
+
+
 class TestGifDuration:
     def test_gif_worker_writes_millisecond_durations(self, tmp_path):
         """imageio hands `duration` straight to Pillow, which counts milliseconds.

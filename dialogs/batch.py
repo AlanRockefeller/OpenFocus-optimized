@@ -329,6 +329,7 @@ class BatchProcessingDialog(QDialog):
         if self.parent_window:
             code = self.parent_window.current_fusion_method()
             label_map = {
+                "none": 'radio_no_fusion',
                 "guided_filter": 'radio_guided_filter',
                 "dct": 'radio_dct',
                 "dtcwt": 'radio_dtcwt',
@@ -726,13 +727,19 @@ class BatchProcessingDialog(QDialog):
                 "color": getattr(self.parent_window, "scale_bar_color", "auto"),
             }
 
+        # 仅对齐批处理：没有融合步骤，必须保存对齐帧（否则整个任务无输出）
+        if fusion_method == "none":
+            save_aligned = True
+        else:
+            save_aligned = self.save_aligned_cb.isChecked()
+
         return {
             "format": format_str,
             "jpg_quality": jpg_quality,
             "fusion_method": fusion_method,
             "fusion_params": fusion_params,
             "reg_methods": reg_methods,
-            "save_aligned": self.save_aligned_cb.isChecked(),  # 是否保存对齐后的图像栈
+            "save_aligned": save_aligned,  # 是否保存对齐后的图像栈
             "scale_bar": scale_cfg,
         }
 
