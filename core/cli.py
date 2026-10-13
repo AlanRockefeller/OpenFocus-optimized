@@ -54,6 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
                         help="Base correction after fusion: match the output's low frequencies to the "
                              "last/first frame (removes brightness/exposure drift, default: none)")
+    parser.add_argument("--sort", default="asc", choices=["asc", "desc", "off"],
+                        help="Stack order for the openfocus_a/b/c methods: 'asc' keeps the file order "
+                             "(default, matches Helicon), 'desc' reverses a far-to-near sweep so the "
+                             "base/last-frame semantics anchor to the intended end, 'off' is an explicit no-op")
+    parser.add_argument("--dust-map", default=None, metavar="WHITE",
+                        help="Flat-field (dust map) correction: path to a defocused shot of a blank/white "
+                             "area; removes static dust specks and vignetting from every frame before "
+                             "registration")
     parser.add_argument("--kernel", "-k", type=int, default=None,
                         help="Kernel size for guided_filter/dct/gfgfgf (forced odd)")
     parser.add_argument("--threads", "-t", type=int, default=4,
@@ -167,6 +175,20 @@ def _fuse_stack(images, args):
     from core.multi_focus_fusion import MultiFocusFusion
     from utils.image_utils import normalize_fuse_input, quantize_fuse_output
 
+    # Flat-field (dust map) correction runs FIRST and in the raw pixel
+    # domain: dust lives in sensor coordinates, so it must be divided out
+    # before registration warps the content.
+    dust_white = getattr(args, "dust_map", None)
+    if dust_white:
+        from utils.dust_map import compute_flat_field, apply_flat_field_stack
+        data = np.fromfile(dust_white, dtype=np.uint8)
+        white = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+        if white is None:
+            raise RuntimeError(f"Failed to decode white-field image: {dust_white}")
+        gain = compute_flat_field(white)
+        images = apply_flat_field_stack(images, gain)
+        print(f"Flat-field (dust map) correction applied from {dust_white}")
+
     # 16-bit sources are normalized to 0-1 float for the back-ends and
     # quantized back to uint16 afterwards, preserving the extra depth.
     images, is_16bit = normalize_fuse_input(images)
@@ -178,7 +200,8 @@ def _fuse_stack(images, args):
         print(f"Registration ({args.align}) done in {time.time() - t0:.1f}s")
 
     fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu,
-                         base_frame=getattr(args, "base_frame", "none"))
+                         base_frame=getattr(args, "base_frame", "none"),
+                         sort_mode=getattr(args, "sort", "asc"))
     if args.tile_size:
         fusion_kwargs["tile_block_size"] = args.tile_size
     if args.method == "stackmffv4":

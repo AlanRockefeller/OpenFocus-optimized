@@ -697,6 +697,10 @@ class BatchProcessingDialog(QDialog):
             fusion_params["base_frame"] = (
                 "last" if getattr(self.parent_window,
                                   "base_frame_correct", False) else "none")
+            # 帧序方向（仅 openfocus 族生效）
+            fusion_params["sort_mode"] = (
+                "desc" if getattr(self.parent_window,
+                                  "stack_reverse_order", False) else "asc")
 
         # 获取配准方法设置（下拉单选：none 时不做配准）
         reg_methods = []

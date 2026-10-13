@@ -158,7 +158,8 @@ class MultiFocusFusion:
                  tile_enabled: bool = True, tile_block_size: int = 1024,
                  tile_overlap: int = 256, tile_threshold: int = 2048,
                  stackmffv4_batch_size: int = 2,
-                 base_frame: str = "none"):
+                 base_frame: str = "none",
+                 sort_mode: str = "asc"):
         """
         初始化融合器
         
@@ -183,6 +184,11 @@ class MultiFocusFusion:
         # 基底低频来自参考帧"——out += LP(I_base) − LP(out)，σ≈32，
         # 消除帧间曝光/亮度漂移（延时与手持栈刚需）。
         self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
+        # 帧序方向：'asc'（默认，保持文件序）| 'desc'（倒序栈翻转）| 'off'，
+        # 仅对 openfocus 族生效（其余算法对帧序不敏感）。
+        # 没有内容式自动检测——内容是反转变换协变的，方向只能显式给出
+        # （实验证据：tools/helicon_repro/validate_autosort.py）。
+        self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
         self._validate_environment()
     
     def _ensure_supported_algorithm(self, algorithm: str) -> None:
@@ -306,6 +312,32 @@ class MultiFocusFusion:
             return (frame.astype(np.float32) * (255.0 / 65535.0))
         return frame.astype(np.float32)
 
+    # ------------------------------------------------------------------
+    # 帧序规范化（Sort automatically，仅 openfocus 族生效）
+    # ------------------------------------------------------------------
+    OPENFOCUS_FAMILY = ('openfocus_a', 'openfocus_b', 'openfocus_c')
+
+    def _maybe_sort_input(self, input_source):
+        if (self.sort_mode == "off"
+                or self.algorithm not in self.OPENFOCUS_FAMILY):
+            return input_source
+        from fusion_methods.openfocus_ab import (
+            sort_frames_for_openfocus, _collect_images)
+        if isinstance(input_source, (list, tuple)):
+            frames = [f for f in input_source if f is not None]
+            frames, flipped = sort_frames_for_openfocus(frames, self.sort_mode)
+        elif isinstance(input_source, str) and os.path.isdir(input_source):
+            # 目录输入：物化帧列表后排序（实现本来也要整栈读取）
+            frames, flipped = sort_frames_for_openfocus(
+                _collect_images(input_source), self.sort_mode)
+        else:
+            return input_source
+        if flipped:
+            print("Info: stack frames reversed per sort mode 'desc' "
+                  "(OpenFocus family: base reference / depth labels now "
+                  "anchor to the other end).")
+        return frames
+
     def _apply_base_correction(self, fused, input_source):
         """out += LP(I_base) − LP(out)：细节层不动，基底低频对齐参考帧。
 
@@ -419,6 +451,10 @@ class MultiFocusFusion:
         Returns:
             numpy.ndarray: 融合后的图像 (uint8格式)
         """
+        # 帧序规范化（仅 openfocus 族）：决定 base 参考端 / 末帧先验 /
+        # 深度图标签的确定性方向。必须在任何分派/分块之前完成，让整条
+        # 下游（含基底校正）都看到排序后的栈。
+        input_source = self._maybe_sort_input(input_source)
         # 如果传入的是已加载的图像列表且单张图像尺寸过大，则使用分块融合
         try:
             is_list_of_arrays = (

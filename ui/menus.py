@@ -222,6 +222,12 @@ def setup_menus(window: QMainWindow) -> None:
     batch_menu.addAction(depth_action)
     window.ui_objs['menu_depth_map'] = depth_action
 
+    dust_action = QAction(trans.t('menu_dust_map'), window)
+    dust_action.triggered.connect(window.show_dust_map_dialog)
+    dust_action.setProperty("trans_key", 'menu_dust_map')
+    batch_menu.addAction(dust_action)
+    window.ui_objs['menu_dust_map'] = dust_action
+
     # --- Settings Menu ---
     settings_menu = menubar.addMenu(trans.t('menu_settings'))
     window.ui_objs['menu_settings'] = settings_menu
