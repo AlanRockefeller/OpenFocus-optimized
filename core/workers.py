@@ -123,6 +123,7 @@ class RenderWorker(QThread):
         rb_ofb_checked: bool = False,
         rb_ofc_checked: bool = False,
         base_frame: str = "none",
+        sort_mode: str = "asc",
     ):
         super().__init__()
         self.raw_images = raw_images
@@ -150,6 +151,8 @@ class RenderWorker(QThread):
         self.rb_ofc_checked = bool(rb_ofc_checked)
         # 基底校正（消除亮度漂移）：'none' | 'last' | 'first'
         self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
+        # 帧序方向（仅 openfocus 族生效）：'asc'（默认）| 'desc' | 'off'
+        self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
         self.kernel_slider_value = kernel_slider_value
         # Tile params passed from UI (may be None -> use fusion defaults)
         self.tile_enabled = tile_enabled
@@ -355,6 +358,7 @@ class RenderWorker(QThread):
             tile_threshold=(self.tile_threshold if self.tile_threshold is not None else TILE_THRESHOLD),
             stackmffv4_batch_size=self.stackmffv4_batch_size,
             base_frame=self.base_frame,
+            sort_mode=self.sort_mode,
         )
 
         # Classical algorithms are CPU-only (see AGENTS.md); only the neural
@@ -712,6 +716,7 @@ class BatchWorker(QThread):
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
                 base_frame=self.processing_settings.get('base_frame', 'none'),
+                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
                 **tile_kwargs)
 
             if fusion_method == "guided_filter":
@@ -882,8 +887,9 @@ class BatchWorker(QThread):
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
                 base_frame=self.processing_settings.get('base_frame', 'none'),
+                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
                 **tile_kwargs)
-            
+
             # 调用fuse方法执行融合：与单文件夹路径使用同一套 16-bit 输入/输出契约，
             # 否则批处理会把 16-bit 栈压成 8-bit（甚至过曝）
             from utils.image_utils import normalize_fuse_input, quantize_fuse_output

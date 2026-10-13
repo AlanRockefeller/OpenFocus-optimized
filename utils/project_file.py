@@ -22,6 +22,7 @@ def _collect_state(window) -> Dict[str, Any]:
         "fusion_method": window.current_fusion_method(),
         "alignment_method": window.current_alignment_method(),
         "kernel_size": window.slider_smooth.value(),
+        "stack_reverse_order": bool(getattr(window, "stack_reverse_order", False)),
         "thread_count": getattr(window, "thread_count", 4),
         "tile_enabled": getattr(window, "tile_enabled", True),
         "tile_block_size": getattr(window, "tile_block_size", 1024),
@@ -234,6 +235,13 @@ def _apply_after_load(window, state: Dict[str, Any]) -> None:
     if kernel % 2 == 0:
         kernel = max(1, kernel - 1)
     window.slider_smooth.setValue(kernel)
+
+    # 反转帧序开关（v1.42）：属性 + 复选框同步
+    reverse = bool(settings.get("stack_reverse_order", False))
+    window.stack_reverse_order = reverse
+    chk = getattr(window, "chk_reverse_order", None)
+    if chk is not None:
+        chk.setChecked(reverse)
 
     if settings.get("thread_count"):
         window.thread_count = int(settings["thread_count"])

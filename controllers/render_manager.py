@@ -408,6 +408,8 @@ class RenderManager:
             rb_ofc_checked=fusion_method == "openfocus_c",
             base_frame="last" if getattr(window, "base_frame_correct", False)
                 else "none",
+            sort_mode="desc" if getattr(window, "stack_reverse_order", False)
+                else "asc",
         )
 
         self._progress_first_t = None

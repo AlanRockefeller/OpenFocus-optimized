@@ -328,6 +328,9 @@ class OpenFocus(QMainWindow):
         self.combo_fusion = right_panel_components.combo_fusion
         self.combo_align = right_panel_components.combo_align
         self.chk_base_correct = right_panel_components.chk_base_correct
+        self.chk_reverse_order = right_panel_components.chk_reverse_order
+        # 帧序方向：False=asc（文件序，默认）/ True=desc（倒序栈）
+        self.stack_reverse_order = False
         self.slider_smooth = right_panel_components.slider_smooth
         self.lbl_smooth_value = right_panel_components.smooth_value_label
         self.smooth_widget = right_panel_components.smooth_widget
@@ -344,6 +347,17 @@ class OpenFocus(QMainWindow):
 
         self.main_splitter.addWidget(right_panel_components.widget)
         bind_right_panel(self, right_panel_components)
+
+        # 持久化开关同步到复选框：属性在 UI 构建前已由 load_window_settings
+        # 恢复（v1.39 起基底校正存在"属性已恢复、复选框仍显示未勾"的不一致，
+        # 这里一并修复）。blockSignals 避免重复触发持久化。
+        self.chk_base_correct.blockSignals(True)
+        self.chk_base_correct.setChecked(bool(self.base_frame_correct))
+        self.chk_base_correct.blockSignals(False)
+        self.chk_reverse_order.blockSignals(True)
+        self.chk_reverse_order.setChecked(bool(
+            getattr(self, "stack_reverse_order", False)))
+        self.chk_reverse_order.blockSignals(False)
 
         # Probe torch availability in a background thread: importing torch
         # can block for seconds, and this only decides one checkbox state.
@@ -639,8 +653,9 @@ class OpenFocus(QMainWindow):
         # 重置配准选项 - 默认 ECC
         self.set_alignment_method("ecc")
 
-        # 基底校正默认关闭
+        # 基底校正默认关闭；帧序默认文件序（不反转）
         self.chk_base_correct.setChecked(False)
+        self.chk_reverse_order.setChecked(False)
         
         # 重置滑块值到默认值
         self.slider_smooth.setValue(31)
@@ -859,6 +874,11 @@ class OpenFocus(QMainWindow):
     def set_auto_download(self, enabled: bool) -> None:
         """Settings menu: download updates in the background while idle."""
         self.update_manager.set_auto_download(enabled)
+        self.persist_settings()
+
+    def set_reverse_order(self, enabled: bool) -> None:
+        """右面板开关：反转帧序（倒序栈，仅影响 OpenFocus A/B/C）。"""
+        self.stack_reverse_order = bool(enabled)
         self.persist_settings()
 
     def set_base_correct(self, enabled: bool) -> None:
@@ -1113,6 +1133,35 @@ class OpenFocus(QMainWindow):
         """Focus-position (pseudo-depth) map viewer and exporter."""
         from dialogs.depthmap import DepthMapDialog
         DepthMapDialog(self).exec()
+
+    def show_dust_map_dialog(self) -> None:
+        """Flat-field (dust map) correction from a defocused white shot."""
+        from dialogs.dustmap import DustMapDialog
+        DustMapDialog(self).exec()
+
+    def apply_flat_field_to_stack(self, gain) -> None:
+        """DustMapDialog 的应用回调：原地校正全栈并使派生结果失效。
+
+        校正同时写入 base_images——尘点/渐晕是物理校正而非视图变换，
+        必须在后续缩放重建时保留。复用 transform_manager 的失效+刷新
+        机制（与旋转/缩放同一条路径）。
+        """
+        import time as _time
+        from utils.dust_map import apply_flat_field_stack
+        self.push_undo()
+        t0 = _time.time()
+        self.raw_images = apply_flat_field_stack(self.raw_images, gain)
+        if getattr(self, "base_images", None):
+            self.base_images = apply_flat_field_stack(self.base_images, gain)
+        if hasattr(self.get_or_create_source_pixmap, "cache_clear"):
+            self.get_or_create_source_pixmap.cache_clear()
+        self.transform_manager._invalidate_processing_results(
+            clear_output_view=True, preserve_outputs=True)
+        self.transform_manager.reload_image_stack(
+            initial_index=getattr(self, "current_img_index", 0))
+        self.statusBar().showMessage(
+            trans.t('dust_applied').format(n=len(self.raw_images),
+                                           t=_time.time() - t0), 5000)
 
     def show_quick_start(self) -> None:
         from dialogs.welcome import WelcomeDialog
@@ -2138,6 +2187,9 @@ class OpenFocus(QMainWindow):
         if getattr(c, 'chk_base_correct', None) is not None:
             c.chk_base_correct.setText(trans.t('chk_base_correct'))
             c.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+        if getattr(c, 'chk_reverse_order', None) is not None:
+            c.chk_reverse_order.setText(trans.t('chk_reverse_order'))
+            c.chk_reverse_order.setToolTip(trans.t('chk_reverse_order_hint'))
 
         c.registration_group.setTitle(trans.t('group_registration'))
         for i, (_code, key, hint_key) in enumerate(ALIGN_ITEMS):

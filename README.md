@@ -13,6 +13,8 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> 🎉 **2026.10.13**: **v1.42** — **Dust map (flat-field) correction**: one defocused white-field shot removes static dust specks and vignetting from the whole stack before registration (Tools → Dust Map, CLI `--dust-map`); plus explicit **stack-order control** for the OpenFocus A/B/C family (`--sort asc|desc|off`) and a resolved implementation work question: OpenFocus never reorders stacks — its depth-map export polarity was the red herring (evidence in `tools/OpenFocus_repro/validate_autosort.py`).
+
 > 🎉 **2026.10.13**: **v1.41** — **algorithm selection redesigned**: fusion and alignment are now **single-choice dropdowns** (alignment: none / Homography / ECC / OpenFocus-fast), and *Remove brightness drift* moved next to *Quick preview* as the post-processing switch it is. **Depth maps** now cover *OpenFocus A/B/C* with the OpenFocus-validated window-variance measure. Also fixed default export filenames tagging OpenFocus results as "None".
 
 > 🎉 **2026.10.13**: **v1.40** — **OpenFocus-parity audit of the v1.39 ports**: fixed *OpenFocus - A* crashing on grayscale stacks, *OpenFocus - B* corrupting >256-frame stacks (uint8 depth clip), and aligned *OpenFocus - C* to the validated max-pick recipe (measurably closer to OpenFocus on deep stacks: balls 5.09% vs 6.23% MAE). Added a OpenFocus-benchmark regression suite (`tests/test_OpenFocus_regression.py`) that locks A/B/C to measured MAE budgets against the original software's output.

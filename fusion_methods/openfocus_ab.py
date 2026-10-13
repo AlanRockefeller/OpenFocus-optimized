@@ -260,3 +260,81 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
         img = _pyramid_expand(img, out_bands[k].shape[:2]) + out_bands[k]
 
     return np.clip(img, 0, 255).astype(fuse_output_dtype(frames))
+
+
+# ------------------------------------------------------------------
+# 帧序检测（Sort automatically，实测 OpenFocus 的行为）
+# ------------------------------------------------------------------
+def frame_sharpness_curve(frames, radius: int = 3, max_dim: int = 256):
+    """逐帧标量清晰度：降采样 luma 上的窗口方差均值（诊断用）。
+
+    用与 A/B/C 融合一致的窗口方差度量（验证：与 OpenFocus 深度图
+    99.5% 一致），在 ≤256px 的小图上计算，单帧毫秒级。
+    注意：该曲线与帧序**方向**无关（见上方实验结论），仅用于诊断与
+    validate_autosort.py 的证据复跑，不参与产品路径的方向决策。
+    """
+    curve = []
+    for f in frames:
+        g = _luminance(np.asarray(f).astype(np.float32))
+        h, w = g.shape[:2]
+        if max(h, w) > max_dim:
+            s = max_dim / float(max(h, w))
+            g = cv2.resize(g, (max(1, int(round(w * s))),
+                               max(1, int(round(h * s)))),
+                           interpolation=cv2.INTER_AREA)
+        curve.append(float(_window_variance(g, radius).mean()))
+    return np.asarray(curve, np.float64)
+
+
+def detect_stack_flip(curve, min_frames: int = 5, threshold: float = -0.7,
+                      min_range: float = 0.10) -> bool:
+    """清晰度曲线随帧序明确单调递减时返回 True（应当翻转）。
+
+    坍缩保护：帧数不足、曲线平坦（无单调证据）时一律不翻——典型焦点栈
+    的全局清晰度是"钟形"（两端模糊中间清晰），秩相关近 0，天然不触发。
+    """
+    c = np.asarray(curve, np.float64)
+    n = int(c.size)
+    if n < min_frames:
+        return False
+    med = float(np.median(c))
+    if med <= 0.0:
+        return False
+    if float(c.max() - c.min()) / med < min_range:
+        return False
+    # Spearman 秩相关 = 秩上的 Pearson
+    ranks = np.argsort(np.argsort(c)).astype(np.float64)
+    idx = np.arange(n, dtype=np.float64)
+    idx -= idx.mean()
+    ranks -= ranks.mean()
+    denom = float(np.sqrt((idx * idx).sum() * (ranks * ranks).sum()))
+    if denom <= 0.0:
+        return False
+    rho = float((idx * ranks).sum() / denom)
+    return rho <= threshold
+
+
+# ------------------------------------------------------------------
+# 帧序方向（Sort）
+# ------------------------------------------------------------------
+# 实验结论（tools/OpenFocus_repro/validate_autosort.py，2026-10-13）：
+# 全局清晰度曲线与帧序方向无关——11 个真实栈的 Spearman rho 散布在
+# -0.98…+1.00，"单调递减检测"只对 1/11 正确。根本原因：内容是
+# 反转变换协变的（反转后的栈同样是合法焦点栈），任何内容信号都
+# 无法判定方向；而 OpenFocus 的 dmap 极性证据显示它对全部 11 栈都按
+# 文件序的反方向处理——方向只能来自元数据或用户意图。
+# 因此方向控制是显式的：asc（默认，保持文件序）/ desc（倒序栈翻转）。
+
+def sort_frames_for_openfocus(frames, mode: str = "asc"):
+    """按 mode 规范帧序，返回 (排序后帧列表, 是否翻转)。
+
+    mode:
+      - "asc" : 保持文件序（默认——所见即所得，方向由用户保证）
+      - "desc": 倒序栈——翻转为正序，让末帧先验（A 的平坦退化）、
+                基底参考（消除亮度漂移）、深度图标签落在确定的一端
+      - "off" : 等同 asc（保留给 UI/CLI 的显式关闭语义）
+    """
+    frames = list(frames)
+    if mode == "desc" and len(frames) > 1:
+        return frames[::-1], True
+    return frames, False

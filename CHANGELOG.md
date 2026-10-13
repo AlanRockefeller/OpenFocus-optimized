@@ -3,6 +3,45 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.42] — 2026-10-13
+
+### Added — dust map (flat-field correction) and stack-order control
+- **Dust map / flat-field correction** (Tools → Dust Map, CLI `--dust-map`):
+  one defocused shot of a blank/white area records the static gain field
+  of the optics; the field is divided out of every frame **before
+  registration** (dust lives in sensor coordinates — correcting after the
+  warp would smear it). Removes dust specks and vignetting together,
+  16-bit safe, gain clipped to [0.5, 2] so dead pixels cannot amplify
+  noise. The dialog previews the gain heatmap plus a before/after of the
+  first frame, takes the white shot from a file or from a stack frame,
+  and applying is undoable with alignment caches invalidated
+- **Stack order for the OpenFocus family** (CLI `--sort asc|desc|off`,
+  GUI "Reverse stack order" checkbox): a far-to-near sweep can be
+  reversed so the base-reference end, A's last-frame prior and the
+  depth-map labels anchor to the intended end. Default `asc` keeps the
+  file order — which an output-side experiment proved is also OpenFocus's
+  behaviour (see below)
+
+### Resolved — the "OpenFocus auto-reverses stacks" question, with evidence
+The implementation work notes had concluded OpenFocus's "Sort automatically"
+reverses frame order (depth labels differed by n-1 on the Mobile Depth
+set). New experiments during this release (`tools/OpenFocus_repro/
+validate_autosort.py`) overturned that: OpenFocus's dmap **export polarity**
+is simply "65535 = first frame" — no reordering ever happens. Three
+independent proofs: ① base correction against the file-last end gives the
+best output MAE on the real stacks (desc makes it worse: keyboard
+1.18%→2.40%), ② the synthetic descending stack keeps its file-last base,
+③ content-based direction detection is impossible in principle (content is
+reversal-covariant; sharpness-curve rho scatters −0.98…+1.00 across the 11
+real stacks). The shipped detector from that earlier conclusion was
+therefore dropped in favour of an explicit user choice
+
+### Fixed
+- **Persisted "Remove brightness drift" never re-checked its checkbox**
+  after a restart: the attribute was restored but the checkbox kept
+  showing unchecked (the render still obeyed the restored value — the UI
+  lied). Both persisted toggles now sync on startup
+
 ## [v1.41] — 2026-10-13
 
 ### Changed — algorithm selection is now dropdown, single-choice
