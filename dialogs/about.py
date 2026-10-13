@@ -155,6 +155,17 @@ class EnvironmentInfoDialog(QDialog):
             info_lines.append(f"  ✗ {trans.t('env_dtcwt_unavailable')}")
         info_lines.append("")
 
+        # 检测 SciPy（DCT 的一致性中值滤波 + 深度图 DCT 度量所需）
+        info_lines.append("-" * 60)
+        info_lines.append("SciPy (required by DCT)")
+        try:
+            import scipy  # noqa: F401
+
+            info_lines.append(f"  ✓ {trans.t('env_installed').format(scipy.__version__)}")
+        except ImportError:
+            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        info_lines.append("")
+
         # 总结
         info_lines.append("=" * 60)
         info_lines.append(trans.t('env_summary'))

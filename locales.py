@@ -467,7 +467,7 @@ class TranslationManager(QObject):
                 'env_gpu_opt': 'GPU Acceleration (Optional):',
                 'env_gpu_desc': '- PyTorch: Enables AI (CPU fallback available but slower)',
                 'env_fusion_alg': 'Fusion Algorithms:',
-                'env_fusion_desc': '- DTCWT library: Required for DTCWT fusion',
+                'env_fusion_desc': '- DTCWT library: Required for DTCWT fusion\n- SciPy: Required for DCT\n- Guided Filter and OpenFocus A/B/C: no extra dependencies',
                 
                 'dialog_contact_title': 'Contact Us',
                 'contact_info_title': 'Contact Information',
@@ -1093,7 +1093,7 @@ class TranslationManager(QObject):
                 'env_gpu_opt': 'GPU 加速 (可选):',
                 'env_gpu_desc': '- PyTorch: 启用 AI (提供 CPU 回退模式，但较慢)',
                 'env_fusion_alg': '融合算法:',
-                'env_fusion_desc': '- DTCWT 库: DTCWT 融合所需',
+                'env_fusion_desc': '- DTCWT 库: DTCWT 融合所需\n- SciPy: DCT 所需\n- 引导滤波与 OpenFocus A/B/C：无需额外依赖',
                 
                 'dialog_contact_title': '联系我们',
                 'contact_info_title': '联系信息',

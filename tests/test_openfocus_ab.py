@@ -318,3 +318,25 @@ class TestOpenFocusAlignment:
         assert out[0].shape[1] >= frames[0].shape[1] - 4
         assert np.abs(out[1].astype(int)[2:-2, 2:-2]
                       - out[0].astype(int)[2:-2, 2:-2]).mean() < 3.0
+
+    def test_defocus_frames_still_align(self):
+        """失焦 + 位移的帧仍要对齐（高通预处理 + 置信门限 + 链式回退
+        的组合效果）。σ11 级的极端模糊物理上不可恢复，不在此列。"""
+        from core.registration import ImageRegistration
+        base = make_two_focus_stack((240, 320))[0]
+        f1 = cv2.warpAffine(cv2.GaussianBlur(base, (0, 0), 3.5),
+                            np.float32([[1, 0, 10], [0, 1, 7]]), (320, 240))
+        f2 = cv2.warpAffine(cv2.GaussianBlur(base, (0, 0), 4.5),
+                            np.float32([[1, 0, 16], [0, 1, 11]]), (320, 240))
+        reg = ImageRegistration(method="openfocus")
+        out = reg.process([base.copy(), f1, f2], output_path=None,
+                          thread_count=2)
+
+        def res(a, b):
+            return np.abs(a.astype(int)[6:-6, 6:-6]
+                          - b.astype(int)[6:-6, 6:-6]).mean()
+
+        # 失焦帧的残差含不可消除的模糊差（对齐只消位移）——阈值放宽到
+        # 0.75，并要求两帧都显著改善
+        assert res(out[2], out[0]) < res(f2, base) * 0.75
+        assert res(out[1], out[0]) < res(f1, base) * 0.75
