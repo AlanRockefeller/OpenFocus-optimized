@@ -13,6 +13,11 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> 🎉 **2026.10.14**: **v1.46** — **variance-window spec from discriminative probes**: OpenFocus's real measure window is a fixed ≈10px box with BT.601 luma and no pre-blur (report §6.7/§6.8); OpenFocus A/B/C default window is now radius 5 — real-stack depth agreement improves (kitchen ±3: 95.3% vs 92.7%) while fused output stays radius-insensitive. Manuals rewritten for the 8-algorithm dropdown era.
+
+> 🎉 **2026.10.14**: **v1.45** — **batch jobs with "Alignment only (no fusion)" crashed**: the fusion string 'none' was handed straight to the fusion constructor. Batch now skips the fusion step and always saves the aligned frames for that mode (otherwise the job would produce no output at all), and the batch options panel shows the localized method name.
+
+> [!NOTE]
 > 🎉 **2026.10.14**: **v1.44** — **consistency sweep**: depth maps now list only index-deciding methods (weighted-average fusions removed — they have no per-pixel decision), the kernel slider states its meaning per algorithm (Guided-filter radius / DCT median / GFG kernel / variance window), Compare-All and all method-name displays follow the fusion-dropdown order in your language, and a real startup bug from the kernel-label work is fixed.
 
 > 🎉 **2026.10.13**: **v1.43** — **alignment overhaul + fixes round**: root-caused the failing OpenFocus alignment (an OpenCV `phaseCorrelate` input-mutation bug corrupting the reference frame + a translation-only model where OpenFocus uses a bounded similarity transform) and rewrote it as bounded rotation/scale/translation search — verified on known perturbations; restored the **alignment-only** output mode; depth maps for *OpenFocus A/B/C* are now three genuinely different maps; *Quick preview* and *Remove brightness drift* share a row.

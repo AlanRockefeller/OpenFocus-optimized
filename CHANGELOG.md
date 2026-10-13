@@ -3,6 +3,34 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.46] — 2026-10-14
+
+### Changed — variance window spec from the discriminative-probe identification
+The implementation work project gained a fourth-round system
+identification (report §6.7/§6.8, reproducible via
+`tools/OpenFocus_repro/probe_measure.py`): probes designed to make candidate
+measures disagree, voted on by OpenFocus's own depth maps, established that
+OpenFocus's real measure window is a **fixed ≈10px box** (the Radius setting
+does not control it), the measure is **BT.601 luma** (exactly what our
+port already uses), and there is **no pre-blur** (a σ0.5 hypothesis was
+tested and rejected: keyboard unchanged, balls slightly worse, kitchen
+within noise).
+
+- OpenFocus A/B/C **variance window default is now radius 5 (kernel 11,
+  was 3/7)** and the family's slider range is capped at radius 10
+  (kernel 21); other algorithms keep 1–51. Real-stack depth agreement
+  with OpenFocus improves (kitchen ±3 frames: 95.3% vs 92.7%, balls 89.2%
+  vs 85.9%); fused output is radius-insensitive (<0.1%) so only the
+  depth-map fidelity moves
+- The depth-map dialog's kernel line and the main-window slider label
+  follow the new default automatically
+
+### Docs
+- User manuals (EN/ZH): the fusion-methods chapter now covers all eight
+  algorithms plus alignment-only, the dropdown-based selection flow, and
+  an updated comparison table; the depth-map chapter reflects the
+  index-deciding-only method list
+
 ## [v1.45] — 2026-10-14
 
 ### Fixed

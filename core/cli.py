@@ -216,7 +216,8 @@ def _fuse_stack(images, args):
     elif args.method in ("dct", "gfgfgf"):
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 7)
     elif args.method in ("openfocus_a", "openfocus_b", "openfocus_c"):
-        fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 7)
+        # 判别性探针（报告 §6.8）：默认方差窗口半径 5（kernel=11）
+        fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 11)
     elif args.method == "stackmffv4":
         fuse_kwargs["model_path"] = _find_model_path()
 

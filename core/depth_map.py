@@ -272,12 +272,13 @@ def _measure_stackmffv4(images, progress, should_cancel,
 # --------------------------------------------------------------------------
 # openfocus_a/b/c — 各自融合管线的"焦点位置"可视化（三种不同的图）
 # --------------------------------------------------------------------------
-def _measure_openfocus(images, progress, should_cancel, kernel_size=7):
+def _measure_openfocus(images, progress, should_cancel, kernel_size=11):
     """B：argmax of blur(x²) − blur(x)² on the gray channel.
 
     与 fusion_methods/openfocus_ab.py 的 B 方法度量一致（验证：与
     OpenFocus 深度图 99.5% 逐像素重合）——硬拾取的逐像素获胜帧。kernel
-    滑块即方差窗口；流式 argmax（严格 > 保持 np.argmax 首胜语义）。
+    滑块即方差窗口（默认半径 5，判别性探针实测最优）；流式 argmax
+    （严格 > 保持 np.argmax 首胜语义）。
     """
     if kernel_size % 2 == 0:
         kernel_size += 1

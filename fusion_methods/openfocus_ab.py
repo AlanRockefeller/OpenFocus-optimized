@@ -90,7 +90,7 @@ def _variance_stack(frames_f: List[np.ndarray], radius: int) -> np.ndarray:
     ], axis=0)
 
 
-def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 7,
+def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 11,
                      thread_count: int = None):
     """OpenFocus - A（方差加权平均，末帧先验）。
 
@@ -132,7 +132,7 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 7,
     return np.clip(fused, 0, 255).astype(fuse_output_dtype(frames))
 
 
-def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 7,
+def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
                      thread_count: int = None):
     """OpenFocus - B（方差深度图选择）。
 
