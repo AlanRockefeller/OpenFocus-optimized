@@ -45,6 +45,7 @@ _PERSISTED_FIELDS = {
     "scale_um_per_px_manual": ("export/scale_um_per_px_manual", 0.0, "float"),
     "scale_bar_position": ("export/scale_bar_position", "bottom-right", "str"),
     "scale_bar_color": ("export/scale_bar_color", "auto", "str"),
+    "base_frame_correct": ("fusion/base_frame_correct", False, "bool"),
 }
 
 

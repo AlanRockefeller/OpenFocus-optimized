@@ -21,6 +21,7 @@ python Registration.py --mode both
 
 
 import argparse
+import concurrent.futures
 import re
 import time
 import cv2
@@ -478,6 +479,147 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
 
 class RegistrationCancelled(Exception):
     """Raised when a render cancellation flag fires mid-registration."""
+
+
+# ========== OpenFocus 快速对齐（有界相位相关，复刻自 Helicon 逆向） ==========
+
+def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
+                          downscale_width=None, thread_count: int = 4,
+                          should_cancel=None, equalize_brightness=True,
+                          max_shift_ratio=0.25):
+    """
+    OpenFocus 快速对齐：有界相位相关 + 亮度均衡 + 自动裁边。
+
+    复刻 Helicon Focus 的对齐档位（docs/HELICON_REPRODUCTION_REPORT.md）：
+    焦点堆栈的呼吸效应本质是小幅全局位移——标准化互功率谱（Hann 窗）
+    的相位相关峰值给出亚像素平移，实测单帧 <10ms，比 ECC 快约 50 倍。
+    每帧低频亮度先均衡到参考帧（对应 Helicon 的 AdjustBrightness），
+    位移钳制在 max_shift_ratio 以内（对应其 -va/-ha 上限），
+    最后按各帧有效区交集自动裁边（AutoCrop）。
+    """
+    if img_filenames is None and isinstance(input_source, str):
+        valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+        img_paths = sorted(
+            (os.path.join(input_source, f) for f in os.listdir(input_source)
+             if os.path.splitext(f)[1].lower() in valid_exts),
+            key=_image_sort_key
+        )
+        images = [cv2.imread(path) for path in img_paths]
+        img_filenames = [os.path.basename(path) for path in img_paths]
+    else:
+        images = input_source
+    if images is None or len(images) < 2:
+        return images if images is not None else []
+
+    n = len(images)
+    h, w = images[0].shape[:2]
+    max_shift = (int(w * max_shift_ratio), int(h * max_shift_ratio))
+
+    def _gray_float(img):
+        if img.ndim == 2:
+            g = img
+        else:
+            take = min(img.shape[2], 3)
+            if take == 1:
+                g = img[:, :, 0]
+            else:
+                m = (np.array([0.114, 0.587, 0.299], np.float32) *
+                     np.array([1.0 if img.dtype == np.uint8 else 1.0] * 3, np.float32))
+                g = cv2.transform(img[:, :, :take].astype(np.float32),
+                                  m.reshape(1, -1))
+                g = g if g.ndim == 2 else g[:, :, 0]
+        return g.astype(np.float32)
+
+    ref_gray = _gray_float(images[0])
+    ref_low = cv2.GaussianBlur(ref_gray, (0, 0), 32.0)
+    ref_low_mean = float(ref_low.mean()) or 1.0
+    gains = [1.0]
+    try:
+        window = cv2.createHanningWindow(
+            (w, h), cv2.CV_32F) if hasattr(cv2, "createHanningWindow") else None
+    except Exception:
+        window = None
+
+    transforms = [np.eye(3, dtype=np.float64)]
+    print("Aligning %d images using OpenFocus phase correlation (fast)..." % n)
+    for i in range(1, n):
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+        cur_gray = _gray_float(images[i])
+        # 亮度均衡：低频增益匹配参考帧（曝光漂移栈上相位相关更稳）
+        gain = 1.0
+        if equalize_brightness:
+            cur_low = cv2.GaussianBlur(cur_gray, (0, 0), 32.0)
+            cur_mean = float(cur_low.mean())
+            if cur_mean > 1e-3:
+                gain = float(np.clip(ref_low_mean / cur_mean, 0.5, 2.0))
+                cur_gray = cur_gray * gain
+        gains.append(gain)
+        try:
+            if window is not None:
+                (dx, dy), response = cv2.phaseCorrelate(
+                    ref_gray, cur_gray, window)
+            else:
+                (dx, dy), response = cv2.phaseCorrelate(ref_gray, cur_gray)
+        except cv2.error:
+            dx = dy = 0.0
+            response = 0.0
+        if response < 0.05:
+            # 弱纹理/失焦帧上相位相关会出现伪峰（实测 response 比正常
+            # 低一个数量级：0.011 vs 0.10+）——低于置信阈值视为无位移
+            dx = dy = 0.0
+        # 有界钳制（对应 Helicon 的位移上限参数）
+        dx = float(np.clip(dx, -max_shift[0], max_shift[0]))
+        dy = float(np.clip(dy, -max_shift[1], max_shift[1]))
+        # phaseCorrelate 返回"当前帧相对参考的位移 d"；warpAffine 的语义是
+        # dst(x) = src(x − t)，要消除 d 必须取 t = −d。
+        H = np.eye(3, dtype=np.float64)
+        H[0, 2] = -dx
+        H[1, 2] = -dy
+        transforms.append(H)
+        print("  frame %d/%d: shift (%+.2f, %+.2f)" % (i, n - 1, dx, dy))
+
+    def _warp(args):
+        idx, img, H, gain = args
+        # phaseCorrelate 返回"当前帧相对参考的位移"——把当前帧平移回参考位置
+        M = H[:2, :]
+        warped = cv2.warpAffine(img, M, (w, h),
+                                flags=cv2.INTER_LANCZOS4
+                                | cv2.WARP_FILL_OUTLIERS,
+                                borderMode=cv2.BORDER_REFLECT)
+        if gain != 1.0:
+            # 亮度均衡同步应用到输出帧（Helicon AdjustBrightness 语义：
+            # 均衡后的帧进入融合，消除曝光漂移）
+            warped = np.clip(warped.astype(np.float32) * gain, 0,
+                             255 if img.dtype == np.uint8 else 65535)
+            warped = warped.astype(img.dtype)
+        return idx, warped
+
+    aligned = [None] * n
+    aligned[0] = images[0]
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, int(thread_count or 4))) as pool:
+        futures = [pool.submit(_warp, (i, images[i], transforms[i], gains[i]))
+                   for i in range(1, n)]
+        for future in concurrent.futures.as_completed(futures):
+            if should_cancel is not None and should_cancel():
+                for pending in futures:
+                    pending.cancel()
+                raise RegistrationCancelled()
+            idx, warped = future.result()
+            aligned[idx] = warped
+
+    top, bottom, left, right = _compute_valid_region_from_transforms(
+        transforms, (h, w))
+    aligned = [img[top:bottom, left:right] for img in aligned]
+
+    if output_path:
+        os.makedirs(output_path, exist_ok=True)
+        print("  - Saving results...")
+        for idx, img in enumerate(aligned):
+            fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
+            cv2.imwrite(os.path.join(output_path, fname), img)
+    return aligned
 
 
 # ========== ECC对齐算法实现（高精度） ==========
@@ -957,7 +1099,7 @@ class ImageRegistration:
         result = registration.process(image_list, './output')
     """
     
-    SUPPORTED_METHODS = ['homography', 'ecc', 'both']
+    SUPPORTED_METHODS = ['homography', 'ecc', 'both', 'openfocus']
     
     def __init__(self, method: str = 'homography', downscale_width: int = 1024):
         """
@@ -997,6 +1139,8 @@ class ImageRegistration:
             return self._process_homography(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
         elif self.method == 'ecc':
             return self._process_ecc(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
+        elif self.method == 'openfocus':
+            return self._process_openfocus(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
         elif self.method == 'both':
             # 组合模式：先 Homography，后 ECC
             # 第一步：Homography (不保存中间结果，除非只做这一步)
@@ -1041,7 +1185,20 @@ class ImageRegistration:
             配准后的图像列表
         """
         return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel)
-    
+
+    def _process_openfocus(self,
+                           input_source: Union[str, List[np.ndarray]],
+                           output_path: Optional[str] = None,
+                           thread_count: int = 4,
+                           should_cancel=None) -> List[np.ndarray]:
+        """
+        OpenFocus 快速对齐（有界相位相关，复刻 Helicon 的对齐档位）
+        """
+        return _align_openfocus_impl(input_source, output_path,
+                                     downscale_width=self.downscale_width,
+                                     thread_count=thread_count,
+                                     should_cancel=should_cancel)
+
     def set_method(self, method: str):
         """
         切换配准方法

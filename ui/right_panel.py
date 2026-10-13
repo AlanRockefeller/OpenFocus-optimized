@@ -44,8 +44,13 @@ class RightPanelComponents:
     rb_c: QRadioButton
     rb_gfg: QRadioButton
     rb_d: QRadioButton
+    rb_ofa: QRadioButton
+    rb_ofb: QRadioButton
+    rb_ofc: QRadioButton
     cb_align_homography: QCheckBox
     cb_align_ecc: QCheckBox
+    cb_align_of: QCheckBox
+    chk_base_correct: QCheckBox
     slider_smooth: QSlider
     smooth_value_label: QLabel
     smooth_widget: QWidget
@@ -98,13 +103,31 @@ def create_right_panel() -> RightPanelComponents:
     rb_gfg.setAutoExclusive(False)
     rb_d = QRadioButton(trans.t('radio_stackmff'))
     rb_d.setAutoExclusive(False)
+    rb_ofa = QRadioButton(trans.t('radio_openfocus_a'))
+    rb_ofa.setAutoExclusive(False)
+    rb_ofa.setToolTip(trans.t('radio_openfocus_a_hint'))
+    rb_ofb = QRadioButton(trans.t('radio_openfocus_b'))
+    rb_ofb.setAutoExclusive(False)
+    rb_ofb.setToolTip(trans.t('radio_openfocus_b_hint'))
+    rb_ofc = QRadioButton(trans.t('radio_openfocus_c'))
+    rb_ofc.setAutoExclusive(False)
+    rb_ofc.setToolTip(trans.t('radio_openfocus_c_hint'))
 
     method_layout.addWidget(rb_a)
     method_layout.addWidget(rb_b)
     method_layout.addWidget(rb_c)
     method_layout.addWidget(rb_gfg)
     method_layout.addWidget(rb_d)
+    method_layout.addWidget(rb_ofa)
+    method_layout.addWidget(rb_ofb)
+    method_layout.addWidget(rb_ofc)
     method_layout.addStretch()
+
+    # 基底校正（消除亮度漂移）：默认不勾选
+    chk_base_correct = QCheckBox(trans.t('chk_base_correct'))
+    chk_base_correct.setChecked(False)
+    chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+    method_layout.addWidget(chk_base_correct)
 
     method_help_layout = QHBoxLayout()
     method_help_layout.addStretch()
@@ -121,9 +144,13 @@ def create_right_panel() -> RightPanelComponents:
     cb_align_ecc.setChecked(True)
     cb_align_homography = QCheckBox(trans.t('check_align_homography'))
     cb_align_homography.setChecked(False)
+    cb_align_of = QCheckBox(trans.t('check_align_of'))
+    cb_align_of.setChecked(False)
+    cb_align_of.setToolTip(trans.t('check_align_of_hint'))
 
     registration_layout.addWidget(cb_align_ecc)
     registration_layout.addWidget(cb_align_homography)
+    registration_layout.addWidget(cb_align_of)
     registration_layout.addStretch()
 
     reg_help_layout = QHBoxLayout()
@@ -262,8 +289,13 @@ def create_right_panel() -> RightPanelComponents:
         rb_c=rb_c,
         rb_gfg=rb_gfg,
         rb_d=rb_d,
+        rb_ofa=rb_ofa,
+        rb_ofb=rb_ofb,
+        rb_ofc=rb_ofc,
         cb_align_homography=cb_align_homography,
         cb_align_ecc=cb_align_ecc,
+        cb_align_of=cb_align_of,
+        chk_base_correct=chk_base_correct,
         slider_smooth=slider_smooth,
         smooth_value_label=lbl_smooth_value,
         smooth_widget=smooth_widget,
@@ -294,6 +326,12 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     components.rb_c.clicked.connect(lambda: window.handle_method_selection(components.rb_c))
     components.rb_gfg.clicked.connect(lambda: window.handle_method_selection(components.rb_gfg))
     components.rb_d.clicked.connect(lambda: window.handle_method_selection(components.rb_d))
+    components.rb_ofa.clicked.connect(lambda: window.handle_method_selection(components.rb_ofa))
+    components.rb_ofb.clicked.connect(lambda: window.handle_method_selection(components.rb_ofb))
+    components.rb_ofc.clicked.connect(lambda: window.handle_method_selection(components.rb_ofc))
+
+    # 基底校正开关（消除亮度漂移）：立即持久化，渲染时读取
+    components.chk_base_correct.toggled.connect(window.set_base_correct)
 
     # 帮助对话框在点击时才导入：模块级导入 dialogs 会与 ui 包形成循环
     # (dialogs.about -> ui.styles -> ui/__init__ -> right_panel -> dialogs)
@@ -321,6 +359,9 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     components.rb_c.clicked.connect(window.update_slider_availability)
     components.rb_gfg.clicked.connect(window.update_slider_availability)
     components.rb_d.clicked.connect(window.update_slider_availability)
+    components.rb_ofa.clicked.connect(window.update_slider_availability)
+    components.rb_ofb.clicked.connect(window.update_slider_availability)
+    components.rb_ofc.clicked.connect(window.update_slider_availability)
 
     components.file_list.customContextMenuRequested.connect(window.source_manager.show_source_context_menu)
     components.file_list.currentRowChanged.connect(window.source_manager.sync_slider_from_list)

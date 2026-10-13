@@ -471,7 +471,8 @@ def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
 
     assert w.aligned_images == processed
     assert w.is_images_aligned is True
-    assert w.last_alignment_options == (False, False)
+    # 3-tuple since v1.39: (homography, ecc, openfocus)
+    assert w.last_alignment_options == (False, False, False)
     assert len(saved) == 1
     assert saved[0]["shape"] == (30, 40)
     assert saved[0]["filenames"] == w.image_filenames
@@ -534,7 +535,9 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
 
     rm.start_compare_all()
     assert rm._compare_mode is True
-    assert len(rm._compare_queue) == 3
+    # guided_filter runs first; the queue holds the rest (A/B/C included
+    # since v1.39)
+    assert len(rm._compare_queue) == 6
     assert rm._compare_current == "guided_filter"
     assert not w.btn_render.isEnabled()
     assert not w.cb_align_homography.isEnabled()

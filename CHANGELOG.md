@@ -3,6 +3,36 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.39] — 2026-10-13
+
+### Added — the Helicon Focus algorithm family, reverse-engineered and verified
+All three derived from a full static+behavioural reverse engineering of
+Helicon Focus 8.1 (docs/HELICON_REPRODUCTION_REPORT.md: 99.5% depth-map
+agreement, 0.95–4.1% output MAE across the 11-stack StackMFF test set).
+- **OpenFocus - A** (variance-weighted average): window-variance weights
+  smoothed per Helicon's Smoothing, with a +1 last-frame prior so flat
+  regions degrade exactly to the last frame
+- **OpenFocus - B** (variance depth-map pick): two-pass
+  argmax(variance) → median+Gaussian depth smoothing → hard pixel pick;
+  tie-break takes the first frame — no halos on smooth surfaces
+- **OpenFocus - C** (Laplacian pyramid): per-band energy soft-normalized
+  blend with the coarsest band taken from the last frame; boosts local
+  contrast (the documented Helicon "contrast and glare" behaviour)
+- **Remove brightness drift** (off by default): unified post-fusion base
+  correction `out += LP(I_base) − LP(out)` (σ=32) matching the last or
+  first frame — removes exposure/brightness drift across the stack
+  (essential for time-lapse); exposed as a checkbox, CLI `--base-frame`,
+  and honoured by tiled fusion and batch jobs
+- **OpenFocus alignment** (fast, checkable alongside ECC/Homography):
+  bounded phase correlation with a Hann window and a 0.05 confidence gate
+  (weak-texture frames report no shift instead of a spurious peak),
+  low-frequency brightness equalization per frame, and automatic crop to
+  the valid intersection; milliseconds per frame, also in the CLI
+  (`-a openfocus`) and batch (chains before ECC/Homography when combined)
+- The three methods join Compare-All, the kernel slider (as the variance
+  window; output is radius-insensitive per the reverse-engineering
+  measurements), batch jobs and the four-language UI
+
 ## [v1.38] — 2026-10-08
 
 ### Fixed

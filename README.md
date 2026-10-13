@@ -13,6 +13,8 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> 🎉 **2026.10.13**: **v1.39** — **the Helicon Focus algorithm family, reverse-engineered and verified**: *OpenFocus - A* (variance-weighted average), *OpenFocus - B* (variance depth-map pick), *OpenFocus - C* (Laplacian pyramid), a **Remove brightness drift** post-correction (off by default), and a **fast OpenFocus alignment** (bounded phase correlation + brightness equalization, milliseconds per frame). All verified against Helicon's own output (99.5% depth-map agreement, 0.95–4.1% MAE on the StackMFF test set) and available in the GUI, batch and CLI (`-m openfocus_a|b|c`, `-a openfocus`, `--base-frame`).
+
 > 🎉 **2026.10.08**: **v1.37** — **Undo/Redo (Ctrl+Z)** for every stack operation, **per-frame enable/disable** (untick a frame to exclude it from fusion without deleting it), **drag to reorder** the stack, Recent Projects, new shortcuts (Ctrl+R render, Ctrl+Shift+R compare all, Ctrl+Shift+B batch, Ctrl+M depth map), SHA-256-verified one-click updates, and CLI pipeline flags (`--dry-run`, `--resume`, `--json`, `--json-progress`, `--config` per-folder overrides).
 
 > 🎉 **2026.10.07**: **v1.36** — **updates happen in the background**: a new release downloads while you keep working (no modal, cancellable, and the staged build is reused, so updating is instant and works offline), and *Update and Restart* reopens the project you had open. Also fixed: the burst of black console windows and the silent stall that never restarted the app, multi-page TIFF stacks multiplying their frames on restore, 16-bit depth-map overlays turning white, and scale-bar calibration leaking between stacks.
