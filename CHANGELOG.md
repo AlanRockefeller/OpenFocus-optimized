@@ -3,6 +3,28 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Similarity estimator parsimony rule**: on defocus frames, blur mimics
+  slight scale in NCC — the bounded search could return spurious rotation
+  (up to ±4°) and 1.03× scale for pure-translation frames. Non-trivial
+  (θ, s) candidates must now beat the translation-only baseline by ≥0.05
+  NCC to be adopted; known-perturbation verification still recovers all
+  true rotation/scale/translation cases
+
+### Improved
+- **Depth-map dialog recomputes automatically when switching between
+  second-scale methods** (matches the auto-compute on open); slow methods
+  keep the explicit Compute button
+- **Environment dialog**: SciPy detection added; dependency summary now
+  complete (SciPy for DCT; Guided Filter and OpenFocus A/B/C need nothing
+  extra)
+- **Help dialog**: descriptions for the reverse-engineered OpenFocus
+  A/B/C methods (were missing from the render-methods help)
+- README/PyPI metadata and manuals updated for the eight-algorithm,
+  dropdown-based present
+
 ## [v1.48] — 2026-10-14
 
 ### Fixed
