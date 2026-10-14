@@ -145,7 +145,7 @@ class TestReleaseNotes:
     def _fake_api(self, monkeypatch, payload):
         calls = []
 
-        def fake(url):
+        def fake(url, timeout=None):
             calls.append(url)
             return payload
         monkeypatch.setattr(updater, "_api_get", fake)
@@ -171,8 +171,8 @@ class TestReleaseNotes:
         # v1.49 renders its bullet, and the "What's new" heading is plain
         assert "A fixed" in notes
 
-    def test_api_failure_falls_back_to_latest_body(self, monkeypatch):
-        def boom(url):
+    def test_api_failure_returns_empty_fast(self, monkeypatch):
+        def boom(url, timeout=None):
             raise OSError("offline")
         monkeypatch.setattr(updater, "_api_get", boom)
         assert updater.fetch_release_notes("1.47", "v1.49") == ""
