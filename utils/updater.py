@@ -140,34 +140,35 @@ def _md_to_plain(md: str) -> str:
     return text if text else (md or "").strip()
 
 
-def _api_get(url: str) -> Optional[dict]:
+def _api_get(url: str, timeout: int = REQUEST_TIMEOUT_S) -> Optional[dict]:
     req = urllib.request.Request(
         url,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "OpenFocus"},
     )
-    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def fetch_release_notes(current_version: str, latest_tag: str,
-                        max_releases: int = 10) -> str:
+                        max_releases: int = 10, timeout: int = 3) -> str:
     """Release notes for every version newer than the installed one.
 
-    Lists the GitHub releases (newest first), keeps everything strictly
-    newer than ``current_version`` (cap ``max_releases`` pages), renders
-    each body and joins with ``## tag`` headings. On any error falls back
-    to the latest release's body alone; returns '' when nothing could be
-    fetched (caller hides the section).
+    Best-effort and cheap: bounded by ``timeout`` (seconds) per call and at
+    most two requests, so a slow/offline network returns '' quickly and the
+    update notification is never held up by the notes fetch. Lists the
+    GitHub releases (newest first), keeps everything strictly newer than
+    ``current_version`` (cap ``max_releases``), renders each body and joins
+    with ``## tag`` headings. Returns '' when nothing could be fetched.
     """
     latest = parse_version(latest_tag) or ()
     if not latest:
         return ""
+    current = parse_version(current_version) or ()
     try:
         data = _api_get(RELEASES_LIST_API_URL + "?per_page=%d"
-                        % max(3, min(30, max_releases + 2)))
+                        % max(3, min(30, max_releases + 2)), timeout)
     except Exception:
         return ""
-    current = parse_version(current_version) or ()
     blocks = []
     for item in data or []:
         if not isinstance(item, dict):
@@ -186,16 +187,6 @@ def fetch_release_notes(current_version: str, latest_tag: str,
         blocks.append("## " + tag.lstrip("vV") + "\n\n" + _md_to_plain(body))
         if len(blocks) >= max_releases:
             break
-    if not blocks:
-        # Fallback: at least the newest release's own notes.
-        try:
-            one = _api_get(RELEASES_API_URL)
-            body = str((one or {}).get("body", "") or "").strip()
-            if body:
-                tag = str((one or {}).get("tag_name", "") or "")
-                blocks.append("## " + tag.lstrip("vV") + "\n\n" + _md_to_plain(body))
-        except Exception:
-            return ""
     return ("\n\n".join(blocks))[:12000]
 
 

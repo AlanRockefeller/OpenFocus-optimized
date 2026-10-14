@@ -91,12 +91,16 @@ class TestCheckAsyncContract:
             "utils.updater.fetch_latest_release",
             lambda: (True, "v9.9", "https://x/releases/tag/v9.9",
                      {"url": "https://x/Setup.exe"}, {"url": "https://x/p.zip"}))
+        # the notes fetch must never hit the network from a unit test
+        monkeypatch.setattr("utils.updater.fetch_release_notes",
+                            lambda *a, **k: "NOTES")
         seen = []
         check_async("1.0", lambda *args: seen.append(args))
         _wait_for(seen)
         assert seen[0][0] == "update"
         assert seen[0][3] == "https://x/p.zip"
         assert seen[0][4] == "https://x/Setup.exe"
+        assert seen[0][6] == "NOTES"
 
     def test_latest_state_reports_page_not_asset(self, monkeypatch):
         monkeypatch.setattr(
