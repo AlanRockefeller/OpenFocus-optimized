@@ -117,8 +117,10 @@ Out(x,y) = Σ_i W_i'·I_i(x,y) / Σ_i W_i'(x,y)           # 归一化加权平�
 
 证据：`methodBlRadio` 控件、`FocusParameters.Method_Bl=Method Bl`（全套 i18n）、
 CLI 报错 "Valid values: 0 to 4 (0-A, 1-B, 3-C, 4-Bl)"、2 号槽位=隐藏的 legacy B。
-**黑盒特征未完成**：`-mp:4` 静默模式挂起（>300s，疑似 silent 路径缺陷或内部多方法串行渲染）。
-推测为多方法结果混合（Bl = Blend），标记为**开放问题**。
+**已解决（2026-10-14 第五轮）**：2/3 帧合成栈与 25 帧真实 balls 栈上，Bl 输出
+与 Method B **逐位相同**（max diff = 0，100% 像素一致）——Bl 是 B 的别名/兼容
+档位，不是混合方法。早先 `-mp:4` 在 stackB 挂起属个例（换小栈与真实栈均 3 秒
+内完成）。**OpenFocus 不需要实现第四方法。**
 
 ## 6. 对 OpenFocus 的工程映射
 
@@ -137,8 +139,19 @@ CLI 报错 "Valid values: 0 to 4 (0-A, 1-B, 3-C, 4-Bl)"、2 号槽位=隐藏的 
 > 清晰度度量确认为**窗口局部方差**（var2/var3 与 Helicon 深度图重合 99.5%），
 > 并发现所有方法共用的复合结构：**输出 = 融合细节 + 最后一帧的基底低频**。
 > 另两项修正：① 深度图在真实数据上是**连续深度面**（"1/32 量化"是合成
-> 分片平台的假象）；② Helicon 的 Sort automatically 会**反转**堆栈内部帧序
-> （方差 argmax 顺序不变，故输出不受影响，但深度图索引需反转解读）。
+> 分片平台的假象）；② ~~Helicon 的 Sort automatically 会反转堆栈内部帧序~~
+> ——**该结论已于第五轮撤回**（极性双重取反造成的误读；排序探针证实所测
+> 栈均无反转，见复现报告 §6.2）。
+>
+> **2026-10-14 第五轮补充（判别性探针 + 真实数据）**：
+> - 度量最终规格 = **BT.601 亮度的窗口方差，固定窗半宽 ≈10px，无预模糊，
+>   平局取首帧**；**Radius 参数不控制度量窗口**（rp=1/3/8 的窗口足迹完全相同），
+>   且 Radius/Smoothing 在正常堆栈上的输出影响都 <1 灰阶（弱效应）；
+> - 对齐为**帧→参考帧**拓扑（反向位移栈裁边 = |s|+1，非链式的 2|s|+1）；
+>   **默认位移上限 ≈5–8% 帧尺寸，超限直接放弃对齐**（不是钳制到上限）；
+> - 比较方法学：Helicon 裁边**不对称**（实测偏移 (0,1)/(2,2)），naive 居中
+>   裁切会把误差虚报约 4–9 倍；配准后 11 栈真实精度 MAE 中位 **1.1%**。
+> 详见 [HELICON_REPRODUCTION_REPORT.md](HELICON_REPRODUCTION_REPORT.md) §7。
 > 完整复现代码与逐像素比对见 [HELICON_REPRODUCTION_REPORT.md](HELICON_REPRODUCTION_REPORT.md)。
 证据文件：`F:\Working\helicon-rea\`（反汇编 `FocusTask_compile.asm`、`func_8822_pyramid_collapse.asm`、
 20 次探针的输出与深度图 `tests/out/`、全部分析脚本 `pe_analyze*.py`、`run_probes.py`）。

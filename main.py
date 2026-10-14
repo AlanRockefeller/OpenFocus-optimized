@@ -1164,9 +1164,18 @@ class OpenFocus(QMainWindow):
         from utils.dust_map import apply_flat_field_stack
         self.push_undo()
         t0 = _time.time()
-        self.raw_images = apply_flat_field_stack(self.raw_images, gain)
-        if getattr(self, "base_images", None):
-            self.base_images = apply_flat_field_stack(self.base_images, gain)
+        try:
+            self.raw_images = apply_flat_field_stack(self.raw_images, gain)
+            if getattr(self, "base_images", None):
+                self.base_images = apply_flat_field_stack(self.base_images, gain)
+        except ValueError as exc:
+            # A frame whose size disagrees with the white field must not die
+            # silently in a Qt slot (the excepthook only writes a crash file).
+            import logging
+            logging.getLogger("openfocus").warning("flat-field apply failed: %s", exc)
+            show_warning_box(self, trans.t("msg_error"),
+                             trans.t("dust_err_not_white"))
+            return
         if hasattr(self.get_or_create_source_pixmap, "cache_clear"):
             self.get_or_create_source_pixmap.cache_clear()
         self.transform_manager._invalidate_processing_results(
