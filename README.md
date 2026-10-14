@@ -13,42 +13,11 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
-> 🎉 **2026.10.14**: **v1.46** — **variance-window spec from discriminative probes**: OpenFocus's real measure window is a fixed ≈10px box with BT.601 luma and no pre-blur (report §6.7/§6.8); OpenFocus A/B/C default window is now radius 5 — real-stack depth agreement improves (kitchen ±3: 95.3% vs 92.7%) while fused output stays radius-insensitive. Manuals rewritten for the 8-algorithm dropdown era.
+> **2026.10.14 · v1.50** — the in-place update now really restarts into the new version (four compounding quit/retry/race bugs fixed), and the update dialog shows the release notes of every version in between.
 
-> 🎉 **2026.10.14**: **v1.45** — **batch jobs with "Alignment only (no fusion)" crashed**: the fusion string 'none' was handed straight to the fusion constructor. Batch now skips the fusion step and always saves the aligned frames for that mode (otherwise the job would produce no output at all), and the batch options panel shows the localized method name.
+> **2026.10.13 · v1.39–v1.49 — the OpenFocus era.** *OpenFocus A/B/C* (variance-weighted average, variance depth-map pick, Laplacian pyramid) implemented and verified against the original binary: 99.5% depth-map agreement, ~1% MAE on real stacks. Plus a fast bounded-similarity alignment (translation + rotation + scale), dust-map flat-field correction, per-pixel depth maps for every index-deciding method, an alignment-only mode, and single-choice dropdowns for all algorithm picking.
 
-> [!NOTE]
-> 🎉 **2026.10.14**: **v1.44** — **consistency sweep**: depth maps now list only index-deciding methods (weighted-average fusions removed — they have no per-pixel decision), the kernel slider states its meaning per algorithm (Guided-filter radius / DCT median / GFG kernel / variance window), Compare-All and all method-name displays follow the fusion-dropdown order in your language, and a real startup bug from the kernel-label work is fixed.
-
-> 🎉 **2026.10.13**: **v1.43** — **alignment overhaul + fixes round**: root-caused the failing OpenFocus alignment (an OpenCV `phaseCorrelate` input-mutation bug corrupting the reference frame + a translation-only model where OpenFocus uses a bounded similarity transform) and rewrote it as bounded rotation/scale/translation search — verified on known perturbations; restored the **alignment-only** output mode; depth maps for *OpenFocus A/B/C* are now three genuinely different maps; *Quick preview* and *Remove brightness drift* share a row.
-
-> 🎉 **2026.10.13**: **v1.42** — **Dust map (flat-field) correction**: one defocused white-field shot removes static dust specks and vignetting from the whole stack before registration (Tools → Dust Map, CLI `--dust-map`); plus explicit **stack-order control** for the OpenFocus A/B/C family (`--sort asc|desc|off`) and a resolved implementation work question: OpenFocus never reorders stacks — its depth-map export polarity was the red herring (evidence in `tools/OpenFocus_repro/validate_autosort.py`).
-
-> 🎉 **2026.10.13**: **v1.41** — **algorithm selection redesigned**: fusion and alignment are now **single-choice dropdowns** (alignment: none / Homography / ECC / OpenFocus-fast), and *Remove brightness drift* moved next to *Quick preview* as the post-processing switch it is. **Depth maps** now cover *OpenFocus A/B/C* with the OpenFocus-validated window-variance measure. Also fixed default export filenames tagging OpenFocus results as "None".
-
-> 🎉 **2026.10.13**: **v1.40** — **OpenFocus-parity audit of the v1.39 ports**: fixed *OpenFocus - A* crashing on grayscale stacks, *OpenFocus - B* corrupting >256-frame stacks (uint8 depth clip), and aligned *OpenFocus - C* to the validated max-pick recipe (measurably closer to OpenFocus on deep stacks: balls 5.09% vs 6.23% MAE). Added a OpenFocus-benchmark regression suite (`tests/test_OpenFocus_regression.py`) that locks A/B/C to measured MAE budgets against the original software's output.
-
-> 🎉 **2026.10.13**: **v1.39** — **the OpenFocus algorithm family, implemented and verified**: *OpenFocus - A* (variance-weighted average), *OpenFocus - B* (variance depth-map pick), *OpenFocus - C* (Laplacian pyramid), a **Remove brightness drift** post-correction (off by default), and a **fast OpenFocus alignment** (bounded phase correlation + brightness equalization, milliseconds per frame). All verified against OpenFocus's own output (99.5% depth-map agreement, 0.95–4.1% MAE on the StackMFF test set) and available in the GUI, batch and CLI (`-m openfocus_a|b|c`, `-a openfocus`, `--base-frame`).
-
-> 🎉 **2026.10.08**: **v1.37** — **Undo/Redo (Ctrl+Z)** for every stack operation, **per-frame enable/disable** (untick a frame to exclude it from fusion without deleting it), **drag to reorder** the stack, Recent Projects, new shortcuts (Ctrl+R render, Ctrl+Shift+R compare all, Ctrl+Shift+B batch, Ctrl+M depth map), SHA-256-verified one-click updates, and CLI pipeline flags (`--dry-run`, `--resume`, `--json`, `--json-progress`, `--config` per-folder overrides).
-
-> 🎉 **2026.10.07**: **v1.36** — **updates happen in the background**: a new release downloads while you keep working (no modal, cancellable, and the staged build is reused, so updating is instant and works offline), and *Update and Restart* reopens the project you had open. Also fixed: the burst of black console windows and the silent stall that never restarted the app, multi-page TIFF stacks multiplying their frames on restore, 16-bit depth-map overlays turning white, and scale-bar calibration leaking between stacks.
-
-> 🎉 **2026.10.02**: **v1.33** — **depth maps**: export the per-pixel focus-position (pseudo-depth) map of any fusion method with customizable pseudo-color schemes — 15 built-in palettes plus your own color stops, live preview, overlay-on-result, and 16-bit raw export; also in the CLI (`--depth-map`). Available in four languages.
-
-> 🎉 **2026.10.04**: **v1.35** — smoother startup: opening a folder from the command line or app icon loads it directly (no import-mode prompt), re-opening the same folder reloads instead of duplicating frames, and crash recovery no longer stacks command-line folders on top of the restored session.
-
-> 🎉 **2026.10.03**: **v1.34** — quality release: 25+ fixes from a five-domain code review — restored the dead Japanese/Spanish language packs, fixed render double-click and 16-bit scale-bar crashes, made multi-page TIFF projects reopenable, stopped lossy WebP re-encoding and a ~1 GB per-update temp leak, and cut depth-map/tiling memory several-fold.
-
-> 🎉 **2026.09.30**: **v1.32** — deep stacks no longer crash the AI fusion with **out-of-memory**: tiling now engages on total stack size and the AI path adapts its tile/batch size to stack depth. Ships with a soak-test harness and a measured [performance reference](./docs/PERFORMANCE.md).
-
-> 🎉 **2026.09.30**: **v1.28–v1.31** — **pip install openfocus** ([PyPI](https://pypi.org/project/openfocus/)), **publication-grade scale bars** (µm/px auto-detected from ImageJ/OME-TIFF metadata, burned into every export), **multi-page TIFF** Z-stack input/output, **crash auto-recovery**, citable releases (Zenodo DOIs) — plus 30+ code-review fixes, most notably ECC registration composing its transforms in reversed order.
-
-> 🎉 **2026.09.29**: **v1.27** — **16-bit stacks no longer fuse to a black/blown-out image**, in-app **Update and Restart** works again, tall/wide stacks stop crashing tiled fusion, and a dozen smaller fixes (cancellation, batch, projects, themes). **v1.26** fixed the "I/O operation on closed file" render crash in windowed builds ([#4](https://github.com/Xinzhe99/OpenFocus/issues/4)).
-
-> 🎉 **2026.09.28**: **v1.21–v1.25** — portable mode, one-click in-app self-update, EXIF preservation, HEIC input, project files (.ofproj), built-in demo stack, sharpness curve, Japanese/Spanish interfaces.
-
-**Earlier milestones**: v1.9–v1.20 — Wipe compare view, dark/light themes, compare-all-methods, quick preview, cancellable renders, 16-bit pipeline, registration cache, batch CLI, installer/DMG, CI automation. Full history in the [Changelog](./CHANGELOG.md).
+**Earlier**: v1.28–v1.37 — pip CLI, scale bars, multi-page TIFF, crash recovery, background updates, undo/redo · v1.21–v1.27 — portable mode, self-update, `.ofproj`, 16-bit pipeline, JA/ES · v1.9–v1.20 — wipe compare, themes, compare-all, quick preview. Full history in the [Changelog](./CHANGELOG.md).
 
 <a id="download"></a>
 ## ⬇️ Download & Install

@@ -93,6 +93,54 @@ class TestDustMap:
         assert len(out) == 4 and out[0].shape == frames[0].shape
 
 
+class TestDustMapDialog:
+    """对话框接线：'从当前栈选择一帧'（旧实现永远读 self._white，
+    栈模式下必抛 ValueError）、尺寸不匹配的本地化错误、16-bit 预览。"""
+
+    def _stub_window(self, h=48, w=64, n=2, dtype=np.uint16, val=40000):
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QWidget, QApplication
+        QApplication.instance() or QApplication([])
+        stub = QWidget()
+        rng = np.random.default_rng(4)
+        # 帧 = 亮底 × 渐变（有"尘点"结构可用），白场用其中一帧本身
+        stub.raw_images = [
+            np.clip(val + rng.normal(0, 800, (h, w, 3)), 0,
+                    65535).astype(dtype) for _ in range(n)]
+        stub.image_filenames = [f"f{i}.tif" for i in range(n)]
+        stub.current_theme = "dark"
+        return stub
+
+    def test_from_stack_frame_preview_applies(self, qapp):
+        from dialogs.dustmap import DustMapDialog
+        stub = self._stub_window()
+        dlg = DustMapDialog(stub)
+        dlg.rb_stack.setChecked(True)
+        assert dlg.combo_stack.count() == len(stub.raw_images)
+        dlg._preview()                       # 旧实现：这里必抛 ValueError
+        assert dlg._gain is not None
+        assert dlg.btn_apply.isEnabled()
+
+    def test_size_mismatch_is_a_localized_error_not_a_crash(self, qapp):
+        from dialogs.dustmap import DustMapDialog
+        stub = self._stub_window(h=48, w=64)
+        dlg = DustMapDialog(stub)
+        big_white = np.full((96, 128, 3), 50000, np.uint16)
+        dlg._compute(big_white)              # 白场与栈尺寸不符
+        assert dlg._gain is None
+        assert not dlg.btn_apply.isEnabled()
+        assert dlg.lbl_status.text()         # 给的是文案，不是裸抛
+
+    def test_dark_white_field_is_rejected_with_message(self, qapp):
+        from dialogs.dustmap import DustMapDialog
+        stub = self._stub_window()
+        dlg = DustMapDialog(stub)
+        dlg._compute(np.zeros((48, 64, 3), np.uint16))
+        assert not dlg.btn_apply.isEnabled()
+        assert dlg.lbl_status.text()
+
+
 # ---------------------------------------------------------------- sort
 class TestSortFrames:
     def test_desc_flips(self):

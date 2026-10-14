@@ -3,6 +3,32 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.51] — 2026-10-14
+
+### Fixed
+- **Dust-map dialog: "From a frame of this stack" never worked** — the
+  preview computed from `self._white`, which is only set by the file-picker
+  path, so the stack-frame path raised `ValueError` and the localized error
+  leaked the library's English message. The chosen frame is now passed
+  through, and every rejection (dark/empty/mismatched white field) shows a
+  localized message
+- **Flat-field apply survived a mismatched frame** — a stack frame whose
+  size disagrees with the white field raised inside a Qt slot (silent
+  crash-file-only failure); it now warns and leaves the stack untouched
+- **Depth-map dialog's dead fallback**: the legacy radio-attribute probe
+  (`rb_gfg`, …) could never fire since the dropdown redesign — removed
+
+### Improved
+- **README News compacted**: fourteen per-release entries (~2.5 kB)
+  collapsed to the current release plus one paragraph for the OpenFocus
+  series plus a one-line earlier history — the full history stays in
+  [CHANGELOG.md](./CHANGELOG.md)
+
+### Tests
+- `TestDustMapDialog`: stack-frame preview, size-mismatch and dark-white
+  rejection with localized messages (5 new cases; suite at 314, all
+  passing on Windows and Linux)
+
 ## [v1.50] — 2026-10-14
 
 ### Fixed — the in-place update could swallow the app

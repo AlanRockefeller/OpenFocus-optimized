@@ -183,14 +183,23 @@ class DustMapDialog(QDialog):
     def _preview(self):
         white = self._current_white()
         if white is not None:
-            self._compute()
+            self._compute(white)
 
-    def _compute(self):
+    def _compute(self, white=None):
+        if white is None:
+            white = self._white
+        if white is None:
+            self._fail(trans.t("dust_err_no_source"))
+            return
         self.lbl_status.setText("")
         try:
-            self._gain = compute_flat_field(self._white)
+            self._gain = compute_flat_field(white)
         except ValueError as exc:
-            self._fail(str(exc))
+            # The library raises English diagnostics; the user sees a
+            # localized one and the detail goes to the log.
+            import logging
+            logging.getLogger("openfocus").warning("flat-field rejected: %s", exc)
+            self._fail(trans.t("dust_err_not_white"))
             return
         # 增益热图：0.5–2.0 线性映射到伪彩
         g = self._gain[:, :, 0] if self._gain.ndim == 3 else self._gain
@@ -201,14 +210,16 @@ class DustMapDialog(QDialog):
         # 当前栈第 0 帧的前后对比（无栈时跳过）
         frames = getattr(self.window_main, "raw_images", None) or []
         if frames:
+            from utils.image_utils import to_display_uint8
             f0 = frames[0]
-            self.lbl_before.setPixmap(_to_pixmap(
-                f0 if f0.dtype == np.uint8 else
-                np.clip(f0, 0, 255).astype(np.uint8)))
-            fixed = apply_flat_field(f0, self._gain)
-            fixed8 = fixed if fixed.dtype == np.uint8 else \
-                np.clip(fixed, 0, 255).astype(np.uint8)
-            self.lbl_after.setPixmap(_to_pixmap(fixed8))
+            try:
+                fixed = apply_flat_field(f0, self._gain)
+            except ValueError:
+                # white field and stack frames disagree in resolution
+                self._fail(trans.t("dust_err_not_white"))
+                return
+            self.lbl_before.setPixmap(_to_pixmap(to_display_uint8(f0)))
+            self.lbl_after.setPixmap(_to_pixmap(to_display_uint8(fixed)))
         self.btn_apply.setEnabled(True)
         self.lbl_status.setStyleSheet("color: #7a7;")
         self.lbl_status.setText(trans.t("dust_ready"))

@@ -392,15 +392,12 @@ class DepthMapDialog(QDialog):
     def _current_window_method(self):
         w = self.window_main
         keys = {code for code, _k in _METHOD_KEYS}
-        # 当前融合方法有深度侧写就用它；否则回退到列表第一项
+        # 当前融合方法有深度侧写就用它；否则（仅对齐 / 加权平均类方法 /
+        # 无方法）回退到列表第一项
         helper = getattr(w, "current_fusion_method", None)
         if callable(helper):
             code = helper()
-            return code if code in keys else _METHOD_KEYS[0][0]
-        for attr, code in (("rb_gfg", "gfgfgf"), ("rb_d", "stackmffv4"),
-                           ("rb_c", "dtcwt"), ("rb_b", "dct")):
-            rb = getattr(w, attr, None)
-            if rb is not None and rb.isChecked():
+            if code in keys:
                 return code
         return _METHOD_KEYS[0][0]
 
