@@ -3,6 +3,38 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.50] — 2026-10-14
+
+### Fixed — the in-place update could swallow the app
+Symptom: check for update → download finishes → the window disappears, and
+the app has to be reopened (and the update clicked again) to reach the new
+version. Four compounding causes, all fixed:
+
+- **The updater quit via `QApplication.quit()`, which skips the window's
+  closeEvent teardown** — the swap script's robocopy then raced still-locked
+  binaries, the elevated retry surfaced as a surprise UAC prompt, and the
+  old build came back. The quit path is now a clean `close()`
+- **Retry budget lost the race**: robocopy `/R:2 /W:1` gave up in ~3s while
+  the interpreter can still be exiting. Now `/R:10 /W:5` (bounded at ~50s)
+- **Process-exit detection was single-shot**: one transient `tasklist`
+  failure started the swap against a live process. The script now requires
+  two consecutive "PID gone" observations
+- **The failure branch relaunched without `--restore-session`**, so even a
+  detected failure dumped the user into an empty window; both relaunch
+  branches now restore the session the updater snapshotted
+
+The staged build is kept on every failure, and the post-restart report now
+says so: reopen Help → Check for Updates and the staged version installs
+immediately, no re-download.
+
+### Added — release notes shown in the updater
+The update dialog carries the release notes of **every version between the
+installed one and the latest** (GitHub release bodies, newest-first
+listing, rendered to plain text, shown under "Show Details..."), and the
+"ready to install" prompt states the no-re-download-on-reopen behaviour.
+`utils/updater.py` gains `fetch_release_notes()`; `check_async` passes the
+notes through.
+
 ## [v1.49] — 2026-10-14
 
 ### Fixed
