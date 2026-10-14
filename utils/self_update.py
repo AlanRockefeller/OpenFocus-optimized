@@ -310,9 +310,12 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
         result = result_path(tag)
         copy_cmd = (
             f"robocopy {_bp(staging_app_dir)} {_bp(app_dir)}"
-            # Bounded retries: the defaults (/R:1000000 /W:30) turned one
-            # locked binary into a silent multi-hour stall.
-            " /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP"
+            # Bounded but forgiving retries: the defaults (/R:1000000 /W:30)
+            # turned one locked binary into a silent multi-hour stall, while
+            # /R:2 /W:1 lost the race against a slow process exit — the swap
+            # failed, a UAC prompt appeared instead, and the app never came
+            # back. 10 tries × 5 s covers a several-second interpreter exit.
+            " /E /IS /IT /R:10 /W:5 /NFL /NDL /NJH /NJS /NP"
         )
         content = (
             "@echo off\r\n"
@@ -343,7 +346,10 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             f"if not exist {_bp(sentinel)} (\r\n"
             f'  echo failed> {_bp(result)}\r\n'
             f'  echo robocopy errorlevel %ERRORLEVEL%>> {_bp(result)}\r\n'
-            f'  start "" {_bp(exe)}\r\n'
+            # Even the failure relaunch restores the session the updater
+            # snapshotted — otherwise the user reopens the old build to an
+            # empty window and has to reload their stack by hand.
+            f'  start "" {_bp(exe)} --restore-session\r\n'
             "  exit /b\r\n"
             ")\r\n"            f"rmdir /S /Q {_bp(staging_root)} >nul 2>&1\r\n"
             f"if exist {_bp(zip_path)} del /Q {_bp(zip_path)} >nul 2>&1\r\n"
@@ -366,11 +372,22 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             # matches the System Idle Process row and burns the full timeout.
             "if %APP_PID% LEQ 0 exit /b 0\r\n"
             "set /a TRIES=0\r\n"
+            "set /a GONE=0\r\n"
             ":waitloop\r\n"
             # 用 PID 等待，不用镜像名：更新期间用户手动再开一个实例时，
             # 按 IMAGENAME 过滤会把新实例当成"老进程还在"而干等到超时。
             f'tasklist /FI "PID eq %APP_PID%" 2>NUL | find " %APP_PID% " >NUL\r\n'
-            "if errorlevel 1 exit /b 0\r\n"
+            "if errorlevel 1 goto :maybe_gone\r\n"
+            "set /a GONE=0\r\n"
+            "goto :wait_check\r\n"
+            ":maybe_gone\r\n"
+            # A single vanished observation can be a transient tasklist
+            # failure — the copy would then race the still-locked exe and
+            # robocopy would burn its retries against a live process.
+            # Require two consecutive observations before starting the swap.
+            "set /a GONE+=1\r\n"
+            "if %GONE% GEQ 2 exit /b 0\r\n"
+            ":wait_check\r\n"
             "set /a TRIES+=1\r\n"
             "if %TRIES% GEQ 60 exit /b 0\r\n"
             # ping 而不是 timeout：隐藏控制台下 timeout 直接报错退出（不等待）

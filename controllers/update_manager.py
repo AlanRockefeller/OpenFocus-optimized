@@ -110,6 +110,9 @@ class UpdateManager(QObject):
         self.page_url = ""
         self.zip_url = ""
         self.setup_url = ""
+        self.zip_digest = ""
+        # plain-text release notes for every version between installed and latest
+        self.notes = ""
         self._download = None
         self._stage = None
         self._manual = False
@@ -268,14 +271,16 @@ class UpdateManager(QObject):
             if self.state != STATE_READY:
                 self._set_state(STATE_CHECKING, self.tag, 0)
 
-        def done(state, tag, url, zip_url="", setup_url="", zip_digest=""):
+        def done(state, tag, url, zip_url="", setup_url="", zip_digest="",
+                 notes=""):
             # Runs on the checker's thread: the signal hop moves it to the GUI.
-            self._on_check_result(state, tag, url, zip_url, setup_url, zip_digest)
+            self._on_check_result(state, tag, url, zip_url, setup_url, zip_digest,
+                                  notes)
 
         updater.check_async(APP_VERSION, lambda *a: done(*a), quiet=quiet)
 
     def _on_check_result(self, state, tag, page_url, zip_url="", setup_url="",
-                         zip_digest=""):
+                         zip_digest="", notes=""):
         self.check_finished.emit(state, tag, page_url, zip_url, setup_url)
         if state != "update":
             if self.state == STATE_CHECKING:
@@ -286,6 +291,7 @@ class UpdateManager(QObject):
         self.zip_url = zip_url or self.zip_url
         self.setup_url = setup_url or self.setup_url
         self.tag = tag or self.tag
+        self.notes = notes or self.notes
         # SHA-256 of the zip as published by GitHub; "" when the release
         # predates digests (verification is skipped then, never faked).
         self.zip_digest = zip_digest or getattr(self, "zip_digest", "")

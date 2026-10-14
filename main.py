@@ -867,10 +867,15 @@ class OpenFocus(QMainWindow):
         QDesktopServices.openUrl(QUrl(RELEASES_PAGE_URL))
 
     def _quit_for_update(self) -> None:
-        """The swap script is running: quit so it can replace the binaries."""
+        """The swap script is running: close so it can replace the binaries.
+
+        close() (not QApplication.quit()): quit() tears the app down without
+        waiting for the window's closeEvent cleanup, and the swap script's
+        robocopy can then still hit locked files — the silent failure that
+        made the app "disappear" and never come back updated.
+        """
         self._restart_for_update = True
         self.close()
-        QApplication.quit()
 
     def set_auto_download(self, enabled: bool) -> None:
         """Settings menu: download updates in the background while idle."""
@@ -907,22 +912,30 @@ class OpenFocus(QMainWindow):
                 and sys.platform in ("win32", "darwin")
                 and (bool(zip_url) or staged)
             )
+            # 更新说明：把已安装版本到最新版之间每个 release 的正文都带上，
+            # 放"详细信息"按钮里（用户特别要求逐版本展示，不只是提示有更新）
+            notes = getattr(self.update_manager, "notes", "") or ""
+            if notes:
+                box.setDetailedText(notes)
             if staged:
-                box.setText(trans.t('update_ready_text').format(version=tag))
+                box.setText(trans.t('update_ready_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 install_btn = box.addButton(
                     trans.t('btn_restart_now'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(
                     trans.t('btn_open_downloads'), QMessageBox.ButtonRole.ActionRole)
                 box.addButton(trans.t('btn_later'), QMessageBox.ButtonRole.RejectRole)
             elif can_one_click:
-                box.setText(trans.t('update_available_oneclick_text').format(version=tag))
+                box.setText(trans.t('update_available_oneclick_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 install_btn = box.addButton(
                     trans.t('btn_update_restart'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(
                     trans.t('btn_open_downloads'), QMessageBox.ButtonRole.ActionRole)
                 box.addButton(trans.t('btn_later'), QMessageBox.ButtonRole.RejectRole)
             else:
-                box.setText(trans.t('update_available_text').format(version=tag))
+                box.setText(trans.t('update_available_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 download_btn = box.addButton(
                     trans.t('btn_download_install'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(

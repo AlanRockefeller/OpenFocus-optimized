@@ -4,12 +4,17 @@ Runs network calls on daemon threads and reports back through callbacks so
 the caller (UI) can decide how to present progress and results.
 """
 import json
+import re
 import sys
 import threading
 import urllib.request
 from typing import Callable, Optional, Tuple
 
 RELEASES_API_URL = "https://api.github.com/repos/Xinzhe99/OpenFocus/releases/latest"
+# The LIST endpoint (newest first) — "/latest?per_page=N" still returns one
+# release, so the per-version notes need this URL instead.
+RELEASES_LIST_API_URL = ("https://api.github.com/repos/Xinzhe99/OpenFocus"
+                         "/releases")
 RELEASES_PAGE_URL = "https://github.com/Xinzhe99/OpenFocus/releases"
 REQUEST_TIMEOUT_S = 10
 
@@ -100,6 +105,107 @@ def fetch_latest_release() -> Tuple[bool, str, str, Optional[dict], Optional[dic
     if not tag:
         return False, "", url, None, None
     return True, tag, url, find_installer_asset(data), find_portable_zip_asset(data)
+
+
+def _md_to_plain(md: str) -> str:
+    """Tiny markdown -> plain text for the update dialog's rich label.
+
+    GitHub release bodies are markdown; QLabel(setText) would show the
+    raw source (##/```/| tables) which reads as garbage. This is not a
+    full renderer: headings/lists/inline code/table pipes are neutralized,
+    line breaks and indentation kept.
+    """
+    out = []
+    in_code = False
+    for line in (md or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            out.append("    " + line.strip())
+            continue
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)   # ATX headings
+        line = re.sub(r"`{1,3}([^`]*)`{1,3}", r"\1", line)  # inline code
+        line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)  # links
+        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)        # bold
+        line = re.sub(r"__([^_]+)__", r"\1", line)            # bold (alt)
+        line = re.sub(r"(?<!\w)\*([^*\n]+)\*(?!\w)", r"\1", line)  # italic
+        line = re.sub(r"^\s*[-*+]\s+", "• ", line)      # bullets
+        line = re.sub(r"^\s*\d+\.\s+", lambda m: m.group().strip(), line)
+        line = re.sub(r"^\s*>\s?", "", line)            # quotes
+        line = line.replace("|", " ")                   # tables
+        line = re.sub(r" {2,}", "  ", line)
+        out.append(line)
+    text = "\n".join(out).strip()
+    return text if text else (md or "").strip()
+
+
+def _api_get(url: str) -> Optional[dict]:
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "OpenFocus"},
+    )
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_release_notes(current_version: str, latest_tag: str,
+                        max_releases: int = 10) -> str:
+    """Release notes for every version newer than the installed one.
+
+    Lists the GitHub releases (newest first), keeps everything strictly
+    newer than ``current_version`` (cap ``max_releases`` pages), renders
+    each body and joins with ``## tag`` headings. On any error falls back
+    to the latest release's body alone; returns '' when nothing could be
+    fetched (caller hides the section).
+    """
+    latest = parse_version(latest_tag) or ()
+    if not latest:
+        return ""
+    try:
+        data = _api_get(RELEASES_LIST_API_URL + "?per_page=%d"
+                        % max(3, min(30, max_releases + 2)))
+    except Exception:
+        return ""
+    current = parse_version(current_version) or ()
+    blocks = []
+    for item in data or []:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag_name", "")).strip()
+        ver = parse_version(tag)
+        if not tag or not ver:
+            continue
+        if current and ver <= current:
+            continue
+        if latest and ver > latest:
+            continue
+        body = str(item.get("body", "") or "").strip()
+        if not body:
+            continue
+        blocks.append("## " + tag.lstrip("vV") + "\n\n" + _md_to_plain(body))
+        if len(blocks) >= max_releases:
+            break
+    if not blocks:
+        # Fallback: at least the newest release's own notes.
+        try:
+            one = _api_get(RELEASES_API_URL)
+            body = str((one or {}).get("body", "") or "").strip()
+            if body:
+                tag = str((one or {}).get("tag_name", "") or "")
+                blocks.append("## " + tag.lstrip("vV") + "\n\n" + _md_to_plain(body))
+        except Exception:
+            return ""
+    return ("\n\n".join(blocks))[:12000]
+
+
+def _notes_text(tag: str) -> str:
+    """Best-effort notes for a just-published release; '' on any failure."""
+    from constants import APP_VERSION
+    try:
+        return fetch_release_notes(APP_VERSION, tag)
+    except Exception:
+        return ""
 
 
 class DownloadCancelled(Exception):
@@ -208,7 +314,7 @@ def download_async(url: str, dest_path: str,
     threading.Thread(target=worker, daemon=True, name="update-download").start()
 
 
-def check_async(current_version: str, on_result: Callable[[str, str, str], None], quiet: bool = False) -> None:
+def check_async(current_version: str, on_result: Callable[..., None], quiet: bool = False) -> None:
     """Check for updates off-thread.
 
     on_result receives (state, tag, download_url) where state is:
@@ -223,7 +329,8 @@ def check_async(current_version: str, on_result: Callable[[str, str, str], None]
     For the "update" state two extra arguments follow the page URL: the
     portable-zip URL and the SHA-256 digest GitHub publishes for that asset,
     so the caller can verify the download instead of swapping in whatever a
-    proxy handed it.
+    proxy handed it; a seventh argument carries the plain-text release
+    notes of every version between the installed one and the latest.
     """
 
     def worker():
@@ -233,7 +340,13 @@ def check_async(current_version: str, on_result: Callable[[str, str, str], None]
             zip_url = (portable_zip or {}).get("url", "")
             zip_digest = (portable_zip or {}).get("digest", "")
             if ok and is_newer(tag, current_version):
-                on_result("update", tag, url, zip_url, setup_url, zip_digest)
+                notes = ""
+                try:
+                    notes = fetch_release_notes(current_version, tag)
+                except Exception:
+                    notes = ""
+                on_result("update", tag, url, zip_url, setup_url, zip_digest,
+                          notes)
             elif not quiet:
                 on_result("latest", tag or "", url)
         except Exception:
