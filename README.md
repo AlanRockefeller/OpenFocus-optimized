@@ -13,7 +13,7 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
-> **2026.10.14 · v1.50** — the in-place update now really restarts into the new version (four compounding quit/retry/race bugs fixed), and the update dialog shows the release notes of every version in between.
+> **2026.10.14 · v1.51** — dust-map "from a stack frame" preview now works (it silently failed before), rejections show localized messages, and the update flow from v1.50 restarts cleanly into the new version with per-version release notes in the dialog.
 
 > **2026.10.13 · v1.39–v1.49 — the Helicon Focus era.** *OpenFocus A/B/C* (variance-weighted average, variance depth-map pick, Laplacian pyramid) reverse-engineered and verified against the original binary: 99.5% depth-map agreement, ~1% MAE on real stacks. Plus a fast bounded-similarity alignment (translation + rotation + scale), dust-map flat-field correction, per-pixel depth maps for every index-deciding method, an alignment-only mode, and single-choice dropdowns for all algorithm picking.
 
