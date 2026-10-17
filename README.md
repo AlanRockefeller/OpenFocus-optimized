@@ -10,6 +10,25 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
   <a href="https://doi.org/10.5281/zenodo.23050823"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.23050823-0078D7?logo=doi&logoColor=white" alt="DOI" /></a>
 </p>
 
+## ⚡ Alan Rockefeller optimized build
+
+This fork of [Xinzhe Xie's OpenFocus](https://github.com/Xinzhe99/OpenFocus)
+was performance-optimized by **Alan Rockefeller** and includes upstream changes
+through v1.55. The optimizations preserve image quality while reducing CPU
+time and memory pressure:
+
+| Area | Optimization | Measured improvement |
+|------|--------------|----------------------|
+| Camera/stack loading | Bounded parallel decoding, while preserving file order, EXIF orientation, HEIC, multi-page TIFF and 16-bit RAW support | **1.17 s → 0.23 s (~5× faster)** for 30 × 12 MP JPEGs |
+| DTCWT | Cache-blocked wavelet filters and bounded parallel transforms, integrated with v1.55's higher-quality N-way decisions | **5.95 s → 3.57 s (1.67× faster)** on a 16 × 1024×768 stack, pixel-identical to the v1.55 serial algorithm; historical v1.38 workloads improved **1.8–3.8×** |
+| Guided-filter fusion | Streamed frames and running focus decisions instead of retaining whole-stack intermediates | Up to **~2× faster** for tiled high-resolution stacks, bit-identical output |
+| StackMFF-V4 on CPU | Folded BatchNorm layers and channels-last inference | **122.6 s → 59.1 s (~2.1× faster)** in the measured CPU workload |
+| Tiled fusion | Fixed-order overlap accumulation and bounded nested threading | Deterministic overlap pixels with lower peak memory pressure |
+
+Results vary with hardware and stack geometry. See
+[Performance & Large Stacks](./docs/PERFORMANCE.md) for methodology, larger
+soak-test results and tuning guidance.
+
 ## 📢 News
 
 > [!NOTE]
