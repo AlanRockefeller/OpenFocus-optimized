@@ -158,6 +158,8 @@ class OpenFocus(QMainWindow):
         self.stackmffv4_batch_size = STACKMFFV4_BATCH_SIZE
         # GPU 加速开关（Settings 菜单可切换，QSettings 持久化）
         self.use_gpu = True
+        # 基底校正（消除亮度漂移）：默认关闭，右面板开关控制
+        self.base_frame_correct = False
         # 恢复持久化设置与最近文件（语言需在菜单构建前应用）
         load_window_settings(self)
         load_drag_export_format(self)
@@ -222,6 +224,8 @@ class OpenFocus(QMainWindow):
         # I should probably update image_panels.py too, or just override text here.
         if hasattr(self, 'lbl_source_img'):
              self.lbl_source_img.setText(trans.t('drag_hint'))
+        if hasattr(self, 'lbl_result_img'):
+            self.lbl_result_img.setText(trans.t('result_hint'))
 
     def init_ui(self):
         setup_menus(self)
@@ -321,16 +325,23 @@ class OpenFocus(QMainWindow):
         self.chk_quick_preview = right_panel_components.chk_quick_preview
         self.btn_method_help = right_panel_components.btn_method_help
         self.btn_reg_help = right_panel_components.btn_reg_help
-        self.rb_a = right_panel_components.rb_a
-        self.rb_b = right_panel_components.rb_b
-        self.rb_c = right_panel_components.rb_c
-        self.rb_gfg = right_panel_components.rb_gfg
-        self.rb_d = right_panel_components.rb_d
-        self.cb_align_homography = right_panel_components.cb_align_homography
-        self.cb_align_ecc = right_panel_components.cb_align_ecc
+        # 融合/对齐算法均为下拉单选；window.current_fusion_method() /
+        # current_alignment_method() 是统一的读取入口
+        self.combo_fusion = right_panel_components.combo_fusion
+        self.combo_align = right_panel_components.combo_align
+        self.chk_base_correct = right_panel_components.chk_base_correct
+        self.chk_reverse_order = right_panel_components.chk_reverse_order
+        # 帧序方向：False=asc（文件序，默认）/ True=desc（倒序栈）
+        self.stack_reverse_order = False
         self.slider_smooth = right_panel_components.slider_smooth
+        self.lbl_kernel = right_panel_components.lbl_kernel
         self.lbl_smooth_value = right_panel_components.smooth_value_label
         self.smooth_widget = right_panel_components.smooth_widget
+        self.depth_smooth_row = right_panel_components.depth_smooth_row
+        self.lbl_depth_smooth = right_panel_components.lbl_depth_smooth
+        self.spin_depth_smooth = right_panel_components.spin_depth_smooth
+        self.spin_depth_smooth.setValue(float(getattr(self, "ofb_depth_smoothing", 1.2) or 0.0))
+        self.spin_depth_smooth.valueChanged.connect(self.set_ofb_depth_smoothing)
         self.source_images_label = right_panel_components.source_images_label
         self.file_list = right_panel_components.file_list
         self.output_label = right_panel_components.output_label
@@ -344,6 +355,17 @@ class OpenFocus(QMainWindow):
 
         self.main_splitter.addWidget(right_panel_components.widget)
         bind_right_panel(self, right_panel_components)
+
+        # 持久化开关同步到复选框：属性在 UI 构建前已由 load_window_settings
+        # 恢复（v1.39 起基底校正存在"属性已恢复、复选框仍显示未勾"的不一致，
+        # 这里一并修复）。blockSignals 避免重复触发持久化。
+        self.chk_base_correct.blockSignals(True)
+        self.chk_base_correct.setChecked(bool(self.base_frame_correct))
+        self.chk_base_correct.blockSignals(False)
+        self.chk_reverse_order.blockSignals(True)
+        self.chk_reverse_order.setChecked(bool(
+            getattr(self, "stack_reverse_order", False)))
+        self.chk_reverse_order.blockSignals(False)
 
         # Probe torch availability in a background thread: importing torch
         # can block for seconds, and this only decides one checkbox state.
@@ -514,17 +536,12 @@ class OpenFocus(QMainWindow):
             # User disabled GPU acceleration (Settings menu)
             self.lbl_status_gpu.setText(trans.t('status_gpu').format('CPU*'))
             return
+        # Read the probe's cached result: importing torch here (UI thread,
+        # on a timer) froze the window for seconds and raced the probe thread
+        from core.multi_focus_fusion import torch_device_kind
         try:
-            import torch
-            if torch.cuda.is_available():
-                props = torch.cuda.get_device_properties(0)
-                self.lbl_status_gpu.setText(trans.t('status_gpu').format('CUDA'))
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.lbl_status_gpu.setText(trans.t('status_gpu').format('MPS'))
-            else:
-                self.lbl_status_gpu.setText(trans.t('status_gpu').format('N/A'))
-        except ImportError:
-            self.lbl_status_gpu.setText(trans.t('status_gpu').format('N/A'))
+            kind = torch_device_kind()
+            self.lbl_status_gpu.setText(trans.t('status_gpu').format(kind or '…'))
         except Exception:
             self.lbl_status_gpu.setText(trans.t('status_gpu').format('Err'))
 
@@ -633,18 +650,20 @@ class OpenFocus(QMainWindow):
 
     def reset_to_default(self):
         """重置到默认状态"""
-        # 重置渲染方法 - 默认选中方法A
-        self.rb_a.setChecked(True)
-        self.rb_b.setChecked(False)
-        self.rb_c.setChecked(False)
-        self.rb_gfg.setChecked(False)
-        self.rb_d.setChecked(False)
+        # 重置渲染方法 - 默认 Guided Filter
+        self.set_fusion_method("guided_filter")
+
+        # 重置配准选项 - 默认 ECC
+        self.set_alignment_method("ecc")
+
+        # 基底校正默认关闭；帧序默认文件序（不反转）
+        self.chk_base_correct.setChecked(False)
+        self.chk_reverse_order.setChecked(False)
         
-        # 重置配准选项 - 默认选中 ECC，不选中 Homography
-        self.cb_align_homography.setChecked(False)
-        self.cb_align_ecc.setChecked(True)
-        
-        # 重置滑块值到默认值
+        # 重置滑块值到默认值（含每个方法记住的值）
+        self._kernel_by_mode = {}
+        if getattr(self, "spin_depth_smooth", None) is not None:
+            self.spin_depth_smooth.setValue(1.2)
         self.slider_smooth.setValue(31)
         
         # 更新滑块可用性
@@ -684,17 +703,26 @@ class OpenFocus(QMainWindow):
         """Re-apply the cached torch-probe result to the method controls.
 
         Other code paths (render restore, batch restore) blanket-enable the
-        fusion radios, which silently re-armed StackMFF-V4 on machines without
+        fusion combo, which silently re-armed StackMFF-V4 on machines without
         torch until the next restart."""
         available = getattr(self, '_stackmff_available', None)
         if available is None:
             return
-        if available:
-            self.rb_d.setEnabled(True)
-            self.rb_d.setToolTip("")
-        else:
-            self.rb_d.setEnabled(False)
-            self.rb_d.setToolTip(trans.t("msg_stackmff_unavailable_text"))
+        combo = self.combo_fusion
+        i = combo.findData("stackmffv4")
+        if i < 0:
+            return
+        # 下拉项级禁用：模型项 setEnabled(False) 让它在弹出列表里置灰
+        item = combo.model().item(i)
+        if item is None:
+            return
+        item.setEnabled(bool(available))
+        combo.setItemData(
+            i,
+            trans.t("msg_stackmff_unavailable_text") if not available else "",
+            Qt.ItemDataRole.ToolTipRole)
+        if not available and combo.currentData() == "stackmffv4":
+            self.set_fusion_method("guided_filter")
 
     # --- Update check ---
 
@@ -736,10 +764,11 @@ class OpenFocus(QMainWindow):
         layout.addWidget(self.btn_update_action)
         bar.addPermanentWidget(container)
         container.hide()
-        # The app has no status bar in its idle layout: create it hidden and
-        # reveal it only while a message or the update indicator needs it.
+        # Always visible: showing/hiding the bar per message made the image
+        # panels jump by one row on every render (and hidden-by-default bars
+        # swallowed every direct statusBar().showMessage call).
         bar.messageChanged.connect(self._on_status_message_changed)
-        bar.setVisible(False)
+        bar.setSizeGripEnabled(False)
         self._update_indicator = container
 
     def _show_status_message(self, text: str, timeout_ms: int = 5000) -> None:
@@ -748,10 +777,18 @@ class OpenFocus(QMainWindow):
         bar.showMessage(text, timeout_ms)
 
     def _on_status_message_changed(self, text: str) -> None:
-        if not text and not getattr(self, '_update_indicator', None):
-            return
-        if not text and not self._update_indicator.isVisible():
-            self.statusBar().setVisible(False)
+        if text:
+            self.statusBar().setVisible(True)
+
+    def _status_bar_busy(self) -> bool:
+        """True while a permanent status widget (update indicator, render
+        progress) is showing."""
+        indicator = getattr(self, '_update_indicator', None)
+        if indicator is not None and indicator.isVisible():
+            return True
+        progress = getattr(getattr(self, 'render_manager', None),
+                           '_status_bar_progress', None)
+        return progress is not None and progress.isVisible()
 
     def _refresh_update_indicator(self) -> None:
         """Render the manager's current state into the status bar + menu."""
@@ -844,14 +881,29 @@ class OpenFocus(QMainWindow):
         QDesktopServices.openUrl(QUrl(RELEASES_PAGE_URL))
 
     def _quit_for_update(self) -> None:
-        """The swap script is running: quit so it can replace the binaries."""
+        """The swap script is running: close so it can replace the binaries.
+
+        close() (not QApplication.quit()): quit() tears the app down without
+        waiting for the window's closeEvent cleanup, and the swap script's
+        robocopy can then still hit locked files — the silent failure that
+        made the app "disappear" and never come back updated.
+        """
         self._restart_for_update = True
         self.close()
-        QApplication.quit()
 
     def set_auto_download(self, enabled: bool) -> None:
         """Settings menu: download updates in the background while idle."""
         self.update_manager.set_auto_download(enabled)
+        self.persist_settings()
+
+    def set_reverse_order(self, enabled: bool) -> None:
+        """右面板开关：反转帧序（倒序栈，仅影响 OpenFocus A/B/C）。"""
+        self.stack_reverse_order = bool(enabled)
+        self.persist_settings()
+
+    def set_base_correct(self, enabled: bool) -> None:
+        """右面板开关：消除亮度漂移（基底校正到末帧）。"""
+        self.base_frame_correct = bool(enabled)
         self.persist_settings()
 
     def _show_update_result(self, state: str, tag: str, page_url: str,
@@ -874,22 +926,30 @@ class OpenFocus(QMainWindow):
                 and sys.platform in ("win32", "darwin")
                 and (bool(zip_url) or staged)
             )
+            # 更新说明：把已安装版本到最新版之间每个 release 的正文都带上，
+            # 放"详细信息"按钮里（用户特别要求逐版本展示，不只是提示有更新）
+            notes = getattr(self.update_manager, "notes", "") or ""
+            if notes:
+                box.setDetailedText(notes)
             if staged:
-                box.setText(trans.t('update_ready_text').format(version=tag))
+                box.setText(trans.t('update_ready_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 install_btn = box.addButton(
                     trans.t('btn_restart_now'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(
                     trans.t('btn_open_downloads'), QMessageBox.ButtonRole.ActionRole)
                 box.addButton(trans.t('btn_later'), QMessageBox.ButtonRole.RejectRole)
             elif can_one_click:
-                box.setText(trans.t('update_available_oneclick_text').format(version=tag))
+                box.setText(trans.t('update_available_oneclick_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 install_btn = box.addButton(
                     trans.t('btn_update_restart'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(
                     trans.t('btn_open_downloads'), QMessageBox.ButtonRole.ActionRole)
                 box.addButton(trans.t('btn_later'), QMessageBox.ButtonRole.RejectRole)
             else:
-                box.setText(trans.t('update_available_text').format(version=tag))
+                box.setText(trans.t('update_available_text').format(version=tag)
+                            + ("\n" + trans.t('update_notes_hint') if notes else ""))
                 download_btn = box.addButton(
                     trans.t('btn_download_install'), QMessageBox.ButtonRole.AcceptRole)
                 open_btn = box.addButton(
@@ -1102,6 +1162,84 @@ class OpenFocus(QMainWindow):
         from dialogs.depthmap import DepthMapDialog
         DepthMapDialog(self).exec()
 
+    def show_retouch_dialog(self) -> None:
+        """Retouch brush on the selected (or newest) fusion result; the edit
+        lands in the output history as a new entry."""
+        from utils.retouch import frames_matching
+        selected = self.export_manager.selected_output()
+        result = selected[0] if selected else self.fusion_result
+        if result is None:
+            show_warning_box(self, trans.t("msg_no_result_title"),
+                             trans.t("retouch_need_result"))
+            return
+        frames = frames_matching(
+            result,
+            self.registration_results if self.registration_results else None,
+            self.aligned_images if getattr(self, "is_images_aligned", False) else None,
+            self.raw_images)
+        if not frames:
+            show_warning_box(self, trans.t("msg_warning"),
+                             trans.t("retouch_size_mismatch"))
+            return
+        from dialogs.retouch import RetouchDialog
+        dlg = RetouchDialog(self, result, frames, names=self.image_filenames)
+        if not dlg.exec():
+            return
+        edited = dlg.edited_result()
+        if edited is None:
+            return
+        self.fusion_result = edited
+        self.output_manager.update_output_list_for_fusion()
+        item = self.output_list.item(0)
+        base = selected[1] if selected else None
+        if item is not None:
+            item.setText((base or item.text()) + "_Retouched")
+        self.output_manager.show_fusion_result()
+        try:
+            from utils import recovery
+            recovery.write_snapshot(self)
+        except Exception:
+            pass
+        self.statusBar().showMessage(trans.t("retouch_applied"), 6000)
+
+    def show_dust_map_dialog(self) -> None:
+        """Flat-field (dust map) correction from a defocused white shot."""
+        from dialogs.dustmap import DustMapDialog
+        DustMapDialog(self).exec()
+
+    def apply_flat_field_to_stack(self, gain) -> None:
+        """DustMapDialog 的应用回调：原地校正全栈并使派生结果失效。
+
+        校正同时写入 base_images——尘点/渐晕是物理校正而非视图变换，
+        必须在后续缩放重建时保留。复用 transform_manager 的失效+刷新
+        机制（与旋转/缩放同一条路径）。
+        """
+        import time as _time
+        from utils.dust_map import apply_flat_field_stack
+        self.push_undo()
+        t0 = _time.time()
+        try:
+            self.raw_images = apply_flat_field_stack(self.raw_images, gain)
+            if getattr(self, "base_images", None):
+                self.base_images = apply_flat_field_stack(self.base_images, gain)
+        except ValueError as exc:
+            # A frame whose size disagrees with the white field must not die
+            # silently in a Qt slot (the excepthook only writes a crash file).
+            import logging
+            logging.getLogger("openfocus").warning("flat-field apply failed: %s", exc)
+            show_warning_box(self, trans.t("msg_error"),
+                             trans.t("dust_err_not_white"))
+            return
+        if hasattr(self.get_or_create_source_pixmap, "cache_clear"):
+            self.get_or_create_source_pixmap.cache_clear()
+        self.transform_manager._invalidate_processing_results(
+            clear_output_view=True, preserve_outputs=True)
+        self.transform_manager.reload_image_stack(
+            initial_index=getattr(self, "current_img_index", 0))
+        self.statusBar().showMessage(
+            trans.t('dust_applied').format(n=len(self.raw_images),
+                                           t=_time.time() - t0), 5000)
+
     def show_quick_start(self) -> None:
         from dialogs.welcome import WelcomeDialog
         WelcomeDialog(self, main_window=self).exec()
@@ -1170,17 +1308,33 @@ class OpenFocus(QMainWindow):
                 )
     
     
-    def handle_method_selection(self, selected_button):
-        """处理融合方法选择，实现互斥但可取消"""
-        # 如果点击的是已选中的按钮，则取消选中
-        if selected_button.isChecked():
-            # 取消其他按钮的选中状态
-            for btn in [self.rb_a, self.rb_b, self.rb_c, self.rb_gfg, self.rb_d]:
-                if btn != selected_button:
-                    btn.setChecked(False)
-        # 如果点击时未选中，则什么也不做（已经自动取消选中）
-    
-    # handle_align_exclusive 已移除，因为不再需要互斥逻辑
+    def current_fusion_method(self) -> str:
+        """当前选中的融合算法代码（下拉单选的唯一读取入口）。"""
+        from ui.right_panel import FUSION_ITEMS
+        code = self.combo_fusion.currentData()
+        codes = {c for c, _k, _h in FUSION_ITEMS}
+        return code if code in codes else "guided_filter"
+
+    def current_alignment_method(self) -> str:
+        """当前选中的对齐算法代码：none | homography | ecc | openfocus。"""
+        code = self.combo_align.currentData()
+        return code if code in ("none", "homography", "ecc", "openfocus") else "ecc"
+
+    def set_fusion_method(self, code: str) -> None:
+        i = self.combo_fusion.findData(code)
+        if i >= 0:
+            self.combo_fusion.setCurrentIndex(i)
+
+    def set_alignment_method(self, code: str) -> None:
+        i = self.combo_align.findData(code)
+        if i >= 0:
+            self.combo_align.setCurrentIndex(i)
+
+    def handle_method_selection(self, *_args):
+        """融合算法下拉切换（单选语义由下拉框保证，这里做联动刷新）。"""
+        # update_slider_availability 已通过信号连接；保留此槽位给
+        # 未来按方法变化的 UI 联动
+        pass
 
     def handle_kernel_slider_change(self, value):
         """确保核大小始终为奇数，并更新显示标签"""
@@ -1196,31 +1350,67 @@ class OpenFocus(QMainWindow):
 
         self.lbl_smooth_value.setText(str(adjusted))
 
-    def update_slider_availability(self):
-        """根据选中的融合方法更新滑块的可用性和默认值"""
-        # Guided Filter/DCT: 共享 kernel 滑块
-        # DTCWT / StackMFF-V4: 不使用滑块
+    # 滑块含义按算法不同：模式 → (i18n 标签键, 默认值)
+    _KERNEL_LABELS = {
+        "guided": "label_kernel_guided",
+        "dct": "label_kernel_dct",
+        "gfg": "label_kernel_gfg",
+        "ofab": "label_kernel_of",
+    }
 
-        if self.rb_a.isChecked():
+    # 方法 → (滑块模式, 范围上限, 默认 kernel)。OpenFocus A/B/C：滑块是方差
+    # 窗口（kernel = 2r+1）；判别性探针（报告 §6.7/§6.8）定 r=5 → 11，范围 1–21。
+    _KERNEL_MODES = {
+        "guided_filter": ("guided", 51, 31),
+        "dct": ("dct", 51, 7),
+        "gfgfgf": ("gfg", 51, 7),
+        "openfocus_a": ("ofab", 21, 11),
+        "openfocus_b": ("ofab", 21, 11),
+        "openfocus_c": ("ofab", 21, 11),
+    }
+
+    def kernel_for_method(self, method: str) -> int:
+        """Kernel the user has set for *method* (its own remembered value,
+        or its default) — the slider means a different thing per method, so
+        another method's value must never leak in (the depth-map dialog
+        used the guided-filter radius 31 as DCT's median window)."""
+        spec = self._KERNEL_MODES.get(method)
+        if spec is None:
+            return 7
+        mode, _hi, default = spec
+        if mode == getattr(self, "current_kernel_mode", None):
+            return int(self.slider_smooth.value())
+        return int(getattr(self, "_kernel_by_mode", {}).get(mode, default))
+
+    def update_slider_availability(self):
+        """根据选中的融合方法更新滑块的可用性、默认值和含义标签。
+
+        每个方法的滑块值单独记忆：切换方法再切回来不再丢失用户调好的值。"""
+        method = self.current_fusion_method()
+        memory = self.__dict__.setdefault("_kernel_by_mode", {})
+        previous = getattr(self, "current_kernel_mode", None)
+        spec = self._KERNEL_MODES.get(method)
+        if previous and spec and previous != spec[0]:
+            memory[previous] = int(self.slider_smooth.value())
+        elif previous and spec is None:
+            memory[previous] = int(self.slider_smooth.value())
+        if spec is not None:
+            mode, hi, default = spec
             self.smooth_widget.setEnabled(True)
-            if self.current_kernel_mode != "guided":
-                self.slider_smooth.setValue(31)
-            self.current_kernel_mode = "guided"
-        elif self.rb_b.isChecked():
-            self.smooth_widget.setEnabled(True)
-            if self.current_kernel_mode != "dct":
-                self.slider_smooth.setValue(7)
-            self.current_kernel_mode = "dct"
-        elif self.rb_gfg.isChecked():
-            # GFG-FGF uses the initial mean/blur kernel controlled by the same slider
-            self.smooth_widget.setEnabled(True)
-            if self.current_kernel_mode != "gfg":
-                # GFG-FGF 默认使用 kernel=7
-                self.slider_smooth.setValue(7)
-            self.current_kernel_mode = "gfg"
+            self.slider_smooth.setRange(1, hi)
+            if previous != mode:
+                self.slider_smooth.setValue(min(hi, memory.get(mode, default)))
+            self.current_kernel_mode = mode
         else:
             self.smooth_widget.setEnabled(False)
+            self.slider_smooth.setRange(1, 51)
             self.current_kernel_mode = None
+        if getattr(self, "depth_smooth_row", None) is not None:
+            self.depth_smooth_row.setVisible(method == "openfocus_b")
+        # 滑块含义标签随算法切换（每个算法的 kernel 含义不同）
+        label_key = self._KERNEL_LABELS.get(self.current_kernel_mode,
+                                            "label_kernel")
+        self.lbl_kernel.setText(trans.t(label_key))
     
     def update_result_view(self, index):
         """更新Output区域显示的图像（用于配准结果或ROI模式下的对齐图像）"""
@@ -1956,6 +2146,16 @@ class OpenFocus(QMainWindow):
         self.restore_last_stack = bool(enabled)
         self.persist_settings()
 
+    def set_ofb_depth_smoothing(self, value: float) -> None:
+        """OpenFocus B depth-transition sigma (persisted)."""
+        self.ofb_depth_smoothing = float(value)
+        self.persist_settings()
+
+    def set_ask_load_scale(self, enabled: bool) -> None:
+        """Toggle the loading-scale prompt shown before every import."""
+        self.ask_load_scale = bool(enabled)
+        self.persist_settings()
+
     def set_align_cache_enabled(self, enabled: bool) -> None:
         """Toggle the on-disk registration cache (Settings menu)."""
         self.align_cache_enabled = bool(enabled)
@@ -2091,17 +2291,31 @@ class OpenFocus(QMainWindow):
         # Update Right Panel
         c = self.right_panel_components
         c.method_group.setTitle(trans.t('group_fusion'))
-        c.rb_a.setText(trans.t('radio_guided_filter'))
-        c.rb_b.setText(trans.t('radio_dct'))
-        c.rb_c.setText(trans.t('radio_dtcwt'))
-        c.rb_gfg.setText(trans.t('radio_gfg'))
-        c.rb_d.setText(trans.t('radio_stackmff'))
-        
+        # 下拉框重翻译：按 (代码, i18n 键, 提示键) 重建条目文本
+        from ui.right_panel import FUSION_ITEMS, ALIGN_ITEMS
+        for i, (_code, key, hint_key) in enumerate(FUSION_ITEMS):
+            if i < c.combo_fusion.count():
+                c.combo_fusion.setItemText(i, trans.t(key))
+                if hint_key:
+                    c.combo_fusion.setItemData(
+                        i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
+        if getattr(c, 'chk_base_correct', None) is not None:
+            c.chk_base_correct.setText(trans.t('chk_base_correct'))
+            c.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+        if getattr(c, 'chk_reverse_order', None) is not None:
+            c.chk_reverse_order.setText(trans.t('chk_reverse_order'))
+            c.chk_reverse_order.setToolTip(trans.t('chk_reverse_order_hint'))
+
         c.registration_group.setTitle(trans.t('group_registration'))
-        c.cb_align_ecc.setText(trans.t('check_align_ecc'))
-        c.cb_align_homography.setText(trans.t('check_align_homography'))
+        for i, (_code, key, hint_key) in enumerate(ALIGN_ITEMS):
+            if i < c.combo_align.count():
+                c.combo_align.setItemText(i, trans.t(key))
+                if hint_key:
+                    c.combo_align.setItemData(
+                        i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
         
-        c.lbl_kernel.setText(trans.t('label_kernel'))
+        # 滑块含义标签由 update_slider_availability 按当前算法写入
+        self.update_slider_availability()
         c.btn_reset.setText(trans.t('btn_reset'))
         # Keep the cancel/progress affordance while a render runs — the
         # retranslation must not reset it to the idle "Render" label.
@@ -2133,6 +2347,9 @@ class OpenFocus(QMainWindow):
         if not self.stack_images:
             if hasattr(self, 'lbl_source_img'):
                 self.lbl_source_img.setText(trans.t('drag_hint'))
+        if getattr(self, 'fusion_result', None) is None and not getattr(
+                self, 'registration_results', None) and hasattr(self, 'lbl_result_img'):
+            self.lbl_result_img.setText(trans.t('result_hint'))
 
         # Update language checked state
         for lang_code, key in (('en', 'action_lang_en'), ('zh', 'action_lang_zh'),
@@ -2153,6 +2370,13 @@ class OpenFocus(QMainWindow):
             self.ui_objs['action_align_cache'].setText(trans.t('action_align_cache'))
             self.ui_objs['action_align_cache'].setToolTip(trans.t('action_align_cache_hint'))
             self.ui_objs['action_restore_last_stack'].setText(trans.t('action_restore_last_stack'))
+        if getattr(self, 'lbl_depth_smooth', None) is not None:
+            self.lbl_depth_smooth.setText(trans.t('label_depth_smoothing'))
+            self.lbl_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
+            self.spin_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
+        if 'action_ask_load_scale' in getattr(self, 'ui_objs', {}):
+            self.ui_objs['action_ask_load_scale'].setText(trans.t('action_ask_load_scale'))
+            self.ui_objs['action_ask_load_scale'].setToolTip(trans.t('action_ask_load_scale_hint'))
         if 'action_auto_download' in getattr(self, 'ui_objs', {}):
             act = self.ui_objs['action_auto_download']
             act.setToolTip(trans.t('action_auto_download_hint'))

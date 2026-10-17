@@ -8,6 +8,52 @@ import re
 # 主题颜色常量
 PRIMARY_BLUE = "#0033A0"
 
+
+def _asset_url(name):
+    """QSS url() 需要正斜杠的绝对路径（打包后资源在 _MEIPASS 下）。"""
+    try:
+        from utils import resource_path
+        return resource_path("assets", name).replace("\\", "/")
+    except Exception:
+        return ""
+
+
+# 复选框勾选态：蓝底白勾（旧版用白色径向圆点，与单选按钮完全同形，
+# 用户分不清哪个是复选、哪个是单选）
+_CHECK_SVG = _asset_url("check_white.svg")
+
+# 下拉/微调箭头：旧样式用 CSS "边框三角形" 技巧，Qt QSS 不支持，实际渲染成
+# 实心黑块（批量对话框格式下拉、标尺对话框数值框）。改用 SVG 图片。
+_ARROW_DOWN_LIGHT = _asset_url("arrow_down_light.svg")
+_ARROW_UP_LIGHT = _asset_url("arrow_up_light.svg")
+_ARROW_DOWN_DARK = _asset_url("arrow_down_dark.svg")
+_ARROW_UP_DARK = _asset_url("arrow_up_dark.svg")
+
+
+def arrow_qss(theme="light_on_dark", button_bg="#4a4a4a", button_hover="#5e5e5e",
+              border="#666666"):
+    """QSS for combo / spin-box arrows. `theme` names the arrow colour:
+    'light_on_dark' (light arrows, dark widgets) or 'dark_on_light'."""
+    down = _ARROW_DOWN_LIGHT if theme == "light_on_dark" else _ARROW_DOWN_DARK
+    up = _ARROW_UP_LIGHT if theme == "light_on_dark" else _ARROW_UP_DARK
+    return f"""
+QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right;
+    width: 20px; border: none; }}
+QComboBox::down-arrow {{ image: url("{down}"); width: 10px; height: 10px; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border; width: 20px; background-color: {button_bg};
+    border: none; border-left: 1px solid {border}; }}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-position: top right; }}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{ background-color: {button_hover}; }}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{ image: url("{up}"); width: 9px; height: 9px; }}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ image: url("{down}"); width: 9px; height: 9px; }}
+"""
+
+_ARROW_SPIN_DARK_QSS = arrow_qss()
+
 # 主窗口 Dark Theme 样式（原 OpenFocus.apply_dark_theme 中的字符串）
 # 暗色主题下给 QDialog 的控件补色（主窗口 QSS 不会传播到对话框）。
 # settings/batch 一直这么做；depthmap/scalebar 此前漏了，暗色下
@@ -25,7 +71,7 @@ QPushButton {
 QPushButton:hover { background-color: #555; }
 QCheckBox { color: #d0d0d0; }
 QCheckBox::indicator { width: 16px; height: 16px; }
-"""
+""" + arrow_qss()
 
 GLOBAL_DARK_STYLE = f"""
 QMainWindow {{ background-color: #1e1e1e; }}
@@ -103,7 +149,9 @@ QCheckBox::indicator {{
     border-radius: 3px;
 }}
 QCheckBox::indicator:checked {{
-    background: qradialgradient(cx:0.5, cy:0.5, radius:0.4, fx:0.5, fy:0.5, stop:0 #fff, stop:0.7 #fff, stop:0.71 #333, stop:1 #333);
+    background-color: #3d6dda;
+    border-color: #3d6dda;
+    image: url("{_CHECK_SVG}");
 }}
 QCheckBox::indicator:hover {{
     border: 2px solid #aaa;
@@ -321,51 +369,7 @@ QComboBox QAbstractItemView {{
     selection-background-color: {PRIMARY_BLUE};
     selection-color: #fff;
 }}
-QSpinBox::up-button,
-QSpinBox::down-button {{
-    subcontrol-origin: border;
-    width: 22px;
-    background-color: #4a4a4a;
-    border-left: 1px solid #666666;
-    border-top: 0;
-    border-right: 0;
-    border-bottom: 0;
-    padding: 2px;
-}}
-QSpinBox::up-button:hover,
-QSpinBox::down-button:hover {{
-    background-color: #5e5e5e;
-}}
-QSpinBox::up-button:pressed,
-QSpinBox::down-button:pressed {{
-    background-color: #3a3a3a;
-}}
-QSpinBox::up-arrow {{
-    width: 0;
-    height: 0;
-    margin-left: 5px;
-    margin-right: 5px;
-    margin-top: 1px;
-    border-style: solid;
-    border-width: 0 6px 9px 6px;
-    border-color: transparent transparent #ffffff transparent;
-}}
-QSpinBox::up-arrow:disabled {{
-    border-color: transparent transparent #9a9a9a transparent;
-}}
-QSpinBox::down-arrow {{
-    width: 0;
-    height: 0;
-    margin-left: 5px;
-    margin-right: 5px;
-    margin-bottom: 1px;
-    border-style: solid;
-    border-width: 9px 6px 0 6px;
-    border-color: #ffffff transparent transparent transparent;
-}}
-QSpinBox::down-arrow:disabled {{
-    border-color: #9a9a9a transparent transparent transparent;
-}}
+{_ARROW_SPIN_DARK_QSS}
 QPushButton {{
     background-color: #444;
     color: white;
@@ -393,7 +397,9 @@ QCheckBox::indicator {{
     background-color: #333;
 }}
 QCheckBox::indicator:checked {{
-    background: qradialgradient(cx:0.5, cy:0.5, radius:0.4, fx:0.5, fy:0.5, stop:0 #fff, stop:0.7 #fff, stop:0.71 #333, stop:1 #333);
+    background-color: #3d6dda;
+    border-color: #3d6dda;
+    image: url("{_CHECK_SVG}");
 }}
 """
 
@@ -419,10 +425,9 @@ QComboBox::drop-down {{
     width: 20px;
 }}
 QComboBox::down-arrow {{
-    image: none;
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 5px solid #000;
+    image: url("{_ARROW_DOWN_DARK}");
+    width: 10px;
+    height: 10px;
 }}
 """
 
@@ -501,7 +506,7 @@ QRadioButton::indicator:hover { border-color: #0969da; }
 
 QCheckBox { spacing: 6px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 2px solid #9aa4ae; border-radius: 4px; background: #ffffff; }
-QCheckBox::indicator:checked { background-color: #0969da; border-color: #0969da; }
+QCheckBox::indicator:checked { background-color: #0969da; border-color: #0969da; image: url(\"""" + _CHECK_SVG + """\"); }
 QCheckBox::indicator:hover { border-color: #0969da; }
 
 QSlider::groove:horizontal { border: none; height: 6px; background: #e1e4e8; border-radius: 3px; }
@@ -517,6 +522,9 @@ QPushButton:hover { background-color: #eef1f4; border-color: #b7c2cc; }
 QPushButton:pressed { background-color: #e4e9ee; }
 QPushButton:disabled { color: #9aa4ae; background-color: #f6f8fa; border-color: #e1e5ea; }
 QPushButton#primaryButton { background-color: #0969da; color: #ffffff; border: none; font-weight: 600; }
+QPushButton#helpButton { padding: 0; min-height: 0; border-radius: 11px; background-color: #eaeef2; color: #57606a; border: 1px solid #d0d7de; font-weight: 600; }
+QPushButton#helpButton:hover { background-color: #dbe4ee; color: #0969da; }
+QPushButton#stepButton { padding: 0; min-height: 0; font-size: 16px; font-weight: 600; }
 QPushButton#primaryButton:hover { background-color: #0b72e8; }
 QPushButton#primaryButton:pressed { background-color: #0857b0; }
 QPushButton#primaryButton:disabled { background-color: #a8c7ee; color: #ffffff; }
@@ -528,6 +536,7 @@ QListWidget, QLineEdit, QSpinBox, QTextEdit, QPlainTextEdit { background-color: 
 QLineEdit:focus, QSpinBox:focus, QTextEdit:focus { border-color: #0969da; }
 QComboBox { background-color: #f6f8fa; color: #1f2328; border: 1px solid #d0d7de; border-radius: 6px; padding: 3px 8px; }
 QComboBox:focus { border-color: #0969da; }
+""" + arrow_qss("dark_on_light", "#f6f8fa", "#eaeef2", "#d0d7de") + """
 QComboBox QAbstractItemView { background-color: #ffffff; color: #1f2328; border: 1px solid #d7dee4; selection-background-color: #eaeef2; selection-color: #1f2328; }
 
 QStatusBar { background-color: #f6f8fa; color: #57606a; border-top: 1px solid #e7ebef; }

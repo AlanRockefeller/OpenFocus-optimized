@@ -37,8 +37,11 @@ if not hasattr(np, "issubsctype"):
 # Optional imports with checks
 try:
     import dtcwt
+    from scipy.ndimage import maximum_filter, convolve
 except ImportError:
     dtcwt = None
+    maximum_filter = None
+    convolve = None
 
 # Target working-set size of one column block in the dtcwt filters.
 _FILTER_BLOCK_BYTES = 1 << 20
@@ -82,37 +85,6 @@ if dtcwt is not None:
     except (ImportError, AttributeError):  # pragma: no cover - dtcwt layout changed
         pass
 
-# 3x3 window of the max-activity rule and of its majority consistency check.
-_WINDOW = np.ones((3, 3), dtype=np.uint8)
-# Majority threshold: more than half of the 3x3 window (4.5 of 9 votes).
-_MAJORITY = 4
-
-
-def _activity(mag):
-    """3x3 max-filter of coefficient magnitudes, all 6 directions at once.
-
-    Equal to scipy maximum_filter(footprint=3x3x1, mode='reflect'): with a
-    3x3 window the reflected neighbour of an edge pixel is the pixel itself,
-    which the default dilate border never exceeds. ~6x faster than scipy.
-    """
-    return cv2.dilate(mag, _WINDOW)
-
-
-def _fuse_pair(c1, mag1, c2, mag2, act2):
-    """Pairwise max-activity fusion with 3x3 majority consistency check.
-
-    Returns the fused coefficients and their magnitudes. |where(W, c1, c2)|
-    is where(W, |c1|, |c2|) exactly, so the running magnitude is carried
-    along instead of recomputing abs() of the complex array every step.
-    """
-    initial_mask = np.greater(_activity(mag1), act2)
-    # Neighbours voting for c1, zero padded (scipy convolve mode='constant').
-    votes = cv2.boxFilter(initial_mask.view(np.uint8), -1, (3, 3),
-                          normalize=False, borderType=cv2.BORDER_CONSTANT)
-    W = votes > _MAJORITY
-    return np.where(W, c1, c2), np.where(W, mag1, mag2)
-
-
 def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
     """
     DTCWT fusion implementation (Optimized CPU version).
@@ -125,10 +97,10 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
         thread_count: Worker threads for the forward transforms
             (None: up to 8, bounded by the CPU count).
     """
-    if dtcwt is None:
+    if dtcwt is None or maximum_filter is None or convolve is None:
         raise RuntimeError(
-            "DTCWT fusion requires 'dtcwt'. "
-            "Please install it via: pip install dtcwt"
+            "DTCWT fusion requires 'dtcwt' and 'scipy'. "
+            "Please install them via: pip install dtcwt scipy"
         )
 
     # 1. Load and Preprocess Images
@@ -143,61 +115,110 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
         cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         for img in images
     ]
-    num_imgs = len(images_rgb)
-
     if thread_count is None:
         workers = min(8, os.cpu_count() or 1)
     else:
         workers = max(1, int(thread_count))
 
+    h, w = images_rgb[0].shape[:2]
+    n_frames = len(images_rgb)
     transform = dtcwt.Transform2d()
 
-    def forward(job):
-        # Everything that depends on one frame alone runs here, in parallel:
-        # the transform plus the magnitudes and activity of its coefficients.
-        channel_idx, img_idx = job
-        t = transform.forward(images_rgb[img_idx][:, :, channel_idx], nlevels=N)
-        mags = [np.abs(h) for h in t.highpasses]
-        acts = [_activity(m) for m in mags]
-        return t.lowpass, t.highpasses, mags, acts
+    # 2. Activity per frame and level from the luminance transform. Only the
+    # (real, |coeff| summed over the 6 orientations) activity maps are kept —
+    # never all frames' complex pyramids, so memory stays near one pyramid.
+    def _luma(img):
+        return 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
 
-    # 2. Forward transforms run ahead on the pool but are folded strictly in
-    # frame order, which the pairwise fusion rule depends on. The bounded
-    # look-ahead keeps a few pyramids alive instead of all N x 3 at once.
-    jobs = [(c, i) for c in range(3) for i in range(num_imgs)]
-    lookahead = 2 * workers
+    def measure_activity(img):
+        pyr = transform.forward(_luma(img), nlevels=N)
+        return [maximum_filter(
+                    np.abs(pyr.highpasses[level]).sum(axis=2).astype(np.float32),
+                    size=3, mode='reflect')
+                for level in range(N)]
+
+    # The transforms are frame-independent. executor.map preserves input
+    # order, so tie-breaking and every downstream decision remain identical
+    # to upstream's serial implementation.
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        by_frame = list(executor.map(measure_activity, images_rgb))
+    activities = [[frame[level] for frame in by_frame] for level in range(N)]
+    del by_frame
+
+    def _consistent_argmax(act):
+        """N-way argmax + 3x3 majority consistency check on the index map.
+
+        One decision per pixel and level, shared by all six orientations and
+        all three channels: deciding each orientation/channel separately (the
+        previous pairwise rule) mixed frames inside one pixel — colour fringes
+        and ghosted edges."""
+        idx = np.argmax(np.stack(act), axis=0)
+        votes = np.stack([convolve((idx == i).astype(np.float32),
+                                   np.ones((3, 3), np.float32), mode='nearest')
+                          for i in range(n_frames)])
+        return np.argmax(votes, axis=0)
+
+    decisions = [_consistent_argmax(activities[level]) for level in range(N)]
+    del activities
+
+    # 3. Low-pass weights: soft selection driven by the coarsest decision. A
+    # plain mean over all frames (the previous rule) washed the defocused
+    # frames' low frequencies into every region — veiling glare / low
+    # contrast on deep stacks.
+    coarse_idx = decisions[-1]
+    lp_weights = None
+
+    # 4. Per channel, stream the frames: forward, keep the selected
+    # coefficients, accumulate the weighted low-pass.
+    def forward_colour(job):
+        channel, frame = job
+        return transform.forward(images_rgb[frame][:, :, channel], nlevels=N)
+
+    # Keep only a bounded number of complex pyramids live at once. Results
+    # are consumed in channel/frame order, preserving upstream's low-pass
+    # accumulation order and therefore its exact output.
+    jobs = [(c, i) for c in range(3) for i in range(n_frames)]
+    lookahead = max(1, 2 * workers)
     fused_channels = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        pending = deque(executor.submit(forward, j) for j in jobs[:lookahead])
+        pending = deque(executor.submit(forward_colour, job)
+                        for job in jobs[:lookahead])
         next_job = len(pending)
-        for channel_idx, img_idx in jobs:
-            lowpass, highs, mags, acts = pending.popleft().result()
+        fused_high = None
+        lp = None
+        for c, i in jobs:
+            pyr = pending.popleft().result()
             if next_job < len(jobs):
-                pending.append(executor.submit(forward, jobs[next_job]))
+                pending.append(executor.submit(forward_colour, jobs[next_job]))
                 next_job += 1
+            if fused_high is None:
+                fused_high = [np.zeros_like(hp) for hp in pyr.highpasses]
+                lp = np.zeros_like(pyr.lowpass)
+                if lp_weights is None:
+                    lp_shape = pyr.lowpass.shape
+                    ws = []
+                    for k in range(n_frames):
+                        m = cv2.resize((coarse_idx == k).astype(np.float32),
+                                       (lp_shape[1], lp_shape[0]),
+                                       interpolation=cv2.INTER_LINEAR)
+                        ws.append(cv2.GaussianBlur(m, (0, 0), 1.5))
+                    ws = np.stack(ws)
+                    lp_weights = ws / np.maximum(ws.sum(axis=0, keepdims=True), 1e-6)
+            for level in range(N):
+                sel = decisions[level] == i
+                fused_high[level][sel] = pyr.highpasses[level][sel]
+            lp += lp_weights[i] * pyr.lowpass
+            del pyr
+            if i == n_frames - 1:
+                rec = transform.inverse(dtcwt.Pyramid(lp, tuple(fused_high)))
+                # dtcwt pads odd sizes by duplicating the last row/column
+                fused_channels.append(rec[:h, :w])
+                fused_high = None
+                lp = None
 
-            if img_idx == 0:
-                # Low-pass: running sum in frame order, identical to
-                # np.mean over the stacked low-passes.
-                lowpass_sum = lowpass.copy()
-                fused_highs, fused_mags = list(highs), mags
-            else:
-                lowpass_sum += lowpass
-                for level in range(N):
-                    fused_highs[level], fused_mags[level] = _fuse_pair(
-                        fused_highs[level], fused_mags[level],
-                        highs[level], mags[level], acts[level])
-
-            if img_idx == num_imgs - 1:
-                # Inverse Transform
-                fused_pyramid = dtcwt.Pyramid(lowpass_sum / num_imgs,
-                                              tuple(fused_highs))
-                fused_channels.append(transform.inverse(fused_pyramid))
-                del lowpass_sum, fused_highs, fused_mags
-
-    # 3. Reconstruct Final Image
+    # 5. Reconstruct Final Image
     fused_img = np.stack(fused_channels, axis=-1)
-    
+
     # Clip and Convert
     fused_img = np.clip(fused_img * 255.0, 0, 255).astype(out_dtype)
     fused_img = cv2.cvtColor(fused_img, cv2.COLOR_RGB2BGR)

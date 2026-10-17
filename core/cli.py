@@ -15,8 +15,9 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple
 
-VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4"]
-VALID_ALIGN = ["none", "homography", "ecc", "both"]
+VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+                 "openfocus_a", "openfocus_b", "openfocus_c"]
+VALID_ALIGN = ["none", "homography", "ecc", "both", "openfocus"]
 VALID_FORMATS = [".png", ".jpg", ".webp", ".bmp", ".tif", ".tiff"]
 
 EXIT_OK = 0
@@ -44,11 +45,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", "-d", default=None,
                         help="Batch mode: fuse every input folder, writing <folder>.<ext> here")
     parser.add_argument("--method", "-m", default="guided_filter", choices=VALID_METHODS,
-                        help="Fusion method (default: guided_filter)")
+                        help="Fusion method (default: guided_filter); openfocus_a/b/c are reverse-engineered "
+                             "from Helicon Focus (A = variance-weighted average, B = variance depth-map pick, "
+                             "C = Laplacian pyramid)")
     parser.add_argument("--align", "-a", default="none", choices=VALID_ALIGN,
-                        help="Registration applied before fusion (default: none)")
+                        help="Registration applied before fusion (default: none); openfocus = fast bounded "
+                             "phase correlation with brightness equalization")
+    parser.add_argument("--align-shift-limit", type=float, default=None, metavar="RATIO",
+                        help="openfocus alignment only: maximum accepted frame shift as a fraction of the "
+                             "frame size (default 0.08, the limit Helicon gives up at; frames above it are "
+                             "left unaligned rather than half-corrected)")
+    parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
+                        help="Base correction after fusion: match the output's low frequencies to the "
+                             "last/first frame (removes brightness/exposure drift, default: none)")
+    parser.add_argument("--sort", default="asc", choices=["asc", "desc", "off"],
+                        help="Stack order for the openfocus_a/b/c methods: 'asc' keeps the file order "
+                             "(default, matches Helicon), 'desc' reverses a far-to-near sweep so the "
+                             "base/last-frame semantics anchor to the intended end, 'off' is an explicit no-op")
+    parser.add_argument("--dust-map", default=None, metavar="WHITE",
+                        help="Flat-field (dust map) correction: path to a defocused shot of a blank/white "
+                             "area; removes static dust specks and vignetting from every frame before "
+                             "registration")
     parser.add_argument("--kernel", "-k", type=int, default=None,
-                        help="Kernel size for guided_filter/dct/gfgfgf (forced odd)")
+                        help="Kernel size (forced odd); for the openfocus family it is the "
+                             "source of the variance-window radius")
+    parser.add_argument("--depth-smoothing", type=float, default=None, metavar="SIGMA",
+                        help="openfocus_b only: depth-map transition smoothing (Gaussian sigma, "
+                             "default 1.2 = Helicon-matched; 0 = sharpest, larger = calmer on noisy stacks)")
     parser.add_argument("--threads", "-t", type=int, default=4,
                         help="Worker thread count (default: 4)")
     parser.add_argument("--batch-size", type=int, default=2,
@@ -129,8 +152,7 @@ def _resolve_stack(args, video_temp_root: str) -> Tuple[str, List[str]]:
 
 
 def _load_images(paths: List[str]):
-    import cv2
-    from core.image_loader import _read_tiff_pages
+    from core.image_loader import _read_tiff_pages, decode_image
     images = []
     for p in paths:
         # A multi-page TIFF is a whole stack in one file
@@ -138,8 +160,9 @@ def _load_images(paths: List[str]):
         if pages is not None:
             images.extend(pages)
             continue
-        data = np.fromfile(p, dtype=np.uint8)
-        img = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+        # Same decoder as the GUI: EXIF orientation, HEIC and camera RAW
+        # (the CLI used a bare cv2.imdecode and fused unrotated frames)
+        img = decode_image(p)
         if img is None:
             raise RuntimeError(f"Failed to decode image: {p}")
         images.append(img)
@@ -160,17 +183,37 @@ def _fuse_stack(images, args):
     from core.multi_focus_fusion import MultiFocusFusion
     from utils.image_utils import normalize_fuse_input, quantize_fuse_output
 
+    # Flat-field (dust map) correction runs FIRST and in the raw pixel
+    # domain: dust lives in sensor coordinates, so it must be divided out
+    # before registration warps the content.
+    dust_white = getattr(args, "dust_map", None)
+    if dust_white:
+        from utils.dust_map import compute_flat_field, apply_flat_field_stack
+        data = np.fromfile(dust_white, dtype=np.uint8)
+        white = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+        if white is None:
+            raise RuntimeError(f"Failed to decode white-field image: {dust_white}")
+        gain = compute_flat_field(white)
+        images = apply_flat_field_stack(images, gain)
+        print(f"Flat-field (dust map) correction applied from {dust_white}")
+
     # 16-bit sources are normalized to 0-1 float for the back-ends and
     # quantized back to uint16 afterwards, preserving the extra depth.
     images, is_16bit = normalize_fuse_input(images)
 
     if args.align != "none":
         t0 = time.time()
-        reg = ImageRegistration(method=args.align, downscale_width=args.downscale)
+        # max_shift_ratio is only read by the openfocus method; the others
+        # ignore it, so one call site stays simple.
+        reg = ImageRegistration(method=args.align, downscale_width=args.downscale,
+                                max_shift_ratio=getattr(args, "align_shift_limit",
+                                                        None))
         images = reg.process(images, output_path=None, thread_count=args.threads)
         print(f"Registration ({args.align}) done in {time.time() - t0:.1f}s")
 
-    fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu)
+    fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu,
+                         base_frame=getattr(args, "base_frame", "none"),
+                         sort_mode=getattr(args, "sort", "asc"))
     if args.tile_size:
         fusion_kwargs["tile_block_size"] = args.tile_size
     if args.method == "stackmffv4":
@@ -184,6 +227,11 @@ def _fuse_stack(images, args):
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 31)
     elif args.method in ("dct", "gfgfgf"):
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 7)
+    elif args.method in ("openfocus_a", "openfocus_b", "openfocus_c"):
+        # 判别性探针（报告 §6.8）：默认方差窗口半径 5（kernel=11）
+        fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 11)
+        if args.method == "openfocus_b" and args.depth_smoothing is not None:
+            fuse_kwargs["depth_smoothing"] = max(0.0, float(args.depth_smoothing))
     elif args.method == "stackmffv4":
         fuse_kwargs["model_path"] = _find_model_path()
 
@@ -217,8 +265,15 @@ def _save_depth(args, fused_out: str) -> None:
     out_dir = os.path.dirname(os.path.abspath(path))
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
+    from core.depth_map import SUPPORTED_METHODS as _DEPTH_METHODS
+    if args.method not in _DEPTH_METHODS:
+        raise RuntimeError(
+            f"--depth-map is not available for method '{args.method}': "
+            "depth/index maps exist only for index-deciding methods ("
+            + ", ".join(_DEPTH_METHODS) + "). Weighted-average fusions "
+            "(guided_filter, openfocus_a) have no per-pixel decision.")
     kernel = None
-    if args.method in ("dct", "gfgfgf"):
+    if args.method in ("dct", "gfgfgf", "openfocus_b", "openfocus_c"):
         kernel = _normalize_kernel(args.kernel, 7)
     idx = compute_focus_index(
         frames, args.method, kernel_size=kernel,

@@ -30,39 +30,72 @@ def _textured_stack(n=4, size=(70, 90), seed=0):
 # --------------------------------------------------------------------------
 
 def _reference_dtcwt(images, N=4):
-    """The pre-optimization DTCWT fusion (scipy rule, all pyramids held)."""
+    """The v1.55 serial N-way DTCWT implementation."""
     import dtcwt
     from scipy.ndimage import maximum_filter, convolve
 
-    def fuse_pair(c1, c2):
-        footprint = np.ones((3, 3, 1), dtype=bool)
-        A1 = maximum_filter(np.abs(c1), footprint=footprint, mode='reflect')
-        A2 = maximum_filter(np.abs(c2), footprint=footprint, mode='reflect')
-        count = convolve((A1 > A2).astype(np.float32),
-                         np.ones((3, 3, 1), dtype=np.float32),
-                         mode='constant', cval=0.0)
-        return np.where(count > 4.5, c1, c2)
-
     rgb = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
            for img in images]
+    h, w = rgb[0].shape[:2]
+    n_frames = len(rgb)
     transform = dtcwt.Transform2d()
+
+    def luma(img):
+        return 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+
+    activities = [[] for _ in range(N)]
+    for img in rgb:
+        pyr = transform.forward(luma(img), nlevels=N)
+        for level in range(N):
+            activities[level].append(maximum_filter(
+                np.abs(pyr.highpasses[level]).sum(axis=2).astype(np.float32),
+                size=3, mode="reflect"))
+
+    decisions = []
+    for activity in activities:
+        idx = np.argmax(np.stack(activity), axis=0)
+        votes = np.stack([
+            convolve((idx == i).astype(np.float32),
+                     np.ones((3, 3), np.float32), mode="nearest")
+            for i in range(n_frames)
+        ])
+        decisions.append(np.argmax(votes, axis=0))
+
+    coarse_idx = decisions[-1]
+    lp_weights = None
     channels = []
     for c in range(3):
-        ts = [transform.forward(img[:, :, c], nlevels=N) for img in rgb]
-        lowpass = np.mean(np.stack([t.lowpass for t in ts], axis=0), axis=0)
-        highs = []
-        for level in range(N):
-            fused = ts[0].highpasses[level]
-            for t in ts[1:]:
-                fused = fuse_pair(fused, t.highpasses[level])
-            highs.append(fused)
-        channels.append(transform.inverse(dtcwt.Pyramid(lowpass, tuple(highs))))
+        highs = None
+        lowpass = None
+        for i, img in enumerate(rgb):
+            pyr = transform.forward(img[:, :, c], nlevels=N)
+            if highs is None:
+                highs = [np.zeros_like(hp) for hp in pyr.highpasses]
+                lowpass = np.zeros_like(pyr.lowpass)
+                if lp_weights is None:
+                    shape = pyr.lowpass.shape
+                    weights = []
+                    for k in range(n_frames):
+                        mask = cv2.resize((coarse_idx == k).astype(np.float32),
+                                          (shape[1], shape[0]),
+                                          interpolation=cv2.INTER_LINEAR)
+                        weights.append(cv2.GaussianBlur(mask, (0, 0), 1.5))
+                    weights = np.stack(weights)
+                    lp_weights = weights / np.maximum(
+                        weights.sum(axis=0, keepdims=True), 1e-6)
+            for level in range(N):
+                selected = decisions[level] == i
+                highs[level][selected] = pyr.highpasses[level][selected]
+            lowpass += lp_weights[i] * pyr.lowpass
+        reconstructed = transform.inverse(dtcwt.Pyramid(lowpass, tuple(highs)))
+        channels.append(reconstructed[:h, :w])
+
     out = np.clip(np.stack(channels, axis=-1) * 255.0, 0, 255).astype(np.uint8)
     return cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
 
 
 @pytest.mark.parametrize("thread_count", [1, 3])
-def test_dtcwt_is_bit_identical_to_reference(thread_count):
+def test_dtcwt_is_bit_identical_to_v155_quality_reference(thread_count):
     pytest.importorskip("dtcwt")
     pytest.importorskip("scipy")
     from fusion_methods.dtcwt import _dtcwt_impl

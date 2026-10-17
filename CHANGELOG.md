@@ -3,6 +3,498 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.55] — 2026-10-15
+
+### Added
+- **3D model export** (depth-map dialog → *Export 3D (OBJ)…*): a textured
+  surface built from the depth map and the fused image — OBJ + MTL + PNG,
+  adjustable relief, *Invert depth axis* flips near/far. Opens in Blender,
+  MeshLab or 3D Viewer.
+
+## [v1.54] — 2026-10-15
+
+### Added
+- **OpenFocus B depth smoothing**: a "Depth smoothing (σ)" control (0–8,
+  default 1.2, matching Helicon) sets the Gaussian sigma of the frame-to-frame
+  depth transition. Remembered across sessions, used by batch processing, and
+  exposed on the CLI as `--depth-smoothing SIGMA`.
+- **Camera RAW input**: RAW files (DNG, CR2/CR3, NEF, ARW, RAF and others) load
+  when the optional `rawpy` (LibRaw) package is present; pip users install it
+  with `pip install "openfocus[raw]"`. RAW is developed to 16-bit with
+  auto-brightening off, so every frame of a stack shares one exposure mapping
+  (per-frame auto exposure would flicker).
+
+### Fixed
+- The command line decoded images with a bare `cv2.imdecode`: no EXIF
+  orientation (CLI results could be rotated differently from the GUI), no HEIC.
+  It now shares the GUI's decoder.
+
+## [v1.53] — 2026-10-15
+
+Follow-up polish to v1.52, found while verifying it on CI and in the light
+theme.
+
+### Fixed
+- **GFG-FGF quality for installer and pip users**: neither ships
+  opencv-contrib, so everyone runs the built-in fast guided filter, which
+  subsampled with nearest-neighbour and aliased fine texture (39.7 dB vs
+  40.8 dB on the ground-truth benchmark). Area averaging now matches
+  opencv-contrib's filter.
+- **Dropping image files froze the window while they decoded**; file drops
+  (and files opened on the app icon) now load on the background worker like
+  folders.
+- **After a second render every previous output stayed selected**, which
+  disabled Save As and Retouch in the context menu; only the new output is
+  selected now. The output tooltip leads with the full (often truncated)
+  name.
+- **Light theme**: the "?" help buttons were squeezed to a 1-pixel line; they
+  now sit beside their dropdowns (also tightening the dark layout). The
+  loading-scale dialog follows the theme instead of forcing dark.
+- README screenshot refreshed.
+
+## [v1.52] — 2026-10-15
+
+A review-driven quality round: one new tool (retouch), two algorithm
+corrections measured on a new ground-truth benchmark, and the rough edges
+of the everyday render loop.
+
+### Added
+- **Retouch brush** (Edit → Retouch Result…, `Ctrl+T`; also in the output
+  list's context menu). Paint pixels from a source frame onto the result to
+  fix halos or wrongly picked details. *Auto-pick* selects, per stroke, the
+  frame that is sharpest under the brush. Soft round brush (radius,
+  hardness, opacity), idempotent strokes, tile-based undo/redo, zoom/pan,
+  source-frame preview (`Tab`); 16-bit results stay 16-bit. The edit is
+  added as a new output (`_Retouched`).
+- **`tools/synthetic_benchmark.py`** — ground-truth benchmark: a texture is
+  defocused along a known depth map into a focus stack and every method is
+  scored by PSNR/SSIM against the true all-in-focus image (clean, sensor
+  noise, small-object scenes; an oracle row shows the ceiling).
+- **"Don't ask again"** in the loading-scale dialog;
+  Settings → *Ask for Loading Scale on Import* turns the prompt back on.
+- Render progress in the status bar: stage (Aligning / Fusing) with a
+  progress bar.
+
+### Fixed — algorithms
+- **GFG-FGF now implements its paper** (issue #5): the Gaussian-like
+  four-neighbourhood gradient operator (eqs 3–8) is merged into the
+  blur-difference focus map (eq 9) before the fast guided filter, and equal
+  focus values are decided by the 3×3 Sobel small-region measure
+  (eqs 11–13). Previously only |I − mean(I)| was used.
+- **GFG-FGF dropped small in-focus objects**: a pre-filter skipped every
+  frame whose whole-frame sharpness was under 15% of the sharpest frame —
+  a frame whose only sharp content is a small object was thrown away
+  (error on that object 30 → 0.7 levels). Removed (it is not in the paper).
+  Decisions and weights are now streamed, so memory no longer grows with
+  N × H × W.
+- **DTCWT rebuilt**: the low-pass band averaged *all* frames (defocused
+  low frequencies washed into every region) and decisions were made
+  pairwise, separately per orientation and colour channel. Now one N-way,
+  majority-checked decision per pixel and level shared by all bands and
+  channels, and a decision-driven low-pass. Benchmark: 34.2 → 39.4 dB
+  (clean), 33.0 → 36.1 (noise), 30.8 → 33.9 (small objects); faster.
+  Odd-sized frames no longer come back one pixel larger.
+- Depth maps for GFG-FGF use the same focus measure and decision as fusion.
+
+### Fixed — workflow and UI
+- No modal "Completed" box after every render (and quick preview): the
+  timing summary goes to the status bar and the output item's tooltip.
+- The status bar was hidden unless one helper was used, so tile progress,
+  "render cancelled" and "compare done" messages were never visible; it is
+  now always shown (no layout jump per render).
+- **Ctrl+S saved the newest render even when an older output was selected
+  and displayed**; it now saves the selected output. Save As proposes that
+  output's own name instead of one built from the current method dropdown.
+  "Image saved" is a status message instead of a modal box.
+- The kernel slider remembers its value per fusion method. The depth-map
+  dialog used the guided-filter radius (31) as DCT's median window.
+- Checked checkboxes looked identical to radio buttons (white dot): now a
+  blue box with a check mark.
+- Combo-box and spin-box arrows rendered as solid black blocks (Qt does
+  not support the CSS border-triangle trick); replaced by SVG arrows.
+- The empty result panel says what to do ("Press Start Render (Ctrl+R)").
+- The torch availability probe raced the status bar, which imported torch
+  on the UI thread (window freeze; "operator prims::amin does not exist");
+  the probe is serialized and the status bar reads its cached result.
+
+### Docs
+- User manual (EN): 59 mojibake sequences repaired (UTF-8 read as GBK since
+  v1.41), duplicated Themes section removed; retouching, the load-scale
+  prompt, GFG-FGF/DTCWT details and all panel shortcuts documented (EN + ZH).
+- README: benchmark table, OpenFocus vs. Helicon Focus comparison, complete
+  method lists.
+
+### Alignment and Helicon parity (reverse-engineering round 5)
+
+- **The `openfocus` alignment shift limit dropped from 25% to 8% of the
+  frame size, and over-limit frames are now left unaligned instead of
+  clamped.** Black-box probing of Helicon's aligner showed it stops
+  tracking at 6–8% (crop no longer follows the shift; output high-frequency
+  energy jumps = ghosting). Clamping to a 25% limit produced a half-corrected
+  frame *and* shrank the valid-region crop by up to a quarter of the frame.
+  The measured center-net translation is now what is checked, so a pure
+  rotation — whose matrix translation term is large — is never mistaken for
+  an over-limit shift. Escape hatch: `--align-shift-limit 0.25` restores the
+  old acceptance range per run.
+- **The Helicon regression harness compared with a centered crop, but
+  Helicon's AutoCrop is not centered** (§7.4: measured offsets (0,+1) and
+  (2,2)). A 1-px grid misalignment costs ~25 levels of pure error, inflating
+  synthetic stackB cases 6.5 % → 4.9 % false-positive range. `_metrics()`
+  now sweeps integer crop offsets (the `registered_mae` recipe from
+  `tools/helicon_repro/`) before scoring.
+
+- **`is_stackmffv4_available()` now probes `torchvision`, not just `torch`.**
+  Found while running the suite (unrelated to the alignment work): the
+  network module imports `from torchvision import models`, so a torch-without-
+  torchvision environment passed the availability guard and crashed at fusion
+  time — and through the tests' "torch installed" skipif. The probe now
+  imports what the code path actually needs.
+
+### Tests
+- `test_helicon_regression.py`: budgets tightened to the measured registered
+  MAE + ~30 % headroom (C real stacks were carried at up to 10.5 % from the
+  v1.39 era; actual 1.4–3.5 %).
+- Five new alignment cases: default limit parsimony, over-limit drop
+  (identity preserved), within-limit recovery, `max_shift_ratio=`
+  override, and rotation-alone not dropped.
+- Stale-comment cleanup: the retracted "Helicon auto-reverses frame order"
+  claim (§6.2 correction) was still quoted in `fusion_methods/openfocus_ab.py`;
+  help dialog / manuals now state the verified numbers (≈1–3.5 % MAE,
+  crop-registered) and document `--align-shift-limit`, `--base-frame`,
+  `--sort`, `--dust-map` and the openfocus family in the CLI tables.
+
+## [v1.51] — 2026-10-14
+
+### Fixed
+- **Dust-map dialog: "From a frame of this stack" never worked** — the
+  preview computed from `self._white`, which is only set by the file-picker
+  path, so the stack-frame path raised `ValueError` and the localized error
+  leaked the library's English message. The chosen frame is now passed
+  through, and every rejection (dark/empty/mismatched white field) shows a
+  localized message
+- **Flat-field apply survived a mismatched frame** — a stack frame whose
+  size disagrees with the white field raised inside a Qt slot (silent
+  crash-file-only failure); it now warns and leaves the stack untouched
+- **Depth-map dialog's dead fallback**: the legacy radio-attribute probe
+  (`rb_gfg`, …) could never fire since the dropdown redesign — removed
+
+### Improved
+- **README News compacted**: fourteen per-release entries (~2.5 kB)
+  collapsed to the current release plus one paragraph for the Helicon
+  series plus a one-line earlier history — the full history stays in
+  [CHANGELOG.md](./CHANGELOG.md)
+
+### Tests
+- `TestDustMapDialog`: stack-frame preview, size-mismatch and dark-white
+  rejection with localized messages (5 new cases; suite at 314, all
+  passing on Windows and Linux)
+
+## [v1.50] — 2026-10-14
+
+### Fixed — the in-place update could swallow the app
+Symptom: check for update → download finishes → the window disappears, and
+the app has to be reopened (and the update clicked again) to reach the new
+version. Four compounding causes, all fixed:
+
+- **The updater quit via `QApplication.quit()`, which skips the window's
+  closeEvent teardown** — the swap script's robocopy then raced still-locked
+  binaries, the elevated retry surfaced as a surprise UAC prompt, and the
+  old build came back. The quit path is now a clean `close()`
+- **Retry budget lost the race**: robocopy `/R:2 /W:1` gave up in ~3s while
+  the interpreter can still be exiting. Now `/R:10 /W:5` (bounded at ~50s)
+- **Process-exit detection was single-shot**: one transient `tasklist`
+  failure started the swap against a live process. The script now requires
+  two consecutive "PID gone" observations
+- **The failure branch relaunched without `--restore-session`**, so even a
+  detected failure dumped the user into an empty window; both relaunch
+  branches now restore the session the updater snapshotted
+
+The staged build is kept on every failure, and the post-restart report now
+says so: reopen Help → Check for Updates and the staged version installs
+immediately, no re-download.
+
+### Added — release notes shown in the updater
+The update dialog carries the release notes of **every version between the
+installed one and the latest** (GitHub release bodies, newest-first
+listing, rendered to plain text, shown under "Show Details..."), and the
+"ready to install" prompt states the no-re-download-on-reopen behaviour.
+`utils/updater.py` gains `fetch_release_notes()`; `check_async` passes the
+notes through.
+
+## [v1.49] — 2026-10-14
+
+### Fixed
+- **Similarity estimator parsimony rule**: on defocus frames, blur mimics
+  slight scale in NCC — the bounded search could return spurious rotation
+  (up to ±4°) and 1.03× scale for pure-translation frames. Non-trivial
+  (θ, s) candidates must now beat the translation-only baseline by ≥0.05
+  NCC to be adopted; known-perturbation verification still recovers all
+  true rotation/scale/translation cases
+
+### Improved
+- **Depth-map dialog recomputes automatically when switching between
+  second-scale methods** (matches the auto-compute on open); slow methods
+  keep the explicit Compute button
+- **Environment dialog**: SciPy detection added; dependency summary now
+  complete (SciPy for DCT; Guided Filter and OpenFocus A/B/C need nothing
+  extra)
+- **Help dialog**: descriptions for the reverse-engineered OpenFocus
+  A/B/C methods (were missing from the render-methods help)
+- README/PyPI metadata and manuals updated for the eight-algorithm,
+  dropdown-based present
+
+## [v1.48] — 2026-10-14
+
+### Fixed
+- Test-only: the depth-dialog "switch recomputes" test raced the first
+  worker's teardown and went red on both CI platforms (v1.47's shipped
+  binaries are unaffected — the feature itself works). The test now waits
+  for the worker to finish before switching
+
+## [v1.47] — 2026-10-14
+
+### Improved
+- **Depth-map dialog: switching between second-scale methods now recomputes
+  automatically**, matching the auto-compute-on-open behaviour. Slow
+  methods (DTCWT, StackMFF-V4) still wait for an explicit Compute, and a
+  running computation is never interrupted by a switch
+
+## [v1.46] — 2026-10-14
+
+### Changed — variance window spec from the discriminative-probe identification
+The reverse-engineering project gained a fourth-round system
+identification (report §6.7/§6.8, reproducible via
+`tools/helicon_repro/probe_measure.py`): probes designed to make candidate
+measures disagree, voted on by Helicon's own depth maps, established that
+Helicon's real measure window is a **fixed ≈10px box** (the Radius setting
+does not control it), the measure is **BT.601 luma** (exactly what our
+port already uses), and there is **no pre-blur** (a σ0.5 hypothesis was
+tested and rejected: keyboard unchanged, balls slightly worse, kitchen
+within noise).
+
+- OpenFocus A/B/C **variance window default is now radius 5 (kernel 11,
+  was 3/7)** and the family's slider range is capped at radius 10
+  (kernel 21); other algorithms keep 1–51. Real-stack depth agreement
+  with Helicon improves (kitchen ±3 frames: 95.3% vs 92.7%, balls 89.2%
+  vs 85.9%); fused output is radius-insensitive (<0.1%) so only the
+  depth-map fidelity moves
+- The depth-map dialog's kernel line and the main-window slider label
+  follow the new default automatically
+
+### Docs
+- User manuals (EN/ZH): the fusion-methods chapter now covers all eight
+  algorithms plus alignment-only, the dropdown-based selection flow, and
+  an updated comparison table; the depth-map chapter reflects the
+  index-deciding-only method list
+
+## [v1.45] — 2026-10-14
+
+### Fixed
+- **Batch jobs with "Alignment only (no fusion)" crashed**: the fusion
+  string `'none'` was handed straight to the fusion constructor. Batch now
+  skips the fusion step and always saves the aligned frames for that mode
+  (otherwise the job would produce no output at all), and the batch
+  options panel shows the localized method name
+
+## [v1.44] — 2026-10-14
+
+### Changed — consistency sweep: depth maps, ordering, parameter semantics
+- **Depth maps now list only index-deciding methods** (DCT, DTCWT,
+  GFG-FGF, StackMFF-V4, OpenFocus B/C). Weighted-average fusions
+  (Guided Filter, OpenFocus A) have no per-pixel decision, so offering a
+  depth map for them was misleading — removed from the dialog and the
+  CLI (`--depth-map` with those methods now explains why it is
+  unavailable). The dialog order matches the fusion dropdown, and the
+  dialog opens on the current fusion method when it has a depth map
+- **The kernel slider states what it means per algorithm**: the label now
+  reads Guided-filter radius / DCT median kernel / GFG initial kernel /
+  Variance window (px) and switches with the method — same slider, but
+  no more guessing what the number does. The depth-map dialog shows the
+  same per-method kernel line
+- **Compare-All follows the fusion-dropdown order** (StackMFF-V4 before
+  the OpenFocus family, was appended last), and the compare progress /
+  output-list tags / info lines use the localized method names instead
+  of hardcoded English
+
+### Fixed
+- **Real-window construction depended on an unwired attribute**: the new
+  per-algorithm kernel label referenced `window.lbl_kernel`, which main
+  never assigned — the app failed to start (tests passed because their
+  stub windows define the attribute). The label is now wired like every
+  other control
+
+## [v1.43] — 2026-10-13
+
+### Fixed — the OpenFocus alignment actually failed on real stacks (root cause)
+- **`cv2.phaseCorrelate` mutates its input arrays** in the bundled OpenCV
+  build: the reference frame silently degraded frame over frame, so every
+  estimate after the first few was computed against a corrupted reference —
+  alignment "did not align". All call sites now pass copies; a regression
+  test pins input immutability
+- The alignment model was translation-only while Helicon's is a bounded
+  **similarity transform**. Rewritten as a bounded grid search (rotation
+  ±8°, scale 0.95–1.05) scored by overlap NCC (the phase-correlation
+  response does not discriminate rotation), with Hann-windowed phase
+  correlation for the sub-pixel residual translation; defocused /
+  weak-texture frames fall back to chaining against the previous frame
+  (adjacent frames blur alike); a motion dead zone keeps fixed-rig stacks
+  untouched (no more sub-pixel noise warps). Verified on known
+  perturbations of a real frame: shift 40→6.3 MAE, rotation 2.5° 23→2.3,
+  scale 1.06 21→5.4, defocus+shift 33→14.2; the fixed-rig kitchen stack
+  estimates ≤0.09px per frame and stays identity. Cost: ~0.1–0.3s/frame
+  (was milliseconds, but wrong)
+
+### Restored — alignment-only output
+- The fusion dropdown gains **"Alignment only (no fusion)"**: registers
+  the stack and shows the aligned frames in the output list. This is the
+  capability the old radio group had (all radios unchecked) that the
+  v1.41 dropdown accidentally removed
+
+### Changed
+- *Quick preview* and *Remove brightness drift* now share one row
+- **Depth maps for OpenFocus A/B/C are three different maps**, each
+  mirroring its pipeline: A = variance-weighted frame centroid
+  (continuous, with the +1 last-frame prior), B = window-variance argmax
+  (the Helicon-validated hard pick), C = finest Laplacian-band energy
+  argmax. Previously all three showed B's map — a real defect, not a
+  display quirk
+
+## [v1.42] — 2026-10-13
+
+### Added — dust map (flat-field correction) and stack-order control
+- **Dust map / flat-field correction** (Tools → Dust Map, CLI `--dust-map`):
+  one defocused shot of a blank/white area records the static gain field
+  of the optics; the field is divided out of every frame **before
+  registration** (dust lives in sensor coordinates — correcting after the
+  warp would smear it). Removes dust specks and vignetting together,
+  16-bit safe, gain clipped to [0.5, 2] so dead pixels cannot amplify
+  noise. The dialog previews the gain heatmap plus a before/after of the
+  first frame, takes the white shot from a file or from a stack frame,
+  and applying is undoable with alignment caches invalidated
+- **Stack order for the OpenFocus family** (CLI `--sort asc|desc|off`,
+  GUI "Reverse stack order" checkbox): a far-to-near sweep can be
+  reversed so the base-reference end, A's last-frame prior and the
+  depth-map labels anchor to the intended end. Default `asc` keeps the
+  file order — which an output-side experiment proved is also Helicon's
+  behaviour (see below)
+
+### Resolved — the "Helicon auto-reverses stacks" question, with evidence
+The reverse-engineering notes had concluded Helicon's "Sort automatically"
+reverses frame order (depth labels differed by n-1 on the Mobile Depth
+set). New experiments during this release (`tools/helicon_repro/
+validate_autosort.py`) overturned that: Helicon's dmap **export polarity**
+is simply "65535 = first frame" — no reordering ever happens. Three
+independent proofs: ① base correction against the file-last end gives the
+best output MAE on the real stacks (desc makes it worse: keyboard
+1.18%→2.40%), ② the synthetic descending stack keeps its file-last base,
+③ content-based direction detection is impossible in principle (content is
+reversal-covariant; sharpness-curve rho scatters −0.98…+1.00 across the 11
+real stacks). The shipped detector from that earlier conclusion was
+therefore dropped in favour of an explicit user choice
+
+### Fixed
+- **Persisted "Remove brightness drift" never re-checked its checkbox**
+  after a restart: the attribute was restored but the checkbox kept
+  showing unchecked (the render still obeyed the restored value — the UI
+  lied). Both persisted toggles now sync on startup
+
+## [v1.41] — 2026-10-13
+
+### Changed — algorithm selection is now dropdown, single-choice
+UI feedback round on the v1.39 panel layout:
+- **Fusion method is a dropdown** (was 8 radio buttons): exactly one method
+  is always selected — same single-choice semantics as the CLI's `-m`
+- **Alignment is a dropdown too** (was three combinable checkboxes):
+  `No alignment / Homography / ECC / OpenFocus (fast)` — one registration
+  method per render. The old chain (OpenFocus → ECC/Homography refinement)
+  is gone; pick ECC or Homography when you need sub-pixel work
+- **"Remove brightness drift" moved out of the fusion group** — it is a
+  post-processing switch shared by every method, so it now lives next to
+  *Quick preview* (still off by default)
+- Render/batch/export/batch-dialog/project files all read the selection
+  through `window.current_fusion_method()` / `current_alignment_method()`;
+  `.ofproj` files saved by v1.39/v1.40 migrate (old checkbox pair → the
+  single closest alignment method)
+
+### Fixed
+- **Default export filenames said "None" for OpenFocus A/B/C** results
+  (the filename mapper predated the new methods); now tagged
+  OpenFocusA/OpenFocusB/OpenFocusC, and alignment shows the single choice
+- Registration help dialog still described the removed
+  "enable both to chain" behaviour and omitted the OpenFocus method
+
+### Added — depth maps cover the Helicon-derived methods
+- The depth-map feature now offers **openfocus_a/b/c** (dialog + core):
+  their measure is the window local variance the reverse engineering
+  validated to 99.5% depth-map agreement with Helicon, with the kernel
+  slider as the variance window — the map now mirrors what those fusion
+  methods actually decide per pixel. Fast (auto-computed on open like
+  the other second-scale measures)
+
+## [v1.40] — 2026-10-13
+
+### Fixed — Helicon-parity audit of the v1.39 ports (three real defects)
+A parameter-level audit against the validated reproduction configs
+(`tools/helicon_repro/audit_port_v139.py`, rerunnable) re-checked every
+constant and decision rule of the v1.39 ports against Helicon's own output:
+
+- **OpenFocus - A crashed (or silently garbled) grayscale stacks**: the
+  weighted-average loop broadcast a 2-D `(h,w)` frame against `(h,w,1)`
+  weights — non-square stacks raised `ValueError`, square stacks produced a
+  wrong `(h,w,w)` array. B/C already supported 2-D; A now does too
+- **OpenFocus - B corrupted stacks deeper than 256 frames**: the depth map
+  was cast to `uint8` before the median filter, clipping index 259 (say) to
+  255 — microscopy stacks of hundreds of frames silently picked the wrong
+  source pixels. Depth smoothing now stays float32 (bit-identical output for
+  ≤256-frame stacks)
+- **OpenFocus - C decision rule deviated from the validated recipe**: v1.39
+  shipped a soft-normalized blend (σ=1 weights, nearest-neighbour expand);
+  the FINAL validated configuration is a per-band **max-pick** (σ=3 weights,
+  bicubic ×2 + σ0.6 expand, coarsest band = last frame). On fresh Helicon
+  Method-C references rendered for the 25–32-frame real stacks, max-pick
+  measures closer to Helicon (keyboard 3.48% vs 3.68%, balls 5.09% vs
+  6.23%); on the synthetic set both agree with the published numbers
+  (0.51% / 6.55% / 3.39%). The code now matches
+  docs/HELICON_REPRODUCTION_REPORT.md exactly
+
+### Added — Helicon-benchmark regression harness
+- `tests/test_helicon_regression.py`: locks A/B/C to measured MAE budgets
+  against the local Helicon reference library and the StackMFF Mobile Depth
+  stacks (auto-skips when the benchmarks are absent, so CI stays green);
+  plus a >256-frame depth-index regression in `tests/test_openfocus_ab.py`
+- New Helicon Method-C references for keyboard/balls/kitchen collected with
+  the original binary (deep-stack regime, 12–32 frames)
+
+## [v1.39] — 2026-10-13
+
+### Added — the Helicon Focus algorithm family, reverse-engineered and verified
+All three derived from a full static+behavioural reverse engineering of
+Helicon Focus 8.1 (docs/HELICON_REPRODUCTION_REPORT.md: 99.5% depth-map
+agreement, 0.95–4.1% output MAE across the 11-stack StackMFF test set).
+- **OpenFocus - A** (variance-weighted average): window-variance weights
+  smoothed per Helicon's Smoothing, with a +1 last-frame prior so flat
+  regions degrade exactly to the last frame
+- **OpenFocus - B** (variance depth-map pick): two-pass
+  argmax(variance) → median+Gaussian depth smoothing → hard pixel pick;
+  tie-break takes the first frame — no halos on smooth surfaces
+- **OpenFocus - C** (Laplacian pyramid): per-band energy soft-normalized
+  blend with the coarsest band taken from the last frame; boosts local
+  contrast (the documented Helicon "contrast and glare" behaviour)
+- **Remove brightness drift** (off by default): unified post-fusion base
+  correction `out += LP(I_base) − LP(out)` (σ=32) matching the last or
+  first frame — removes exposure/brightness drift across the stack
+  (essential for time-lapse); exposed as a checkbox, CLI `--base-frame`,
+  and honoured by tiled fusion and batch jobs
+- **OpenFocus alignment** (fast, checkable alongside ECC/Homography):
+  bounded phase correlation with a Hann window and a 0.05 confidence gate
+  (weak-texture frames report no shift instead of a spurious peak),
+  low-frequency brightness equalization per frame, and automatic crop to
+  the valid intersection; milliseconds per frame, also in the CLI
+  (`-a openfocus`) and batch (chains before ECC/Homography when combined)
+- The three methods join Compare-All, the kernel slider (as the variance
+  window; output is radius-insensitive per the reverse-engineering
+  measurements), batch jobs and the four-language UI
+
 ## [v1.38] — 2026-10-08
 
 ### Fixed

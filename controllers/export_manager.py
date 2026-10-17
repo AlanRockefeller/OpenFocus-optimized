@@ -77,61 +77,70 @@ class ExportManager:
     # ------------------------------------------------------------------
     # Filename helpers
     # ------------------------------------------------------------------
+    _FUSION_FILE_TAGS = {
+        "guided_filter": "GuidedFilter",
+        "dct": "DCT",
+        "dtcwt": "DTCWT",
+        "gfgfgf": "GFGFGF",
+        "stackmffv4": "StackMFFV4",
+        "openfocus_a": "OpenFocusA",
+        "openfocus_b": "OpenFocusB",
+        "openfocus_c": "OpenFocusC",
+    }
+    _ALIGN_FILE_TAGS = {
+        "homography": "Homography",
+        "ecc": "ECC",
+        "openfocus": "OpenFocusAlign",
+    }
+
+    def _fusion_tag(self) -> str:
+        return self._FUSION_FILE_TAGS.get(
+            self.window.current_fusion_method(), "None")
+
+    def _align_tag(self) -> str:
+        return self._ALIGN_FILE_TAGS.get(
+            self.window.current_alignment_method(), "NoAlign")
+
     def generate_default_filename(self) -> str:
-        window = self.window
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return (f"OpenFocus_{timestamp}_{self._fusion_tag()}_"
+                f"{self._align_tag()}")
 
-        if window.rb_a.isChecked():
-            fusion_method = "GuidedFilter"
-        elif window.rb_b.isChecked():
-            fusion_method = "DCT"
-        elif window.rb_c.isChecked():
-            fusion_method = "DTCWT"
-        elif window.rb_gfg.isChecked():
-            fusion_method = "GFGFGF"
-        elif window.rb_d.isChecked():
-            fusion_method = "StackMFFV4"
-        else:
-            fusion_method = "None"
+    def selected_output(self):
+        """(image, default filename) of the output the user has selected in
+        the output list, or None. Saving must follow the selection: Ctrl+S
+        used to write the newest render even with an older one selected
+        and shown, and Save As proposed a name built from the *current*
+        method dropdown rather than the method that made that output."""
+        window = self.window
+        lst = getattr(window, "output_list", None)
+        results = getattr(window, "fusion_results", None) or []
+        if lst is None or window.fusion_result is None:
+            return None
+        row = lst.currentRow()
+        if row < 0 or row >= len(results):
+            return None
+        item = lst.item(row)
+        name = item.text() if item is not None else ""
+        return results[row], self.filename_from_label(name)
 
-        reg_methods = []
-        if window.cb_align_homography.isChecked():
-            reg_methods.append("Homography")
-        if window.cb_align_ecc.isChecked():
-            reg_methods.append("ECC")
-        reg_method_str = "+".join(reg_methods) if reg_methods else "NoAlign"
-
-        return f"OpenFocus_{timestamp}_{fusion_method}_{reg_method_str}"
+    @staticmethod
+    def filename_from_label(label: str) -> str:
+        """Output-list label -> safe default filename (compare-all labels
+        carry ' — Method' suffixes)."""
+        import re as _re
+        name = (label or "").replace(" — ", "_").strip()
+        name = _re.sub(r'[\\/:*?"<>|\s]+', "_", name)
+        return name or "OpenFocus_result"
 
     def generate_default_foldername(self) -> str:
         window = self.window
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        if window.rb_a.isChecked():
-            fusion_method = "GuidedFilter"
-        elif window.rb_b.isChecked():
-            fusion_method = "DCT"
-        elif window.rb_c.isChecked():
-            fusion_method = "DTCWT"
-        elif window.rb_gfg.isChecked():
-            fusion_method = "GFGFGF"
-        elif window.rb_d.isChecked():
-            fusion_method = "StackMFFV4"
-        else:
-            fusion_method = "None"
-
-        reg_methods = []
-        if window.cb_align_homography.isChecked():
-            reg_methods.append("Homography")
-        if window.cb_align_ecc.isChecked():
-            reg_methods.append("ECC")
-        reg_method_str = "+".join(reg_methods) if reg_methods else "NoAlign"
-
         folder_basename = "OpenFocus_Stack"
         if getattr(window, "current_folder_path", None):
             folder_basename = os.path.basename(window.current_folder_path)
 
-        return f"{folder_basename}_{timestamp}_{fusion_method}_{reg_method_str}"
+        return f"{folder_basename}_{timestamp}_{self._fusion_tag()}_{self._align_tag()}"
 
     # ------------------------------------------------------------------
     # Export helpers
@@ -141,7 +150,12 @@ class ExportManager:
         result_to_save = None
         title = ""
 
-        if window.fusion_result is not None:
+        selected = self.selected_output()
+        default_filename = None
+        if selected is not None:
+            result_to_save, default_filename = selected
+            title = trans.t("action_save")
+        elif window.fusion_result is not None:
             result_to_save = window.fusion_result
             title = trans.t("action_save")
         elif window.registration_results:
@@ -152,7 +166,8 @@ class ExportManager:
             show_warning_box(window, trans.t("msg_no_result_title"), trans.t("msg_no_result_text"))
             return
 
-        default_filename = self.generate_default_filename()
+        if not default_filename:
+            default_filename = self.generate_default_filename()
         file_path, _ = QFileDialog.getSaveFileName(
             window,
             title,
@@ -174,13 +189,10 @@ class ExportManager:
             ext = os.path.splitext(file_path)[1].lower()
             params = get_imwrite_params(ext)
             if imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params):
-                show_message_box(
-                    window,
-                    trans.t("msg_success"),
-                    trans.t("msg_image_saved_text"),
-                    trans.t("msg_image_saved_info").format(path=file_path),
-                    QMessageBox.Icon.Information,
-                )
+                # Non-blocking confirmation (errors still get a dialog)
+                window.statusBar().showMessage(
+                    trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
+                    8000)
             else:
                 show_message_box(
                     window,

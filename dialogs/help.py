@@ -90,10 +90,13 @@ class RenderMethodHelpDialog(HelpDialog):
     Dual-tree complex wavelet fusion that decomposes the stack across scales and orientations before recombining it. It is well suited to intricate, high-frequency content where retaining fine detail is critical.</p>
 
     <p>GFG-FGF<br/>
-    GFG-FGF is a multi-focus image fusion algorithm based on a generalized four-neighborhood Gaussian gradient (GFG) operator combined with a fast guided filter (FGF). Feature extraction uses the GFG operator to capture high-frequency edge and gradient information. Information enhancement leverages the FGF together with the original image texture to smooth defocused regions while emphasizing focused areas. The fusion strategy constructs a pixel-wise decision map by selecting the maximum focus measure per pixel and then refines these decisions with FGF for edge-preserving smoothing, producing a weighted fusion that favors sharp, well-focused pixels.</p>
+    GFG-FGF is a multi-focus image fusion algorithm based on a Gaussian-like four-neighbourhood gradient (GFG) operator (Fu et al., 2024) combined with a fast guided filter (FGF). Feature extraction uses the GFG operator to capture high-frequency edge and gradient information. Information enhancement leverages the FGF together with the original image texture to smooth defocused regions while emphasizing focused areas. The fusion strategy constructs a pixel-wise decision map by selecting the maximum focus measure per pixel (ties broken by a 3&times;3 Sobel small-region measure) and then refines these decisions with FGF for edge-preserving smoothing, producing a weighted fusion that favors sharp, well-focused pixels.</p>
 
     <p>StackMFF-V4<br/>
-    A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>"""
+    A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>
+
+    <p>OpenFocus A / B / C<br/>
+    The Helicon Focus method family, reverse-engineered and verified against the original software's output (about 1&ndash;3.5% MAE, crop-offset-registered, on real benchmark stacks). <b>A</b> is a variance-weighted average with a last-frame prior &mdash; fast and colour-stable on short stacks. <b>B</b> is a variance depth-map pick that selects the sharpest frame per pixel &mdash; the best choice for smooth surfaces and microscopy. <b>C</b> is a Laplacian-pyramid per-band blend with a natural look on textured subjects. The kernel slider sets the variance window (default radius 5, matching Helicon's fixed window); fused output is insensitive to it, while depth maps get sharper labels.</p>"""
         
         super().__init__(trans.t('help_render_title'), help_text, parent)
 
@@ -103,15 +106,29 @@ class RegistrationHelpDialog(HelpDialog):
 
     def __init__(self, parent=None):
         help_text = """<h3>Registration Methods</h3>
-        
+
+    <p>Alignment is a single choice (dropdown): pick exactly one method per
+    render, or "No alignment" to fuse the frames as loaded.</p>
+
+    <p>No alignment<br/>
+    Skips registration entirely — fastest, and correct when the stack is
+    already registered (fixed-rig captures).</p>
+
     <p>Align (Homography)<br/>
     Uses feature-based homography transformation to align images. Detects SIFT features between consecutive frames and computes perspective transformation matrices. Ideal for most focus stacks that need global geometric correction.</p>
 
     <p>Align (ECC)<br/>
     Enhanced Correlation Coefficient alignment refines alignment at the sub-pixel level. Works well for fine adjustments or whenever feature detection is unreliable.</p>
 
-    <p>Both options are independent—enable either one individually or turn on both to apply homography alignment first and then refine with ECC.</p>"""
-        
+    <p>Align (OpenFocus, fast)<br/>
+    Bounded similarity registration (translation + rotation + scale,
+    reverse-engineered from Helicon Focus) with per-frame brightness
+    equalization and auto-crop. Sub-second per frame. Frames whose shift
+    exceeds 8% of the frame size are left unaligned rather than partially
+    corrected — that is where Helicon's own aligner gives up too (CLI:
+    --align-shift-limit). Choose ECC or Homography for non-rigid or extreme
+    geometry.</p>"""
+
         super().__init__(trans.t("help_registration_title"), help_text, parent)
 
 

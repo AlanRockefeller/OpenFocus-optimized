@@ -85,16 +85,11 @@ class BatchManager:
         except Exception:
             pass
         try:
-            self.window.rb_a.setEnabled(False)
-            self.window.rb_b.setEnabled(False)
-            self.window.rb_c.setEnabled(False)
-            self.window.rb_gfg.setEnabled(False)
-            self.window.rb_d.setEnabled(False)
+            self.window.combo_fusion.setEnabled(False)
         except Exception:
             pass
         try:
-            self.window.cb_align_homography.setEnabled(False)
-            self.window.cb_align_ecc.setEnabled(False)
+            self.window.combo_align.setEnabled(False)
         except Exception:
             pass
         try:
@@ -196,8 +191,8 @@ class BatchManager:
         """Re-enable the controls a batch job disabled (unless a render owns them)."""
         if self._render_owns_controls():
             return
-        for name in ("slider_smooth", "rb_a", "rb_b", "rb_c", "rb_gfg",
-                     "cb_align_homography", "cb_align_ecc", "btn_reset"):
+        for name in ("slider_smooth", "combo_fusion", "combo_align",
+                     "btn_reset"):
             widget = getattr(self.window, name, None)
             if widget is None:
                 continue
@@ -254,16 +249,11 @@ class BatchManager:
         except Exception:
             pass
         try:
-            self.window.rb_a.setEnabled(True)
-            self.window.rb_b.setEnabled(True)
-            self.window.rb_c.setEnabled(True)
-            self.window.rb_gfg.setEnabled(True)
-            self.window.rb_d.setEnabled(True)
+            self.window.combo_fusion.setEnabled(True)
         except Exception:
             pass
         try:
-            self.window.cb_align_homography.setEnabled(True)
-            self.window.cb_align_ecc.setEnabled(True)
+            self.window.combo_align.setEnabled(True)
         except Exception:
             pass
         try:

@@ -5,6 +5,8 @@ from PyQt6.QtGui import QKeySequence, QShortcut, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -12,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
-    QRadioButton,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -28,6 +29,31 @@ from ui.styles import (
 from locales import trans
 from widgets.output_list import OutputListWidget
 
+# 融合算法下拉项：(算法代码, i18n 键, 提示 i18n 键或 None)。
+# "none" = 仅对齐不融合（v1.41 下拉化前的老能力：只跑配准、输出对齐帧）。
+FUSION_ITEMS = (
+    ("none", "radio_no_fusion", "radio_no_fusion_hint"),
+    ("guided_filter", "radio_guided_filter", None),
+    ("dct", "radio_dct", None),
+    ("dtcwt", "radio_dtcwt", None),
+    ("gfgfgf", "radio_gfg", None),
+    ("stackmffv4", "radio_stackmff", None),
+    ("openfocus_a", "radio_openfocus_a", "radio_openfocus_a_hint"),
+    ("openfocus_b", "radio_openfocus_b", "radio_openfocus_b_hint"),
+    ("openfocus_c", "radio_openfocus_c", "radio_openfocus_c_hint"),
+)
+
+# 对齐算法下拉项（单选语义）：none = 不对齐，直接融合原始帧。
+ALIGN_ITEMS = (
+    ("none", "check_align_none", "check_align_none_hint"),
+    ("homography", "check_align_homography", None),
+    ("ecc", "check_align_ecc", None),
+    ("openfocus", "check_align_of", "check_align_of_hint"),
+)
+
+FUSION_DEFAULT = "guided_filter"
+ALIGN_DEFAULT = "ecc"
+
 
 @dataclass
 class RightPanelComponents:
@@ -39,17 +65,14 @@ class RightPanelComponents:
     chk_quick_preview: QCheckBox
     btn_method_help: QPushButton
     btn_reg_help: QPushButton
-    rb_a: QRadioButton
-    rb_b: QRadioButton
-    rb_c: QRadioButton
-    rb_gfg: QRadioButton
-    rb_d: QRadioButton
-    cb_align_homography: QCheckBox
-    cb_align_ecc: QCheckBox
+    combo_fusion: QComboBox
+    combo_align: QComboBox
+    chk_base_correct: QCheckBox
+    chk_reverse_order: QCheckBox
     slider_smooth: QSlider
     smooth_value_label: QLabel
     smooth_widget: QWidget
-    
+
     # Groups
     method_group: QGroupBox
     registration_group: QGroupBox
@@ -59,12 +82,25 @@ class RightPanelComponents:
     file_list: QListWidget
     output_label: QLabel
     output_list: QListWidget
-    
+
     # Status Panel Labels
     lbl_status_loaded: QLabel
     lbl_status_resolution: QLabel
     lbl_status_gpu: QLabel
     lbl_status_memory: QLabel
+
+    # OpenFocus B depth-transition smoothing (shown only for that method)
+    depth_smooth_row: QWidget = None
+    lbl_depth_smooth: QLabel = None
+    spin_depth_smooth: "QDoubleSpinBox" = None
+
+
+def _fill_combo(combo: QComboBox, items) -> None:
+    for code, key, hint_key in items:
+        combo.addItem(trans.t(key), code)
+        if hint_key:
+            combo.setItemData(combo.count() - 1, trans.t(hint_key),
+                              Qt.ItemDataRole.ToolTipRole)
 
 
 def create_right_panel() -> RightPanelComponents:
@@ -87,51 +123,41 @@ def create_right_panel() -> RightPanelComponents:
 
     method_group = QGroupBox(trans.t('group_fusion'))
     method_layout = QVBoxLayout(method_group)
-    rb_a = QRadioButton(trans.t('radio_guided_filter'))
-    rb_a.setChecked(True)
-    rb_a.setAutoExclusive(False)
-    rb_b = QRadioButton(trans.t('radio_dct'))
-    rb_b.setAutoExclusive(False)
-    rb_c = QRadioButton(trans.t('radio_dtcwt'))
-    rb_c.setAutoExclusive(False)
-    rb_gfg = QRadioButton(trans.t('radio_gfg'))
-    rb_gfg.setAutoExclusive(False)
-    rb_d = QRadioButton(trans.t('radio_stackmff'))
-    rb_d.setAutoExclusive(False)
-
-    method_layout.addWidget(rb_a)
-    method_layout.addWidget(rb_b)
-    method_layout.addWidget(rb_c)
-    method_layout.addWidget(rb_gfg)
-    method_layout.addWidget(rb_d)
-    method_layout.addStretch()
-
+    # 融合算法：下拉单选（一项永远选中，与 CLI -m 的单选语义一致）
+    combo_fusion = QComboBox()
+    _fill_combo(combo_fusion, FUSION_ITEMS)
+    idx = combo_fusion.findData(FUSION_DEFAULT)
+    combo_fusion.setCurrentIndex(max(0, idx))
+    # "?" sits on the dropdown's row: a row of its own wasted half the
+    # group's height and got squeezed to 1 px under the light theme padding
     method_help_layout = QHBoxLayout()
-    method_help_layout.addStretch()
+    method_help_layout.setSpacing(6)
+    method_help_layout.addWidget(combo_fusion, 1)
     btn_method_help = QPushButton("?")
     btn_method_help.setFixedSize(22, 22)
-    btn_method_help.setFont(QFont("Arial", 16))
+    btn_method_help.setFont(QFont("Arial", 12))
     btn_method_help.setStyleSheet(HELP_BUTTON_STYLE)
+    btn_method_help.setObjectName("helpButton")
     method_help_layout.addWidget(btn_method_help)
     method_layout.addLayout(method_help_layout)
 
     registration_group = QGroupBox(trans.t('group_registration'))
     registration_layout = QVBoxLayout(registration_group)
-    cb_align_ecc = QCheckBox(trans.t('check_align_ecc'))
-    cb_align_ecc.setChecked(True)
-    cb_align_homography = QCheckBox(trans.t('check_align_homography'))
-    cb_align_homography.setChecked(False)
-
-    registration_layout.addWidget(cb_align_ecc)
-    registration_layout.addWidget(cb_align_homography)
-    registration_layout.addStretch()
-
+    # 对齐算法：下拉单选（none / 单应性 / ECC / OpenFocus 快速）
+    combo_align = QComboBox()
+    _fill_combo(combo_align, ALIGN_ITEMS)
+    idx = combo_align.findData(ALIGN_DEFAULT)
+    combo_align.setCurrentIndex(max(0, idx))
+    # "?" sits on the dropdown's row: a row of its own wasted half the
+    # group's height and got squeezed to 1 px under the light theme padding
     reg_help_layout = QHBoxLayout()
-    reg_help_layout.addStretch()
+    reg_help_layout.setSpacing(6)
+    reg_help_layout.addWidget(combo_align, 1)
     btn_reg_help = QPushButton("?")
     btn_reg_help.setFixedSize(22, 22)
-    btn_reg_help.setFont(QFont("Arial", 16))
+    btn_reg_help.setFont(QFont("Arial", 12))
     btn_reg_help.setStyleSheet(HELP_BUTTON_STYLE)
+    btn_reg_help.setObjectName("helpButton")
     reg_help_layout.addWidget(btn_reg_help)
     registration_layout.addLayout(reg_help_layout)
 
@@ -157,6 +183,25 @@ def create_right_panel() -> RightPanelComponents:
     smooth_layout.addWidget(slider_smooth)
     config_layout.addWidget(smooth_widget)
 
+    # OpenFocus B: depth-map transition smoothing (Helicon's Smoothing knob)
+    depth_smooth_row = QWidget()
+    ds_layout = QHBoxLayout(depth_smooth_row)
+    ds_layout.setContentsMargins(0, 0, 0, 4)
+    lbl_depth_smooth = QLabel(trans.t('label_depth_smoothing'))
+    lbl_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
+    spin_depth_smooth = QDoubleSpinBox()
+    spin_depth_smooth.setRange(0.0, 8.0)
+    spin_depth_smooth.setSingleStep(0.2)
+    spin_depth_smooth.setDecimals(1)
+    spin_depth_smooth.setValue(1.2)
+    spin_depth_smooth.setFixedWidth(80)
+    spin_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
+    ds_layout.addWidget(lbl_depth_smooth)
+    ds_layout.addStretch()
+    ds_layout.addWidget(spin_depth_smooth)
+    depth_smooth_row.setVisible(False)
+    config_layout.addWidget(depth_smooth_row)
+
     button_bar = QHBoxLayout()
     btn_reset = QPushButton(trans.t('btn_reset'))
     btn_reset.setStyleSheet(HOVER_HIGHLIGHT_BUTTON_STYLE)
@@ -175,7 +220,23 @@ def create_right_panel() -> RightPanelComponents:
     chk_quick_preview = QCheckBox(trans.t('chk_quick_preview'))
     chk_quick_preview.setToolTip(trans.t('chk_quick_preview_hint'))
     chk_quick_preview.setStyleSheet("color: #aaa;")
-    config_layout.addWidget(chk_quick_preview)
+    # 快速预览 + 消除亮度漂移同一行（都是输出侧开关）
+    toggle_row = QHBoxLayout()
+    toggle_row.addWidget(chk_quick_preview)
+    chk_base_correct = QCheckBox(trans.t('chk_base_correct'))
+    chk_base_correct.setChecked(False)
+    chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+    chk_base_correct.setStyleSheet("color: #aaa;")
+    toggle_row.addWidget(chk_base_correct)
+    config_layout.addLayout(toggle_row)
+
+    # 反转帧序（倒序栈）：远→近扫的栈勾选后按规范方向处理，仅影响
+    # OpenFocus A/B/C 的 base 参考端 / 末帧先验 / 深度图标签方向
+    chk_reverse_order = QCheckBox(trans.t('chk_reverse_order'))
+    chk_reverse_order.setChecked(False)
+    chk_reverse_order.setToolTip(trans.t('chk_reverse_order_hint'))
+    chk_reverse_order.setStyleSheet("color: #aaa;")
+    config_layout.addWidget(chk_reverse_order)
 
     right_splitter.addWidget(config_widget)
 
@@ -224,7 +285,7 @@ def create_right_panel() -> RightPanelComponents:
         }
         QLabel {
             color: #cccccc; 
-            font-size: 11px;
+            font-size: 11px; 
             font-family: Consolas, "Segoe UI", monospace;
         }
     """)
@@ -242,7 +303,7 @@ def create_right_panel() -> RightPanelComponents:
     status_layout.addWidget(lbl_status_gpu, 0, 1)
     status_layout.addWidget(lbl_status_resolution, 1, 0)
     status_layout.addWidget(lbl_status_memory, 1, 1)
-    
+
     status_layout.setColumnStretch(0, 1)
     status_layout.setColumnStretch(1, 1)
 
@@ -257,17 +318,14 @@ def create_right_panel() -> RightPanelComponents:
         chk_quick_preview=chk_quick_preview,
         btn_method_help=btn_method_help,
         btn_reg_help=btn_reg_help,
-        rb_a=rb_a,
-        rb_b=rb_b,
-        rb_c=rb_c,
-        rb_gfg=rb_gfg,
-        rb_d=rb_d,
-        cb_align_homography=cb_align_homography,
-        cb_align_ecc=cb_align_ecc,
+        combo_fusion=combo_fusion,
+        combo_align=combo_align,
+        chk_base_correct=chk_base_correct,
+        chk_reverse_order=chk_reverse_order,
         slider_smooth=slider_smooth,
         smooth_value_label=lbl_smooth_value,
         smooth_widget=smooth_widget,
-        
+
         method_group=method_group,
         registration_group=registration_group,
         lbl_kernel=lbl_kernel,
@@ -280,6 +338,9 @@ def create_right_panel() -> RightPanelComponents:
         lbl_status_resolution=lbl_status_resolution,
         lbl_status_gpu=lbl_status_gpu,
         lbl_status_memory=lbl_status_memory,
+        depth_smooth_row=depth_smooth_row,
+        lbl_depth_smooth=lbl_depth_smooth,
+        spin_depth_smooth=spin_depth_smooth,
     )
 
 
@@ -289,11 +350,16 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     if hasattr(components.output_list, "set_window"):
         components.output_list.set_window(window)
 
-    components.rb_a.clicked.connect(lambda: window.handle_method_selection(components.rb_a))
-    components.rb_b.clicked.connect(lambda: window.handle_method_selection(components.rb_b))
-    components.rb_c.clicked.connect(lambda: window.handle_method_selection(components.rb_c))
-    components.rb_gfg.clicked.connect(lambda: window.handle_method_selection(components.rb_gfg))
-    components.rb_d.clicked.connect(lambda: window.handle_method_selection(components.rb_d))
+    # 下拉框本身就是单选，无需互斥处理；切换时刷新滑块联动
+    components.combo_fusion.currentIndexChanged.connect(
+        window.handle_method_selection)
+    components.combo_fusion.currentIndexChanged.connect(
+        window.update_slider_availability)
+
+    # 基底校正开关（消除亮度漂移）：立即持久化，渲染时读取
+    components.chk_base_correct.toggled.connect(window.set_base_correct)
+    # 反转帧序（倒序栈）：仅影响 openfocus 族的帧序方向语义
+    components.chk_reverse_order.toggled.connect(window.set_reverse_order)
 
     # 帮助对话框在点击时才导入：模块级导入 dialogs 会与 ui 包形成循环
     # (dialogs.about -> ui.styles -> ui/__init__ -> right_panel -> dialogs)
@@ -316,12 +382,6 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
 
     components.slider_smooth.valueChanged.connect(window.handle_kernel_slider_change)
 
-    components.rb_a.clicked.connect(window.update_slider_availability)
-    components.rb_b.clicked.connect(window.update_slider_availability)
-    components.rb_c.clicked.connect(window.update_slider_availability)
-    components.rb_gfg.clicked.connect(window.update_slider_availability)
-    components.rb_d.clicked.connect(window.update_slider_availability)
-
     components.file_list.customContextMenuRequested.connect(window.source_manager.show_source_context_menu)
     components.file_list.currentRowChanged.connect(window.source_manager.sync_slider_from_list)
     components.file_list.itemChanged.connect(window.source_manager.on_item_changed)
@@ -343,9 +403,6 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     delete_output_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), components.output_list)
     delete_output_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
     delete_output_shortcut.activated.connect(window.output_manager.delete_selected_output_images)
-    components.output_list._delete_shortcut = delete_output_shortcut
+    components.output_list._delete_output_shortcut = delete_output_shortcut
 
     window.update_slider_availability()
-
-    components.cb_align_ecc.installEventFilter(window)
-    components.cb_align_homography.installEventFilter(window)

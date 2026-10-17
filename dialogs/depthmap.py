@@ -37,18 +37,21 @@ from utils import colormap as cmap
 from utils.image_utils import imwrite_auto
 from utils.settings_store import get_last_dialog_dir, get_settings, set_last_dialog_dir
 
+# 仅收录"按索引决策"的融合方法（与融合下拉同序；加权平均类无逐像素
+# 决策，不提供深度图——guided_filter / openfocus_a 不在此列）
 _METHOD_KEYS = (
-    ("guided_filter", "radio_guided_filter"),
     ("dct", "radio_dct"),
     ("dtcwt", "radio_dtcwt"),
     ("gfgfgf", "radio_gfg"),
     ("stackmffv4", "radio_stackmff"),
+    ("openfocus_b", "radio_openfocus_b"),
+    ("openfocus_c", "radio_openfocus_c"),
 )
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
 
 # 打开对话框时自动计算的方法（秒级）；dtcwt/stackmffv4 分钟级，不自动跑
-_FAST_AUTO_METHODS = {"guided_filter", "dct", "gfgfgf"}
+_FAST_AUTO_METHODS = {"dct", "gfgfgf", "openfocus_b", "openfocus_c"}
 
 # 对话框关闭时仍在跑的 worker 放这里保活：QThread 对象被销毁而线程仍在
 # 运行会直接 abort 整个进程（AI 推理可达数分钟，用户关窗很正常）。
@@ -287,6 +290,12 @@ class DepthMapDialog(QDialog):
         self.method_combo.setCurrentIndex(max(0, i))
         form.addRow(trans.t("depth_method"), self.method_combo)
 
+        # kernel 含义随方法不同（与主面板滑块同源语义）——只读说明行
+        self.lbl_kernel_info = QLabel("")
+        self.lbl_kernel_info.setStyleSheet("color: #999;")
+        form.addRow("", self.lbl_kernel_info)
+        self._update_kernel_info()
+
         self.map_combo = QComboBox()
         self._fill_colormaps()
         form.addRow(trans.t("depth_colormap"), self.map_combo)
@@ -310,6 +319,13 @@ class DepthMapDialog(QDialog):
         self.smooth_spin.setRange(0, 5)
         self.smooth_spin.setToolTip(trans.t("depth_smooth_hint"))
         form.addRow(trans.t("depth_smooth"), self.smooth_spin)
+
+        self.relief_spin = QSpinBox()
+        self.relief_spin.setRange(1, 100)
+        self.relief_spin.setSuffix(" %")
+        self.relief_spin.setValue(15)
+        self.relief_spin.setToolTip(trans.t("depth_relief_hint"))
+        form.addRow(trans.t("depth_relief"), self.relief_spin)
 
         self.overlay_chk = QCheckBox(trans.t("depth_overlay"))
         self.overlay_chk.setToolTip(trans.t("depth_overlay_hint"))
@@ -345,6 +361,9 @@ class DepthMapDialog(QDialog):
         save_color.clicked.connect(lambda: self._save(colorized=True))
         save_raw = QPushButton(trans.t("depth_save_raw"))
         save_raw.clicked.connect(lambda: self._save(colorized=False))
+        save_3d = QPushButton(trans.t("depth_export_3d"))
+        save_3d.setToolTip(trans.t("depth_export_3d_hint"))
+        save_3d.clicked.connect(self._export_3d)
         close_btn = QPushButton(trans.t("btn_close"))
         close_btn.clicked.connect(self.reject)
         btns.addWidget(self.compute_btn)
@@ -352,6 +371,7 @@ class DepthMapDialog(QDialog):
         btns.addStretch()
         btns.addWidget(save_color)
         btns.addWidget(save_raw)
+        btns.addWidget(save_3d)
         btns.addWidget(close_btn)
         layout.addLayout(btns)
 
@@ -382,13 +402,15 @@ class DepthMapDialog(QDialog):
 
     def _current_window_method(self):
         w = self.window_main
-        checks = (("rb_gfg", "gfgfgf"), ("rb_d", "stackmffv4"),
-                  ("rb_c", "dtcwt"), ("rb_b", "dct"))
-        for attr, code in checks:
-            rb = getattr(w, attr, None)
-            if rb is not None and rb.isChecked():
+        keys = {code for code, _k in _METHOD_KEYS}
+        # 当前融合方法有深度侧写就用它；否则（仅对齐 / 加权平均类方法 /
+        # 无方法）回退到列表第一项
+        helper = getattr(w, "current_fusion_method", None)
+        if callable(helper):
+            code = helper()
+            if code in keys:
                 return code
-        return "guided_filter"
+        return _METHOD_KEYS[0][0]
 
     def _load_custom_schemes(self):
         try:
@@ -448,10 +470,45 @@ class DepthMapDialog(QDialog):
     # ------------------------------------------------------------------
     def _on_method_changed(self):
         """预览图还是旧方法的——明确告诉用户，避免拿错图。"""
+        self._update_kernel_info()
+        method = self.method_combo.currentData()
+        if (hasattr(self, "status_lbl") and hasattr(self, "_index01")
+                and method in _FAST_AUTO_METHODS and self._images()
+                and not (self._worker and self._worker.isRunning())):
+            # 秒级方法切换即自动重算（与打开对话框时自动计算一致）；
+            # 慢速方法（DTCWT/AI）仍由用户决定
+            self._compute()
+            return
         if (self._index01 is not None and self._map_method is not None
                 and self.method_combo.currentData() != self._map_method
                 and not (self._worker and self._worker.isRunning())):
             self.status_lbl.setText(trans.t("depth_map_stale"))
+
+    _KERNEL_INFO_KEYS = {"dct": "label_kernel_dct",
+                         "gfgfgf": "label_kernel_gfg",
+                         "openfocus_b": "label_kernel_of",
+                         "openfocus_c": "label_kernel_of"}
+
+    def _update_kernel_info(self):
+        """kernel 在不同方法里含义不同（与主面板滑块同源）——只读展示。"""
+        key = self._KERNEL_INFO_KEYS.get(self.method_combo.currentData())
+        if not key:
+            self.lbl_kernel_info.setText("")
+            return
+        k = self._kernel_for(self.method_combo.currentData())
+        self.lbl_kernel_info.setText(f"{trans.t(key)} {k}")
+
+    def _kernel_for(self, method):
+        """The kernel the user set for *this* method in the main window (each
+        method remembers its own slider value), forced odd."""
+        k = 7
+        getter = getattr(self.window_main, "kernel_for_method", None)
+        try:
+            if callable(getter):
+                k = int(getter(method))
+        except Exception:
+            k = 7
+        return k + 1 if k % 2 == 0 else k
 
     def _update_overlay_availability(self):
         base = getattr(self.window_main, "fusion_result", None) if self.window_main else None
@@ -485,15 +542,10 @@ class DepthMapDialog(QDialog):
             return
         method = self.method_combo.currentData()
         use_gpu = bool(getattr(self.window_main, "use_gpu", False))
-        # The depth map must use the kernel the user set for fusion (DCT's
-        # median window / GFG-FGF's blur), not the built-in default.
-        kernel_size = 7
-        try:
-            slider = getattr(self.window_main, "slider_smooth", None)
-            if slider is not None:
-                kernel_size = int(slider.value())
-        except Exception:
-            kernel_size = 7
+        # The depth map uses the kernel the user set for that method (DCT's
+        # median window / GFG-FGF's blur / variance window), never another
+        # method's slider value.
+        kernel_size = self._kernel_for(method)
         self._worker = DepthWorker(imgs, method, use_gpu, kernel_size, self)
         self._worker_method = method
         self._worker.progress.connect(lambda i, n: self.status_lbl.setText(
@@ -613,6 +665,37 @@ class DepthMapDialog(QDialog):
         except Exception as exc:
             self.status_lbl.setText(f"{exc}")
 
+    def _export_3d(self):
+        """Depth map + fused image -> textured OBJ (utils/mesh_export.py)."""
+        if self._index01 is None:
+            self.status_lbl.setText(trans.t("depth_no_map_yet"))
+            return
+        tex = getattr(self.window_main, "fusion_result", None)
+        if tex is None or tex.shape[:2] != self._index01.shape[:2]:
+            # no matching result: texture with the first frame of the stack
+            imgs = self._images() or []
+            tex = imgs[0] if imgs and imgs[0].shape[:2] == self._index01.shape[:2] else None
+        if tex is None:
+            self.status_lbl.setText(trans.t("depth_overlay_missing"))
+            return
+        start_dir = get_last_dialog_dir()
+        default = (start_dir.rstrip("/\\") + "/" if start_dir else "") + "depth_model.obj"
+        path, _ = QFileDialog.getSaveFileName(
+            self, trans.t("depth_export_3d"), default, "Wavefront OBJ (*.obj)")
+        if not path:
+            return
+        set_last_dialog_dir(path)
+        try:
+            from core.depth_map import smooth_index_map
+            from utils.mesh_export import export_obj
+            index = smooth_index_map(self._index01, self.smooth_spin.value())
+            info = export_obj(path, index, tex,
+                              relief=self.relief_spin.value() / 100.0,
+                              invert=self.invert_chk.isChecked())
+            self.status_lbl.setText(trans.t("depth_saved").format(path=info["files"][0]))
+        except Exception as exc:
+            self.status_lbl.setText(f"{exc}")
+
     def _default_path(self, start_dir, raw=False):
         base = "depth_map" + ("_raw16" if raw else "")
         ext = ".tif" if raw else ".png"
@@ -628,6 +711,7 @@ class DepthMapDialog(QDialog):
         self.gamma_spin.setValue(float(s.value("depthmap/gamma", 1.0)))
         self.smooth_spin.setValue(int(s.value("depthmap/smooth", 0)))
         self.invert_chk.setChecked(s.value("depthmap/invert", False, type=bool))
+        self.relief_spin.setValue(int(s.value("depthmap/relief", 15)))
         self._refresh_preview()
 
     def _save_prefs(self):
@@ -636,6 +720,7 @@ class DepthMapDialog(QDialog):
         s.setValue("depthmap/gamma", self.gamma_spin.value())
         s.setValue("depthmap/smooth", self.smooth_spin.value())
         s.setValue("depthmap/invert", self.invert_chk.isChecked())
+        s.setValue("depthmap/relief", self.relief_spin.value())
 
     def _detach_worker(self):
         """关闭对话框时后台线程可能正处在长推理中——QThread 被销毁而线程

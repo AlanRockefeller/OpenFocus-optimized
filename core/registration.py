@@ -21,6 +21,7 @@ python Registration.py --mode both
 
 
 import argparse
+import concurrent.futures
 import re
 import time
 import cv2
@@ -479,6 +480,333 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
 class RegistrationCancelled(Exception):
     """Raised when a render cancellation flag fires mid-registration."""
 
+
+# ========== OpenFocus 对齐：有界相似变换（平移+旋转+缩放） ==========
+
+_OF_EST_WIDTH = 480  # 估计阶段长边上限（旋转/缩放网格在低分辨率上搜索）
+# 位移上限（帧尺寸比例）。逆向实证 §7.2：Helicon 的对齐在 ≤6% 时裁边精确
+# 跟随位移，≥8% 直接放弃追踪（输出高频能量跳升=鬼影模糊）。旧默认 25% 有
+# 两个害处：强行把不可靠的大位移校正成半错位；且有效区交集会被裁掉一大块
+# （25% 上限 = 单边最多丢 1/4 画面）。取 8%（Helicon 放弃点的上端——本对齐
+# 器有 NCC 置信门限与简约规则，比 Helicon 的全局参数估计更稳），可用
+# ImageRegistration(max_shift_ratio=) / CLI --align-shift-limit 按需放宽。
+_OF_MAX_SHIFT_RATIO = 0.08
+
+
+def _of_gray_hp(img, est_width):
+    """灰度 + 高通（减去 σ2.5 低通），并降采样到估计分辨率。"""
+    if img.ndim == 2:
+        g = img.astype(np.float32)
+    else:
+        take = min(img.shape[2], 3)
+        if take == 1:
+            g = img[:, :, 0].astype(np.float32)
+        else:
+            m = np.array([0.114, 0.587, 0.299], np.float32)
+            g = cv2.transform(img[:, :, :take].astype(np.float32),
+                              m.reshape(1, -1))
+            g = g if g.ndim == 2 else g[:, :, 0]
+    g = g - cv2.GaussianBlur(g, (0, 0), 2.5)
+    h, w = g.shape[:2]
+    if max(h, w) > est_width:
+        s = est_width / float(max(h, w))
+        g = cv2.resize(g, (max(16, int(round(w * s))),
+                           max(16, int(round(h * s)))),
+                       interpolation=cv2.INTER_AREA)
+    return np.ascontiguousarray(g, np.float32)
+
+
+_HANN_CACHE = {}
+
+
+def _of_hann_cache(w, h):
+    key = (w, h)
+    win = _HANN_CACHE.get(key)
+    if win is None:
+        win = cv2.createHanningWindow((w, h), cv2.CV_32F)
+        if len(_HANN_CACHE) > 16:
+            _HANN_CACHE.clear()
+        _HANN_CACHE[key] = win
+    return win
+
+
+def _of_ncc_score(ref_hp, fixed):
+    """重叠区归一化互相关：旋转/缩放候选的判别评分。
+
+    平移用 Hann 窗相位相关（亚像素）取整后裁重叠区；NCC 在正确校正
+    时 →1，旋转错 0.5° 以上急剧下降（判别度远好于相位相关响应值）。
+    返回 (ncc, dx, dy)。
+    """
+    h, w = ref_hp.shape[:2]
+    win = _of_hann_cache(w, h)
+    try:
+        # 关键：本机构建的 OpenCV phaseCorrelate 会原地修改输入数组
+        # （实测同一数组的 digest 在每次调用后变化）——参考图会被逐帧
+        # 污染，这正是 v1.39 "对齐不了"的根因。必须传副本。
+        (dx, dy), _resp = cv2.phaseCorrelate(
+            ref_hp.copy(), fixed.copy(), win)
+    except cv2.error:
+        return -1.0, 0.0, 0.0
+    ix, iy = int(round(dx)), int(round(dy))
+    xs0, xs1 = max(0, -ix), min(w, w - ix)
+    ys0, ys1 = max(0, -iy), min(h, h - iy)
+    if xs1 - xs0 < w // 3 or ys1 - ys0 < h // 3:
+        return -1.0, dx, dy
+    a = ref_hp[ys0:ys1, xs0:xs1]
+    b = fixed[ys0 + iy:ys1 + iy, xs0 + ix:xs1 + ix]
+    a = a - a.mean()
+    b = b - b.mean()
+    den = float(np.sqrt(float((a * a).sum()) * float((b * b).sum())))
+    ncc = float((a * b).sum()) / den if den > 1e-9 else -1.0
+    return ncc, dx, dy
+
+
+def _of_estimate_similarity(ref_hp, cur_hp,
+                            rot_bound=8.0, scale_range=(0.95, 1.05)):
+    """有界网格搜索 cur→ref 的相似变换（旋转+缩放），NCC 评分。
+
+    返回 (ncc, theta_deg, scale, dx, dy)：
+    theta/scale 满足 warpAffine(cur, getRotationMatrix2D(center, theta,
+    scale)) ≈ ref（内容层面），(dx, dy) 是残差平移（phaseCorrelate 语义：
+    校正后内容仍需移动的量）。
+    """
+    h, w = ref_hp.shape[:2]
+    cy, cx = h / 2.0, w / 2.0
+
+    def _eval(theta, scale):
+        M = cv2.getRotationMatrix2D((cx, cy), theta, scale)
+        fixed = cv2.warpAffine(cur_hp, M, (w, h))
+        return _of_ncc_score(ref_hp, fixed)
+
+    best = (-1.0, 0.0, 1.0, 0.0, 0.0)
+    # 平移-only 基准：模糊与缩放在 NCC 上天然相似，无显著增益时坚持
+    # s=1 的简约解（否则失焦帧会被误判出假旋转/假缩放）
+    base_ncc, base_dx, base_dy = _eval(0.0, 1.0)
+    best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
+    for th in np.arange(-rot_bound, rot_bound + 1e-6, 1.0):
+        for sc in (0.95, 1.0, 1.05):
+            if not (scale_range[0] - 1e-9 <= sc <= scale_range[1] + 1e-9):
+                continue
+            ncc, dx, dy = _eval(th, sc)
+            if ncc > best[0]:
+                best = (ncc, th, sc, dx, dy)
+    # 非平凡 (θ, s) 必须显著优于平移-only 基准（≥0.05 NCC）才采纳
+    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
+        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
+    if best[1] == 0.0 and best[2] == 1.0 and best[0] >= 0.97:
+        # 常见情形：纯平移已高度吻合——跳过两级精修（省一半耗时）
+        return best
+    # 两级精修：角度 0.25°、缩放 0.01
+    for _ in range(2):
+        th0, sc0 = best[1], best[2]
+        improved = False
+        for th in np.arange(max(-rot_bound, th0 - 1.0),
+                            min(rot_bound, th0 + 1.0) + 1e-9, 0.25):
+            for sc in np.arange(max(scale_range[0], sc0 - 0.02),
+                                min(scale_range[1], sc0 + 0.02) + 1e-9, 0.01):
+                ncc, dx, dy = _eval(th, sc)
+                if ncc > best[0] + 1e-6:
+                    best = (ncc, th, sc, dx, dy)
+                    improved = True
+        if not improved:
+            break
+    # 精修后复检：非平凡解仍须显著优于平移-only 基准
+    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
+        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
+    return best
+
+
+def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
+                          downscale_width=None, thread_count: int = 4,
+                          should_cancel=None, equalize_brightness=True,
+                          max_shift_ratio=None):
+    """
+    OpenFocus 快速对齐：有界相似变换（平移+旋转+缩放）+ 亮度均衡 + 自动裁边。
+
+    复刻 Helicon Focus 的对齐档位（docs/HELICON_REPRODUCTION_REPORT.md）：
+    呼吸效应 = 小幅全局相似变换（平移+旋转+缩放，受上限约束）。旋转/缩放
+    用有界网格搜索（重叠区 NCC 判别评分——相位相关响应值对旋转不敏感），
+    平移用 Hann 窗相位相关亚像素估计；失焦/弱纹理帧对参考帧置信不足时
+    链到上一帧（相邻帧模糊程度更接近）；低置信或运动分量低于死区时视为
+    无运动（保护固定机位栈不被噪声抖动）。每帧低频亮度均衡到参考帧
+    （Helicon AdjustBrightness），位移超过 max_shift_ratio 时**放弃该帧
+    对齐**（逆向实证 §7.2：Helicon 在 6–8% 之上直接不追，强行钳制会得到
+    一半错位 + 污染有效区），最后按有效区交集自动裁边（AutoCrop）。
+    """
+    if max_shift_ratio is None:
+        max_shift_ratio = _OF_MAX_SHIFT_RATIO
+    if img_filenames is None and isinstance(input_source, str):
+        valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+        img_paths = sorted(
+            (os.path.join(input_source, f) for f in os.listdir(input_source)
+             if os.path.splitext(f)[1].lower() in valid_exts),
+            key=_image_sort_key
+        )
+        images = [cv2.imread(path) for path in img_paths]
+        img_filenames = [os.path.basename(path) for path in img_paths]
+    else:
+        images = input_source
+    if images is None or len(images) < 2:
+        return images if images is not None else []
+
+    n = len(images)
+    h, w = images[0].shape[:2]
+    max_shift = (int(w * max_shift_ratio), int(h * max_shift_ratio))
+    est_width = min(_OF_EST_WIDTH, max(320, w))
+
+    def _gray_float(img):
+        if img.ndim == 2:
+            g = img
+        else:
+            take = min(img.shape[2], 3)
+            if take == 1:
+                g = img[:, :, 0]
+            else:
+                m = np.array([0.114, 0.587, 0.299], np.float32)
+                g = cv2.transform(img[:, :, :take].astype(np.float32),
+                                  m.reshape(1, -1))
+                g = g if g.ndim == 2 else g[:, :, 0]
+        return g.astype(np.float32)
+
+    ref_gray = _gray_float(images[0])
+    ref_low = cv2.GaussianBlur(ref_gray, (0, 0), 32.0)
+    ref_low_mean = float(ref_low.mean()) or 1.0
+    gains = [1.0]
+
+    ref_hp = _of_gray_hp(images[0], est_width)
+    eh, ew = ref_hp.shape[:2]
+
+    def _compose_full(ncc_pack):
+        """估计分辨率下的校正参数 → 全分辨率 3x3（warpAffine 直接可用）。
+
+        warpAffine 的 M 是内容正向变换（实测：[I|+10] 把内容右移 10px；
+        getRotationMatrix2D(θ,s) 的搜索语义已在网格中验证）。完整校正 =
+        先施加旋转/缩放 Rs，再把内容平移 −d（d 为相位相关的残差内容
+        位移）。矩阵复合：M_total = [I|−d]·Rs_full；d 从估计分辨率按
+        比例换算回全分辨率。
+        """
+        _ncc, theta, scale, dx, dy = ncc_pack
+        Rs = np.eye(3)
+        Rs[:2, :] = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), theta, scale)
+        sx, sy = ew / float(w), eh / float(h)
+        d_full = np.array([-dx / sx, -dy / sy])
+        M = np.eye(3)
+        M[:2, :2] = Rs[:2, :2]
+        M[:2, 2] = Rs[:2, :2] @ d_full + Rs[:2, 2]
+        return M
+
+    # 死区：低于这些分量视为无运动（固定机位栈的噪声保护）
+    dead_t, dead_rot, dead_scale = 0.15, 0.05, 1e-3
+    min_ncc = 0.06          # 低于此视为无可靠对应关系
+    chain_ncc = 0.10        # 对参考帧置信不足 → 链到上一帧重估
+
+    corrections = [np.eye(3, dtype=np.float64)]  # cur→ref 的校正矩阵
+    prev_hp = ref_hp
+    print("Aligning %d images using OpenFocus (bounded similarity)..." % n)
+    for i in range(1, n):
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+        cur_gray = _gray_float(images[i])
+        gain = 1.0
+        if equalize_brightness:
+            cur_low = cv2.GaussianBlur(cur_gray, (0, 0), 32.0)
+            cur_mean = float(cur_low.mean())
+            if cur_mean > 1e-3:
+                gain = float(np.clip(ref_low_mean / cur_mean, 0.5, 2.0))
+                cur_gray = cur_gray * gain
+        gains.append(gain)
+
+        cur_hp = _of_gray_hp(images[i], est_width)
+        est = _of_estimate_similarity(ref_hp, cur_hp)
+        chained = False
+        if est[0] < chain_ncc and i >= 2:
+            # 失焦/弱纹理帧：与相邻帧（模糊程度接近）更相关——链式估计
+            est2 = _of_estimate_similarity(prev_hp, cur_hp)
+            if est2[0] > est[0] + 0.02:
+                M = corrections[i - 1] @ _compose_full(est2)
+                chained = True
+                est = (est2[0],) + est[1:]
+        if not chained:
+            M = _compose_full(est)
+
+        ncc = est[0]
+        if ncc < min_ncc:
+            M = np.eye(3)
+        # 平移分量取“画面中心的净位移”：矩阵的 M[:,2] 还包含绕中心旋转/缩放
+        # 诱导的项（480×360 上 2.5° 就有 ~8-11px），直接拿它判上限会把合法
+        # 的旋转校正误杀成“位移超限”。t_c = b + (A − I)·c。
+        A2 = M[:2, :2]
+        tc = M[:2, 2] + A2 @ np.array([w / 2.0, h / 2.0]) - np.array(
+            [w / 2.0, h / 2.0])
+        tx = float(tc[0])
+        ty = float(tc[1])
+        # 位移上限：超限**放弃该帧对齐**。逆向实证 §7.2——Helicon 在位移
+        # 超过 ~6–8% 帧尺寸时直接不追（裁边不再跟随、输出高频跳升=鬼影），
+        # 而旧的"钳制到上限"会把大位移校正成半错位，还让有效区交集被裁掉
+        # 一大块（25% 上限意味着单边最多裁 1/4 画面）。
+        over = (abs(tx) > max_shift[0] or abs(ty) > max_shift[1])
+        if over:
+            M = np.eye(3)
+            tx = ty = 0.0
+        # 死区：整体运动可忽略 → 恒等（不产生裁边/插值损失）
+        rot_deg = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
+        scale_now = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
+        if (abs(tx) < dead_t and abs(ty) < dead_t
+                and abs(rot_deg) < dead_rot
+                and abs(scale_now - 1.0) < dead_scale):
+            M = np.eye(3)
+        corrections.append(M)
+        prev_hp = cur_hp
+        print("  frame %d/%d: rot %+.2f° scale %.3f shift (%+.2f, %+.2f)"
+              " ncc %.2f%s%s" % (i, n - 1, rot_deg, scale_now, tx, ty, ncc,
+                                 " (chained)" if chained else "",
+                                 " (DROPPED: shift over %.0f%% of frame)"
+                                 % (100.0 * max_shift_ratio) if over else ""))
+
+    def _warp(args):
+        idx, img, M, gain = args
+        warped = cv2.warpAffine(img, M[:2, :], (w, h),
+                                flags=cv2.INTER_LANCZOS4
+                                | cv2.WARP_FILL_OUTLIERS,
+                                borderMode=cv2.BORDER_REFLECT)
+        if gain != 1.0:
+            # 亮度均衡同步应用到输出帧（Helicon AdjustBrightness 语义：
+            # 均衡后的帧进入融合，消除曝光漂移）
+            warped = np.clip(warped.astype(np.float32) * gain, 0,
+                             255 if img.dtype == np.uint8 else 65535)
+            warped = warped.astype(img.dtype)
+        return idx, warped
+
+    aligned = [None] * n
+    aligned[0] = images[0]
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, int(thread_count or 4))) as pool:
+        futures = [pool.submit(_warp, (i, images[i], corrections[i], gains[i]))
+                   for i in range(1, n)]
+        for future in concurrent.futures.as_completed(futures):
+            if should_cancel is not None and should_cancel():
+                for pending in futures:
+                    pending.cancel()
+                raise RegistrationCancelled()
+            idx, warped = future.result()
+            aligned[idx] = warped
+
+    # 有效区 = 各帧"正向映射矩形"（corrections 的逆）的交集内接框：
+    # dst(x) = cur(A·x) 有效 ⟺ A·x ∈ 源图 ⟺ x ∈ A⁻¹(源图矩形)
+    fwd = [np.linalg.inv(M) if M is not None else None for M in corrections]
+    top, bottom, left, right = _compute_valid_region_from_transforms(
+        fwd, (h, w))
+    if top >= bottom or left >= right:
+        top, bottom, left, right = 0, h, 0, w
+    aligned = [img[top:bottom, left:right] for img in aligned]
+
+    if output_path:
+        os.makedirs(output_path, exist_ok=True)
+        print("  - Saving results...")
+        for idx, img in enumerate(aligned):
+            fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
+            cv2.imwrite(os.path.join(output_path, fname), img)
+    return aligned
 
 # ========== ECC对齐算法实现（高精度） ==========
 
@@ -957,14 +1285,18 @@ class ImageRegistration:
         result = registration.process(image_list, './output')
     """
     
-    SUPPORTED_METHODS = ['homography', 'ecc', 'both']
+    SUPPORTED_METHODS = ['homography', 'ecc', 'both', 'openfocus']
     
-    def __init__(self, method: str = 'homography', downscale_width: int = 1024):
+    def __init__(self, method: str = 'homography', downscale_width: int = 1024,
+                 max_shift_ratio: Optional[float] = None):
         """
         初始化配准器
         
         Args:
             method (str): 配准方法名称，可选 'homography', 'ecc', 'both'
+            downscale_width (int): 特征/估计阶段的下采样宽度
+            max_shift_ratio (float): 仅 'openfocus' 生效——位移上限（帧尺寸
+                比例，0–1）。None 用 _OF_MAX_SHIFT_RATIO（8%，逆向 §7.2）。
         """
         if method not in self.SUPPORTED_METHODS:
             raise ValueError(
@@ -975,6 +1307,8 @@ class ImageRegistration:
         self.method = method
         # 用户可配置的下采样宽度，用于特征提取等预处理阶段
         self.downscale_width = int(downscale_width) if downscale_width is not None else 1024
+        self.max_shift_ratio = (float(max_shift_ratio)
+                                if max_shift_ratio is not None else None)
     
     def process(self, 
                 input_source: Union[str, List[np.ndarray]], 
@@ -997,6 +1331,8 @@ class ImageRegistration:
             return self._process_homography(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
         elif self.method == 'ecc':
             return self._process_ecc(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
+        elif self.method == 'openfocus':
+            return self._process_openfocus(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
         elif self.method == 'both':
             # 组合模式：先 Homography，后 ECC
             # 第一步：Homography (不保存中间结果，除非只做这一步)
@@ -1041,7 +1377,21 @@ class ImageRegistration:
             配准后的图像列表
         """
         return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel)
-    
+
+    def _process_openfocus(self,
+                           input_source: Union[str, List[np.ndarray]],
+                           output_path: Optional[str] = None,
+                           thread_count: int = 4,
+                           should_cancel=None) -> List[np.ndarray]:
+        """
+        OpenFocus 快速对齐（有界相位相关，复刻 Helicon 的对齐档位）
+        """
+        return _align_openfocus_impl(input_source, output_path,
+                                     downscale_width=self.downscale_width,
+                                     thread_count=thread_count,
+                                     should_cancel=should_cancel,
+                                     max_shift_ratio=self.max_shift_ratio)
+
     def set_method(self, method: str):
         """
         切换配准方法

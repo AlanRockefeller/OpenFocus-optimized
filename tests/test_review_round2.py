@@ -35,22 +35,18 @@ class TestMultipageProjectMapping:
         from utils.project_file import save_project, validate_project
         from PyQt6.QtCore import QObject
 
-        class _RB:  # 单选按钮桩：只需要 isChecked
-            def __init__(self, checked=False):
-                self._c = checked
-            def isChecked(self):
-                return self._c
-
         class _W(QObject):  # 属性桩：只需要 project_file 用到的字段
             pass
 
         w = _W()
-        w.rb_a, w.rb_b, w.rb_c = _RB(True), _RB(), _RB()
-        w.rb_gfg, w.rb_d = _RB(), _RB()
-        w.cb_align_homography = _RB()
-        w.cb_align_ecc = _RB()
-        w.chk_quick_preview = _RB()
-        w.slider_smooth = _RB()  # 复用桩：补 value()
+        # 下拉单选契约（与真实窗口一致）
+        w._fusion, w._alignment = "guided_filter", "none"
+        w.current_fusion_method = lambda: w._fusion
+        w.current_alignment_method = lambda: w._alignment
+        w.set_fusion_method = lambda code: setattr(w, "_fusion", code)
+        w.set_alignment_method = lambda code: setattr(w, "_alignment", code)
+        w.chk_quick_preview = type("Q", (), {"isChecked": lambda s: False})()
+        w.slider_smooth = type("S", (), {})()  # 桩：补 value()
         w.slider_smooth.value = lambda: 7
         w.raw_images = pages
         w.image_filenames = [f"zstack_page_{i:03d}.tif" for i in range(3)]

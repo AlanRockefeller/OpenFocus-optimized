@@ -1,20 +1,19 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "openfocus"
-description = "Multi-focus image fusion from the command line: registration (ECC / homography) plus five fusion algorithms in one pip-installable tool"
+description = "Multi-focus image fusion from the command line: registration (ECC / homography / fast phase correlation) plus eight fusion algorithms — four classical, three reverse-engineered from Helicon Focus (OpenFocus A/B/C) and a neural model — in one pip-installable tool"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Xinzhe Xie", email = "xiexinzheyyy@163.com" }]
-license = { text = "MIT" }
-keywords = ["image-fusion", "focus-stacking", "multifocus", "microscopy", "photography"]
+license = "MIT"
+keywords = ["image-fusion", "focus-stacking", "multifocus", "microscopy", "photography", "helicon", "depth-map"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Graphics :: Graphics Conversion",
@@ -32,6 +31,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 ai = ["torch", "torchvision"]
 heic = ["pillow-heif"]
+raw = ["rawpy"]
 
 [project.scripts]
 openfocus = "core.cli:main"

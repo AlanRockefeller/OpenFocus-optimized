@@ -53,6 +53,10 @@ class OutputManager:
                 pass
 
         window.output_list.insertItem(0, item)
+        # Select only the new entry: setCurrentRow() extends an existing
+        # selection, which left every previous output highlighted too (and
+        # disabled the single-item actions — Save As, Retouch).
+        window.output_list.clearSelection()
         window.output_list.setCurrentRow(0)
         self.update_output_count()
 
@@ -75,6 +79,12 @@ class OutputManager:
         save_as_action.triggered.connect(lambda: self.save_output_image_as(window.output_list.currentItem()))
         save_as_action.setEnabled(len(window.output_list.selectedItems()) == 1)
         menu.addAction(save_as_action)
+
+        retouch_action = QAction(trans.t("action_retouch"), window)
+        retouch_action.triggered.connect(window.show_retouch_dialog)
+        retouch_action.setEnabled(len(window.output_list.selectedItems()) == 1
+                                  and window.fusion_result is not None)
+        menu.addAction(retouch_action)
 
         # Drag-out export format submenu (persisted per user)
         drag_menu = menu.addMenu(trans.t("menu_drag_format"))
@@ -116,6 +126,7 @@ class OutputManager:
         else:
             window.fusion_result = None
             window.lbl_result_img.clear()
+            window.lbl_result_img.setText(trans.t("result_hint"))
             window.result_control_bar.setVisible(False)
 
     def export_all_results(self) -> None:
@@ -157,7 +168,7 @@ class OutputManager:
         if row < 0:
             return
 
-        default_filename = window.export_manager.generate_default_filename()
+        default_filename = window.export_manager.filename_from_label(item.text())
         file_path, _selected_filter = QFileDialog.getSaveFileName(
             window,
             trans.t("action_save"),
@@ -184,12 +195,9 @@ class OutputManager:
                 params = get_imwrite_params(ext)
                 success = imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params)
                 if success:
-                    show_success_box(
-                        window,
-                        trans.t("msg_success"),
-                        trans.t("msg_image_saved_text"),
-                        trans.t("msg_image_saved_info").format(path=file_path),
-                    )
+                    window.statusBar().showMessage(
+                        trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
+                        8000)
                 else:
                     show_error_box(
                         window,
@@ -206,12 +214,9 @@ class OutputManager:
                 params = get_imwrite_params(ext)
                 success = imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params)
                 if success:
-                    show_success_box(
-                        window,
-                        trans.t("msg_success"),
-                        trans.t("msg_image_saved_text"),
-                        trans.t("msg_image_saved_info").format(path=file_path),
-                    )
+                    window.statusBar().showMessage(
+                        trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
+                        8000)
                 else:
                     show_error_box(
                         window,
@@ -277,6 +282,7 @@ class OutputManager:
         else:
             window.fusion_result = None
             window.lbl_result_img.clear()
+            window.lbl_result_img.setText(trans.t("result_hint"))
             window.result_control_bar.setVisible(False)
 
     # ------------------------------------------------------------------

@@ -7,7 +7,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
 
-from utils import show_custom_message_box, show_message_box, show_warning_box
+from utils import show_message_box, show_warning_box
 from utils.image_utils import to_display_uint8
 from core.multi_focus_fusion import is_stackmffv4_available
 from core.workers import RenderWorker
@@ -36,8 +36,31 @@ class RenderManager:
         "dct": "DCT",
         "dtcwt": "DTCWT",
         "gfgfgf": "GFG-FGF",
+        "openfocus_a": "OpenFocus A",
+        "openfocus_b": "OpenFocus B",
+        "openfocus_c": "OpenFocus C",
         "stackmffv4": "AI",
     }
+    # UI 展示（进度/输出列表/信息行）走 i18n 标签；ALGORITHM_DISPLAY 仅作
+    # 非代码兜底与文件名无关
+    ALGO_TRANS_KEY = {
+        "guided_filter": "radio_guided_filter",
+        "dct": "radio_dct",
+        "dtcwt": "radio_dtcwt",
+        "gfgfgf": "radio_gfg",
+        "stackmffv4": "radio_stackmff",
+        "openfocus_a": "radio_openfocus_a",
+        "openfocus_b": "radio_openfocus_b",
+        "openfocus_c": "radio_openfocus_c",
+        "none": "radio_no_fusion",
+    }
+
+    @classmethod
+    def algo_display_name(cls, code: str) -> str:
+        key = cls.ALGO_TRANS_KEY.get(code)
+        if key:
+            return trans.t(key)
+        return cls.ALGORITHM_DISPLAY.get(code, code)
 
     def __init__(self, window: Any):
         self.window = window
@@ -73,10 +96,7 @@ class RenderManager:
         except Exception:
             pass
         try:
-            window.rb_a.setEnabled(True)
-            window.rb_b.setEnabled(True)
-            window.rb_c.setEnabled(True)
-            window.rb_gfg.setEnabled(True)
+            window.combo_fusion.setEnabled(True)
         except Exception:
             pass
         # StackMFF-V4 availability is owned by the torch probe: blanket-enabling
@@ -84,14 +104,8 @@ class RenderManager:
         hook = getattr(window, "refresh_method_availability", None)
         if callable(hook):
             hook()
-        else:
-            try:
-                window.rb_d.setEnabled(True)
-            except Exception:
-                pass
         try:
-            window.cb_align_homography.setEnabled(True)
-            window.cb_align_ecc.setEnabled(True)
+            window.combo_align.setEnabled(True)
         except Exception:
             pass
         try:
@@ -134,9 +148,11 @@ class RenderManager:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_render_need_images_text"))
             return
 
-        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf"]
-        if is_stackmffv4_available():
-            methods.append("stackmffv4")
+        # 与融合下拉同序（stackmffv4 在 openfocus 族之前）
+        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+                   "openfocus_a", "openfocus_b", "openfocus_c"]
+        if not is_stackmffv4_available():
+            methods.remove("stackmffv4")
 
         self._compare_queue = list(methods)
         self._compare_total = len(methods)
@@ -153,7 +169,7 @@ class RenderManager:
             trans.t("msg_compare_progress").format(
                 i=self._compare_total - len(self._compare_queue) + 1,
                 n=self._compare_total,
-                method=self.ALGORITHM_DISPLAY.get(method, method)),
+                method=self.algo_display_name(method)),
             5000)
         self.start_render(force_algorithm=method)
 
@@ -213,16 +229,11 @@ class RenderManager:
         except Exception:
             pass
         try:
-            window.rb_a.setEnabled(False)
-            window.rb_b.setEnabled(False)
-            window.rb_c.setEnabled(False)
-            window.rb_gfg.setEnabled(False)
-            window.rb_d.setEnabled(False)
+            window.combo_fusion.setEnabled(False)
         except Exception:
             pass
         try:
-            window.cb_align_homography.setEnabled(False)
-            window.cb_align_ecc.setEnabled(False)
+            window.combo_align.setEnabled(False)
         except Exception:
             pass
         try:
@@ -236,16 +247,15 @@ class RenderManager:
         except Exception:
             pass
 
-        need_align_homography = window.cb_align_homography.isChecked()
-        need_align_ecc = window.cb_align_ecc.isChecked()
+        fusion_method = window.current_fusion_method()
+        alignment_method = window.current_alignment_method()
+        need_align_homography = alignment_method == "homography"
+        need_align_ecc = alignment_method == "ecc"
+        need_align_openfocus = alignment_method == "openfocus"
 
         need_fusion = (
             force_algorithm is not None
-            or window.rb_a.isChecked()
-            or window.rb_b.isChecked()
-            or window.rb_c.isChecked()
-            or window.rb_gfg.isChecked()
-            or window.rb_d.isChecked()
+            or fusion_method != "none"
         )
 
         kernel_slider_value = window.slider_smooth.value()
@@ -254,13 +264,14 @@ class RenderManager:
         if kernel_slider_value % 2 == 0:
             kernel_slider_value = max(1, kernel_slider_value - 1)
 
-        if force_algorithm is None and window.rb_d.isChecked() and not is_stackmffv4_available():
+        if force_algorithm is None and fusion_method == "stackmffv4" \
+                and not is_stackmffv4_available():
             show_warning_box(
                 window,
                 trans.t("msg_stackmff_unavailable_title"),
                 trans.t("msg_stackmff_unavailable_text"),
             )
-            window.rb_d.setChecked(False)
+            window.set_fusion_method("guided_filter")
             self._restore_ui_controls()
             return
 
@@ -306,7 +317,7 @@ class RenderManager:
             # 告诉Worker图像已经对齐
             effective_aligned_images = window.roi_aligned_images
             effective_is_aligned = True
-            effective_last_alignment_options = (False, True)  # 表示ECC已完成
+            effective_last_alignment_options = (False, True, False)  # 表示ECC已完成
         elif self._preview_mode:
             # Quick preview: downscale the stack so the draft render finishes
             # in a fraction of the time; alignment always reruns on the small
@@ -316,10 +327,13 @@ class RenderManager:
             effective_need_align_ecc = need_align_ecc
             effective_aligned_images = source_images
             effective_is_aligned = False
-            effective_last_alignment_options = (False, False)
-        elif (need_align_homography or need_align_ecc) and not window.is_images_aligned \
+            effective_last_alignment_options = (False, False, False)
+        elif (need_align_homography or need_align_ecc) \
+                and not window.is_images_aligned \
                 and getattr(window, "align_cache_enabled", True):
-            # Try the on-disk registration cache before re-aligning
+            # Try the on-disk registration cache before re-aligning.
+            # (OpenFocus-only alignment is excluded: its result is a cheap
+            # translation — re-running costs less than a cache-key mismatch.)
             from utils import align_cache
             cached = align_cache.load_aligned(
                 getattr(window, "current_folder_path", ""),
@@ -336,7 +350,8 @@ class RenderManager:
                 effective_need_align_ecc = need_align_ecc
                 effective_aligned_images = cached
                 effective_is_aligned = True
-                effective_last_alignment_options = (need_align_homography, need_align_ecc)
+                effective_last_alignment_options = (
+                    need_align_homography, need_align_ecc, need_align_openfocus)
             else:
                 source_images = stack_images
                 effective_need_align_homography = need_align_homography
@@ -372,7 +387,8 @@ class RenderManager:
             # this, never against "source".
             "source_ref": window.raw_images,
             "alignment_options": (
-                effective_need_align_homography, effective_need_align_ecc),
+                effective_need_align_homography, effective_need_align_ecc,
+                need_align_openfocus),
             "preview": self._preview_mode,
             "roi": roi_rect is not None,
             "filenames": list(stack_filenames),
@@ -387,11 +403,11 @@ class RenderManager:
             effective_need_align_homography,
             effective_need_align_ecc,
             need_fusion,
-            window.rb_a.isChecked(),
-            window.rb_b.isChecked(),
-            window.rb_c.isChecked(),
-            window.rb_gfg.isChecked(),
-            window.rb_d.isChecked(),
+            fusion_method == "guided_filter",
+            fusion_method == "dct",
+            fusion_method == "dtcwt",
+            fusion_method == "gfgfgf",
+            fusion_method == "stackmffv4",
             kernel_slider_value,
             tile_enabled=getattr(window, "tile_enabled", None),
             tile_block_size=getattr(window, "tile_block_size", None),
@@ -405,6 +421,15 @@ class RenderManager:
             roi_base_index=roi_base_index,
             use_gpu=getattr(window, "use_gpu", True),
             algorithm_override=force_algorithm,
+            need_align_openfocus=need_align_openfocus,
+            rb_ofa_checked=fusion_method == "openfocus_a",
+            rb_ofb_checked=fusion_method == "openfocus_b",
+            rb_ofc_checked=fusion_method == "openfocus_c",
+            base_frame="last" if getattr(window, "base_frame_correct", False)
+                else "none",
+            sort_mode="desc" if getattr(window, "stack_reverse_order", False)
+                else "asc",
+            depth_smoothing=getattr(window, "ofb_depth_smoothing", None),
         )
 
         self._progress_first_t = None
@@ -412,6 +437,9 @@ class RenderManager:
         self.worker.finished_signal.connect(self.on_render_finished)
         self.worker.error_signal.connect(self.on_render_error)
         self.worker.progress_signal.connect(self.on_render_progress)
+        self.worker.stage_signal.connect(self.on_render_stage)
+        window.statusBar().clearMessage()  # stale "loading…" etc.
+        self._show_progress_bar(trans.t('render_progress'))
         self.worker.start()
 
     def on_render_finished(
@@ -424,6 +452,7 @@ class RenderManager:
         device_name: str,
     ) -> None:
         window = self.window
+        self._hide_progress_bar()
         context = self._render_context
         preview = context["preview"] if context else getattr(self, '_preview_mode', False)
         self._preview_mode = False
@@ -487,7 +516,7 @@ class RenderManager:
                     item = window.output_list.item(0)
                     if item is not None:
                         item.setText(
-                            f"{item.text()} — {self.ALGORITHM_DISPLAY.get(method, method)}")
+                            f"{item.text()} — {self.algo_display_name(method)}")
 
                 # New output: refresh the wipe B-side history, keep selection
                 if getattr(window, "wipe_active", False):
@@ -594,55 +623,51 @@ class RenderManager:
             if preview:
                 info_lines.append(trans.t("info_preview_quality"))
             if registration_performed:
-                align_methods = []
-                if window.cb_align_homography.isChecked():
-                    align_methods.append(trans.t("check_align_homography"))
-                if window.cb_align_ecc.isChecked():
-                    align_methods.append(trans.t("check_align_ecc"))
-                align_method_str = ", ".join(align_methods) if align_methods else trans.t("val_none")
+                alignment_method = window.current_alignment_method()
+                label_map = {
+                    "homography": trans.t("check_align_homography"),
+                    "ecc": trans.t("check_align_ecc"),
+                    "openfocus": trans.t("check_align_of"),
+                }
+                align_method_str = label_map.get(alignment_method,
+                                                 trans.t("val_none"))
                 info_lines.append(trans.t("info_align_method").format(align_method_str))
                 info_lines.append(trans.t("info_align_time").format(alignment_time))
             else:
                 info_lines.append(trans.t("info_align_none_cached"))
                 info_lines.append(trans.t("info_align_time").format(0.0))
 
-            if (
-                window.rb_a.isChecked()
-                or window.rb_b.isChecked()
-                or window.rb_c.isChecked()
-                or window.rb_gfg.isChecked()
-                or window.rb_d.isChecked()
-            ):
-                if window.rb_a.isChecked():
-                    method_name = trans.t("radio_guided_filter")
-                elif window.rb_b.isChecked():
-                    method_name = trans.t("radio_dct")
-                elif window.rb_c.isChecked():
-                    method_name = trans.t("radio_dtcwt")
-                elif window.rb_gfg.isChecked():
-                    method_name = trans.t("radio_gfg")
-                elif window.rb_d.isChecked():
-                    method_name = trans.t("radio_stackmff")
-                else:
-                    method_name = trans.t("radio_guided_filter")
-
+            fusion_method = window.current_fusion_method()
+            if fusion_method == "none" and not compare:
+                # 仅对齐模式：只跑配准，融合时间不适用
+                info_lines.append(trans.t("info_fusion_none"))
+                info_lines.append(trans.t("info_align_time").format(alignment_time))
+            else:
+                # 对比渲染时显示的是队列里实际渲染的方法，而非当前下拉选择
+                compare_method = getattr(self, "_compare_current", None)
+                method_name = self.algo_display_name(
+                    compare_method or fusion_method)
                 info_lines.append(trans.t("info_fusion_method").format(method_name))
                 info_lines.append(trans.t("info_fusion_time").format(fusion_time))
                 info_lines.append(trans.t("info_proc_unit").format(device_name))
-            else:
-                info_lines.append(trans.t("info_fusion_none"))
-                info_lines.append(trans.t("info_fusion_time").format(0.0))
 
             info_lines.append(trans.t("info_total_time").format(total_time))
 
+            # Non-blocking completion report: a modal "Completed" box after
+            # every render (incl. quick previews) cost a click per iteration
+            # and covered the result the user wanted to inspect. The summary
+            # goes to the status bar; the full timing sits in the output
+            # entry's tooltip.
             if not compare:
-                show_custom_message_box(
-                    window,
-                    trans.t("dialog_completed_title"),
-                    trans.t("dialog_completed_msg"),
-                    "\n".join(info_lines),
-                    QMessageBox.Icon.Information,
-                )
+                window.statusBar().showMessage(
+                    trans.t("dialog_completed_title") + " — "
+                    + " · ".join(info_lines), 15000)
+            if (fusion_result is not None and not preview
+                    and window.output_list.count() > 0):
+                newest = window.output_list.item(0)
+                if newest is not None:
+                    # Long names are cut off in the list: lead with the name
+                    newest.setToolTip("\n".join([newest.text(), ""] + info_lines))
 
         except Exception as exc:
             import logging
@@ -680,10 +705,59 @@ class RenderManager:
                 self._restore_ui_controls()
             self.worker = None
 
+    def _progress_widgets(self):
+        """Lazily created status-bar progress bar + stage label.
+
+        Before this a render showed no activity at all unless the fusion
+        happened to be tiled; long ECC alignments looked like a hang."""
+        bar = getattr(self, "_status_bar_progress", None)
+        if bar is None:
+            from PyQt6.QtWidgets import QLabel, QProgressBar
+            sb = self.window.statusBar()
+            label = QLabel()
+            bar = QProgressBar()
+            bar.setFixedWidth(180)
+            bar.setFixedHeight(14)
+            bar.setTextVisible(False)
+            sb.addPermanentWidget(label)
+            sb.addPermanentWidget(bar)
+            label.hide()
+            bar.hide()
+            self._status_bar_progress = bar
+            self._status_bar_label = label
+        return bar, self._status_bar_label
+
+    def _show_progress_bar(self, text: str) -> None:
+        try:
+            bar, label = self._progress_widgets()
+            bar.setRange(0, 0)  # indeterminate until a stage reports counts
+            label.setText(text)
+            label.show()
+            bar.show()
+            self.window.statusBar().setVisible(True)
+        except Exception:
+            pass
+
+    def _hide_progress_bar(self) -> None:
+        bar = getattr(self, "_status_bar_progress", None)
+        if bar is not None:
+            bar.hide()
+            self._status_bar_label.hide()
+
+
+    def on_render_stage(self, stage: str) -> None:
+        text = trans.t('render_stage_align') if stage == "align" else trans.t('render_stage_fuse')
+        self._progress_first_t = None
+        self._show_progress_bar(text)
+
     def on_render_progress(self, done: int, total: int) -> None:
         """Surface tiled-fusion progress in the status bar with an ETA."""
         import time as _time
         window = self.window
+        bar = getattr(self, "_status_bar_progress", None)
+        if bar is not None and total > 0:
+            bar.setRange(0, int(total))
+            bar.setValue(int(done))
         now = _time.time()
         last = getattr(self, '_progress_last_t', None)
         if last is None or now - last > 1.0:  # throttle to 1 Hz
@@ -706,6 +780,7 @@ class RenderManager:
         self._preview_mode = False
         self._render_context = None
         self.worker = None
+        self._hide_progress_bar()
 
         if getattr(self, '_compare_mode', False):
             # A failed method aborts the whole comparison run

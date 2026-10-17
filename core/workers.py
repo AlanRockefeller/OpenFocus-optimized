@@ -89,6 +89,7 @@ class RenderWorker(QThread):
 
     finished_signal = pyqtSignal(object, object, bool, float, float, str)
     progress_signal = pyqtSignal(int, int)  # done, total (tiled fusion)
+    stage_signal = pyqtSignal(str)  # "align" | "fuse"
     error_signal = pyqtSignal(str)
 
     def __init__(
@@ -118,6 +119,13 @@ class RenderWorker(QThread):
         roi_base_index=0,
         use_gpu: bool = True,
         algorithm_override: str | None = None,
+        need_align_openfocus: bool = False,
+        rb_ofa_checked: bool = False,
+        rb_ofb_checked: bool = False,
+        rb_ofc_checked: bool = False,
+        base_frame: str = "none",
+        sort_mode: str = "asc",
+        depth_smoothing: float = None,
     ):
         super().__init__()
         self.raw_images = raw_images
@@ -131,6 +139,7 @@ class RenderWorker(QThread):
         # 配准选项
         self.need_align_homography = need_align_homography
         self.need_align_ecc = need_align_ecc
+        self.need_align_openfocus = bool(need_align_openfocus)
 
         # 融合选项
         self.need_fusion = need_fusion
@@ -139,6 +148,15 @@ class RenderWorker(QThread):
         self.rb_c_checked = rb_c_checked
         self.rb_gfg_checked = rb_gfg_checked
         self.rb_d_checked = rb_d_checked
+        self.rb_ofa_checked = bool(rb_ofa_checked)
+        self.rb_ofb_checked = bool(rb_ofb_checked)
+        self.rb_ofc_checked = bool(rb_ofc_checked)
+        # 基底校正（消除亮度漂移）：'none' | 'last' | 'first'
+        self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
+        # 帧序方向（仅 openfocus 族生效）：'asc'（默认）| 'desc' | 'off'
+        self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
+        # OpenFocus B 深度图过渡 σ（None = 默认 1.2）
+        self.depth_smoothing = depth_smoothing
         self.kernel_slider_value = kernel_slider_value
         # Tile params passed from UI (may be None -> use fusion defaults)
         self.tile_enabled = tile_enabled
@@ -179,10 +197,12 @@ class RenderWorker(QThread):
             current_alignment_options = (
                 self.need_align_homography,
                 self.need_align_ecc,
+                self.need_align_openfocus,
             )
             need_registration = (
                 self.need_align_homography
                 or self.need_align_ecc
+                or self.need_align_openfocus
             )
             can_reuse_aligned_images = (
                 self.is_images_aligned
@@ -203,6 +223,7 @@ class RenderWorker(QThread):
                         self.error_signal.emit("CANCELLED: render cancelled")
                         return
                     alignment_start_time = time.time()
+                    self.stage_signal.emit("align")
                     processed_images, alignment_time = self._run_registration(
                         processed_images, should_cancel=lambda: self.is_cancelled)
                     registration_performed = True
@@ -217,6 +238,7 @@ class RenderWorker(QThread):
                     self.error_signal.emit("CANCELLED: render cancelled")
                     return
                 fusion_start_time = time.time()
+                self.stage_signal.emit("fuse")
                 # 使用裁剪后的图像进行融合（如果ROI已启用）
                 fusion_images = cropped_images if cropped_images is not None else processed_images
                 fusion_result, device_name = self._run_fusion(
@@ -252,6 +274,18 @@ class RenderWorker(QThread):
         """执行图像配准"""
         alignment_start_time = time.time()
 
+        # OpenFocus 快速对齐先跑（全局平移，毫秒级）；勾选了 ECC/单应性时
+        # 在其结果上继续精配准——粗对齐让后续特征匹配更稳。
+        if self.need_align_openfocus:
+            if self.reg_downscale_width is not None:
+                fast = ImageRegistration(method="openfocus",
+                                         downscale_width=self.reg_downscale_width)
+            else:
+                fast = ImageRegistration(method="openfocus")
+            images = fast.process(images, output_path=None,
+                                  thread_count=self.thread_count,
+                                  should_cancel=should_cancel)
+
         if self.need_align_homography and self.need_align_ecc:
             mode = "both"
         elif self.need_align_homography:
@@ -259,7 +293,7 @@ class RenderWorker(QThread):
         elif self.need_align_ecc:
             mode = "ecc"
         else:
-            return images, 0
+            return images, time.time() - alignment_start_time
 
         if self.reg_downscale_width is not None:
             registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
@@ -329,6 +363,8 @@ class RenderWorker(QThread):
             tile_overlap=(self.tile_overlap if self.tile_overlap is not None else TILE_OVERLAP),
             tile_threshold=(self.tile_threshold if self.tile_threshold is not None else TILE_THRESHOLD),
             stackmffv4_batch_size=self.stackmffv4_batch_size,
+            base_frame=self.base_frame,
+            sort_mode=self.sort_mode,
         )
 
         # Classical algorithms are CPU-only (see AGENTS.md); only the neural
@@ -379,6 +415,16 @@ class RenderWorker(QThread):
                 **fuse_cancel,
             )
             result = quantize_fuse_output(result, is_16bit)
+        elif algorithm in ("openfocus_a", "openfocus_b", "openfocus_c"):
+            result = fusion.fuse(
+                input_source=images,
+                img_resize=None,
+                kernel_size=kernel_size,
+                thread_count=self.thread_count,
+                depth_smoothing=self.depth_smoothing,
+                **fuse_cancel,
+            )
+            result = quantize_fuse_output(result, is_16bit)
         elif algorithm == "stackmffv4":
             model_path = resource_path("weights", "stackmffv4.pth")
             result = fusion.fuse(
@@ -415,6 +461,12 @@ class RenderWorker(QThread):
             return "gfgfgf"
         elif self.rb_d_checked:
             return "stackmffv4"
+        elif self.rb_ofa_checked:
+            return "openfocus_a"
+        elif self.rb_ofb_checked:
+            return "openfocus_b"
+        elif self.rb_ofc_checked:
+            return "openfocus_c"
         else:
             return "guided_filter"
 
@@ -614,6 +666,16 @@ class BatchWorker(QThread):
         if reg_methods:
             align_homography = "homography" in reg_methods
             align_ecc = "ecc" in reg_methods
+            align_of = "openfocus" in reg_methods
+
+            if align_of:
+                # OpenFocus 快速对齐先跑（全局平移，毫秒级）
+                from core.registration import ImageRegistration
+                fast = ImageRegistration(method="openfocus")
+                aligned_images = fast.process(
+                    aligned_images, output_path=None,
+                    thread_count=self.thread_count,
+                    should_cancel=lambda: self.is_cancelled)
 
             if align_homography and align_ecc:
                 mode = "both"
@@ -631,11 +693,15 @@ class BatchWorker(QThread):
                 else:
                     registration = ImageRegistration(method=mode)
                 aligned_images = registration.process(
-                    images, output_path=None, thread_count=self.thread_count,
+                    aligned_images, output_path=None, thread_count=self.thread_count,
                     should_cancel=lambda: self.is_cancelled)
 
         output_format = self.processing_settings.get('format', 'jpg')
         fusion_method = self.processing_settings.get('fusion_method')
+        if fusion_method == "none":
+            # 仅对齐批处理：跳过融合，输出=对齐后的帧（save_aligned 由
+            # 批处理对话框强制开启）
+            fusion_method = None
         if fusion_method:
             fusion_params = self.processing_settings.get('fusion_params', {}).copy()
             if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
@@ -658,7 +724,11 @@ class BatchWorker(QThread):
             if aligned_for_export is None:
                 del aligned_images  # 融合期间原 uint16 栈纯属悬挂占用
 
-            fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=self.use_gpu, **tile_kwargs)
+            fusion = MultiFocusFusion(
+                algorithm=fusion_method, use_gpu=self.use_gpu,
+                base_frame=self.processing_settings.get('base_frame', 'none'),
+                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
+                **tile_kwargs)
 
             if fusion_method == "guided_filter":
                 kernel_size = fusion_params.get('kernel_size', 31)
@@ -699,6 +769,18 @@ class BatchWorker(QThread):
                     img_resize=None,
                     kernel_size=kernel_size,
                     thread_count=self.thread_count,
+                    should_cancel=lambda: self.is_cancelled,
+                )
+            elif fusion_method in ("openfocus_a", "openfocus_b", "openfocus_c"):
+                kernel_size = fusion_params.get('kernel_size', 7)
+                if kernel_size % 2 == 0:
+                    kernel_size = max(1, kernel_size - 1)
+                result = fusion.fuse(
+                    input_source=fusion_input,
+                    img_resize=None,
+                    kernel_size=kernel_size,
+                    thread_count=self.thread_count,
+                    depth_smoothing=fusion_params.get('depth_smoothing'),
                     should_cancel=lambda: self.is_cancelled,
                 )
             elif fusion_method == "stackmffv4":
@@ -751,10 +833,19 @@ class BatchWorker(QThread):
             # 配准选项
             align_homography = "homography" in reg_methods
             align_ecc = "ecc" in reg_methods
-            
+
             # 执行配准
             aligned_images = []
-            
+
+            # OpenFocus 快速对齐先跑（若勾选）
+            if "openfocus" in reg_methods:
+                fast = ImageRegistration(method="openfocus")
+                aligned_images = fast.process(
+                    images, output_path=None, thread_count=self.thread_count,
+                    should_cancel=lambda: self.is_cancelled)
+            else:
+                aligned_images = list(images)
+
             # 确定配准模式
             if align_homography and align_ecc:
                 mode = "both"
@@ -771,7 +862,7 @@ class BatchWorker(QThread):
                 else:
                     registration = ImageRegistration(method=mode)
                 aligned_images = registration.process(
-                    images, output_path=None, thread_count=self.thread_count,
+                    aligned_images, output_path=None, thread_count=self.thread_count,
                     should_cancel=lambda: self.is_cancelled)
             else:
                 # 如果没有选择任何配准方法，直接使用原始图像
@@ -779,6 +870,9 @@ class BatchWorker(QThread):
         
         # 3. 图像融合
         fusion_method = self.processing_settings.get('fusion_method')
+        if fusion_method == "none":
+            # 仅对齐批处理：跳过融合（输出=对齐后的帧）
+            fusion_method = None
         if fusion_method:
             fusion_params = self.processing_settings.get('fusion_params', {})
             if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
@@ -805,8 +899,12 @@ class BatchWorker(QThread):
             tile_kwargs.setdefault('tile_overlap', self.tile_overlap if self.tile_overlap is not None else TILE_OVERLAP)
             tile_kwargs.setdefault('tile_threshold', self.tile_threshold if self.tile_threshold is not None else TILE_THRESHOLD)
 
-            fusion = MultiFocusFusion(algorithm=fusion_method, use_gpu=self.use_gpu, **tile_kwargs)
-            
+            fusion = MultiFocusFusion(
+                algorithm=fusion_method, use_gpu=self.use_gpu,
+                base_frame=self.processing_settings.get('base_frame', 'none'),
+                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
+                **tile_kwargs)
+
             # 调用fuse方法执行融合：与单文件夹路径使用同一套 16-bit 输入/输出契约，
             # 否则批处理会把 16-bit 栈压成 8-bit（甚至过曝）
             from utils.image_utils import normalize_fuse_input, quantize_fuse_output

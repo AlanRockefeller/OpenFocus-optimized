@@ -23,7 +23,52 @@ try:
 except ImportError:
     HEIF_AVAILABLE = False
 
+try:
+    import rawpy  # optional: camera RAW via LibRaw
+    RAWPY_AVAILABLE = True
+except ImportError:
+    RAWPY_AVAILABLE = False
+
 from utils.image_utils import to_display_uint8
+
+RAW_FORMATS = {'.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf',
+               '.sr2', '.raf', '.orf', '.rw2', '.raw', '.pef', '.srw', '.3fr',
+               '.iiq', '.erf', '.kdc', '.mos', '.mrw', '.x3f'}
+
+
+def _read_raw(path: str) -> Optional[np.ndarray]:
+    """Camera RAW -> 16-bit BGR (sRGB gamma, camera white balance).
+
+    Auto-brightening is off on purpose: LibRaw's per-image auto exposure
+    would brighten each frame of a focus stack differently (the defocused
+    ones most), which reads as flicker and corrupts the focus measures.
+    Orientation is applied by LibRaw itself.
+    """
+    if not RAWPY_AVAILABLE:
+        return None
+    try:
+        with rawpy.imread(path) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, output_bps=16,
+                                  no_auto_bright=True)
+        return np.ascontiguousarray(rgb[:, :, ::-1])
+    except Exception:
+        return None
+
+
+def decode_image(path: str) -> Optional[np.ndarray]:
+    """Decode one still image (any supported format) to BGR, keeping 16-bit.
+    EXIF orientation is applied for everything except RAW (LibRaw does it)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in RAW_FORMATS:
+        return _read_raw(path)
+    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8),
+                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+    if img is None:
+        # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
+        img = _read_via_pil(path)
+    if img is not None:
+        img = apply_exif_orientation(path, img)
+    return img
 
 
 def _read_exif_bytes(path: str) -> bytes:
@@ -192,15 +237,8 @@ def _downscale(img: np.ndarray, scale_factor: float) -> np.ndarray:
 
 
 def _decode_image(path: str) -> Optional[np.ndarray]:
-    """One still image, EXIF-oriented; None when no decoder can read it."""
-    img = cv2.imdecode(np.fromfile(path, dtype=np.uint8),
-                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-    if img is None:
-        # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
-        img = _read_via_pil(path)
-    if img is not None:
-        img = apply_exif_orientation(path, img)
-    return img
+    """Backward-compatible alias for the shared still-image decoder."""
+    return decode_image(path)
 
 
 def _decode_source(path: str, scale_factor: float):
@@ -209,7 +247,9 @@ def _decode_source(path: str, scale_factor: float):
     pages = _read_tiff_pages(path)
     if pages is not None:
         return "pages", [_downscale(page, scale_factor) for page in pages]
-    img = _decode_image(path)
+    # Use the shared decoder so parallel stack loading also supports camera
+    # RAW, HEIC, EXIF orientation and non-ASCII paths exactly like the CLI.
+    img = decode_image(path)
     if img is not None:
         img = _downscale(img, scale_factor)
     return "image", img
@@ -221,12 +261,15 @@ class ImageStackLoader:
     SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
     if HEIF_AVAILABLE:
         SUPPORTED_FORMATS |= {'.heic', '.heif'}
+    if RAWPY_AVAILABLE:
+        SUPPORTED_FORMATS |= RAW_FORMATS
     SUPPORTED_VIDEO_FORMATS = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm'}
 
     def __init__(self):
         self.image_paths = []
         self.images = []
         self.thumbnail_size = (600, 400)
+        self.source_exif = b""
         # µm/px auto-detected from the stack's TIFF metadata (None = unknown)
         self.px_size_um = None
 
@@ -515,7 +558,7 @@ class ImageStackLoader:
         loaded_data = []
         failed_count = 0
 
-        decoded = _decode_all(_decode_image,
+        decoded = _decode_all(decode_image,
                               [full_path for _, full_path in image_files])
         for (filename, full_path), img in zip(image_files, decoded):
             try:

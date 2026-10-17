@@ -11,7 +11,7 @@
 7. [Image Registration](#7-image-registration)
 8. [Image Fusion Methods](#8-image-fusion-methods)
 9. [Image Transformations](#9-image-transformations)
-10. [Labels and Annotations](#10-labels-and-annotations)
+10. [Retouching, Labels and Annotations](#10-retouching-labels-and-annotations)
 11. [Settings and Configuration](#11-settings-and-configuration)
 12. [Batch Processing](#12-batch-processing)
 13. [Exporting Results](#13-exporting-results)
@@ -48,6 +48,10 @@ OpenFocus is a professional multi-focus image fusion desktop application designe
 - Image files: JPG, PNG, BMP, TIFF, and other common formats
 - Video files: MP4 format (automatically decoded into image sequences)
 - Folders containing numbered image sequences
+- Camera RAW files (DNG, CR2/CR3, NEF, ARW, RAF, ORF, RW2 and other common
+  RAW formats). Decoding needs the optional `rawpy` (LibRaw) package; the
+  Windows and macOS builds include it, and pip users can install it with
+  `pip install "openfocus[raw]"`
 
 ### Supported Output Formats
 
@@ -123,8 +127,13 @@ The top menu bar provides access to all functions:
 
 1. Go to **File → Open Folder** or press `Ctrl+O`
 2. Select a folder containing your image sequence
-3. A downsample dialog will appear - choose your preferred scale factor
+3. A loading-scale dialog appears — choose the scale (100% = full resolution)
 4. Click OK to load the images
+
+Tick **Don't ask again** in that dialog to always load at the chosen scale
+without a prompt; **Settings → Ask for Loading Scale on Import** turns the
+prompt back on. A loaded stack can still be downscaled later with
+**Edit → Resize**.
 
 The software will automatically:
 - Detect and sort image files by filename
@@ -144,8 +153,7 @@ File → Save Project stores your whole working session as an `.ofproj`
 file: the exact source file list (in order), the load scale, fusion
 method, registration options, kernel size, tile/thread/registration
 settings, label configurations and the current frame. File → Open Project
-rebuilds that session exactly (source images are referenced, not copied —
-keep them in place). The window title shows the open project.
+rebuilds that session exactly (source images are referenced, not copied — keep them in place). The window title shows the open project.
 
 ### Demo Stack
 
@@ -189,15 +197,17 @@ text. The CLI supports it via `--scale-bar` (auto calibration) and
 
 ### Depth Map (Focus Position)
 
-Tools → Depth Map… opens a viewer that computes, per pixel, which frame of
-the stack is in focus — the pseudo-depth signal every fusion method derives
-internally — using the selected method's own activity measure (all five
-methods are supported; for DTCWT it is the wavelet high-pass energy). The
+**Tools → Depth Map…** opens a viewer that computes, per pixel, which frame of
+the stack is in focus — the pseudo-depth signal the fusion itself decides
+on — using the selected method's own activity measure. Only
+index-deciding methods are offered (DCT, DTCWT, GFG-FGF, StackMFF-V4,
+OpenFocus B/C); weighted-average fusions (Guided Filter, OpenFocus A)
+have no per-pixel decision and are not listed. The
 map is shown pseudo-colored with a legend (frame 0 → N-1) and can be
 customized live:
 
 - **Color map**: grayscale (publication standard) plus 15 scientific
-  palettes (Turbo, Viridis, Magma, …), and
+  palettes (Turbo, Viridis, Magma, …) and
   your own — *New Custom Scheme…* builds a gradient from any number of
   color stops (double-click a stop to edit position and color); custom
   schemes are saved and offered in the dropdown.
@@ -209,6 +219,15 @@ customized live:
 - **Export**: *Save Colorized…* (PNG/JPEG/TIFF/BMP) or *Save Raw 16-bit…*
   (the normalized index map at full precision, ideal for downstream
   analysis in ImageJ/Fiji/python).
+- **3D model**: *Export 3D (OBJ)…* writes a textured surface built from the
+  depth map and the fused result as `<name>.obj`, `<name>.mtl` and
+  `<name>_texture.png`, which open in Blender, MeshLab or Windows 3D Viewer.
+  The mesh is downsampled to at most 600 vertices on its longest side and
+  lightly despeckled, after the Smoothing value above is applied. *3D relief*
+  (1–100 %, default 15 %) sets the surface height as a percentage of the
+  image's longest side and is remembered. *Invert depth axis* flips which end
+  of the stack is near. The texture is the fused result, or the stack's first
+  frame if no result of the same size exists.
 
 Computation runs in the background with progress and cancellation; the AI
 method reuses the same memory-safe tiling as AI fusion, so deep stacks
@@ -217,15 +236,14 @@ work. The CLI equivalent is `--depth-map [path]` with `--depth-colormap`.
 ### Crash Auto-Recovery
 
 OpenFocus continuously keeps a snapshot of your working session (stack,
-settings, labels, current frame). If the application closes unexpectedly —
-a crash, power loss, or a forced kill — the next launch detects it and
+settings, labels, current frame). If the application closes unexpectedly — a crash, power loss, or a forced kill — the next launch detects it and
 offers **Restore Session** to return exactly to where you were. Clean
 exits never show the prompt. Recovery data lives next to your settings
 (portable installs keep it beside the executable, so it travels with you).
 
 ### Recent Files
 
-Every stack you open is remembered under **File → Open Recent** (up to 8 entries). Press `Alt+1` … `Alt+8` to reopen an entry directly. Reopening the same stack moves it to the top; entries whose files no longer exist can be removed with a prompt, and **Clear Recent List** empties the menu.
+Every stack you open is remembered under **File → Open Recent** (up to 8 entries). Press `Alt+1`–`Alt+8` to reopen an entry directly. Reopening the same stack moves it to the top; entries whose files no longer exist can be removed with a prompt, and **Clear Recent List** empties the menu.
 
 ### Drag and Drop
 
@@ -241,6 +259,11 @@ automatically during import, so portrait shots load upright.
 16-bit PNG/TIFF inputs are detected automatically and preserved end-to-end:
 fusion runs at full depth and results can be saved back as 16-bit PNG/TIFF
 (JPG/BMP exports are converted to 8-bit, as those formats cannot store 16 bits).
+
+Camera RAW files are developed to 16-bit (camera white balance, sRGB gamma)
+with auto-brightening disabled, so every frame of a stack gets the same
+exposure mapping; per-frame auto exposure would make brightness flicker
+between frames. Save as TIFF or PNG to keep the 16-bit data.
 
 ### Clearing the Stack
 
@@ -327,12 +350,24 @@ Image registration corrects spatial misalignment between frames in your image st
 - Faster than ECC for initial alignment
 - Good for images with significant perspective changes
 
+#### OpenFocus (fast)
+
+- Bounded similarity alignment (translation + rotation + scale),
+  reverse-engineered from Helicon Focus, with per-frame brightness
+  equalization and auto-crop
+- Sub-second per frame — much faster than ECC or Homography
+- Frames shifting more than **8% of the frame size are left unaligned**
+  rather than partially corrected; that is where Helicon's own aligner
+  gives up too. Override with the CLI `--align-shift-limit`
+- For non-rigid or extreme geometry, pick ECC or Homography instead
+
 ### Enabling Registration
 
 1. In the right panel, locate the **Registration** group
-2. Check **Align (ECC)** to enable ECC alignment
-3. Check **Align (Homography)** to enable Homography alignment
-4. Both methods can be used together for better results
+2. Pick one method from the dropdown: **No alignment**, **OpenFocus (fast)**,
+   **Align (ECC)** or **Align (Homography)**
+3. The OpenFocus fast alignment can also be chained in front of ECC or
+   Homography (coarse global pass first, then the precise local pass)
 
 ### When to Use Registration
 
@@ -352,7 +387,7 @@ Access additional settings via **Settings → Registration**:
 
 ## 8. Image Fusion Methods
 
-OpenFocus offers five fusion algorithms. Each has different characteristics suitable for various image types.
+OpenFocus offers eight fusion algorithms (plus an alignment-only mode). Each has different characteristics suitable for various image types.
 
 ### Guided Filter (Default)
 
@@ -375,14 +410,23 @@ OpenFocus offers five fusion algorithms. Each has different characteristics suit
 - **Algorithm**: Multi-scale wavelet domain fusion
 - **Best for**: Complex scenes with multiple detail levels
 - **Advantages**: Excellent multi-scale analysis, good directionality
-- **Parameter**: Kernel size for filtering operations
+- **Fusion rule**: one decision per pixel and level for all orientations and
+  colour channels (N-way, majority-consistency checked); the low-pass band
+  follows the coarsest decision instead of averaging every frame
+- **Parameter**: none (the kernel slider is disabled)
 
-### GFG-FGF (Generalized Four-neighborhood Gradient - Fast Guided Filter)
+### GFG-FGF (Gaussian-like Four-neighbourhood Gradient + Fast Guided Filter)
 
-- **Algorithm**: Gradient-based fusion with fast guided filtering
-- **Best for**: Images with clear focus regions
-- **Advantages**: Fast, good focus region detection
-- **Parameter**: Kernel size adjustment
+- **Algorithm**: implementation of Fu et al. (*Laser & Optoelectronics
+  Progress*, 2024): a blur-difference focus map |I − mean(I)| is enriched
+  with the Gaussian-like four-neighbourhood gradient (GFG) operator, refined
+  by a fast guided filter, decided per pixel (ties broken by a 3×3 Sobel
+  small-region measure), and the binary decision maps are smoothed by the
+  fast guided filter again before the weighted blend.
+- **Best for**: Microscopy and images with clear focus regions
+- **Advantages**: Fast, sharp focus-region boundaries; memory does not grow
+  with the number of frames
+- **Parameter**: Kernel = size of the mean filter of the coarse focus map
 
 ### StackMFF-V4 (Deep Learning)
 
@@ -392,11 +436,42 @@ OpenFocus offers five fusion algorithms. Each has different characteristics suit
 - **Requirements**: PyTorch installation, optional CUDA GPU
 - **Note**: May be unavailable if PyTorch is not installed
 
+### OpenFocus A / B / C (reverse-engineered from Helicon Focus)
+
+- **Algorithm**: The Helicon Focus method family, reproduced and verified
+  against the original software's output (about 1–3.5% MAE,
+  crop-offset-registered, on real benchmark stacks; 99.5% depth-map
+  agreement)
+- **OpenFocus A**: variance-weighted average with a last-frame prior —
+  fast, colour-stable on short stacks
+- **OpenFocus B**: variance depth-map pick — selects the sharpest frame
+  per pixel; best on smooth surfaces and microscopy
+- **OpenFocus C**: Laplacian-pyramid per-band blend — natural look on
+  textured subjects, boosts local contrast
+- **Parameters**: Variance window (kernel slider); results are
+  radius-insensitive per the reverse-engineering measurements
+
+**Depth smoothing (OpenFocus B only)**: B's depth map decides which frame
+wins each pixel. The *Depth smoothing (σ)* spin box, shown under the kernel
+slider when B is selected (range 0–8, step 0.2, default 1.2), sets the
+Gaussian sigma of the transition between frames. 1.2 matches Helicon Focus;
+0 keeps the finest detail; larger values calm speckles and halos at depth
+jumps on noisy stacks. The value is remembered across sessions and is also
+used by batch processing. CLI: `--depth-smoothing SIGMA`.
+
+### Alignment only (no fusion)
+
+Select **Alignment only (no fusion)** as the method to register the stack
+and send the aligned frames to the output list without fusing — handy to
+inspect registration quality or export aligned frames.
+
 ### Selecting a Fusion Method
 
 1. In the right panel, locate the **Fusion** group
-2. Select one or more methods by checking the corresponding boxes
-3. Adjust kernel size if applicable
+2. Pick a method from the **dropdown** (exactly one is always selected;
+   the first entry registers without fusing)
+3. Adjust kernel size if applicable — the label shows what the kernel
+   means for the selected method
 4. Click **Start Render** to process
 
 ### Algorithm Comparison Guide
@@ -408,6 +483,9 @@ OpenFocus offers five fusion algorithms. Each has different characteristics suit
 | DTCWT | Medium | Very Good | Complex scenes |
 | GFG-FGF | Fast | Good | Focus regions |
 | AI Fusion (StackMFF-V4) | Slow (GPU) | Excellent | Best quality |
+| OpenFocus A | Very Fast | Very Good | Short stacks, colour stability |
+| OpenFocus B | Very Fast | Very Good | Smooth surfaces, microscopy |
+| OpenFocus C | Fast | Very Good | Textured subjects, natural look |
 
 ### Quick Preview (Draft Render)
 
@@ -415,7 +493,7 @@ Tuning parameters on large stacks is slow at full resolution. Check
 **Quick preview** above the render button and OpenFocus first renders a
 downscaled draft (longest side 1200 px) — typically several times faster,
 including registration. The preview is displayed with a "Preview" note in
-the completion dialog and is **not** added to the output history. Uncheck
+the status-bar summary after the render and is **not** added to the output history. Uncheck
 the box and render again to produce the full-resolution result. Preview
 mode does not apply to ROI renders and never pollutes the full-resolution
 alignment cache.
@@ -452,7 +530,32 @@ Transformations are applied to the entire image stack, maintaining alignment bet
 
 ---
 
-## 10. Labels and Annotations
+## 10. Retouching, Labels and Annotations
+
+### Retouching the Result (Edit → Retouch Result…, `Ctrl+T`)
+
+Fusion can still leave a local defect — a halo around a high-contrast edge,
+a bristle taken from the wrong frame, noise in a flat area. The retouch
+brush copies pixels from a source frame onto the result:
+
+1. Render a result (or select one in the output list; right-click → *Retouch
+   Result…* works too) and press `Ctrl+T`.
+2. Paint over the defect with the left mouse button. With **Auto-pick
+   sharpest frame per stroke** on (default), every stroke first selects the
+   frame that has the most detail under the brush — fixing a halo is usually
+   a single drag. Turn it off to choose the frame yourself with the slider
+   or `,` / `.`.
+3. Adjust **radius** (`[` / `]`), **hardness** (soft edges hide the seam) and
+   **opacity**. Overlapping dabs within one stroke never compound.
+4. **Show source frame** (`Tab`) previews the frame you are painting from.
+   Wheel zooms, right/middle-drag pans, `F` fits the image.
+5. `Ctrl+Z` / `Ctrl+Y` undo and redo whole strokes. **Apply as New Output**
+   adds the retouched image to the output list (suffix `_Retouched`); the
+   original output stays untouched.
+
+The brush uses the aligned frames that produced the result, so it lines up
+with it; 16-bit results stay 16-bit. ROI renders and resized stacks cannot
+be retouched (their frames no longer match the result's geometry).
 
 ### Adding Labels
 
@@ -533,13 +636,6 @@ Two interface themes are available: **Dark (default)** and **Light**. Switch via
 **Settings → Theme**; the choice is applied immediately (the Windows title
 bar follows) and remembered. First-launch users choose a theme in the
 welcome dialog.
-
-### Themes
-
-Two interface themes are available: **Dark (default)** and **Light**.
-Switch via **Settings → Theme**; the choice applies immediately (the
-Windows title bar follows) and is remembered. First-launch users choose a
-theme inside the welcome dialog.
 
 ### Portable Mode
 
@@ -689,9 +785,14 @@ python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
 |--------|-------------|
 | `--input, -i` | Image folder, video file, or one or more image files |
 | `--output, -o` | Output image path (extension sets the format) |
-| `--method, -m` | `guided_filter` (default), `dct`, `dtcwt`, `gfgfgf`, `stackmffv4` |
-| `--align, -a` | `none` (default), `homography`, `ecc`, `both` |
-| `--kernel, -k` | Kernel size for guided_filter/dct/gfgfgf (forced odd) |
+| `--method, -m` | `guided_filter` (default), `dct`, `dtcwt`, `gfgfgf`, `stackmffv4`, `openfocus_a`, `openfocus_b`, `openfocus_c` |
+| `--align, -a` | `none` (default), `homography`, `ecc`, `both`, `openfocus` |
+| `--align-shift-limit` | `openfocus` align only: max accepted shift as a fraction of the frame size (default 0.08; frames above it are left unaligned) |
+| `--base-frame` | After fusion, match the output's low frequencies to the `last`/`first` frame (`none` default) — removes exposure drift |
+| `--sort` | Frame order for `openfocus_a/b/c`: `asc` (default, file order), `desc` (reverse a far-to-near sweep), `off` |
+| `--dust-map WHITE` | Flat-field (dust map) correction from a defocused white-field shot |
+| `--kernel, -k` | Kernel size (forced odd; for the openfocus family it is the source of the variance-window radius) |
+| `--depth-smoothing SIGMA` | `openfocus_b` only: Gaussian sigma of the frame-to-frame depth transition (default 1.2; 0 keeps the finest detail) |
 | `--threads, -t` | Worker thread count (default 4) |
 | `--batch-size` | AI tile batch size (default 2) |
 | `--cpu` | Force CPU even if a GPU is available |
@@ -721,6 +822,13 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 | `Ctrl+Shift+S` | Save Registered Stack |
 | `Ctrl+W` | Clear Stack |
 | `Ctrl+Q` | Exit |
+| `Ctrl+R` | Start Render |
+| `Ctrl+Shift+R` | Compare All methods |
+| `Ctrl+T` | Retouch Result |
+| `Ctrl+M` | Depth Map |
+| `Ctrl+E` | Toggle Wipe compare |
+| `Ctrl+Shift+B` | Batch Processing |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo (stack edits) |
 
 ### Navigation
 
@@ -752,7 +860,7 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 
 #### Fusion Results Look Blurry or Ghosted
 
-- Enable image registration (both ECC and Homography)
+- Enable image registration (pick one from the dropdown: Homography / ECC / OpenFocus fast)
 - Ensure images are properly aligned before fusion
 - Try a different fusion algorithm
 - Increase kernel size for smoother results
@@ -823,7 +931,7 @@ DTCWT provides multi-scale, multi-directional decomposition of images. It captur
 
 ### GFG-FGF
 
-This algorithm uses a Generalized Four-neighborhood Gaussian approach to measure local focus, combined with Fast Guided Filter for weight map refinement. It efficiently identifies and merges in-focus regions.
+Implements Fu et al. (2024): the coarse focus map |I − mean(I)| is enriched with the Gaussian-like four-neighbourhood gradient — the 3×3 template T = [1 2 1; 2 4 2; 1 2 1]/16 gives P = I⊗T, and G = (|I(x±1,y) − P|)/2 + (|I(x,y±1) − P|)/2 with values below T0 = 0.005 dropped — then refined by a fast guided filter. Pixels pick the frame with the largest focus value (ties: 3×3 Sobel small-region measure), and the binary decision maps are smoothed by the fast guided filter before the weighted blend.
 
 ### AI Fusion (StackMFF-V4)
 

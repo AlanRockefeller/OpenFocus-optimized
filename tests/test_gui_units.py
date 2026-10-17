@@ -178,7 +178,7 @@ import ui.styles  # noqa: E402  (import order, see above)
 from PyQt6.QtCore import QRectF  # noqa: E402
 from PyQt6.QtGui import QAction  # noqa: E402
 from PyQt6.QtWidgets import (  # noqa: E402
-    QCheckBox, QListWidget, QPushButton, QRadioButton, QSlider, QWidget,
+    QCheckBox, QComboBox, QListWidget, QPushButton, QRadioButton, QSlider, QWidget,
 )
 
 from locales import trans  # noqa: E402
@@ -323,12 +323,25 @@ def _render_window(frames):
     w.wipe_active = False
     w.btn_render = QPushButton("Render")
     w.btn_reset = QPushButton("Reset")
-    w.rb_a = QRadioButton()
-    w.rb_a.setChecked(True)
-    for attr in ("rb_b", "rb_c", "rb_gfg", "rb_d"):
-        setattr(w, attr, QRadioButton())
-    w.cb_align_homography = QCheckBox()
-    w.cb_align_ecc = QCheckBox()
+    # 下拉单选的融合/对齐选择 + 统一读取助手（与真实窗口同契约）
+    from ui.right_panel import FUSION_ITEMS, ALIGN_ITEMS
+
+    w.combo_fusion = QComboBox()
+    for code, _key, _hint in FUSION_ITEMS:
+        w.combo_fusion.addItem(code, code)
+    w.combo_fusion.setCurrentIndex(0)
+    w.combo_align = QComboBox()
+    for code, _key, _hint in ALIGN_ITEMS:
+        w.combo_align.addItem(code, code)
+    # 桩默认 none（等价旧测试里三个对齐框全不勾），对齐路径走“无配准”分支
+    w.combo_align.setCurrentIndex(
+        max(0, w.combo_align.findData("none")))
+    w.current_fusion_method = lambda: w.combo_fusion.currentData()
+    w.current_alignment_method = lambda: w.combo_align.currentData()
+    w.set_fusion_method = lambda code: w.combo_fusion.setCurrentIndex(
+        max(0, w.combo_fusion.findData(code)))
+    w.set_alignment_method = lambda code: w.combo_align.setCurrentIndex(
+        max(0, w.combo_align.findData(code)))
     w.chk_quick_preview = QCheckBox()
     w.slider_smooth = QSlider()
     w.slider_smooth.setValue(31)
@@ -360,6 +373,7 @@ def _fake_worker_class():
             self.finished_signal = _StubSignal()
             self.error_signal = _StubSignal()
             self.progress_signal = _StubSignal()
+            self.stage_signal = _StubSignal()
 
         def isRunning(self):
             return self._running
@@ -386,7 +400,7 @@ def _patched_render_manager(monkeypatch, window, ai_available=False):
 
     monkeypatch.setattr(render_module, "RenderWorker", _fake_worker_class())
     monkeypatch.setattr(render_module, "is_stackmffv4_available", lambda: ai_available)
-    for name in ("show_custom_message_box", "show_message_box", "show_warning_box"):
+    for name in ("show_message_box", "show_warning_box"):
         monkeypatch.setattr(render_module, name, lambda *a, **k: None)
 
     saved = []
@@ -471,7 +485,8 @@ def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
 
     assert w.aligned_images == processed
     assert w.is_images_aligned is True
-    assert w.last_alignment_options == (False, False)
+    # 3-tuple since v1.39: (homography, ecc, openfocus)
+    assert w.last_alignment_options == (False, False, False)
     assert len(saved) == 1
     assert saved[0]["shape"] == (30, 40)
     assert saved[0]["filenames"] == w.image_filenames
@@ -534,10 +549,12 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
 
     rm.start_compare_all()
     assert rm._compare_mode is True
-    assert len(rm._compare_queue) == 3
+    # guided_filter runs first; the queue holds the rest (A/B/C included
+    # since v1.39)
+    assert len(rm._compare_queue) == 6
     assert rm._compare_current == "guided_filter"
     assert not w.btn_render.isEnabled()
-    assert not w.cb_align_homography.isEnabled()
+    assert not w.combo_align.isEnabled()
 
     running = rm.worker
     rm.start_compare_all()  # second click cancels
@@ -560,7 +577,7 @@ def test_compare_all_cancel_between_renders_unlocks_the_ui(qapp, monkeypatch):
 
     assert rm._compare_queue == [] and rm._compare_mode is False
     assert w.btn_render.isEnabled()
-    assert w.cb_align_homography.isEnabled() and w.slider_smooth.isEnabled()
+    assert w.combo_align.isEnabled() and w.slider_smooth.isEnabled()
 
 
 def test_roi_reset_clears_rect_button_and_state(qapp):
@@ -795,3 +812,110 @@ def test_downsample_dialog_respects_max_scale(qapp):
 
     over = DownsampleDialog(initial_scale=0.9, max_scale=0.4)
     assert over.get_scale_factor() == 0.4
+
+
+def test_kernel_slider_remembers_value_per_method(qapp):
+    """Switching fusion methods used to reset the slider to the method's
+    default, losing the user's tuned value; and the depth dialog read the
+    slider whatever method it belonged to (GF radius 31 as DCT median)."""
+    from PyQt6.QtWidgets import QLabel, QSlider, QWidget
+    import main as main_module
+
+    cls = main_module.OpenFocus
+
+    class W:
+        _KERNEL_MODES = cls._KERNEL_MODES
+        _KERNEL_LABELS = cls._KERNEL_LABELS
+        update_slider_availability = cls.update_slider_availability
+        kernel_for_method = cls.kernel_for_method
+
+        def __init__(self):
+            self.slider_smooth = QSlider()
+            self.smooth_widget = QWidget()
+            self.lbl_kernel = QLabel()
+            self.current_kernel_mode = None
+            self.method = "guided_filter"
+
+        def current_fusion_method(self):
+            return self.method
+
+    w = W()
+    w.update_slider_availability()
+    assert w.slider_smooth.value() == 31
+    w.slider_smooth.setValue(21)
+    w.method = "dct"
+    w.update_slider_availability()
+    assert w.slider_smooth.value() == 7
+    assert w.kernel_for_method("guided_filter") == 21
+    assert w.kernel_for_method("dct") == 7
+    w.slider_smooth.setValue(9)
+    w.method = "guided_filter"
+    w.update_slider_availability()
+    assert w.slider_smooth.value() == 21
+    assert w.kernel_for_method("dct") == 9
+    assert w.kernel_for_method("openfocus_b") == 11
+
+
+def test_load_scale_prompt_can_be_skipped(monkeypatch):
+    """'Don't ask again' stores the scale and later imports skip the prompt."""
+    import controllers.source_manager as sm_mod
+
+    shown = []
+
+    class Dlg:
+        def __init__(self, *a, **k):
+            shown.append(k.get("show_dont_ask"))
+
+        def exec(self):
+            return True
+
+        def get_scale_factor(self):
+            return 0.5
+
+        def dont_ask_again(self):
+            return True
+
+    monkeypatch.setattr(sm_mod, "DownsampleDialog", Dlg)
+
+    class Win:
+        current_scale_factor = 1.0
+        ui_objs = {}
+        persisted = 0
+
+        def persist_settings(self):
+            Win.persisted += 1
+
+    mgr = sm_mod.SourceManager.__new__(sm_mod.SourceManager)
+    mgr.window = Win()
+    assert mgr._ask_load_scale() == 0.5
+    assert shown == [True]
+    assert mgr.window.ask_load_scale is False and Win.persisted == 1
+    assert mgr._ask_load_scale() == 0.5
+    assert len(shown) == 1, "second import must not prompt"
+
+
+def test_new_output_is_the_only_selected_item(qapp):
+    from PyQt6.QtWidgets import QAbstractItemView, QLabel, QListWidget
+    from controllers.output_manager import OutputManager
+
+    class W:
+        pass
+
+    w = W()
+    w.output_list = QListWidget()
+    w.output_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    w.output_label = QLabel()
+    w.fusion_results = []
+    w.fusion_result = None
+
+    class E:
+        @staticmethod
+        def generate_default_filename():
+            return "out"
+
+    w.export_manager = E()
+    mgr = OutputManager(w)
+    mgr.update_output_list_for_fusion()
+    mgr.update_output_list_for_fusion()
+    assert len(w.output_list.selectedItems()) == 1
+    assert w.output_list.currentRow() == 0

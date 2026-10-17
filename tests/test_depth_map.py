@@ -35,7 +35,9 @@ def _synthetic_thirds(h=240, w=320):
 
 
 class TestComputeFocusIndex:
-    @pytest.mark.parametrize("method", ["guided_filter", "dct", "gfgfgf", "dtcwt"])
+    @pytest.mark.parametrize("method", ["dct", "gfgfgf",
+                                        "dtcwt", "openfocus_b",
+                                        "openfocus_c"])
     def test_thirds_identified(self, method):
         idx = compute_focus_index(_synthetic_thirds(), method)
         assert idx.shape == (240, 320)
@@ -44,6 +46,12 @@ class TestComputeFocusIndex:
         assert idx[:, :100].mean() == pytest.approx(0.0, abs=0.1)
         assert idx[:, 110:210].mean() == pytest.approx(0.5, abs=0.1)
         assert idx[:, 220:].mean() == pytest.approx(1.0, abs=0.1)
+
+    def test_weighted_average_methods_rejected(self):
+        """加权平均类融合没有逐像素决策——不提供深度图（v1.44 设计收敛）。"""
+        for method in ("guided_filter", "openfocus_a"):
+            with pytest.raises(ValueError):
+                compute_focus_index(_synthetic_thirds(), method)
 
     def test_unsupported_method_raises(self):
         with pytest.raises(ValueError):
@@ -55,18 +63,38 @@ class TestComputeFocusIndex:
 
     def test_supported_list_complete(self):
         assert set(SUPPORTED_METHODS) == {
-            "guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4"}
+            "dct", "dtcwt", "gfgfgf", "stackmffv4",
+            "openfocus_b", "openfocus_c"}
+
+    def test_openfocus_depth_maps_differ(self):
+        """B/C 的深度侧写照各自的融合管线：B=方差硬 argmax，
+        C=带通能量 argmax（v1.43 前两者共用一张图，是缺陷）。"""
+        rng = np.random.default_rng(11)
+        h, w = 160, 240
+        tex = np.clip(128 + rng.normal(0, 30, (h, w, 3)), 0, 255)
+        # 两帧都有纹理（重叠聚焦）：f0 左 2/3 强，f1 右 2/3 强
+        f0 = tex.copy()
+        f0[:, int(w * 2 / 3):] = cv2.GaussianBlur(tex, (0, 0), 4)[:, int(w * 2 / 3):]
+        f1 = tex.copy()
+        f1[:, :int(w / 3)] = cv2.GaussianBlur(tex, (0, 0), 4)[:, :int(w / 3)]
+        frames = [f0.astype(np.uint8), f1.astype(np.uint8)]
+        b = compute_focus_index(frames, "openfocus_b")
+        c = compute_focus_index(frames, "openfocus_c")
+        # B 是硬拾取：只有 0/1 两个值
+        assert set(np.unique(np.round(b, 3))) <= {0.0, 1.0}
+        # C 的带通能量选择与 B 的方差统计不同（至少不是逐位相同）
+        assert not np.allclose(b, c, atol=1e-6)
 
     def test_cancellation(self):
         def cancel():
             return True
         with pytest.raises(DepthMapCancelled):
-            compute_focus_index(_synthetic_thirds(), "guided_filter",
+            compute_focus_index(_synthetic_thirds(), "dct",
                                 should_cancel=cancel)
 
     def test_uint16_input_domain(self):
         frames = [f.astype(np.uint16) * 257 for f in _synthetic_thirds()]
-        idx = compute_focus_index(frames, "guided_filter")
+        idx = compute_focus_index(frames, "dct")
         assert idx[:, 220:].mean() > 0.8
 
 
@@ -197,7 +225,7 @@ class TestReviewFixes:
             use_gpu = False
             fusion_result = None
 
-        # guided_filter is a fast method -> construction auto-starts the
+        # dct is a fast method -> construction auto-starts the
         # (monkeypatched, slow) worker
         dlg = dm.DepthMapDialog(_Stub())
         assert started.wait(5), "auto-compute did not start"
@@ -214,3 +242,62 @@ class TestReviewFixes:
             app.processEvents()
             time.sleep(0.02)
         assert worker not in dm._ORPHAN_WORKERS
+
+    def test_switching_to_fast_method_auto_computes(self, monkeypatch, qapp):
+        """切换到秒级方法时自动重算（与打开即算一致）——v1.44 前切换后
+        只给一条"按计算刷新"提示，秒级方法也要手动点。"""
+        import threading
+        import os as _os
+        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PyQt6.QtWidgets import QWidget
+        app = qapp  # noqa: F841
+        import dialogs.depthmap as dm
+        from core import depth_map
+
+        calls = []
+        started = threading.Event()
+
+        def counting_compute(images, method, **kw):
+            calls.append(method)
+            started.set()
+            return np.zeros(images[0].shape[:2], np.float32)
+
+        monkeypatch.setattr(depth_map, "compute_focus_index", counting_compute)
+
+        class _Stub(QWidget):
+            raw_images = [np.zeros((32, 32, 3), np.uint8) for _ in range(2)]
+            ui_theme = "dark"
+            use_gpu = False
+            fusion_result = None
+            slider_smooth = type("S", (), {"value": lambda s: 7})()
+
+        dlg = dm.DepthMapDialog(_Stub())
+        assert started.wait(5), "auto-compute did not start on open"
+        # 等首个计算完成（线程退出）：计算进行中切换方法会跳过自动重算
+        # （一次只允许一个 worker），CI 慢机上此处不等待就是时序脆弱点
+        deadline = time.time() + 10
+        while (dlg._worker is not None and dlg._worker.isRunning()
+               and time.time() < deadline):
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        n_on_open = len(calls)
+
+        # 切换到另一个秒级方法 → 自动重算
+        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("gfgfgf"))
+        deadline = time.time() + 10
+        while len(calls) == n_on_open and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert len(calls) > n_on_open, "fast method switch did not auto-compute"
+        assert calls[-1] == "gfgfgf"
+
+        # 切换到慢速方法（dtcwt）→ 不自动算，只提示
+        n_before = len(calls)
+        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("dtcwt"))
+        deadline = time.time() + 3
+        while len(calls) > n_before and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        assert len(calls) == n_before, "slow method must not auto-compute"
+        dlg.reject()

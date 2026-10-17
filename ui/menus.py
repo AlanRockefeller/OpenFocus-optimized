@@ -186,6 +186,15 @@ def setup_menus(window: QMainWindow) -> None:
     edit_menu.addAction(window.resize_action)
     window.ui_objs['action_resize'] = window.resize_action
 
+    # Retouch brush: paint pixels from a source frame onto the result
+    retouch_action = QAction(trans.t('action_retouch'), window)
+    retouch_action.setShortcut("Ctrl+T")
+    retouch_action.setToolTip(trans.t('action_retouch_hint'))
+    retouch_action.triggered.connect(window.show_retouch_dialog)
+    edit_menu.addAction(retouch_action)
+    window.ui_objs['action_retouch'] = retouch_action
+    retouch_action.setProperty("trans_key", 'action_retouch')
+
     window.add_label_action = QAction(trans.t('action_add_label'), window)
     window.add_label_action.triggered.connect(window.label_manager.show_add_label_dialog)
     window.add_label_action.setEnabled(False)
@@ -221,6 +230,12 @@ def setup_menus(window: QMainWindow) -> None:
     depth_action.setProperty("trans_key", 'menu_depth_map')
     batch_menu.addAction(depth_action)
     window.ui_objs['menu_depth_map'] = depth_action
+
+    dust_action = QAction(trans.t('menu_dust_map'), window)
+    dust_action.triggered.connect(window.show_dust_map_dialog)
+    dust_action.setProperty("trans_key", 'menu_dust_map')
+    batch_menu.addAction(dust_action)
+    window.ui_objs['menu_dust_map'] = dust_action
 
     # --- Settings Menu ---
     settings_menu = menubar.addMenu(trans.t('menu_settings'))
@@ -278,6 +293,15 @@ def setup_menus(window: QMainWindow) -> None:
     restore_action.triggered.connect(window.set_restore_last_stack)
     settings_menu.addAction(restore_action)
     window.ui_objs['action_restore_last_stack'] = restore_action
+
+    # Ask for the loading scale on every import (off = use the last choice)
+    ask_scale_action = QAction(trans.t('action_ask_load_scale'), window)
+    ask_scale_action.setCheckable(True)
+    ask_scale_action.setChecked(bool(getattr(window, 'ask_load_scale', True)))
+    ask_scale_action.setToolTip(trans.t('action_ask_load_scale_hint'))
+    ask_scale_action.triggered.connect(window.set_ask_load_scale)
+    settings_menu.addAction(ask_scale_action)
+    window.ui_objs['action_ask_load_scale'] = ask_scale_action
 
     # Background update download toggle (persisted by the update manager)
     auto_update_action = QAction(trans.t('action_auto_download'), window)

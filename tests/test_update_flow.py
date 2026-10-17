@@ -52,11 +52,18 @@ class TestApplyScriptWindows:
         text = self._script(tmp_path, monkeypatch, pid=0)
         assert "if %APP_PID% LEQ 0 exit /b 0" in text
 
+    def test_process_exit_is_debounced(self, tmp_path, monkeypatch):
+        """One vanished tasklist observation is not proof: a transient tasklist
+        failure would otherwise start the copy against the still-locked exe."""
+        text = self._script(tmp_path, monkeypatch)
+        assert "set /a GONE=0" in text
+        assert "if %GONE% GEQ 2 exit /b 0" in text
+
     def test_robocopy_retries_are_bounded(self, tmp_path, monkeypatch):
         """Defaults (/R:1000000 /W:30) stalled the swap forever on a locked exe."""
         text = self._script(tmp_path, monkeypatch)
-        assert "/R:2 /W:1" in text
-        assert text.count("/R:2 /W:1") == 2  # normal + elevated branch
+        assert "/R:10 /W:5" in text
+        assert text.count("/R:10 /W:5") == 2  # normal + elevated branch
 
     def test_relaunch_restores_the_session(self, tmp_path, monkeypatch):
         text = self._script(tmp_path, monkeypatch)
@@ -66,6 +73,14 @@ class TestApplyScriptWindows:
         text = self._script(tmp_path, monkeypatch)
         assert "echo failed>" in text.replace("echo failed >", "echo failed>")
         assert self_update.result_path("v9.9") in text
+
+    def test_failure_relaunch_restores_the_session(self, tmp_path, monkeypatch):
+        """Even the FAILED swap path must bring the app back into the saved
+        session: without it the user reopens the old build to an empty window
+        and has to reload the stack by hand."""
+        text = self._script(tmp_path, monkeypatch)
+        # both relaunches (failure branch and success branch) carry the flag
+        assert text.count("--restore-session") == 2
 
     def test_elevation_does_not_flash_a_console(self, tmp_path, monkeypatch):
         text = self._script(tmp_path, monkeypatch)
@@ -115,6 +130,71 @@ class TestUpdateResults:
         assert results["v9.8"] == (False, "robocopy errorlevel 16")
         # consumed exactly once: the message must not reappear every start
         assert self_update.consume_results() == []
+
+
+class TestReleaseNotes:
+    """逐版本更新说明抓取（用户要求展示 installed→latest 之间的所有 release）。"""
+
+    ITEMS = [
+        {"tag_name": "v1.49", "body": "## What's new\n- **A** fixed\n"},
+        {"tag_name": "v1.48", "body": "### Fixed\n- bug `x` here\n"},
+        {"tag_name": "v1.47", "body": "improved depth dialog"},
+        {"tag_name": "v1.40", "body": "OLD — must be filtered out"},
+    ]
+
+    def _fake_api(self, monkeypatch, payload):
+        calls = []
+
+        def fake(url, timeout=None):
+            calls.append(url)
+            return payload
+        monkeypatch.setattr(updater, "_api_get", fake)
+        return calls
+
+    def test_lists_only_versions_in_between(self, monkeypatch):
+        calls = self._fake_api(monkeypatch, self.ITEMS)
+        notes = updater.fetch_release_notes("1.47", "v1.49")
+        assert "1.49" in notes and "1.48" in notes
+        assert "1.47" not in notes          # installed version itself excluded
+        assert "OLD" not in notes           # older versions excluded
+        # the LIST endpoint (not /latest), otherwise the body would be a
+        # single release dict and nothing would aggregate
+        assert calls and "/releases?" in calls[0]
+
+    def test_markdown_is_rendered_plain(self, monkeypatch):
+        self._fake_api(monkeypatch, self.ITEMS)
+        notes = updater.fetch_release_notes("1.47", "v1.49")
+        # heading markers and inline code ticks are neutralized
+        assert "###" not in notes
+        assert "`" not in notes
+        assert "bug x here" in notes
+        # v1.49 renders its bullet, and the "What's new" heading is plain
+        assert "A fixed" in notes
+
+    def test_api_failure_returns_empty_fast(self, monkeypatch):
+        def boom(url, timeout=None):
+            raise OSError("offline")
+        monkeypatch.setattr(updater, "_api_get", boom)
+        assert updater.fetch_release_notes("1.47", "v1.49") == ""
+
+    def test_check_async_passes_notes_through(self, monkeypatch):
+        import threading
+        seen = {}
+
+        def fake_latest():
+            return True, "v1.49", "http://page", None, {
+                "url": "http://zip", "digest": "sha256:ab"}
+        monkeypatch.setattr(updater, "fetch_latest_release", fake_latest)
+        monkeypatch.setattr(updater, "fetch_release_notes",
+                            lambda cur, latest: "NOTES-TEXT")
+        updater.check_async("1.47",
+                            lambda *a: seen.__setitem__("r", a))
+        for _ in range(200):
+            if "r" in seen:
+                break
+            threading.Event().wait(0.01)
+        assert seen["r"][0] == "update"
+        assert seen["r"][-1] == "NOTES-TEXT"
 
 
 class TestStagedReuse:
