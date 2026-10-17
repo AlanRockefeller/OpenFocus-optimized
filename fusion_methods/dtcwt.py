@@ -45,6 +45,52 @@ except ImportError:
 
 # Target working-set size of one column block in the dtcwt filters.
 _FILTER_BLOCK_BYTES = 1 << 20
+# Forward transforms may briefly need roughly twice the bytes retained by the
+# returned pyramid. Keep that working set within a fraction of currently
+# available RAM so disabling tiled fusion cannot queue many full-image
+# pyramids and exhaust the process.
+_TRANSFORM_MEMORY_FRACTION = 0.25
+_PYRAMID_WORKSPACE_MULTIPLIER = 2
+
+
+def _available_memory_bytes():
+    """Best-effort available physical memory, with a conservative fallback."""
+    try:
+        import psutil
+        return max(1, int(psutil.virtual_memory().available))
+    except Exception:
+        pass
+    try:
+        pages = os.sysconf('SC_AVPHYS_PAGES')
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        return max(1, int(pages) * int(page_size))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 4 << 30
+
+
+def _estimate_pyramid_bytes(height, width, nlevels):
+    """Estimate a float32 DTCWT pyramid plus its forward workspace."""
+    rows, cols = max(1, int(height)), max(1, int(width))
+    retained = 0
+    for _ in range(max(1, int(nlevels))):
+        rows = (rows + 1) // 2
+        cols = (cols + 1) // 2
+        # Six complex64 orientations at each level.
+        retained += rows * cols * 6 * np.dtype(np.complex64).itemsize
+    # dtcwt's low-pass is twice the final high-pass dimensions.
+    retained += (2 * rows) * (2 * cols) * np.dtype(np.float32).itemsize
+    return max(1, retained * _PYRAMID_WORKSPACE_MULTIPLIER)
+
+
+def _memory_bounded_transform_plan(height, width, nlevels, workers):
+    """Return worker/lookahead counts bounded by available pyramid memory."""
+    requested = max(1, int(workers))
+    pyramid_bytes = _estimate_pyramid_bytes(height, width, nlevels)
+    budget = max(1, int(_available_memory_bytes() * _TRANSFORM_MEMORY_FRACTION))
+    max_live = max(1, budget // pyramid_bytes)
+    bounded_workers = min(requested, max_live)
+    lookahead = min(max_live, max(1, 2 * bounded_workers))
+    return bounded_workers, lookahead
 
 
 def _column_blocked(fn):
@@ -122,6 +168,7 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
 
     h, w = images_rgb[0].shape[:2]
     n_frames = len(images_rgb)
+    workers, lookahead = _memory_bounded_transform_plan(h, w, N, workers)
     transform = dtcwt.Transform2d()
 
     # 2. Activity per frame and level from the luminance transform. Only the
@@ -178,7 +225,6 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
     # are consumed in channel/frame order, preserving upstream's low-pass
     # accumulation order and therefore its exact output.
     jobs = [(c, i) for c in range(3) for i in range(n_frames)]
-    lookahead = max(1, 2 * workers)
     fused_channels = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         pending = deque(executor.submit(forward_colour, job)

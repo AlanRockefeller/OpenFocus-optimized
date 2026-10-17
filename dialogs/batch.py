@@ -40,6 +40,7 @@ class BatchProcessingDialog(QDialog):
         self.folder_thumbnails = []
         self.single_folder_stacks = []
         self.single_folder_images_with_times = []
+        self.single_folder_scale_factor = 1.0
 
         # 获取父窗口的融合和对齐设置
         self.parent_window = parent
@@ -625,6 +626,7 @@ class BatchProcessingDialog(QDialog):
         
         self.single_folder_images_with_times = images_with_times
         self.single_folder_folder_path = folder_path
+        self.single_folder_scale_factor = 1.0
 
         # 更新路径显示
         folder_name = os.path.basename(folder_path)
@@ -742,6 +744,9 @@ class BatchProcessingDialog(QDialog):
             "reg_methods": reg_methods,
             "save_aligned": save_aligned,  # 是否保存对齐后的图像栈
             "scale_bar": scale_cfg,
+            # Single-folder mode hands already-decoded frames to the worker.
+            # Preserve their scale so TIFF calibration remains physical.
+            "input_scale_factor": self.single_folder_scale_factor,
         }
 
     def preload_single_folder(self, folder_path: str, scale_factor: float = 1.0) -> None:
@@ -786,6 +791,12 @@ class BatchProcessingDialog(QDialog):
             self.single_folder_images_with_times = scaled_images
         else:
             self.single_folder_images_with_times = images_with_times
+
+        try:
+            scale = float(scale_factor)
+        except (TypeError, ValueError):
+            scale = 1.0
+        self.single_folder_scale_factor = scale if 0 < scale <= 1.0 else 1.0
 
         self.single_folder_folder_path = folder_path
 

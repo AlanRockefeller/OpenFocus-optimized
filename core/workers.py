@@ -660,6 +660,16 @@ class BatchWorker(QThread):
         images = [item[1] for item in stack_images_with_times]
         original_paths = [item[0] for item in stack_images_with_times]
 
+        # Unlike multi-folder mode, these frames were decoded by the dialog,
+        # not by this worker's loader. Detect each split stack's calibration
+        # here and convert it to the resolution of the pre-decoded frames.
+        self.image_loader.px_size_um = None
+        input_scale = self.processing_settings.get('input_scale_factor', 1.0)
+        for path in original_paths:
+            self.image_loader._note_stack_metadata(path, input_scale)
+            if self.image_loader.px_size_um is not None:
+                break
+
         aligned_images = images.copy()
         reg_methods = self.processing_settings.get('reg_methods', [])
 
@@ -726,8 +736,10 @@ class BatchWorker(QThread):
 
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
-                base_frame=self.processing_settings.get('base_frame', 'none'),
-                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
+                base_frame=fusion_params.pop(
+                    'base_frame', self.processing_settings.get('base_frame', 'none')),
+                sort_mode=fusion_params.pop(
+                    'sort_mode', self.processing_settings.get('sort_mode', 'asc')),
                 **tile_kwargs)
 
             if fusion_method == "guided_filter":
@@ -874,7 +886,8 @@ class BatchWorker(QThread):
             # 仅对齐批处理：跳过融合（输出=对齐后的帧）
             fusion_method = None
         if fusion_method:
-            fusion_params = self.processing_settings.get('fusion_params', {})
+            fusion_params = dict(
+                self.processing_settings.get('fusion_params', {}) or {})
             if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
                 fusion_params = dict(fusion_params)
                 fusion_params["model_path"] = resource_path("weights", "stackmffv4.pth")
@@ -901,8 +914,10 @@ class BatchWorker(QThread):
 
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
-                base_frame=self.processing_settings.get('base_frame', 'none'),
-                sort_mode=self.processing_settings.get('sort_mode', 'asc'),
+                base_frame=fusion_params.pop(
+                    'base_frame', self.processing_settings.get('base_frame', 'none')),
+                sort_mode=fusion_params.pop(
+                    'sort_mode', self.processing_settings.get('sort_mode', 'asc')),
                 **tile_kwargs)
 
             # 调用fuse方法执行融合：与单文件夹路径使用同一套 16-bit 输入/输出契约，
@@ -1012,9 +1027,9 @@ class BatchWorker(QThread):
                 output_path = self._unique_output_path(
                     os.path.join(output_dir,
                                  f"{os.path.splitext(filename)[0]}_registered.{extension}"))
-            self._save_image(output_path, image, extension,
-                             scale_cfg=self._stack_scale_cfg())
-            saved = True
+            saved = bool(self._save_image(
+                output_path, image, extension,
+                scale_cfg=self._stack_scale_cfg())) or saved
         return saved
 
     def _get_output_path_for_single_folder(self, source_folder_path):

@@ -273,13 +273,24 @@ class ImageStackLoader:
         # µm/px auto-detected from the stack's TIFF metadata (None = unknown)
         self.px_size_um = None
 
-    def _note_stack_metadata(self, path: str) -> None:
-        """Take EXIF and the µm/px calibration from the first loaded file."""
+    def _note_stack_metadata(self, path: str,
+                             scale_factor: float = 1.0) -> None:
+        """Take EXIF and scaled µm/px calibration from the first source."""
         if not self.source_exif:
             self.source_exif = _read_exif_bytes(path)
         if self.px_size_um is None:
             from utils.scalebar import detect_px_size_um
-            self.px_size_um = detect_px_size_um(path)
+            px_size_um = detect_px_size_um(path)
+            if px_size_um is not None:
+                try:
+                    scale = float(scale_factor)
+                except (TypeError, ValueError):
+                    scale = 1.0
+                # _downscale only changes pixels for factors in this range.
+                # Each retained pixel then spans 1 / scale source pixels.
+                if not 0.0 < scale <= 1.0:
+                    scale = 1.0
+                self.px_size_um = px_size_um / scale
 
     def load_from_folder(self, folder_path: str, scale_factor: float = 1.0) -> Tuple[bool, str, List[np.ndarray], List[str]]:
         if not os.path.isdir(folder_path):
@@ -315,7 +326,7 @@ class ImageStackLoader:
                 kind, data = result
                 if kind == "pages":
                     # One multi-page TIFF = one whole stack
-                    self._note_stack_metadata(full_path)
+                    self._note_stack_metadata(full_path, scale_factor)
                     stem = os.path.splitext(filename)[0]
                     for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
@@ -323,7 +334,7 @@ class ImageStackLoader:
                     continue
 
                 if data is not None:
-                    self._note_stack_metadata(full_path)
+                    self._note_stack_metadata(full_path, scale_factor)
                     loaded_images.append(data)
                     filenames.append(filename)
                 else:
@@ -421,7 +432,7 @@ class ImageStackLoader:
                     raise result
                 kind, data = result
                 if kind == "pages":
-                    self._note_stack_metadata(full_path)
+                    self._note_stack_metadata(full_path, scale_factor)
                     stem = os.path.splitext(os.path.basename(full_path))[0]
                     for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
@@ -431,7 +442,7 @@ class ImageStackLoader:
                 if data is None:
                     failed_count += 1
                     continue
-                self._note_stack_metadata(full_path)
+                self._note_stack_metadata(full_path, scale_factor)
                 loaded_images.append(data)
                 filenames.append(os.path.basename(full_path))
             except Exception as e:

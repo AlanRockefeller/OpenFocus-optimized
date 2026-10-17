@@ -308,6 +308,17 @@ def effective_px_um(window) -> Optional[float]:
         return manual
     source = getattr(window, "source_px_um", None)
     if source and source > 0:
+        # source_px_um describes base_images, which may already have been
+        # decoded below full resolution. A later resize starts from that base,
+        # so account for the additional base/current scale ratio as well.
+        try:
+            base_scale = float(getattr(window, "base_scale_factor", 1.0) or 1.0)
+            current_scale = float(
+                getattr(window, "current_scale_factor", base_scale) or base_scale)
+        except (TypeError, ValueError):
+            base_scale = current_scale = 1.0
+        if base_scale > 0 and current_scale > 0:
+            return source * base_scale / current_scale
         return source
     return None
 
