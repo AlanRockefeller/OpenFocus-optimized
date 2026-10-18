@@ -29,6 +29,7 @@ except ImportError:
     RAWPY_AVAILABLE = False
 
 from utils.image_utils import to_display_uint8
+from utils.sorting import natural_sort_key
 
 RAW_FORMATS = {'.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf',
                '.sr2', '.raf', '.orf', '.rw2', '.raw', '.pef', '.srw', '.3fr',
@@ -60,8 +61,14 @@ def decode_image(path: str) -> Optional[np.ndarray]:
     ext = os.path.splitext(path)[1].lower()
     if ext in RAW_FORMATS:
         return _read_raw(path)
+    # IMREAD_IGNORE_ORIENTATION is required: modern OpenCV already rotates by
+    # the EXIF Orientation tag itself, so letting apply_exif_orientation run
+    # afterwards applied every transform twice (portrait phone shots loaded
+    # sideways). The PIL fallback below does not rotate on its own, so the
+    # single explicit pass is the only orientation step for both paths.
     img = cv2.imdecode(np.fromfile(path, dtype=np.uint8),
-                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR
+                       | cv2.IMREAD_IGNORE_ORIENTATION)
     if img is None:
         # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
         img = _read_via_pil(path)
@@ -76,7 +83,7 @@ def _read_exif_bytes(path: str) -> bytes:
         return b""
     try:
         ext = os.path.splitext(path)[1].lower()
-        if ext not in ('.jpg', '.jpeg', '.tif', '.tiff', '.png'):
+        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.tif', '.tiff', '.png', '.webp'):
             return b""
         with PILImage.open(path) as pil_img:
             return pil_img.info.get('exif', b"") or b""
@@ -108,7 +115,7 @@ def apply_exif_orientation(path: str, img: np.ndarray) -> np.ndarray:
         return img
     try:
         ext = os.path.splitext(path)[1].lower()
-        if ext not in ('.jpg', '.jpeg', '.tif', '.tiff'):
+        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.tif', '.tiff', '.png', '.webp'):
             return img
         with PILImage.open(path) as pil_img:
             orientation = pil_img.getexif().get(274, 1)
@@ -207,7 +214,8 @@ def _collapse_repeats(paths: list) -> list:
 class ImageStackLoader:
     """图像栈加载器"""
 
-    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp',
+                         '.tiff', '.tif', '.webp'}
     if HEIF_AVAILABLE:
         SUPPORTED_FORMATS |= {'.heic', '.heif'}
     if RAWPY_AVAILABLE:
@@ -235,10 +243,11 @@ class ImageStackLoader:
         if not image_files:
             return False, "No supported image files found in the folder", [], []
 
-        image_files.sort(key=lambda x: x[0])
+        image_files.sort(key=lambda x: natural_sort_key(x[0]))
 
         loaded_images = []
         filenames = []
+        loaded_paths = []
         failed_count = 0
         self.source_exif = b""
         # Reset per load: one loader instance serves the whole session, so a
@@ -263,6 +272,7 @@ class ImageStackLoader:
                             height = int(page.shape[0] * scale_factor)
                             page = cv2.resize(page, (width, height), interpolation=cv2.INTER_AREA)
                         loaded_images.append(page)
+                        loaded_paths.append(full_path)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
@@ -278,6 +288,7 @@ class ImageStackLoader:
                         height = int(img.shape[0] * scale_factor)
                         img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
                     loaded_images.append(img)
+                    loaded_paths.append(full_path)
                     filenames.append(filename)
                 else:
                     failed_count += 1
@@ -289,7 +300,11 @@ class ImageStackLoader:
             return False, "Could not load any image files", [], []
 
         self.images = loaded_images
-        self.image_paths = [f[1] for f in image_files[:len(loaded_images)]]
+        # One path per *frame*: a multi-page TIFF contributes the same
+        # container path for each of its pages, and a failed file must not
+        # shift the remaining paths (get_image_info used to report the wrong
+        # file for every frame after either case).
+        self.image_paths = loaded_paths
 
         message = f"Loaded {len(loaded_images)} image(s)"
         if failed_count > 0:
@@ -355,6 +370,7 @@ class ImageStackLoader:
 
         loaded_images = []
         filenames = []
+        loaded_paths = []
         failed_count = 0
         sources = _collapse_repeats(list(filepaths))
         # see load_from_folder: calibration must not stick across stacks
@@ -381,6 +397,7 @@ class ImageStackLoader:
                             height = int(page.shape[0] * scale_factor)
                             page = cv2.resize(page, (width, height), interpolation=cv2.INTER_AREA)
                         loaded_images.append(page)
+                        loaded_paths.append(full_path)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
@@ -401,6 +418,7 @@ class ImageStackLoader:
                     img = cv2.resize(img, (width, height), interpolation=cv2.INTER_AREA)
 
                 loaded_images.append(img)
+                loaded_paths.append(full_path)
                 filenames.append(os.path.basename(full_path))
             except Exception as e:
                 failed_count += 1
@@ -410,7 +428,7 @@ class ImageStackLoader:
             return False, "Could not load any image files", [], []
 
         self.images = loaded_images
-        self.image_paths = list(sources)
+        self.image_paths = loaded_paths
 
         message = f"Loaded {len(loaded_images)} image(s)"
         if failed_count > 0:
@@ -547,7 +565,7 @@ class ImageStackLoader:
                 if ts is not None:
                     return ts
                 return float('inf')
-            return item[0]
+            return natural_sort_key(item[0])
 
         loaded_data.sort(key=get_sort_key)
 

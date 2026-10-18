@@ -76,3 +76,10 @@ def test_config_requires_batch_mode(tmp_path):
     cfg.write_text("{}", encoding="utf-8")
     rc = _run_cli(["-i", fa, "-o", str(tmp_path / "x.png"), "--config", str(cfg)])
     assert rc == 2
+
+
+def test_multiple_folders_require_output_dir(tmp_path, capsys):
+    fa, fb, _out = _make_stacks(tmp_path)
+    rc = _run_cli(["-i", fa, fb, "-o", str(tmp_path / "single.png")])
+    assert rc == 2
+    assert "--output-dir" in capsys.readouterr().err

@@ -13,6 +13,8 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 ## 📢 News
 
 > [!NOTE]
+> **2026.10.18 · v1.56 — correctness pass.** EXIF-rotated photos now load upright and export with a neutral orientation tag; mixed 8/16-bit stacks fuse correctly; folder frames sort naturally (`img2` before `img10`); DCT keeps the input size and DTCWT no longer tiles (and seams) just because an image is large; depth maps follow the same frame order/alignment as the render; Japanese/Spanish survive a restart; WebP input and drag-export work.
+
 > **2026.10.15 · v1.54–v1.55** — **3D model export** (depth map + fused image as a textured OBJ for Blender/MeshLab), **camera RAW input** (DNG, CR2/CR3, NEF, ARW, RAF, … developed to 16-bit with one exposure mapping for the whole stack) and a **depth-smoothing control for OpenFocus B** (OpenFocus's Smoothing knob; also `--depth-smoothing` on the CLI).
 
 > **2026.10.15 · v1.52–v1.53 — retouch brush & a quality pass.** New **Retouch** tool (`Ctrl+T`): paint pixels from a source frame onto the result to fix halos — it auto-picks the sharpest frame under the brush. **DTCWT** rebuilt (+5 dB on the ground-truth benchmark), **GFG-FGF** now follows its paper ([#5](https://github.com/Xinzhe99/OpenFocus/issues/5)) and no longer drops small in-focus objects. Smoother workflow: no modal popup after every render, live progress, optional load-scale prompt, per-method kernel memory, Ctrl+S saves the selected output.

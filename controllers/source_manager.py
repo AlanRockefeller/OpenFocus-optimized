@@ -92,7 +92,7 @@ class SourceManager:
                         show_warning_box(window, trans.t("msg_load_failed"),
                                          trans.t("msg_load_stack_failed_text"), message)
                     return
-                if filepaths and not self._confirm_mixed_sizes(images):
+                if not self._confirm_mixed_sizes(images):
                     return
                 if append and not self._confirm_append_dimensions(images):
                     return
@@ -528,9 +528,9 @@ class SourceManager:
             self.clear_image_stack()
             return
 
+        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
-        window.push_undo()
         self._pop_sequence(window.image_filenames, row)
         self._pop_sequence(window.raw_images, row)
         self._pop_sequence(getattr(window, "base_images", None), row)
@@ -568,9 +568,9 @@ class SourceManager:
             self.clear_image_stack()
             return
 
+        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
-        window.push_undo()
         rows.sort(reverse=True)
 
         for row in rows:

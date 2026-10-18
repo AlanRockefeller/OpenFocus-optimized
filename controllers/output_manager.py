@@ -19,6 +19,10 @@ from locales import trans
 class OutputManager:
     """Encapsulates output panel interactions and state updates."""
 
+    # Every entry keeps a full-resolution copy; unbounded history plus
+    # compare-all (8 results per run) exhausted memory on large stacks.
+    MAX_HISTORY = 20
+
     def __init__(self, window: Any):
         self.window = window
 
@@ -58,6 +62,12 @@ class OutputManager:
         # disabled the single-item actions — Save As, Retouch).
         window.output_list.clearSelection()
         window.output_list.setCurrentRow(0)
+        # Drop the oldest entries beyond the cap so long sessions cannot grow
+        # without bound (list and data array stay 1:1).
+        while len(window.fusion_results) > self.MAX_HISTORY:
+            window.fusion_results.pop()
+            if window.output_list.count() > len(window.fusion_results):
+                window.output_list.takeItem(window.output_list.count() - 1)
         self.update_output_count()
 
     def sync_output_slider_from_list(self, row: int) -> None:

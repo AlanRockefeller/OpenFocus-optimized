@@ -225,6 +225,12 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     bar_px = max(8, int(round(bar_um / px_um)))
     thickness = max(2, int(round(h * 0.004)))
     margin = max(10, int(round(min(h, w) * 0.02)))
+    # Very small frames made the "tight frame" fallback below push bar_y1
+    # past bar_y2, which PIL rejects with ValueError and turned every small
+    # export into a failure. Keep the whole motif inside the canvas.
+    margin = min(margin, max(1, h // 4), max(1, w // 4))
+    bar_px = min(bar_px, max(4, w - 2 * margin))
+    thickness = min(thickness, max(1, h // 3))
     font_size = max(14, int(round(h * 0.022)))
 
     font = _load_font(font_size)
@@ -268,6 +274,11 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
         bar_y1 = margin
         bar_y2 = bar_y1 + thickness
         text_y = bar_y2 + gap
+
+    # Clamp defensively: any negative/overflowing coordinate pair reaches PIL
+    # as an invalid rectangle (y1 < y0) and aborts the export.
+    bar_x1, bar_x2 = sorted((min(max(bar_x1, 0), w), min(max(bar_x2, 0), w)))
+    bar_y1, bar_y2 = sorted((min(max(bar_y1, 0), h), min(max(bar_y2, 0), h)))
 
     if color == "auto":
         mean = _region_mean(img, bar_x1 - margin, bar_y1 - margin,

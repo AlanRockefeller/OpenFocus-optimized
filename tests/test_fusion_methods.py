@@ -310,3 +310,36 @@ def test_dtcwt_keeps_odd_frame_size():
               for i in range(3)]
     out = MultiFocusFusion("dtcwt").fuse(frames)
     assert out.shape == (75, 99, 3)
+
+
+def test_dct_output_keeps_input_size(two_focus_stack):
+    """The block grid used to trim up to 7 px off the bottom/right, while the
+    tiled path returned full size — output geometry depended on tiling."""
+    h, w = 122, 161  # deliberately not multiples of 8
+    stack = make_two_focus_stack((h, w))
+
+    whole = MultiFocusFusion(algorithm="dct", tile_enabled=False).fuse(stack)
+    assert whole.shape == (h, w, 3)
+
+    tiled = MultiFocusFusion(algorithm="dct", tile_enabled=True,
+                             tile_block_size=64, tile_overlap=16,
+                             tile_threshold=10).fuse(stack)
+    assert tiled.shape == (h, w, 3)
+
+
+def test_dtcwt_is_not_tiled_only_because_of_size(monkeypatch, two_focus_stack):
+    """Tiling a globally-defined transform leaves a seam at the block grid;
+    with a small stack the whole-image path must be used even for large
+    frames (the size-only rule used to tile anything above 2048 px)."""
+    calls = []
+
+    def _forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("dtcwt was tiled despite a small activity budget")
+
+    monkeypatch.setattr(MultiFocusFusion, "_fuse_tiled", _forbidden)
+    fusion = MultiFocusFusion(algorithm="dtcwt", tile_enabled=True,
+                              tile_threshold=10)
+    out = fusion.fuse(input_source=two_focus_stack)
+    assert out.shape[:2] == (120, 160)
+    assert calls == []

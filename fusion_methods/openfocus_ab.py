@@ -37,7 +37,7 @@ def _collect_images(input_source) -> List[np.ndarray]:
         return frames
 
     if isinstance(input_source, str) and os.path.isdir(input_source):
-        exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+        exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
         files = [f for f in sorted(os.listdir(input_source))
                  if f.lower().endswith(exts)]
         if len(files) < 2:

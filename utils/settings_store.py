@@ -201,13 +201,21 @@ def save_window_settings(window) -> None:
     settings.setValue(RECENT_PROJECTS_KEY, list(getattr(window, "recent_projects", [])))
 
 
+SUPPORTED_LANGUAGES = ("en", "zh", "ja", "es")
+
+
 def get_saved_language():
-    """Return the persisted language code ('en'/'zh') or None for auto-detect."""
+    """Return the persisted language code or None for auto-detect.
+
+    Must accept every language the UI offers (ja/es were added in v1.50):
+    the whitelist used to be en/zh only, so picking 日本語 or Español was
+    saved but ignored on the next launch.
+    """
     settings = get_settings()
     if not settings.contains(LANGUAGE_KEY):
         return None
     lang = str(settings.value(LANGUAGE_KEY, "")).lower()
-    return lang if lang in ("en", "zh") else None
+    return lang if lang in SUPPORTED_LANGUAGES else None
 
 
 def save_window_layout(window) -> None:
@@ -252,7 +260,9 @@ def set_drag_export_format(window, fmt: str) -> None:
     fmt = fmt.lower()
     if fmt == ".tiff":
         fmt = ".tif"
-    if fmt not in (".jpg", ".png", ".tif"):
+    # The context menu offers WebP; rejecting it here made that entry a
+    # silent no-op (the drag stayed JPG while the menu looked selectable).
+    if fmt not in (".jpg", ".png", ".webp", ".tif"):
         return
     window.drag_export_format = fmt
     get_settings().setValue(DRAG_FORMAT_KEY, fmt)

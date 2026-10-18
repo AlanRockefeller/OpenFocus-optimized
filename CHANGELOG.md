@@ -3,6 +3,53 @@
 All notable changes to OpenFocus are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.56] — 2026-10-18
+
+A correctness pass over image import, tiling and long sessions.
+
+### Fixed
+- **EXIF orientation was applied twice** (OpenCV already honours the tag), so
+  portrait phone photos loaded sideways/upside-down. Exports now also reset
+  the embedded Orientation tag — the pixels are upright, and keeping "rotate
+  90°" made every viewer rotate the finished picture again.
+- **Mixed bit-depth stacks** (8-bit + 16-bit frames in one folder) left the
+  16-bit frame in the 0–65535 domain, saturating the result to white; the
+  reverse order crushed the 8-bit frame to black. Normalisation is per frame.
+- **A 16-bit frame no longer changes the folder's frame order**: folder
+  loading, CLI input, tiled directory reads and base-frame selection share a
+  natural sort (`img2` before `img10`, numbered frames before names).
+- **DCT output keeps the input size**: the block grid used to crop up to
+  7 rows/columns while the tiled path returned full size.
+- **DTCWT is no longer tiled just because a frame is large** — tiling a
+  globally-defined transform left a seam at the block grid. It now tiles only
+  when the whole-image activity maps would exceed the memory budget.
+- **Depth maps follow the fusion input**: frame order (`--sort desc`),
+  per-frame exclusions, alignment and the OpenFocus kernel default now match
+  what the fused result actually used.
+- **`--depth-map` saving reports a failed write** instead of claiming success.
+- **Registration cache works under non-ASCII paths** (e.g. 中文目录); it used
+  raw `cv2.imread/imwrite`, which silently failed on Windows.
+- **Compare-all no longer locks the UI** if the stack changes mid-render: the
+  queue is aborted instead of leaving the Render button disabled.
+- **Small images with the scale bar enabled crashed on export** (PIL rejects
+  an inverted rectangle); geometry is clamped.
+- **Japanese/Spanish language choices survive a restart** (only en/zh were
+  accepted when restoring).
+- **WebP drag-export option works** (the setter rejected it) and **WebP/JFIF
+  files can be opened** as input.
+- **Output history is capped at 20 results**; undo snapshots keep references
+  instead of copying every frame twice (large stacks could exhaust memory),
+  and Resize undo restores the scale factor and per-frame exclusions.
+- **Project files remember "Remove brightness drift"** (`base_frame_correct`).
+- Dragging a WebP option, unknown export extensions: `imwrite_auto` now
+  returns `False` instead of raising out of a Qt slot.
+- **Threads are never `terminate()`d** at shutdown / after batch or update
+  work — they are asked to cancel and parked if they cannot stop in time
+  (`QThread.terminate()` inside native code is undefined behaviour).
+- Mixed-size folders warn at load time (previously the failure appeared only
+  when rendering); several input folders with a single `--output` are a usage
+  error instead of being silently concatenated into one stack.
+
 ## [v1.55] — 2026-10-15
 
 ### Added

@@ -15,6 +15,8 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple
 
+from utils.sorting import natural_sort_key
+
 VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
                  "openfocus_a", "openfocus_b", "openfocus_c"]
 VALID_ALIGN = ["none", "homography", "ecc", "both", "openfocus"]
@@ -107,8 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _list_folder_images(folder: str, loader) -> List[str]:
     return sorted(
-        os.path.join(folder, f) for f in os.listdir(folder)
-        if f.lower().endswith(tuple(loader.SUPPORTED_FORMATS))
+        (os.path.join(folder, f) for f in os.listdir(folder)
+         if f.lower().endswith(tuple(loader.SUPPORTED_FORMATS))),
+        key=natural_sort_key,
     )
 
 
@@ -239,8 +242,15 @@ def _fuse_stack(images, args):
     if fused is None:
         raise RuntimeError("Fusion returned no result")
     fused = quantize_fuse_output(fused, is_16bit)
-    # 注册/归一化后的帧留给 --depth-map 用（与融合同一输入）
-    args._depth_frames = list(images)
+    # 注册/归一化后的帧留给 --depth-map 用（与融合同一输入）。帧序必须与
+    # 融合内部一致：--sort desc 会在 fuse() 内反转帧序，深度图若仍按原序
+    # 计算，0/N-1 标签就指向相反的一端。
+    depth_frames = list(images)
+    if args.method in ("openfocus_a", "openfocus_b", "openfocus_c"):
+        from fusion_methods.openfocus_ab import sort_frames_for_openfocus
+        depth_frames, _flipped = sort_frames_for_openfocus(
+            depth_frames, getattr(args, "sort", "asc"))
+    args._depth_frames = depth_frames
     print(f"Fusion ({args.method}, device={info['device']}) done in {time.time() - t0:.1f}s")
     return fused
 
@@ -273,8 +283,12 @@ def _save_depth(args, fused_out: str) -> None:
             + ", ".join(_DEPTH_METHODS) + "). Weighted-average fusions "
             "(guided_filter, openfocus_a) have no per-pixel decision.")
     kernel = None
-    if args.method in ("dct", "gfgfgf", "openfocus_b", "openfocus_c"):
+    if args.method in ("dct", "gfgfgf"):
         kernel = _normalize_kernel(args.kernel, 7)
+    elif args.method in ("openfocus_b", "openfocus_c"):
+        # same default variance window the fusion used (11), otherwise the
+        # map is computed with a different measure than the fused result
+        kernel = _normalize_kernel(args.kernel, 11)
     idx = compute_focus_index(
         frames, args.method, kernel_size=kernel,
         model_path=_find_model_path() if args.method == "stackmffv4" else None,
@@ -501,6 +515,15 @@ def run_cli(argv: List[str]) -> int:
         if not args.output:
             print("error: one of --output / --output-dir is required", file=sys.stderr)
             return EXIT_USAGE
+        # A single output means "one stack". Several folders used to be
+        # silently concatenated into one unrelated stack; batch users must
+        # opt into --output-dir.
+        dir_inputs = [p for p in args.input if os.path.isdir(os.path.abspath(p))]
+        if len(dir_inputs) > 1:
+            print("error: multiple input folders require --output-dir "
+                  "(--output fuses every input into a single stack)",
+                  file=sys.stderr)
+            return EXIT_USAGE
         ext = os.path.splitext(args.output)[1].lower()
         if not ext or ext not in VALID_FORMATS:
             print(f"error: unsupported output extension '{ext or '(none)'}'; "
@@ -519,7 +542,7 @@ def run_cli(argv: List[str]) -> int:
         # Video inputs are unpacked to a temp dir that is always cleaned up
         with tempfile.TemporaryDirectory(prefix="openfocus_video_") as video_temp:
             _src, paths = _resolve_stack(args, video_temp)
-            print(f"Loaded {len(paths)} images from {args.input[0]}")
+            print(f"Loaded {len(paths)} image(s) from {_src}")
 
             if args.dry_run:
                 print(f"[dry-run] method={args.method} align={args.align} "

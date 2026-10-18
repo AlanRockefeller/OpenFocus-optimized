@@ -481,6 +481,16 @@ class RenderManager:
             _logging.getLogger("openfocus").warning(
                 "render result discarded: stack changed while rendering")
             window.statusBar().showMessage(message, 8000)
+            # Nothing will chain the next comparison method any more (the
+            # queue is only advanced from the normal completion path), so an
+            # untouched compare run left the render button disabled forever
+            # with a stale "-1/0" progress label.
+            if getattr(self, "_compare_mode", False):
+                self._compare_mode = False
+                self._compare_queue = []
+                self._compare_current = None
+            self._render_context = None
+            self.worker = None
             self._restore_ui_controls()
             return
 

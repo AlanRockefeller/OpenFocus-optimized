@@ -45,7 +45,7 @@ OpenFocus 是一款面向科研人员、工程师和图像处理从业者的专�
 
 ### 支持的输入格式
 
-- 图像文件：JPG、PNG、BMP、TIFF 及其他常见格式
+- 图像文件：JPG/JPEG、PNG、BMP、TIFF、WebP 及其他常见格式
 - 视频文件：MP4、AVI、MOV、MKV、WMV、FLV、WEBM（自动解码为图像序列）
 - 包含按序号命名的图像序列的文件夹
 - 相机 RAW 文件（DNG、CR2/CR3、NEF、ARW、RAF、ORF、RW2 等常见 RAW 格式）：
@@ -54,7 +54,7 @@ OpenFocus 是一款面向科研人员、工程师和图像处理从业者的专�
 
 ### 支持的输出格式
 
-- 单张图像：JPG、PNG、BMP、TIFF
+- 单张图像：JPG、PNG、BMP、TIFF、WebP
 - 图像序列：以文件夹形式保存
 - 动画：GIF 格式
 
@@ -653,7 +653,7 @@ OpenFocus 可以把配准结果保存在源图像栈旁的 `.openfocus_cache` �
 
 ### 拖出导出格式
 
-从输出列表拖出结果时使用的图像格式，在输出列表右键菜单的 **拖出格式**（JPG、PNG 或 TIFF）中选择，选择会被记住。
+从输出列表拖出结果时使用的图像格式，在输出列表右键菜单的 **拖出格式**（JPG、PNG、WebP 或 TIFF）中选择，选择会被记住。
 
 ### 保存配准栈
 

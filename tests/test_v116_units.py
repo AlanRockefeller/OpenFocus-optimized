@@ -105,3 +105,48 @@ class TestUpdateRateLimit:
         from utils.updater import is_newer
         assert is_newer("v1.16", "1.15")
         assert not is_newer("v1.15", "1.15")
+
+
+class TestLanguagePersistence:
+    @pytest.mark.parametrize("lang", ["en", "zh", "ja", "es"])
+    def test_every_offered_language_round_trips(self, qapp, clean_settings, lang):
+        """get_saved_language only accepted en/zh, so picking 日本語 or
+        Español was stored but silently ignored on the next launch."""
+        from utils.settings_store import (
+            reset_settings_singleton, save_window_settings, get_saved_language,
+        )
+        from locales import trans
+
+        reset_settings_singleton()
+        # Set the plain attribute instead of emitting languageChanged: other
+        # modules create QApplications outside the session fixture, so the
+        # singleton QObject may already be torn down in a full-suite run.
+        original = trans.current_lang
+        try:
+            trans.current_lang = lang
+            save_window_settings(type("W", (), {
+                "recent_files": [], "recent_projects": []})())
+            assert get_saved_language() == lang
+        finally:
+            trans.current_lang = original
+
+
+class TestDragFormatWebP:
+    def test_webp_is_selectable(self, qapp, clean_settings):
+        from utils.settings_store import set_drag_export_format, get_drag_export_format
+
+        class W:
+            drag_export_format = ".jpg"
+
+        w = W()
+        set_drag_export_format(w, ".webp")  # the menu offers it
+        assert get_drag_export_format(w) == ".webp"
+
+
+class TestImwriteUnknownExtension:
+    def test_returns_false_instead_of_raising(self, tmp_path):
+        from utils.image_utils import imwrite_auto
+
+        ok = imwrite_auto(str(tmp_path / "out.xyz"),
+                          np.zeros((4, 4, 3), np.uint8))
+        assert ok is False

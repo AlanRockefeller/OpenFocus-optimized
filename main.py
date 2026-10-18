@@ -89,6 +89,37 @@ from constants import (
     STACKMFFV4_BATCH_SIZE,
 )
 
+# QThreads still running when the app shuts down. They are kept alive at
+# module scope instead of being terminated: QThread.terminate() on a thread
+# inside cv2/torch native code can corrupt the process, and dropping the last
+# reference aborts it ("QThread: Destroyed while thread is still running").
+_ORPHAN_THREADS: list = []
+
+
+def _shutdown_worker(worker, timeout_ms=1500):
+    """Ask a QThread to stop, then wait; never terminate it.
+
+    Cancellation is polled between pipeline stages, so a worker deep inside
+    cv2/torch cannot be interrupted. Killing it with terminate() mid-native-
+    call is undefined behaviour; park the reference at module scope instead
+    (the process is exiting).
+    """
+    if worker is None:
+        return
+    cancel = getattr(worker, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:
+            pass
+    elif hasattr(worker, "is_cancelled"):
+        worker.is_cancelled = True
+    if worker.isRunning():
+        worker.quit()  # no-op for run() overrides, harmless otherwise
+        if not worker.wait(timeout_ms):
+            _ORPHAN_THREADS.append(worker)
+
+
 def update_manager_for(window) -> UpdateManager:
     """Return (creating on first use) the window's update manager.
 
@@ -553,19 +584,31 @@ class OpenFocus(QMainWindow):
     UNDO_LIMIT = 20
 
     def _capture_stack_state(self) -> dict:
+        """Snapshot stack membership for undo, without copying pixels.
+
+        Every stack mutation (rotate, flip, resize, delete, drag-reorder,
+        flat-field correction) replaces the array objects instead of writing
+        into them, so list references are a valid snapshot and undo costs
+        O(frames) memory instead of a full second copy of the stack.
+        Invariant: never modify a frame array in place after push_undo().
+        """
         return {
-            "raw": [im.copy() for im in self.raw_images],
+            "raw": list(self.raw_images),
             "filenames": list(self.image_filenames),
             "source_paths": list(getattr(self, "image_source_paths", [])),
-            "base": [im.copy() for im in getattr(self, "base_images", [])],
+            "base": list(getattr(self, "base_images", [])),
             "excluded": set(getattr(self, "excluded_frames", set())),
             "current": getattr(self, "current_img_index", 0),
+            "scale": float(getattr(self, "current_scale_factor", 1.0) or 1.0),
+            "base_scale": float(getattr(self, "base_scale_factor", 1.0) or 1.0),
         }
 
     def push_undo(self) -> None:
-        """Snapshot the stack BEFORE a mutation. Cheap enough for stacks of
-        realistic depth (references are copied, pixels duplicated) and it makes
-        every destructive operation reversible."""
+        """Snapshot the stack before a mutation.
+
+        Snapshots hold references (see _capture_stack_state), so the undo
+        limit is about edit history, not memory.
+        """
         if getattr(self, "_undo_guard", False):
             return
         self._undo_stack.append(self._capture_stack_state())
@@ -575,12 +618,16 @@ class OpenFocus(QMainWindow):
         self._refresh_undo_actions()
 
     def _restore_stack_state(self, state: dict) -> None:
-        self.raw_images = [im.copy() for im in state["raw"]]
+        self.raw_images = list(state["raw"])
         self.image_filenames = list(state["filenames"])
         self.image_source_paths = list(state["source_paths"])
-        self.base_images = [im.copy() for im in state["base"]]
+        self.base_images = list(state["base"])
         self.excluded_frames = set(state["excluded"])
         self.current_img_index = state["current"]
+        # Resize is undoable too; without the scale factors the Resize dialog
+        # reopened with the post-resize percentage while showing the old pixels.
+        self.current_scale_factor = float(state.get("scale", 1.0) or 1.0)
+        self.base_scale_factor = float(state.get("base_scale", 1.0) or 1.0)
         # The restored stack invalidates every derived result, exactly like
         # rotate/flip do.
         self.transform_manager.invalidate_processing_results(
@@ -2049,24 +2096,6 @@ class OpenFocus(QMainWindow):
         from utils import recovery
         recovery.write_snapshot(self)
         recovery.mark_clean_exit()
-
-        def _shutdown_worker(worker, timeout_ms=1500):
-            """Wait for a QThread to finish, terminating as a last resort.
-
-            The reference is parked on the window instead of dropped: dropping
-            the last reference to a still-running QThread aborts the process
-            with "QThread: Destroyed while thread is still running".
-            """
-            if worker is None:
-                return
-            if worker.isRunning():
-                worker.quit()  # no-op for run() overrides, harmless otherwise
-                if not worker.wait(timeout_ms):
-                    worker.terminate()
-                    worker.wait(1000)
-                if not hasattr(self, '_dying_workers'):
-                    self._dying_workers = []
-                self._dying_workers.append(worker)
 
         # Stop ROI alignment worker if running
         if getattr(self, 'roi_alignment_worker', None) is not None:

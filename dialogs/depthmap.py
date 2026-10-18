@@ -527,8 +527,26 @@ class DepthMapDialog(QDialog):
         self._resize_timer.start()
 
     def _images(self):
-        imgs = getattr(self.window_main, "raw_images", None) or []
-        return list(imgs) if len(imgs) >= 2 else None
+        """Frames the depth map must be computed from.
+
+        Must match the fusion input: the aligned, filter-included stack in
+        the frame order the OpenFocus family used. Computing from raw_images
+        (the old behaviour) ignored per-frame exclusions, ran on unaligned
+        frames and ignored "reverse stack order", so the exported map's
+        index labels disagreed with the fused result.
+        """
+        win = self.window_main
+        frames = list(getattr(win, "registration_results", None) or [])
+        if not frames:
+            effective = getattr(win, "effective_stack", None)
+            if callable(effective):
+                try:
+                    frames = list(effective()[0])
+                except Exception:
+                    frames = []
+            if not frames:
+                frames = list(getattr(win, "raw_images", None) or [])
+        return frames if len(frames) >= 2 else None
 
     def _compute(self):
         # One worker at a time: a second _compute would overwrite the reference
@@ -541,6 +559,9 @@ class DepthMapDialog(QDialog):
             self.status_lbl.setText(trans.t("depth_need_stack"))
             return
         method = self.method_combo.currentData()
+        if (method in ("openfocus_b", "openfocus_c")
+                and getattr(self.window_main, "stack_reverse_order", False)):
+            imgs = list(reversed(imgs))
         use_gpu = bool(getattr(self.window_main, "use_gpu", False))
         # The depth map uses the kernel the user set for that method (DCT's
         # median window / GFG-FGF's blur / variance window), never another
@@ -575,23 +596,6 @@ class DepthMapDialog(QDialog):
         self.compute_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
         self.status_lbl.setText("" if msg == "cancelled" else msg)
-
-    def _detach_worker(self):
-        """Release the finished worker safely (never while it is running)."""
-        worker = self._worker
-        self._worker = None
-        if worker is None:
-            return
-        if worker.isRunning():
-            worker.cancel()
-            try:
-                from dialogs.depthmap import _ORPHAN_WORKERS
-            except Exception:
-                _ORPHAN_WORKERS = None
-            if _ORPHAN_WORKERS is not None:
-                _ORPHAN_WORKERS.add(worker)
-                worker.finished.connect(lambda w=worker: _ORPHAN_WORKERS.discard(w))
-        worker.deleteLater()
 
     # ------------------------------------------------------------------
     def _colorized_full(self):
@@ -657,11 +661,16 @@ class DepthMapDialog(QDialog):
         set_last_dialog_dir(path)
         try:
             if colorized:
-                imwrite_auto(path, self._colorized_full())
+                ok = imwrite_auto(path, self._colorized_full())
             else:
                 u16 = np.clip(self._index01 * 65535.0, 0, 65535).round().astype(np.uint16)
-                imwrite_auto(path, u16)
-            self.status_lbl.setText(trans.t("depth_saved").format(path=path))
+                ok = imwrite_auto(path, u16)
+            # imwrite_auto returns False (it does not raise) when the target
+            # is unwritable — claiming success there was actively misleading.
+            if ok:
+                self.status_lbl.setText(trans.t("depth_saved").format(path=path))
+            else:
+                self.status_lbl.setText(trans.t("msg_save_failed_text"))
         except Exception as exc:
             self.status_lbl.setText(f"{exc}")
 
@@ -728,7 +737,10 @@ class DepthMapDialog(QDialog):
         自行跑完/退出并自我清理；信号在接收者销毁后由 Qt 自动断开。"""
         w = self._worker
         self._worker = None
-        if w is None or not w.isRunning():
+        if w is None:
+            return
+        if not w.isRunning():
+            w.deleteLater()
             return
         w.cancel()
         w.setParent(None)

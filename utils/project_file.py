@@ -23,6 +23,7 @@ def _collect_state(window) -> Dict[str, Any]:
         "alignment_method": window.current_alignment_method(),
         "kernel_size": window.slider_smooth.value(),
         "stack_reverse_order": bool(getattr(window, "stack_reverse_order", False)),
+        "base_frame_correct": bool(getattr(window, "base_frame_correct", False)),
         "thread_count": getattr(window, "thread_count", 4),
         "tile_enabled": getattr(window, "tile_enabled", True),
         "tile_block_size": getattr(window, "tile_block_size", 1024),
@@ -199,7 +200,6 @@ def validate_project(path: str) -> Tuple[bool, str, Dict[str, Any]]:
 def apply_project(window, state: Dict[str, Any]) -> None:
     """Load the project's sources and restore settings/labels/index."""
     sources: List[str] = state.get("resolved_sources") or state["sources"]
-    settings = state.get("settings", {})
 
     # The stack may span folders; the registration cache and the "save project"
     # suggestion both key off the folder of the first frame.
@@ -242,6 +242,12 @@ def _apply_after_load(window, state: Dict[str, Any]) -> None:
     chk = getattr(window, "chk_reverse_order", None)
     if chk is not None:
         chk.setChecked(reverse)
+
+    base_correct = bool(settings.get("base_frame_correct", False))
+    window.base_frame_correct = base_correct
+    base_chk = getattr(window, "chk_base_correct", None)
+    if base_chk is not None:
+        base_chk.setChecked(base_correct)
 
     if settings.get("thread_count"):
         window.thread_count = int(settings["thread_count"])

@@ -10,6 +10,12 @@ from ui.styles import MESSAGE_BOX_STYLE, PROGRESS_DIALOG_STYLE
 from core.workers import BatchWorker
 from locales import trans
 
+# Threads still running when the manager is torn down. Never terminate() a
+# worker that may be inside OpenCV/NumPy native code; park the pair instead
+# (the process is exiting or the window is closing).
+_ORPHAN_WORKERS: list = []
+
+
 
 class BatchManager:
     """Coordinates batch processing workflows and lifetime of background workers."""
@@ -267,12 +273,18 @@ class BatchManager:
             self._progress_dialog = None
 
     def _teardown_worker(self) -> None:
-        if self._thread:
-            self._thread.quit()
-            # The worker only checks is_cancelled between folders, so a folder
-            # in progress cannot be interrupted — never block the UI forever.
-            if not self._thread.wait(5000):
-                self._thread.terminate()
-                self._thread.wait(1000)
-            self._thread = None
+        thread, worker = self._thread, self._worker
+        self._thread = None
         self._worker = None
+        if worker is not None:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+        if thread is not None:
+            thread.quit()
+            # The worker only checks is_cancelled between folders, so a folder
+            # in progress cannot be interrupted — never block the UI forever
+            # and never terminate() a thread inside native code.
+            if not thread.wait(5000):
+                _ORPHAN_WORKERS.append((thread, worker))

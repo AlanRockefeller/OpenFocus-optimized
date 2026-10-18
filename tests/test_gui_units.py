@@ -919,3 +919,132 @@ def test_new_output_is_the_only_selected_item(qapp):
     mgr.update_output_list_for_fusion()
     assert len(w.output_list.selectedItems()) == 1
     assert w.output_list.currentRow() == 0
+
+
+def test_stack_change_during_compare_unlocks_controls(qapp, monkeypatch):
+    """A discarded compare render used to leave _compare_mode/queue intact:
+    the render button stayed disabled with a stale "-1/0" progress label and
+    no next method was ever chained."""
+    frames = [np.zeros((32, 32, 3), dtype=np.uint8) + i for i in range(2)]
+    w = _render_window(frames)
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+
+    rm._compare_mode = True
+    rm._compare_total = 3
+    rm._compare_queue = ["dct", "dtcwt"]
+    rm._compare_current = "dct"
+    # source_ref differs -> the finished result belongs to another stack
+    rm._render_context = {
+        "source": list(w.raw_images),
+        "source_ref": object(),
+        "alignment_options": (False, False, False),
+        "preview": False,
+        "roi": False,
+        "filenames": list(w.image_filenames),
+        "included": [0, 1],
+    }
+    w.btn_render.setEnabled(False)
+
+    rm.on_render_finished([], None, False, 0.0, 0.0, "CPU")
+
+    assert rm._compare_mode is False
+    assert rm._compare_queue == []
+    assert rm._compare_current is None
+    assert rm.worker is None
+    assert w.btn_render.isEnabled()
+    assert "处理中" not in w.btn_render.text()
+
+
+def test_output_history_is_capped(qapp):
+    from PyQt6.QtWidgets import QLabel, QListWidget
+    from controllers.output_manager import OutputManager
+
+    class W:
+        pass
+
+    w = W()
+    w.output_list = QListWidget()
+    w.output_label = QLabel()
+    w.fusion_results = []
+    w.fusion_result = None
+
+    class E:
+        @staticmethod
+        def generate_default_filename():
+            return "out"
+
+    w.export_manager = E()
+    mgr = OutputManager(w)
+    mgr.MAX_HISTORY = 3
+    for i in range(6):
+        w.fusion_result = np.full((4, 4, 3), i, np.uint8)
+        mgr.update_output_list_for_fusion()
+
+    assert len(w.fusion_results) == 3
+    assert w.output_list.count() == 3
+
+
+def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
+    """Snapshots used to copy every frame twice (raw + base); they now hold
+    references because mutations replace arrays. Resize must undo its scale
+    factor too, or the Resize dialog opens with the wrong percentage."""
+    import main as main_module
+
+    class W:
+        pass
+
+    w = W()
+    img = np.zeros((4, 4, 3), np.uint8)
+    w.raw_images = [img]
+    w.image_filenames = ["a.png"]
+    w.image_source_paths = []
+    w.base_images = [img]
+    w.excluded_frames = {1}
+    w.current_img_index = 0
+    w.current_scale_factor = 0.5
+    w.base_scale_factor = 1.0
+    w.transform_manager = _FakeTransformManager()
+
+    state = main_module.OpenFocus._capture_stack_state(w)
+    assert state["raw"][0] is img, "snapshot must not duplicate pixels"
+
+    w.raw_images = [np.ones((4, 4, 3), np.uint8)]
+    main_module.OpenFocus._restore_stack_state(w, state)
+
+    assert w.raw_images[0] is img
+    assert w.current_scale_factor == 0.5
+    assert w.base_scale_factor == 1.0
+    assert w.excluded_frames == {1}
+
+
+def test_shutdown_worker_never_terminates(monkeypatch):
+    import main as main_module
+
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+            self.terminated = False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def isRunning(self):
+            return True
+
+        def quit(self):
+            pass
+
+        def wait(self, _ms):
+            return False
+
+        def terminate(self):
+            self.terminated = True
+
+    worker = Worker()
+    orphan = []
+    monkeypatch.setattr(main_module, "_ORPHAN_THREADS", orphan)
+    main_module._shutdown_worker(worker, timeout_ms=0)
+
+    assert worker.cancelled
+    assert worker.terminated is False
+    assert orphan == [worker]

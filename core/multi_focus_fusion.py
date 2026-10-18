@@ -10,6 +10,7 @@ from fusion_methods.stackmffv4 import _stackmffv4_impl, _stackmffv4_batch_impl
 from fusion_methods.dtcwt import _dtcwt_impl
 from utils import resource_path
 from utils.image_utils import normalize_fuse_input
+from utils.sorting import natural_sort_key
 
 
 # Tile 参数已改为 MultiFocusFusion 实例属性，见类构造函数中的默认值和访问器方法。
@@ -125,6 +126,24 @@ def _stack_footprint_exceeds(frames, tile_threshold: int) -> bool:
     bytes_per_frame = first.itemsize * int(np.prod(first.shape)) if first.ndim else first.itemsize
     total_bytes = len(frames) * bytes_per_frame
     return total_bytes > (tile_threshold ** 2) * 3
+
+
+# DTCWT keeps one float32 activity map per frame and level (a geometric
+# series summing to ~4/3 * H*W per frame). Splitting the image into tiles
+# changes each tile's transform boundary, which leaves a visible seam at the
+# block grid; tile only when the whole-image activity set would be large.
+DTCWT_ACTIVITY_BUDGET = 1200 * 1024 * 1024
+
+
+def _dtcwt_activity_bytes(frames) -> int:
+    if not frames:
+        return 0
+    first = frames[0]
+    if getattr(first, "ndim", 0) < 2:
+        return 0
+    h, w = first.shape[:2]
+    per_frame = h * w * (4.0 / 3.0) * np.dtype(np.float32).itemsize
+    return int(len(frames) * per_frame)
 
 
 # 每次 StackMFF-V4 模型调用可承受的激活内存预算，单位为 1024x1024 帧。
@@ -325,8 +344,8 @@ class MultiFocusFusion:
                 return None
             frame = input_source[-1] if self.base_frame == "last" else input_source[0]
         elif isinstance(input_source, str) and os.path.isdir(input_source):
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(input_source))
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(input_source), key=natural_sort_key)
                      if f.lower().endswith(exts)]
             if not files:
                 return None
@@ -509,8 +528,15 @@ class MultiFocusFusion:
             footprint_tiles = (
                 self.algorithm == 'stackmffv4'
                 and _stack_footprint_exceeds(input_source, self.tile_threshold))
-            if self.tile_enabled and (max(h, w) > self.tile_threshold
-                                      or footprint_tiles):
+            dtcwt_tiles = (
+                self.algorithm == 'dtcwt'
+                and _dtcwt_activity_bytes(input_source) > DTCWT_ACTIVITY_BUDGET)
+            if self.algorithm == 'dtcwt':
+                # size alone is not a reason to break the global transform
+                needs_tiles = dtcwt_tiles
+            else:
+                needs_tiles = max(h, w) > self.tile_threshold
+            if self.tile_enabled and (needs_tiles or footprint_tiles):
                 # 使用分块融合，块大小和重叠均由实例属性控制
                 print(f"Info: Large stack detected ({len(input_source)}x{w}x{h}). Using tiled fusion mode (block={self.tile_block_size}, overlap={self.tile_overlap}).")
                 kws = dict(kwargs)
@@ -536,8 +562,8 @@ class MultiFocusFusion:
                 raise RuntimeError("OpenCV is required to read image files for tiled fusion. Install with: pip install opencv-python") from exc
 
             # 列出常见图片扩展
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(input_source)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(input_source), key=natural_sort_key) if f.lower().endswith(exts)]
             if len(files) > 0:
                 first_path = os.path.join(input_source, files[0])
                 first_img = cv2.imread(first_path, cv2.IMREAD_UNCHANGED)
@@ -549,8 +575,15 @@ class MultiFocusFusion:
                     self.algorithm == 'stackmffv4'
                     and _stack_footprint_exceeds(
                         [first_img] * len(files), self.tile_threshold))
-                if self.tile_enabled and (max(fh, fw) > self.tile_threshold
-                                          or footprint_tiles):
+                dtcwt_tiles = (
+                    self.algorithm == 'dtcwt'
+                    and _dtcwt_activity_bytes(
+                        [first_img] * len(files)) > DTCWT_ACTIVITY_BUDGET)
+                if self.algorithm == 'dtcwt':
+                    needs_tiles = dtcwt_tiles
+                else:
+                    needs_tiles = max(fh, fw) > self.tile_threshold
+                if self.tile_enabled and (needs_tiles or footprint_tiles):
                     # 目录输入按文件懒加载方式分块融合（仅当实例 tile_enabled 开启时）
                     kws = dict(kwargs)
                     kws.pop('block_size', None)
@@ -881,8 +914,8 @@ class MultiFocusFusion:
             except Exception as exc:
                 raise RuntimeError("OpenCV is required to read image files for tiled fusion. Install with: pip install opencv-python") from exc
 
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(img_dir), key=natural_sort_key) if f.lower().endswith(exts)]
             if len(files) == 0:
                 raise ValueError(f"No image files found in directory: {img_dir}")
             first_img = cv2.imread(os.path.join(img_dir, files[0]), cv2.IMREAD_UNCHANGED)
@@ -1078,8 +1111,8 @@ class MultiFocusFusion:
         # 获取文件列表（如果是目录输入）——先于分批决策，帧数决定瓦片/批量
         files = None
         if img_dir is not None:
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(img_dir), key=natural_sort_key) if f.lower().endswith(exts)]
 
         n_frames = len(imgs) if imgs is not None else len(files)
         eff_block, batch_size, tile_coords = _stackmffv4_effective_tiling(

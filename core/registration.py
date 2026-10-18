@@ -22,7 +22,6 @@ python Registration.py --mode both
 
 import argparse
 import concurrent.futures
-import re
 import time
 import cv2
 import numpy as np
@@ -31,6 +30,8 @@ import glob
 import sys
 import io
 from typing import Union, List, Optional
+
+from utils.sorting import natural_sort_key as _image_sort_key
 
 # Windowed/Windows console mojibake fix — frozen builds only. Rebinding
 # sys.stdout at import time closes the ORIGINAL wrapper once it is collected
@@ -61,7 +62,7 @@ if getattr(sys, "frozen", False) and sys.stdout is not None and hasattr(sys.stdo
 #         # Use generator expression and list comprehension for optimized file filtering and sorting
 #         img_paths = sorted(
 #             (os.path.join(input_source, f) for f in os.listdir(input_source)
-#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tif'}),
+#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}),
 #             key=lambda x: int(num_pattern.findall(os.path.basename(x))[-1])
 #         )
 #         # Use list comprehension to read all images at once
@@ -266,16 +267,6 @@ def _crop_with_transforms(images, H_matrices):
 
 # ========== 单应性对齐算法实现（非线性） ==========
 
-def _image_sort_key(path):
-    """按文件名末尾数字排序，无数字的按字典序排在后面。
-
-    直接返回 int 或 str 的混合键会在 Python 3 里抛 TypeError（'<' not supported
-    between instances of 'int' and 'str'），所以统一返回可比较的元组。
-    """
-    name = os.path.basename(path)
-    nums = re.findall(r"\d+", name)
-    return (0, int(nums[-1]), "") if nums else (1, 0, name)
-
 
 def _align_homography_impl(input_source, output_path=None, img_filenames=None, downscale_width=1600, thread_count: int = 4, should_cancel=None):
     """
@@ -292,7 +283,7 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
     # --- 1. 数据加载与预处理 ---
     if img_filenames is None and isinstance(input_source, str):
         # 支持常见格式，过滤非图片
-        valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+        valid_exts = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}
         img_paths = sorted(
             (os.path.join(input_source, f) for f in os.listdir(input_source)
              if os.path.splitext(f)[1].lower() in valid_exts),
@@ -636,7 +627,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
     if max_shift_ratio is None:
         max_shift_ratio = _OF_MAX_SHIFT_RATIO
     if img_filenames is None and isinstance(input_source, str):
-        valid_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+        valid_exts = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}
         img_paths = sorted(
             (os.path.join(input_source, f) for f in os.listdir(input_source)
              if os.path.splitext(f)[1].lower() in valid_exts),
@@ -823,7 +814,7 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
     if img_filenames is None and isinstance(input_source, str):
         img_paths = sorted(
             (os.path.join(input_source, f) for f in os.listdir(input_source)
-             if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tif'}),
+             if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}),
             key=_image_sort_key
         )
         images = [cv2.imread(path) for path in img_paths]
@@ -1126,7 +1117,7 @@ def _stabilisation_impl(input_source, output_path=None, filenames=None):
     if isinstance(input_source, str):
         img_paths = sorted(
             [os.path.join(input_source, file) for file in os.listdir(input_source)
-             if os.path.splitext(file)[1].lower() in ['.jpg', '.jpeg', '.png', '.bmp', '.tif']],
+             if os.path.splitext(file)[1].lower() in ['.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp']],
             key=_image_sort_key
         )
         images = [cv2.imread(path) for path in img_paths]
@@ -1246,7 +1237,7 @@ def _stabilisation_impl(input_source, output_path=None, filenames=None):
 #         num_pattern = re.compile(r"\d+")
 #         img_paths = sorted(
 #             (os.path.join(input_source, f) for f in os.listdir(input_source)
-#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tif'}),
+#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}),
 #             key=lambda x: int(num_pattern.findall(os.path.basename(x))[-1])
 #         )
 #         img_filenames = [os.path.basename(path) for path in img_paths]

@@ -165,7 +165,12 @@ def imwrite_auto(path: str, image: np.ndarray, params: Optional[list] = None,
     # the np.fromfile workaround the loaders already use for reading.
     try:
         path.encode("ascii")
-        ok = cv2.imwrite(path, image, params if params else [])
+        try:
+            ok = cv2.imwrite(path, image, params if params else [])
+        except cv2.error:
+            # unknown extension / encoder unavailable: the documented
+            # contract is a bool, not an exception from a Qt slot.
+            ok = False
     except UnicodeEncodeError:
         ok = False
         try:
@@ -180,6 +185,10 @@ def imwrite_auto(path: str, image: np.ndarray, params: Optional[list] = None,
     if ok and embed and image.dtype == np.uint8 and ext in (".png", ".tif", ".tiff", ".webp"):
         try:
             from PIL import Image
+            # The pixels written here are already upright (the loaders apply
+            # EXIF orientation), so the copied tag must be neutralized or
+            # every EXIF-aware viewer rotates the export a second time.
+            embed = _upright_exif(embed)
             with Image.open(path) as pil_img:
                 # webp 默认有损：嵌入 EXIF 的重存必须保持无损
                 save_kw = {"exif": embed}
@@ -191,6 +200,25 @@ def imwrite_auto(path: str, image: np.ndarray, params: Optional[list] = None,
     return ok
 
 
+def _upright_exif(exif_bytes: bytes) -> bytes:
+    """Return EXIF bytes with the Orientation tag reset to 1.
+
+    Exports store upright pixels, while the source EXIF still says "rotate
+    this by 90°" — embedding it unchanged makes viewers rotate the finished
+    picture again. Unparseable blobs are passed through unchanged.
+    """
+    try:
+        from PIL import Image
+        exif = Image.Exif()
+        exif.load(exif_bytes)
+        if exif.get(274, 1) == 1:
+            return exif_bytes
+        exif[274] = 1
+        return exif.tobytes()
+    except Exception:
+        return exif_bytes
+
+
 def normalize_fuse_input(images):
     """Scale uint16 stacks down to float32 in the 0-255 range the back-ends use.
 
@@ -199,10 +227,22 @@ def normalize_fuse_input(images):
     assumes, so their own `/ 255.0` preprocessing stays correct; keeping the
     values float rather than rounding to uint8 is what preserves the depth.
     """
-    is_16 = len(images) > 0 and images[0].dtype == np.uint16
-    if is_16:
-        return [f.astype(np.float32) * (255.0 / 65535.0) for f in images], True
-    return images, False
+    # Per-frame, not frame-0-only: one 16-bit TIFF dropped into a folder of
+    # 8-bit JPEGs used to stay in the 0-65535 domain while every back-end
+    # assumed 0-255, saturating the whole result to white (and the reverse
+    # order crushed the 8-bit frame to black).
+    is_16 = any(f.dtype == np.uint16 for f in images)
+    if not is_16:
+        return images, False
+    out = []
+    for frame in images:
+        if frame.dtype == np.uint16:
+            out.append(frame.astype(np.float32) * (255.0 / 65535.0))
+        elif frame.dtype == np.float32:
+            out.append(frame)
+        else:
+            out.append(frame.astype(np.float32))
+    return out, True
 
 
 def fuse_output_dtype(images) -> type:
