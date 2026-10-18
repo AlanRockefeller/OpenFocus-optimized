@@ -5,6 +5,7 @@ import time
 import cv2
 import numpy as np
 import concurrent.futures
+from collections import deque
 
 from fusion_methods.dct import _ensure_color_image
 from utils.image_utils import fuse_output_dtype
@@ -113,15 +114,41 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
     if img_resize:
         stack_ori = [cv2.resize(img, img_resize) for img in stack_ori]
 
-    # 转换为 float32 并归一化到 [0, 1]
-    stack_flt = [img.astype(np.float32) / 255.0 for img in stack_ori]
     # 16-bit stacks arrive as float32 in 0-255; returning uint8 here would
     # discard the depth the caller asked to preserve.
     out_dtype = fuse_output_dtype(stack_ori)
-    del stack_ori  # float 化完成后原 uint8 栈只占内存（gfg_fgf 同理已删）
-    
+
+    def to_float(img):
+        # 转换为 float32 并归一化到 [0, 1]。按帧现算而不是整栈预先转换：
+        # float 栈是源栈的 4 倍内存，两遍各转一次的代价远小于读写它。
+        return img.astype(np.float32) / 255.0
+
     # ========== 核心算法实现 ==========
-    
+
+    def ordered_map(fn, items):
+        """Yield fn(item) in item order while a bounded window runs ahead.
+
+        Results are consumed strictly in frame order (float accumulation is
+        not associative, and the argmax keeps the first maximum), but only
+        a few frames' intermediates are alive at once instead of all N.
+        """
+        # ThreadPoolExecutor's own default when no thread count was given
+        workers = max_workers or min(32, (os.cpu_count() or 1) + 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            lookahead = 2 * workers
+            pending = deque()
+            items = iter(items)
+            for item in items:
+                pending.append(executor.submit(fn, item))
+                if len(pending) >= lookahead:
+                    break
+            while pending:
+                result = pending.popleft().result()
+                for item in items:
+                    pending.append(executor.submit(fn, item))
+                    break
+                yield result
+
     def guided_filter_fusion_stack(images):
         """
         对图像堆栈执行基于引导滤波的融合
@@ -133,25 +160,17 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
         rows, cols, channels = images[0].shape
         
         # 1. 图像分解 (Base Layer & Detail Layer)
-        # 使用 uniform_filter 提取 Base 层
-        
-        def process_decompose(img):
-            # 使用 cv2.blur 替代 uniform_filter，速度更快
+        # 使用 cv2.blur 提取 Base 层；第 4 步按帧现算，不再为整栈保存
+        # base/detail（两者合计是 float 栈的两倍内存）。
+        def decompose(img):
             base = cv2.blur(img, (average_filter_size, average_filter_size), borderType=cv2.BORDER_REFLECT)
             detail = img - base
             return base, detail
 
-        # 并行处理图像分解
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            decompose_results = list(executor.map(process_decompose, images))
-        
-        base_layers = [res[0] for res in decompose_results]
-        detail_layers = [res[1] for res in decompose_results]
-            
         # 2. 计算显著性图 (Saliency Map)
         # Saliency = Gaussian(abs(Laplacian(Sum_Channels)))
-        
-        def process_saliency(img):
+        def process_saliency(k):
+            img = to_float(images[k])
             # 将三通道相加用于计算拉普拉斯
             img_sum = np.sum(img, axis=2)
             # 使用 cv2.Laplacian 替代 scipy.ndimage.laplace
@@ -160,14 +179,25 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
             sal = cv2.GaussianBlur(lap, (0, 0), sigmaX=DEFAULT_SIGMA_R, sigmaY=DEFAULT_SIGMA_R, borderType=cv2.BORDER_REFLECT)
             return sal
 
-        # 并行处理显著性图计算
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            saliency_maps = list(executor.map(process_saliency, images))
-            
         # 3. 生成初始决策图 (Decision Map)
-        # 在每个像素位置选择显著性最大的图像索引
-        saliency_stack = np.stack(saliency_maps, axis=0) # (N, H, W)
-        max_indices = np.argmax(saliency_stack, axis=0)  # (H, W)
+        # 在每个像素位置选择显著性最大的图像索引。逐帧滚动求 argmax，
+        # 不再堆出 (N, H, W) 的显著性栈；严格大于 = 并列时取最早一帧，
+        # 与 np.argmax 完全一致。
+        max_saliency = None
+        max_indices = np.zeros((rows, cols), dtype=np.int32)
+        for k, sal in enumerate(ordered_map(process_saliency, range(num_images))):
+            if max_saliency is None:
+                max_saliency = sal
+                continue
+            better = sal > max_saliency
+            np.copyto(max_saliency, sal, where=better)
+            np.copyto(max_indices, k, where=better)
+        del max_saliency
+
+        # 没有赢得任何像素的帧掩膜全零，引导滤波后的权重恰好为 0，
+        # 对累加没有任何贡献，直接跳过。
+        wins = np.bincount(max_indices.ravel(), minlength=num_images)
+        contributing = [k for k in range(num_images) if wins[k] > 0]
         
         # 4. 权重图细化与融合 (Weight Refinement & Fusion)
         # 初始化累加器
@@ -178,10 +208,11 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
         fused_detail_denominator = np.zeros((rows, cols), dtype=np.float32) # 优化为单通道
         
         def process_weight_fusion(k):
+            img_k = to_float(images[k])
+            base_k, detail_k = decompose(img_k)
+
             # 生成第 k 张图的二值掩膜
             mask_k = (max_indices == k).astype(np.float32) # (H, W)
-            
-            img_k = images[k] # Guide image (H, W, 3)
             
             # 使用内置的引导滤波细化掩膜
             img_k_gray = cv2.cvtColor(img_k, cv2.COLOR_BGR2GRAY)
@@ -221,31 +252,23 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
             # 优化：不再使用 np.repeat 扩展为 3 通道，而是利用广播机制
             # weight_base_k 和 weight_detail_k 都是 (H, W)
             
-            # 计算分子项 (H, W, 3) * (H, W, 1) -> (H, W, 3)
-            base_num = base_layers[k] * weight_base_k[:, :, np.newaxis]
-            detail_num = detail_layers[k] * weight_detail_k[:, :, np.newaxis]
+            # 计算分子项 (H, W, 3) * (H, W, 1) -> (H, W, 3)，原地写回
+            np.multiply(base_k, weight_base_k[:, :, np.newaxis], out=base_k)
+            np.multiply(detail_k, weight_detail_k[:, :, np.newaxis], out=detail_k)
             
             # 分母项直接返回单通道权重即可
-            return base_num, weight_base_k, detail_num, weight_detail_k
+            return base_k, weight_base_k, detail_k, weight_detail_k
 
-        # 并行处理权重计算与融合
-        # 使用 as_completed 模式，处理完一个就累加一个，避免一次性持有所有结果导致内存爆炸
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(process_weight_fusion, k) for k in range(num_images)]
-            # 按帧序号固定顺序累加：as_completed 的完成顺序取决于线程调度，
-            # float32 加法不满足结合律，同输入不同运行会产生不同的输出像素。
-            for future in futures:
-                # 抛出来，不再只 print 后跳过：吞掉某一帧的异常会"成功"产出一张
-                # 缺帧的融合图，用户看不出结果已经被破坏。
-                bn, bd, dn, dd = future.result()
-                fused_base_numerator += bn
-                fused_base_denominator += bd
-                fused_detail_numerator += dn
-                fused_detail_denominator += dd
-                # 显式删除引用，帮助垃圾回收
-                del bn, bd, dn, dd
+        # 按帧序号固定顺序累加：float32 加法不满足结合律，同输入不同运行
+        # 不能产生不同的输出像素。异常直接抛出，不能"成功"产出缺帧的融合图。
+        for bn, bd, dn, dd in ordered_map(process_weight_fusion, contributing):
+            fused_base_numerator += bn
+            fused_base_denominator += bd
+            fused_detail_numerator += dn
+            fused_detail_denominator += dd
+            # 显式删除引用，帮助垃圾回收
+            del bn, bd, dn, dd
 
-            
         # 5. 重建图像
         # 避免除以零
         fused_base_denominator[fused_base_denominator < 1e-6] = 1e-6
@@ -262,4 +285,4 @@ def gff_impl(input_source, img_resize, kernel_size=31, thread_count: int = None)
         
         return fused_img
 
-    return guided_filter_fusion_stack(stack_flt)
+    return guided_filter_fusion_stack(stack_ori)

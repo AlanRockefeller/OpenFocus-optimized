@@ -45,11 +45,14 @@ def make_texture(h, w, seed=0):
         p1 = (int(rng.integers(0, w)), int(rng.integers(0, h)))
         p2 = (int(rng.integers(0, w)), int(rng.integers(0, h)))
         cv2.line(img, p1, p2, c, int(rng.integers(1, 3)), cv2.LINE_AA)
+    # OpenCV 5 restricts putText to CV_8U. The benchmark scene is quantized
+    # to uint8 on return anyway, so rasterize labels on that final canvas.
+    img = np.clip(img, 0, 255).astype(np.uint8)
     for i in range(12):
         cv2.putText(img, "OpenFocus %d" % i,
                     (int(rng.integers(0, w - 200)), int(rng.integers(20, h))),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 1, cv2.LINE_AA)
-    return np.clip(img, 0, 255).astype(np.float32)
+    return img.astype(np.float32)
 
 
 def make_depth(h, w):

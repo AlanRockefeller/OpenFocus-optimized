@@ -176,6 +176,14 @@ def _normalize_kernel(kernel: Optional[int], default: int) -> int:
     return max(1, size)
 
 
+def _depth_frames_for(images, method: str, sort_mode: str):
+    """Return frames in the same order used by an index-deciding fusion."""
+    frames = list(images)
+    if method in ("openfocus_b", "openfocus_c") and sort_mode == "desc":
+        frames.reverse()
+    return frames
+
+
 def _fuse_stack(images, args):
     """Register and fuse one stack; returns the fused image."""
     import cv2
@@ -240,7 +248,8 @@ def _fuse_stack(images, args):
         raise RuntimeError("Fusion returned no result")
     fused = quantize_fuse_output(fused, is_16bit)
     # 注册/归一化后的帧留给 --depth-map 用（与融合同一输入）
-    args._depth_frames = list(images)
+    args._depth_frames = _depth_frames_for(
+        images, args.method, getattr(args, "sort", "asc"))
     print(f"Fusion ({args.method}, device={info['device']}) done in {time.time() - t0:.1f}s")
     return fused
 
@@ -274,7 +283,8 @@ def _save_depth(args, fused_out: str) -> None:
             "(guided_filter, openfocus_a) have no per-pixel decision.")
     kernel = None
     if args.method in ("dct", "gfgfgf", "openfocus_b", "openfocus_c"):
-        kernel = _normalize_kernel(args.kernel, 7)
+        default_kernel = 11 if args.method in ("openfocus_b", "openfocus_c") else 7
+        kernel = _normalize_kernel(args.kernel, default_kernel)
     idx = compute_focus_index(
         frames, args.method, kernel_size=kernel,
         model_path=_find_model_path() if args.method == "stackmffv4" else None,

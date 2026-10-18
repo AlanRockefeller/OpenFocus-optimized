@@ -43,6 +43,35 @@ The final soak pass caught and fixed two real defects:
 Wall times vary with machine load; treat them as stable orders of magnitude.
 Per-run values land in a JSON file via `--json`.
 
+## Speedups after v1.38
+
+Measured on a second machine (Linux laptop, i7-10875H 8C/16T, CPU-only,
+GUI default of 4 worker threads) with synthetic focus stacks; each figure
+is the best of 2–3 runs alternating old and new code, since this machine's
+wall times vary ~2× with background load.
+
+| Change | 40 × 2000×1500 | 30 × 4000×3000 (tiled) | Output |
+|--------|----------------|------------------------|--------|
+| DTCWT: cv2 fusion rule, threaded + cache-blocked transforms | 51.4 s → 13.5 s | 154 s → 86 s | bit-identical on the historical v1.38 rule¹ |
+| guided_filter: streamed frames, running argmax | 4.09 s → 3.84 s | 24.1 s → 12.2 s | bit-identical |
+| AI (StackMFF-V4): BatchNorm folded, channels_last on CPU | 122.6 s → 59.1 s | — | 67 of 3 M px pick a neighbouring frame (exact near-ties) |
+| Stack loading: parallel decode (30 × 12 MP JPEG) | — | 1.17 s → 0.23 s | identical |
+
+¹ v1.52 replaced DTCWT's pairwise per-channel decisions with higher-quality
+N-way shared decisions and a decision-driven low-pass. The retained threaded
+and cache-blocked transform path is now tested bit-for-bit against the v1.55
+serial algorithm; timings above predate that quality change.
+
+Tiled fusion also accumulates overlapping tiles in a fixed order now;
+previously the overlap bands could differ by one level between two runs
+on the same stack. `tests/test_fusion_speedups.py` pins DTCWT bit-for-bit to
+the v1.55 quality algorithm and the guided filter to its pre-optimization
+implementation.
+
+Thread scaling on this machine flattens at 4–6 workers for every method:
+the classical algorithms are memory-bandwidth bound, so more threads than
+the default do not help on a dual-channel laptop.
+
 ## Memory
 
 - Classical tiled fusion stays bounded by the tile size regardless of depth.

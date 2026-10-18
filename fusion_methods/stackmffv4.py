@@ -39,6 +39,40 @@ def _ensure_torch():
         _CUDA_AVAILABLE = False
 
 
+def _optimize_for_inference(model, device):
+    """Fold every eval-mode BatchNorm into the convolution before it.
+
+    BN after a conv is an affine map, so folding it into the conv weights
+    and bias computes the same function with ~60 fewer full-resolution
+    passes. Only conv->BN pairs inside one nn.Sequential and the depthwise
+    BN of the custom activation are folded; Block/UpBlock.switch_to_deploy
+    is NOT used because it also merges conv1 and conv2 across the ReLU
+    (leaky_relu with act_learn=0), which changes the network. On CPU the
+    model also switches to channels_last, which oneDNN convolves ~1.6x
+    faster. Together ~2x faster on CPU; the float rounding differences
+    flip a handful of exact near-ties in the focus index map (~0.003% px).
+    """
+    _ensure_torch()
+    from torch.nn.utils.fusion import fuse_conv_bn_eval
+    from core.models.stackmffv4_network import activation
+
+    for module in model.modules():
+        if isinstance(module, torch.nn.Sequential):
+            names = list(module._modules.keys())
+            for conv_name, bn_name in zip(names, names[1:]):
+                conv = module._modules[conv_name]
+                bn = module._modules[bn_name]
+                if (isinstance(conv, torch.nn.Conv2d)
+                        and isinstance(bn, torch.nn.BatchNorm2d)):
+                    module._modules[conv_name] = fuse_conv_bn_eval(conv, bn)
+                    module._modules[bn_name] = torch.nn.Identity()
+        elif isinstance(module, activation) and not module.deploy:
+            module.switch_to_deploy()
+    if device.type == 'cpu':
+        model.to(memory_format=torch.channels_last)
+    return model
+
+
 def _get_model_and_device(model_path, use_gpu):
     """
     获取或初始化全局模型和设备
@@ -75,8 +109,9 @@ def _get_model_and_device(model_path, use_gpu):
         if any(key.startswith('module.') for key in state_dict.keys()):
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
-        model.to(device)
         model.eval()
+        _optimize_for_inference(model, device)
+        model.to(device)
         _GLOBAL_MODEL = model
         _GLOBAL_DEVICE = device
         _GLOBAL_MODEL_PATH = os.path.abspath(model_path)
@@ -84,6 +119,8 @@ def _get_model_and_device(model_path, use_gpu):
         model = _GLOBAL_MODEL
         if _GLOBAL_DEVICE != device:
             model.to(device)
+            if device.type == 'cpu':
+                model.to(memory_format=torch.channels_last)
             _GLOBAL_DEVICE = device
     
     return model, device

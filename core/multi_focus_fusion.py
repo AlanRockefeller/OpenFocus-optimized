@@ -679,7 +679,8 @@ class MultiFocusFusion:
             input_source,
             img_resize,
             N,
-            self.use_gpu
+            self.use_gpu,
+            thread_count=kwargs.get('thread_count'),
         )
     
     def _fuse_stackmffv4(self,
@@ -1025,10 +1026,16 @@ class MultiFocusFusion:
             return (x0, y0, fh, fw, fused_tile, weight2d)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=optimal_threads) as executor:
-            futures = {executor.submit(process_single_tile, coords): coords 
-                       for coords in tile_coords}
+            futures = {executor.submit(process_single_tile, coords): idx
+                       for idx, coords in enumerate(tile_coords)}
             completed_tiles = 0
             total_tiles = len(futures)
+            # Overlapping tiles must be summed in a fixed order: float32
+            # addition is not associative, so accumulating in completion
+            # order made the overlap bands differ by 1 level between runs.
+            # Finished tiles wait here until every earlier tile is added.
+            finished = {}
+            next_tile = 0
             for future in concurrent.futures.as_completed(futures):
                 # 取消必须在这个循环里检查：以前所有分块都会被跑完才回到
                 # worker 的取消判定，大图上点"取消"看起来毫无反应。
@@ -1037,12 +1044,15 @@ class MultiFocusFusion:
                         pending.cancel()
                     from core.registration import RegistrationCancelled
                     raise RegistrationCancelled()
-                x0, y0, fh, fw, fused_tile, weight2d = future.result()
+                finished[futures[future]] = future.result()
                 # 立刻累加并释放，不在 results 里攒下所有分块：重叠分块的
                 # 总面积可达整图的两倍，攒起来会翻倍峰值内存。
-                acc[y0:y0+fh, x0:x0+fw, :channels] += fused_tile.astype(np.float32) * weight2d[:, :, np.newaxis]
-                weight[y0:y0+fh, x0:x0+fw, 0] += weight2d
-                del fused_tile, weight2d
+                while next_tile in finished:
+                    x0, y0, fh, fw, fused_tile, weight2d = finished.pop(next_tile)
+                    next_tile += 1
+                    acc[y0:y0+fh, x0:x0+fw, :channels] += fused_tile.astype(np.float32) * weight2d[:, :, np.newaxis]
+                    weight[y0:y0+fh, x0:x0+fw, 0] += weight2d
+                    del fused_tile, weight2d
                 if progress_callback is not None:
                     completed_tiles += 1
                     try:

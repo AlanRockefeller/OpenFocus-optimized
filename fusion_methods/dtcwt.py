@@ -1,9 +1,13 @@
 # Reference:
 # Lewis J J, O’Callaghan R J, Nikolov S G, et al. Pixel-and region-based image fusion with complex wavelets[J]. Information fusion, 2007, 8(2): 119-130.
 
+import functools
 import os
 import re
 import glob
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from typing import Union, List, Tuple, Optional
 import cv2
@@ -39,8 +43,95 @@ except ImportError:
     maximum_filter = None
     convolve = None
 
+# Target working-set size of one column block in the dtcwt filters.
+_FILTER_BLOCK_BYTES = 1 << 20
+# Forward transforms may briefly need roughly twice the bytes retained by the
+# returned pyramid. Keep that working set within a fraction of currently
+# available RAM so disabling tiled fusion cannot queue many full-image
+# pyramids and exhaust the process.
+_TRANSFORM_MEMORY_FRACTION = 0.25
+_PYRAMID_WORKSPACE_MULTIPLIER = 2
 
-def _dtcwt_impl(input_source, img_resize, N, use_gpu):
+
+def _available_memory_bytes():
+    """Best-effort available physical memory, with a conservative fallback."""
+    try:
+        import psutil
+        return max(1, int(psutil.virtual_memory().available))
+    except Exception:
+        pass
+    try:
+        pages = os.sysconf('SC_AVPHYS_PAGES')
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        return max(1, int(pages) * int(page_size))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 4 << 30
+
+
+def _estimate_pyramid_bytes(height, width, nlevels):
+    """Estimate a float32 DTCWT pyramid plus its forward workspace."""
+    rows, cols = max(1, int(height)), max(1, int(width))
+    retained = 0
+    for _ in range(max(1, int(nlevels))):
+        rows = (rows + 1) // 2
+        cols = (cols + 1) // 2
+        # Six complex64 orientations at each level.
+        retained += rows * cols * 6 * np.dtype(np.complex64).itemsize
+    # dtcwt's low-pass is twice the final high-pass dimensions.
+    retained += (2 * rows) * (2 * cols) * np.dtype(np.float32).itemsize
+    return max(1, retained * _PYRAMID_WORKSPACE_MULTIPLIER)
+
+
+def _memory_bounded_transform_plan(height, width, nlevels, workers):
+    """Return worker/lookahead counts bounded by available pyramid memory."""
+    requested = max(1, int(workers))
+    pyramid_bytes = _estimate_pyramid_bytes(height, width, nlevels)
+    budget = max(1, int(_available_memory_bytes() * _TRANSFORM_MEMORY_FRACTION))
+    max_live = max(1, budget // pyramid_bytes)
+    bounded_workers = min(requested, max_live)
+    lookahead = min(max_live, max(1, 2 * bounded_workers))
+    return bounded_workers, lookahead
+
+
+def _column_blocked(fn):
+    """Run a dtcwt column filter over cache-sized column blocks.
+
+    dtcwt's colfilter/coldfilt/colifilt filter every column independently
+    (the symmetric extension is along rows only) but make one full-image
+    pass per filter tap, so a 12 MP frame streams through RAM ~20 times per
+    call. Splitting the columns gives the same per-element arithmetic in the
+    same order - bit-identical output - with each block staying in cache.
+    """
+    if getattr(fn, "_openfocus_blocked", False):
+        return fn
+
+    @functools.wraps(fn)
+    def blocked(X, *filters):
+        X = np.asarray(X)
+        if X.ndim != 2:
+            return fn(X, *filters)
+        rows, cols = X.shape
+        step = max(16, _FILTER_BLOCK_BYTES // (8 * max(1, rows)))
+        if cols <= step:
+            return fn(X, *filters)
+        return np.concatenate(
+            [fn(X[:, c:c + step], *filters) for c in range(0, cols, step)],
+            axis=1)
+
+    blocked._openfocus_blocked = True
+    return blocked
+
+
+if dtcwt is not None:
+    try:
+        import dtcwt.numpy.transform2d as _dtcwt_t2d
+        for _name in ("colfilter", "coldfilt", "colifilt"):
+            setattr(_dtcwt_t2d, _name,
+                    _column_blocked(getattr(_dtcwt_t2d, _name)))
+    except (ImportError, AttributeError):  # pragma: no cover - dtcwt layout changed
+        pass
+
+def _dtcwt_impl(input_source, img_resize, N, use_gpu, thread_count=None):
     """
     DTCWT fusion implementation (Optimized CPU version).
     
@@ -49,6 +140,8 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu):
         img_resize: Tuple (width, height) or None.
         N: Number of wavelet decomposition levels.
         use_gpu: Ignored in this optimized NumPy version (CPU is used).
+        thread_count: Worker threads for the forward transforms
+            (None: up to 8, bounded by the CPU count).
     """
     if dtcwt is None or maximum_filter is None or convolve is None:
         raise RuntimeError(
@@ -63,16 +156,19 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu):
         raise ValueError("At least two images are required for fusion.")
 
     # Convert to float32 RGB [0, 1]
-    # Processing images as a batch is not easily possible with standard dtcwt library 
-    # (which expects 2D inputs), so we prepare them for channel-wise processing.
     out_dtype = fuse_output_dtype(images)
     images_rgb = [
         cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         for img in images
     ]
+    if thread_count is None:
+        workers = min(8, os.cpu_count() or 1)
+    else:
+        workers = max(1, int(thread_count))
 
     h, w = images_rgb[0].shape[:2]
     n_frames = len(images_rgb)
+    workers, lookahead = _memory_bounded_transform_plan(h, w, N, workers)
     transform = dtcwt.Transform2d()
 
     # 2. Activity per frame and level from the luminance transform. Only the
@@ -81,14 +177,20 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu):
     def _luma(img):
         return 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
 
-    activities = [[] for _ in range(N)]
-    for img in images_rgb:
+    def measure_activity(img):
         pyr = transform.forward(_luma(img), nlevels=N)
-        for level in range(N):
-            activities[level].append(
-                maximum_filter(np.abs(pyr.highpasses[level]).sum(axis=2).astype(np.float32),
-                               size=3, mode='reflect'))
-        del pyr
+        return [maximum_filter(
+                    np.abs(pyr.highpasses[level]).sum(axis=2).astype(np.float32),
+                    size=3, mode='reflect')
+                for level in range(N)]
+
+    # The transforms are frame-independent. executor.map preserves input
+    # order, so tie-breaking and every downstream decision remain identical
+    # to upstream's serial implementation.
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        by_frame = list(executor.map(measure_activity, images_rgb))
+    activities = [[frame[level] for frame in by_frame] for level in range(N)]
+    del by_frame
 
     def _consistent_argmax(act):
         """N-way argmax + 3x3 majority consistency check on the index map.
@@ -115,12 +217,26 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu):
 
     # 4. Per channel, stream the frames: forward, keep the selected
     # coefficients, accumulate the weighted low-pass.
+    def forward_colour(job):
+        channel, frame = job
+        return transform.forward(images_rgb[frame][:, :, channel], nlevels=N)
+
+    # Keep only a bounded number of complex pyramids live at once. Results
+    # are consumed in channel/frame order, preserving upstream's low-pass
+    # accumulation order and therefore its exact output.
+    jobs = [(c, i) for c in range(3) for i in range(n_frames)]
     fused_channels = []
-    for c in range(3):
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = deque(executor.submit(forward_colour, job)
+                        for job in jobs[:lookahead])
+        next_job = len(pending)
         fused_high = None
         lp = None
-        for i, img in enumerate(images_rgb):
-            pyr = transform.forward(img[:, :, c], nlevels=N)
+        for c, i in jobs:
+            pyr = pending.popleft().result()
+            if next_job < len(jobs):
+                pending.append(executor.submit(forward_colour, jobs[next_job]))
+                next_job += 1
             if fused_high is None:
                 fused_high = [np.zeros_like(hp) for hp in pyr.highpasses]
                 lp = np.zeros_like(pyr.lowpass)
@@ -139,9 +255,12 @@ def _dtcwt_impl(input_source, img_resize, N, use_gpu):
                 fused_high[level][sel] = pyr.highpasses[level][sel]
             lp += lp_weights[i] * pyr.lowpass
             del pyr
-        rec = transform.inverse(dtcwt.Pyramid(lp, tuple(fused_high)))
-        # dtcwt pads odd sizes by duplicating the last row/column
-        fused_channels.append(rec[:h, :w])
+            if i == n_frames - 1:
+                rec = transform.inverse(dtcwt.Pyramid(lp, tuple(fused_high)))
+                # dtcwt pads odd sizes by duplicating the last row/column
+                fused_channels.append(rec[:h, :w])
+                fused_high = None
+                lp = None
 
     # 5. Reconstruct Final Image
     fused_img = np.stack(fused_channels, axis=-1)
