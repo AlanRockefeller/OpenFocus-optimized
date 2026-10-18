@@ -391,6 +391,7 @@ class RenderManager:
                 need_align_openfocus),
             "preview": self._preview_mode,
             "roi": roi_rect is not None,
+            "all_filenames": list(window.image_filenames or []),
             "filenames": list(stack_filenames),
             "included": list(included_idx),
         }
@@ -472,7 +473,7 @@ class RenderManager:
             and not context.get("roi")
             and (window.raw_images is not context.get("source_ref")
                  or window.included_indices() != context.get("included")
-                 or list(window.image_filenames or []) != context["filenames"])
+                 or list(window.image_filenames or []) != context["all_filenames"])
         )
         if stack_changed:
             import logging as _logging

@@ -207,11 +207,15 @@ class _StubStatusBar:
 
 
 class _StubOutputManager:
+    def __init__(self):
+        self.shown = 0
+        self.updated = 0
+
     def show_fusion_result(self):
-        pass
+        self.shown += 1
 
     def update_output_list_for_fusion(self):
-        pass
+        self.updated += 1
 
     def update_output_count(self):
         pass
@@ -297,7 +301,10 @@ def _render_window(frames):
 
     def effective_stack(self=None):
         idx = included_indices()
-        return w.raw_images, list(w.image_filenames), idx
+        if len(idx) == len(w.raw_images):
+            return w.raw_images, list(w.image_filenames), idx
+        return ([w.raw_images[i] for i in idx],
+                [w.image_filenames[i] for i in idx], idx)
 
     import types
     w.included_indices = types.MethodType(included_indices, w)
@@ -490,6 +497,27 @@ def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
     assert len(saved) == 1
     assert saved[0]["shape"] == (30, 40)
     assert saved[0]["filenames"] == w.image_filenames
+
+
+def test_render_with_excluded_frame_is_not_discarded(qapp, monkeypatch):
+    """The staleness guard must compare like with like: the full filename
+    list to its launch-time snapshot, not to the filtered worker filenames."""
+    frames = [np.zeros((30, 40, 3), dtype=np.uint8) + i for i in range(3)]
+    w = _render_window(frames)
+    w.excluded_frames = {1}
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+    from controllers import render_manager as render_module
+    monkeypatch.setattr(render_module.QApplication, "alert", lambda *args: None)
+    rm.start_render()
+
+    handed = rm.worker.args[0]
+    assert [id(frame) for frame in handed] == [id(frames[0]), id(frames[2])]
+    fused = np.full_like(frames[0], 7)
+    rm.on_render_finished(handed, fused, False, 0.0, 1.0, "CPU")
+
+    assert w.fusion_result is fused
+    assert w.output_manager.shown == 1
+    assert w.output_manager.updated == 1
 
 
 def test_alignment_dropped_when_a_frame_is_deleted_mid_render(qapp, monkeypatch):
