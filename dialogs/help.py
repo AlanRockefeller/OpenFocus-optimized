@@ -96,7 +96,7 @@ class RenderMethodHelpDialog(HelpDialog):
     A neural network trained on everyday focus stacks. It generally produces the strongest results with minimal tuning. Because it is not fine-tuned for specialist domains (microphotography, microscopy, medical imaging, etc.), avoid it when domain shifts are expected. Runs fastest with GPU acceleration.</p>
 
     <p>OpenFocus A / B / C<br/>
-    The OpenFocus method family, implemented and verified against the original software's output (about 1&ndash;3.5% MAE, crop-offset-registered, on real benchmark stacks). <b>A</b> is a variance-weighted average with a last-frame prior &mdash; fast and colour-stable on short stacks. <b>B</b> is a variance depth-map pick that selects the sharpest frame per pixel &mdash; the best choice for smooth surfaces and microscopy. <b>C</b> is a Laplacian-pyramid per-band blend with a natural look on textured subjects. The kernel slider sets the variance window (default radius 5, matching OpenFocus's fixed window); fused output is insensitive to it, while depth maps get sharper labels.</p>"""
+    Variance-weighted average, variance depth-map pick, and Laplacian-pyramid fusion. <b>A</b> is a variance-weighted average with a last-frame prior &mdash; fast and colour-stable on short stacks. <b>B</b> is a variance depth-map pick that selects the sharpest frame per pixel &mdash; the best choice for smooth surfaces and microscopy. <b>C</b> is a Laplacian-pyramid per-band blend with a natural look on textured subjects. The kernel slider sets the variance window (default radius 5); fused output is insensitive to it, while depth maps get sharper labels.</p>"""
         
         super().__init__(trans.t('help_render_title'), help_text, parent)
 
@@ -121,13 +121,11 @@ class RegistrationHelpDialog(HelpDialog):
     Enhanced Correlation Coefficient alignment refines alignment at the sub-pixel level. Works well for fine adjustments or whenever feature detection is unreliable.</p>
 
     <p>Align (OpenFocus, fast)<br/>
-    Bounded similarity registration (translation + rotation + scale,
-    implemented from OpenFocus) with per-frame brightness
-    equalization and auto-crop. Sub-second per frame. Frames whose shift
-    exceeds 8% of the frame size are left unaligned rather than partially
-    corrected — that is where OpenFocus's own aligner gives up too (CLI:
-    --align-shift-limit). Choose ECC or Homography for non-rigid or extreme
-    geometry.</p>"""
+    Bounded similarity registration (translation + rotation + scale)
+    with per-frame brightness equalization and auto-crop. Sub-second per
+    frame. Frames whose shift exceeds 8% of the frame size are left
+    unaligned rather than partially corrected (CLI: --align-shift-limit).
+    Choose ECC or Homography for non-rigid or extreme geometry.</p>"""
 
         super().__init__(trans.t("help_registration_title"), help_text, parent)
 

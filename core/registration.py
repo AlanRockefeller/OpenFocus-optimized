@@ -475,11 +475,9 @@ class RegistrationCancelled(Exception):
 # ========== OpenFocus 对齐：有界相似变换（平移+旋转+缩放） ==========
 
 _OF_EST_WIDTH = 480  # 估计阶段长边上限（旋转/缩放网格在低分辨率上搜索）
-# 位移上限（帧尺寸比例）。实测 §7.2：OpenFocus 的对齐在 ≤6% 时裁边精确
-# 跟随位移，≥8% 直接放弃追踪（输出高频能量跳升=鬼影模糊）。旧默认 25% 有
-# 两个害处：强行把不可靠的大位移校正成半错位；且有效区交集会被裁掉一大块
-# （25% 上限 = 单边最多丢 1/4 画面）。取 8%（OpenFocus 放弃点的上端——本对齐
-# 器有 NCC 置信门限与简约规则，比 OpenFocus 的全局参数估计更稳），可用
+# 位移上限（帧尺寸比例）：较大的位移估计不可靠，强行校正会得到半错位
+# 并让有效区交集被裁掉一大块（25% 上限 = 单边最多丢 1/4 画面）。取 8%——
+# 本对齐器有 NCC 置信门限与简约规则，可用
 # ImageRegistration(max_shift_ratio=) / CLI --align-shift-limit 按需放宽。
 _OF_MAX_SHIFT_RATIO = 0.08
 
@@ -614,15 +612,13 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
     """
     OpenFocus 快速对齐：有界相似变换（平移+旋转+缩放）+ 亮度均衡 + 自动裁边。
 
-    复刻 OpenFocus 的对齐档位（docs/OpenFocus_REPRODUCTION_REPORT.md）：
-    呼吸效应 = 小幅全局相似变换（平移+旋转+缩放，受上限约束）。旋转/缩放
+    适用小幅全局相似变换（平移+旋转+缩放，受上限约束）。旋转/缩放
     用有界网格搜索（重叠区 NCC 判别评分——相位相关响应值对旋转不敏感），
     平移用 Hann 窗相位相关亚像素估计；失焦/弱纹理帧对参考帧置信不足时
     链到上一帧（相邻帧模糊程度更接近）；低置信或运动分量低于死区时视为
     无运动（保护固定机位栈不被噪声抖动）。每帧低频亮度均衡到参考帧
-    （OpenFocus AdjustBrightness），位移超过 max_shift_ratio 时**放弃该帧
-    对齐**（实测 §7.2：OpenFocus 在 6–8% 之上直接不追，强行钳制会得到
-    一半错位 + 污染有效区），最后按有效区交集自动裁边（AutoCrop）。
+    位移超过 max_shift_ratio 时**放弃该帧对齐**（强行钳制会得到
+    一半错位 + 污染有效区），最后按有效区交集自动裁边。
     """
     if max_shift_ratio is None:
         max_shift_ratio = _OF_MAX_SHIFT_RATIO
@@ -731,9 +727,8 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
             [w / 2.0, h / 2.0])
         tx = float(tc[0])
         ty = float(tc[1])
-        # 位移上限：超限**放弃该帧对齐**。实测 §7.2——OpenFocus 在位移
-        # 超过 ~6–8% 帧尺寸时直接不追（裁边不再跟随、输出高频跳升=鬼影），
-        # 而旧的"钳制到上限"会把大位移校正成半错位，还让有效区交集被裁掉
+        # 位移上限：超限**放弃该帧对齐**——较大的位移估计不可靠，
+        # 旧的"钳制到上限"会把大位移校正成半错位，还让有效区交集被裁掉
         # 一大块（25% 上限意味着单边最多裁 1/4 画面）。
         over = (abs(tx) > max_shift[0] or abs(ty) > max_shift[1])
         if over:
@@ -761,8 +756,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                                 | cv2.WARP_FILL_OUTLIERS,
                                 borderMode=cv2.BORDER_REFLECT)
         if gain != 1.0:
-            # 亮度均衡同步应用到输出帧（OpenFocus AdjustBrightness 语义：
-            # 均衡后的帧进入融合，消除曝光漂移）
+            # 亮度均衡同步应用到输出帧：均衡后的帧进入融合，消除曝光漂移
             warped = np.clip(warped.astype(np.float32) * gain, 0,
                              255 if img.dtype == np.uint8 else 65535)
             warped = warped.astype(img.dtype)
@@ -1287,7 +1281,7 @@ class ImageRegistration:
             method (str): 配准方法名称，可选 'homography', 'ecc', 'both'
             downscale_width (int): 特征/估计阶段的下采样宽度
             max_shift_ratio (float): 仅 'openfocus' 生效——位移上限（帧尺寸
-                比例，0–1）。None 用 _OF_MAX_SHIFT_RATIO（8%，分析 §7.2）。
+                比例，0–1）。None 用 _OF_MAX_SHIFT_RATIO（8%）。
         """
         if method not in self.SUPPORTED_METHODS:
             raise ValueError(
@@ -1375,7 +1369,7 @@ class ImageRegistration:
                            thread_count: int = 4,
                            should_cancel=None) -> List[np.ndarray]:
         """
-        OpenFocus 快速对齐（有界相位相关，复刻 OpenFocus 的对齐档位）
+        OpenFocus 快速对齐（有界相似变换）
         """
         return _align_openfocus_impl(input_source, output_path,
                                      downscale_width=self.downscale_width,

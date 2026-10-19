@@ -228,14 +228,13 @@ class MultiFocusFusion:
         # StackMFF V4 批量处理大小
         self.stackmffv4_batch_size = max(1, int(stackmffv4_batch_size))
         # 基底校正（消除亮度漂移）：'none' | 'last' | 'first'。
-        # 验证：OpenFocus 全系方法的输出都是"细节层来自融合决策 +
-        # 基底低频来自参考帧"——out += LP(I_base) − LP(out)，σ≈32，
+        # 细节层来自融合决策，基底低频来自参考帧——
+        # out += LP(I_base) − LP(out)，σ≈32，
         # 消除帧间曝光/亮度漂移（延时与手持栈刚需）。
         self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
         # 帧序方向：'asc'（默认，保持文件序）| 'desc'（倒序栈翻转）| 'off'，
         # 仅对 openfocus 族生效（其余算法对帧序不敏感）。
-        # 没有内容式自动检测——内容是反转变换协变的，方向只能显式给出
-        # （实验证据：tools/OpenFocus_repro/validate_autosort.py）。
+        # 没有内容式自动检测——内容是反转变换协变的，方向只能显式给出。
         self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
         self._validate_environment()
     
@@ -293,7 +292,7 @@ class MultiFocusFusion:
                           img_resize: Optional[Tuple[int, int]] = None,
                           kernel_size: int = 7,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - A：方差加权平均（末帧先验），OpenFocus Method A 复现。"""
+        """OpenFocus - A：方差加权平均（末帧先验）。"""
         from fusion_methods.openfocus_ab import openfocus_a_impl
         kernel_size = max(1, int(kernel_size or 7))
         if kernel_size % 2 == 0:
@@ -307,7 +306,7 @@ class MultiFocusFusion:
                           img_resize: Optional[Tuple[int, int]] = None,
                           kernel_size: int = 7,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - B：方差深度图选择，OpenFocus Method B 复现。"""
+        """OpenFocus - B：方差深度图选择。"""
         from fusion_methods.openfocus_ab import openfocus_b_impl
         kernel_size = max(1, int(kernel_size or 7))
         if kernel_size % 2 == 0:
@@ -322,7 +321,7 @@ class MultiFocusFusion:
                           img_resize: Optional[Tuple[int, int]] = None,
                           kernel_size: int = 7,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - C：拉普拉斯金字塔融合，OpenFocus Method C 复现。"""
+        """OpenFocus - C：拉普拉斯金字塔融合。"""
         from fusion_methods.openfocus_ab import openfocus_c_impl
         kernel_size = max(1, int(kernel_size or 7))
         if kernel_size % 2 == 0:
@@ -390,7 +389,7 @@ class MultiFocusFusion:
     def _apply_base_correction(self, fused, input_source):
         """out += LP(I_base) − LP(out)：细节层不动，基底低频对齐参考帧。
 
-        OpenFocus 全系方法的公共结构（实测）：消除帧间曝光/亮度漂移。
+        细节层不动，基底低频对齐参考帧：消除帧间曝光/亮度漂移。
         self.base_frame == 'none'（默认）时原样返回。
         """
         if fused is None or self.base_frame == "none":

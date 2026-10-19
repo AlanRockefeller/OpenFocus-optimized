@@ -183,7 +183,7 @@ def create_right_panel() -> RightPanelComponents:
     smooth_layout.addWidget(slider_smooth)
     config_layout.addWidget(smooth_widget)
 
-    # OpenFocus B: depth-map transition smoothing (OpenFocus's Smoothing knob)
+    # OpenFocus B: depth-map transition smoothing
     depth_smooth_row = QWidget()
     ds_layout = QHBoxLayout(depth_smooth_row)
     ds_layout.setContentsMargins(0, 0, 0, 4)

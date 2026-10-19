@@ -14,10 +14,9 @@ per-pixel decision and are deliberately absent.
 - gfgfgf:        argmax of the GFG + fast-guided-filter focus map (paper eqs 1-13)
 - stackmffv4:    the model's own focus-index output (tiled with the same
                  memory budget as AI fusion)
-- openfocus_b:   argmax of the window local variance — the measure the
-                 OpenFocus implementation work validated to 99.5% depth-map
-                 agreement (blur(x²) − blur(x)²); the kernel slider is
-                 the variance window, exactly as in B's fusion
+- openfocus_b:   argmax of the window local variance
+                 (blur(x²) − blur(x)²); the kernel slider is the
+                 variance window, exactly as in B's fusion
 - openfocus_c:   argmax of the finest Laplacian-band energy (gray −
                  blur(σ1), the pyramid's own decision signal)
 
@@ -269,9 +268,8 @@ def _measure_stackmffv4(images, progress, should_cancel,
 def _measure_openfocus(images, progress, should_cancel, kernel_size=11):
     """B：argmax of blur(x²) − blur(x)² on the gray channel.
 
-    与 fusion_methods/openfocus_ab.py 的 B 方法度量一致（验证：与
-    OpenFocus 深度图 99.5% 逐像素重合）——硬拾取的逐像素获胜帧。kernel
-    滑块即方差窗口（默认半径 5，判别性探针实测最优）；流式 argmax
+    与 fusion_methods/openfocus_ab.py 的 B 方法度量一致——硬拾取的
+    逐像素获胜帧。kernel 滑块即方差窗口（默认半径 5）；流式 argmax
     （严格 > 保持 np.argmax 首胜语义）。
     """
     if kernel_size % 2 == 0:

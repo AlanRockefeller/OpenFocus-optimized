@@ -47,22 +47,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", "-d", default=None,
                         help="Batch mode: fuse every input folder, writing <folder>.<ext> here")
     parser.add_argument("--method", "-m", default="guided_filter", choices=VALID_METHODS,
-                        help="Fusion method (default: guided_filter); openfocus_a/b/c are implemented "
-                             "from OpenFocus (A = variance-weighted average, B = variance depth-map pick, "
+                        help="Fusion method (default: guided_filter); openfocus_a/b/c select the "
+                             "OpenFocus family (A = variance-weighted average, B = variance depth-map pick, "
                              "C = Laplacian pyramid)")
     parser.add_argument("--align", "-a", default="none", choices=VALID_ALIGN,
                         help="Registration applied before fusion (default: none); openfocus = fast bounded "
                              "phase correlation with brightness equalization")
     parser.add_argument("--align-shift-limit", type=float, default=None, metavar="RATIO",
                         help="openfocus alignment only: maximum accepted frame shift as a fraction of the "
-                             "frame size (default 0.08, the limit OpenFocus gives up at; frames above it are "
+                             "frame size (default 0.08; frames above it are "
                              "left unaligned rather than half-corrected)")
     parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
                         help="Base correction after fusion: match the output's low frequencies to the "
                              "last/first frame (removes brightness/exposure drift, default: none)")
     parser.add_argument("--sort", default="asc", choices=["asc", "desc", "off"],
                         help="Stack order for the openfocus_a/b/c methods: 'asc' keeps the file order "
-                             "(default, matches OpenFocus), 'desc' reverses a far-to-near sweep so the "
+                             "(default), 'desc' reverses a far-to-near sweep so the "
                              "base/last-frame semantics anchor to the intended end, 'off' is an explicit no-op")
     parser.add_argument("--dust-map", default=None, metavar="WHITE",
                         help="Flat-field (dust map) correction: path to a defocused shot of a blank/white "
@@ -73,7 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "source of the variance-window radius")
     parser.add_argument("--depth-smoothing", type=float, default=None, metavar="SIGMA",
                         help="openfocus_b only: depth-map transition smoothing (Gaussian sigma, "
-                             "default 1.2 = OpenFocus-matched; 0 = sharpest, larger = calmer on noisy stacks)")
+                             "default 1.2; 0 = sharpest, larger = calmer on noisy stacks)")
     parser.add_argument("--threads", "-t", type=int, default=4,
                         help="Worker thread count (default: 4)")
     parser.add_argument("--batch-size", type=int, default=2,

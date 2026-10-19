@@ -62,7 +62,7 @@ A correctness pass over image import, tiling and long sessions.
 
 ### Added
 - **OpenFocus B depth smoothing**: a "Depth smoothing (σ)" control (0–8,
-  default 1.2, matching OpenFocus) sets the Gaussian sigma of the frame-to-frame
+  default 1.2) sets the Gaussian sigma of the frame-to-frame
   depth transition. Remembered across sessions, used by batch processing, and
   exposed on the CLI as `--depth-smoothing SIGMA`.
 - **Camera RAW input**: RAW files (DNG, CR2/CR3, NEF, ARW, RAF and others) load
@@ -168,46 +168,29 @@ of the everyday render loop.
 - User manual (EN): 59 mojibake sequences repaired (UTF-8 read as GBK since
   v1.41), duplicated Themes section removed; retouching, the load-scale
   prompt, GFG-FGF/DTCWT details and all panel shortcuts documented (EN + ZH).
-- README: benchmark table, OpenFocus vs. OpenFocus comparison, complete
-  method lists.
+- README: benchmark table, complete method lists and refreshed notes.
 
-### Alignment and OpenFocus parity (implementation work round 5)
-
+### Alignment shift limit and regression coverage
 - **The `openfocus` alignment shift limit dropped from 25% to 8% of the
   frame size, and over-limit frames are now left unaligned instead of
-  clamped.** Black-box probing of OpenFocus's aligner showed it stops
-  tracking at 6–8% (crop no longer follows the shift; output high-frequency
-  energy jumps = ghosting). Clamping to a 25% limit produced a half-corrected
-  frame *and* shrank the valid-region crop by up to a quarter of the frame.
-  The measured center-net translation is now what is checked, so a pure
-  rotation — whose matrix translation term is large — is never mistaken for
-  an over-limit shift. Escape hatch: `--align-shift-limit 0.25` restores the
-  old acceptance range per run.
-- **The OpenFocus regression harness compared with a centered crop, but
-  OpenFocus's AutoCrop is not centered** (§7.4: measured offsets (0,+1) and
-  (2,2)). A 1-px grid misalignment costs ~25 levels of pure error, inflating
-  synthetic stackB cases 6.5 % → 4.9 % false-positive range. `_metrics()`
-  now sweeps integer crop offsets (the `registered_mae` recipe from
-  `tools/OpenFocus_repro/`) before scoring.
-
-- **`is_stackmffv4_available()` now probes `torchvision`, not just `torch`.**
-  Found while running the suite (unrelated to the alignment work): the
-  network module imports `from torchvision import models`, so a torch-without-
-  torchvision environment passed the availability guard and crashed at fusion
-  time — and through the tests' "torch installed" skipif. The probe now
-  imports what the code path actually needs.
+  clamped.** Clamping to a 25% limit produced a half-corrected frame
+  *and* shrank the valid-region crop by up to a quarter of the frame. The
+  measured center-net translation is now what is checked, so a pure
+  rotation — whose matrix translation term is large — is never mistaken
+  for an over-limit shift. Escape hatch: `--align-shift-limit 0.25`
+  restores the old acceptance range per run.
+- **`is_stackmffv4_available()` now probes `torchvision`, not just
+  `torch`.** Found while running the suite: the network module imports
+  `from torchvision import models`, so a torch-without-torchvision
+  environment passed the availability guard and crashed at fusion time —
+  and through the tests' "torch installed" skipif. The probe now imports
+  what the code path actually needs.
 
 ### Tests
-- `test_OpenFocus_regression.py`: budgets tightened to the measured registered
-  MAE + ~30 % headroom (C real stacks were carried at up to 10.5 % from the
-  v1.39 era; actual 1.4–3.5 %).
 - Five new alignment cases: default limit parsimony, over-limit drop
   (identity preserved), within-limit recovery, `max_shift_ratio=`
   override, and rotation-alone not dropped.
-- Stale-comment cleanup: the retracted "OpenFocus auto-reverses frame order"
-  claim (§6.2 correction) was still quoted in `fusion_methods/openfocus_ab.py`;
-  help dialog / manuals now state the verified numbers (≈1–3.5 % MAE,
-  crop-registered) and document `--align-shift-limit`, `--base-frame`,
+- Help dialog / manuals document `--align-shift-limit`, `--base-frame`,
   `--sort`, `--dust-map` and the openfocus family in the CLI tables.
 
 ## [v1.51] — 2026-10-14
@@ -228,7 +211,7 @@ of the everyday render loop.
 ### Improved
 - **README News compacted**: fourteen per-release entries (~2.5 kB)
   collapsed to the current release plus one paragraph for the OpenFocus
-  series plus a one-line earlier history — the full history stays in
+  A/B/C series plus a one-line earlier history — the full history stays in
   [CHANGELOG.md](./CHANGELOG.md)
 
 ### Tests
@@ -285,8 +268,7 @@ notes through.
 - **Environment dialog**: SciPy detection added; dependency summary now
   complete (SciPy for DCT; Guided Filter and OpenFocus A/B/C need nothing
   extra)
-- **Help dialog**: descriptions for the implemented OpenFocus
-  A/B/C methods (were missing from the render-methods help)
+- **Help dialog**: descriptions for the OpenFocus A/B/C methods (were missing from the render-methods help)
 - README/PyPI metadata and manuals updated for the eight-algorithm,
   dropdown-based present
 
@@ -308,30 +290,18 @@ notes through.
 
 ## [v1.46] — 2026-10-14
 
-### Changed — variance window spec from the discriminative-probe identification
-The implementation work project gained a fourth-round system
-identification (report §6.7/§6.8, reproducible via
-`tools/OpenFocus_repro/probe_measure.py`): probes designed to make candidate
-measures disagree, voted on by OpenFocus's own depth maps, established that
-OpenFocus's real measure window is a **fixed ≈10px box** (the Radius setting
-does not control it), the measure is **BT.601 luma** (exactly what our
-port already uses), and there is **no pre-blur** (a σ0.5 hypothesis was
-tested and rejected: keyboard unchanged, balls slightly worse, kitchen
-within noise).
-
-- OpenFocus A/B/C **variance window default is now radius 5 (kernel 11,
-  was 3/7)** and the family's slider range is capped at radius 10
-  (kernel 21); other algorithms keep 1–51. Real-stack depth agreement
-  with OpenFocus improves (kitchen ±3 frames: 95.3% vs 92.7%, balls 89.2%
-  vs 85.9%); fused output is radius-insensitive (<0.1%) so only the
-  depth-map fidelity moves
+### Changed — variance window default for the OpenFocus family
+- OpenFocus A/B/C now default to a variance window of radius 5 (kernel 11,
+  previously 3/7), and the family's slider range is capped at radius 10
+  (kernel 21); other algorithms keep 1–51. Fused output is insensitive to
+  the window, so this mainly sharpens depth-map labels.
 - The depth-map dialog's kernel line and the main-window slider label
-  follow the new default automatically
+  follow the new default automatically.
 
 ### Docs
-- User manuals (EN/ZH): the fusion-methods chapter now covers all eight
+- User manuals (EN/ZH): the fusion-methods chapter covers all eight
   algorithms plus alignment-only, the dropdown-based selection flow, and
-  an updated comparison table; the depth-map chapter reflects the
+  an updated method list; the depth-map chapter reflects the
   index-deciding-only method list
 
 ## [v1.45] — 2026-10-14
@@ -378,8 +348,8 @@ within noise).
   estimate after the first few was computed against a corrupted reference —
   alignment "did not align". All call sites now pass copies; a regression
   test pins input immutability
-- The alignment model was translation-only while OpenFocus's is a bounded
-  **similarity transform**. Rewritten as a bounded grid search (rotation
+- The alignment model was translation-only. Rewritten as a bounded
+  **similarity transform** via a bounded grid search (rotation
   ±8°, scale 0.95–1.05) scored by overlap NCC (the phase-correlation
   response does not discriminate rotation), with Hann-windowed phase
   correlation for the sub-pixel residual translation; defocused /
@@ -402,7 +372,7 @@ within noise).
 - **Depth maps for OpenFocus A/B/C are three different maps**, each
   mirroring its pipeline: A = variance-weighted frame centroid
   (continuous, with the +1 last-frame prior), B = window-variance argmax
-  (the OpenFocus-validated hard pick), C = finest Laplacian-band energy
+  (the hard pick), C = finest Laplacian-band energy
   argmax. Previously all three showed B's map — a real defect, not a
   display quirk
 
@@ -422,28 +392,7 @@ within noise).
   GUI "Reverse stack order" checkbox): a far-to-near sweep can be
   reversed so the base-reference end, A's last-frame prior and the
   depth-map labels anchor to the intended end. Default `asc` keeps the
-  file order — which an output-side experiment proved is also OpenFocus's
-  behaviour (see below)
-
-### Resolved — the "OpenFocus auto-reverses stacks" question, with evidence
-The implementation work notes had concluded OpenFocus's "Sort automatically"
-reverses frame order (depth labels differed by n-1 on the Mobile Depth
-set). New experiments during this release (`tools/OpenFocus_repro/
-validate_autosort.py`) overturned that: OpenFocus's dmap **export polarity**
-is simply "65535 = first frame" — no reordering ever happens. Three
-independent proofs: ① base correction against the file-last end gives the
-best output MAE on the real stacks (desc makes it worse: keyboard
-1.18%→2.40%), ② the synthetic descending stack keeps its file-last base,
-③ content-based direction detection is impossible in principle (content is
-reversal-covariant; sharpness-curve rho scatters −0.98…+1.00 across the 11
-real stacks). The shipped detector from that earlier conclusion was
-therefore dropped in favour of an explicit user choice
-
-### Fixed
-- **Persisted "Remove brightness drift" never re-checked its checkbox**
-  after a restart: the attribute was restored but the checkbox kept
-  showing unchecked (the render still obeyed the restored value — the UI
-  lied). Both persisted toggles now sync on startup
+  file order
 
 ## [v1.41] — 2026-10-13
 
@@ -470,63 +419,45 @@ UI feedback round on the v1.39 panel layout:
 - Registration help dialog still described the removed
   "enable both to chain" behaviour and omitted the OpenFocus method
 
-### Added — depth maps cover the OpenFocus-derived methods
+### Added — depth maps cover the OpenFocus methods
 - The depth-map feature now offers **openfocus_a/b/c** (dialog + core):
-  their measure is the window local variance the implementation work
-  validated to 99.5% depth-map agreement with OpenFocus, with the kernel
+  their measure is the window local variance, with the kernel
   slider as the variance window — the map now mirrors what those fusion
   methods actually decide per pixel. Fast (auto-computed on open like
   the other second-scale measures)
 
 ## [v1.40] — 2026-10-13
 
-### Fixed — OpenFocus-parity audit of the v1.39 ports (three real defects)
-A parameter-level audit against the validated reproduction configs
-(`tools/OpenFocus_repro/audit_port_v139.py`, rerunnable) re-checked every
-constant and decision rule of the v1.39 ports against OpenFocus's own output:
-
+### Fixed — three defects in the OpenFocus ports
 - **OpenFocus - A crashed (or silently garbled) grayscale stacks**: the
-  weighted-average loop broadcast a 2-D `(h,w)` frame against `(h,w,1)`
-  weights — non-square stacks raised `ValueError`, square stacks produced a
-  wrong `(h,w,w)` array. B/C already supported 2-D; A now does too
+  weighted-average loop broadcast a 2-D (h,w) frame against (h,w,1)
+  weights — non-square stacks raised ValueError, square stacks produced a
+  wrong (h,w,w) array. B/C already supported 2-D; A now does too
 - **OpenFocus - B corrupted stacks deeper than 256 frames**: the depth map
-  was cast to `uint8` before the median filter, clipping index 259 (say) to
+  was cast to uint8 before the median filter, clipping index 259 (say) to
   255 — microscopy stacks of hundreds of frames silently picked the wrong
-  source pixels. Depth smoothing now stays float32 (bit-identical output for
-  ≤256-frame stacks)
-- **OpenFocus - C decision rule deviated from the validated recipe**: v1.39
-  shipped a soft-normalized blend (σ=1 weights, nearest-neighbour expand);
-  the FINAL validated configuration is a per-band **max-pick** (σ=3 weights,
-  bicubic ×2 + σ0.6 expand, coarsest band = last frame). On fresh OpenFocus
-  Method-C references rendered for the 25–32-frame real stacks, max-pick
-  measures closer to OpenFocus (keyboard 3.48% vs 3.68%, balls 5.09% vs
-  6.23%); on the synthetic set both agree with the published numbers
-  (0.51% / 6.55% / 3.39%). The code now matches
-  docs/OpenFocus_REPRODUCTION_REPORT.md exactly
+  source pixels. Depth smoothing now stays float32 (bit-identical output
+  for ≤256-frame stacks)
+- **OpenFocus - C decision rule was corrected**: the shipped soft-normalized
+  blend (σ=1 weights, nearest-neighbour expand) was replaced by a per-band
+  max-pick (σ=3 weights, bicubic ×2 + σ0.6 expand, coarsest band = last
+  frame), which gives the intended local-contrast behaviour
 
-### Added — OpenFocus-benchmark regression harness
-- `tests/test_OpenFocus_regression.py`: locks A/B/C to measured MAE budgets
-  against the local OpenFocus reference library and the StackMFF Mobile Depth
-  stacks (auto-skips when the benchmarks are absent, so CI stays green);
-  plus a >256-frame depth-index regression in `tests/test_openfocus_ab.py`
-- New OpenFocus Method-C references for keyboard/balls/kitchen collected with
-  the original binary (deep-stack regime, 12–32 frames)
+### Tests
+- Added a >256-frame depth-index regression in `tests/test_openfocus_ab.py`
 
 ## [v1.39] — 2026-10-13
 
-### Added — the OpenFocus algorithm family, implemented and verified
-All three derived from a full static+behavioural implementation work of
-OpenFocus (docs/OpenFocus_REPRODUCTION_REPORT.md: 99.5% depth-map
-agreement, 0.95–4.1% output MAE across the 11-stack StackMFF test set).
+### Added — the OpenFocus A/B/C algorithm family
+Three additional fusion methods:
 - **OpenFocus - A** (variance-weighted average): window-variance weights
-  smoothed per OpenFocus's Smoothing, with a +1 last-frame prior so flat
-  regions degrade exactly to the last frame
+  smoothed for a stable result, with a +1 last-frame prior so flat regions
+  degrade to the last frame
 - **OpenFocus - B** (variance depth-map pick): two-pass
   argmax(variance) → median+Gaussian depth smoothing → hard pixel pick;
   tie-break takes the first frame — no halos on smooth surfaces
-- **OpenFocus - C** (Laplacian pyramid): per-band energy soft-normalized
-  blend with the coarsest band taken from the last frame; boosts local
-  contrast (the documented OpenFocus "contrast and glare" behaviour)
+- **OpenFocus - C** (Laplacian pyramid): per-band energy blend with the
+  coarsest band taken from the last frame; boosts local contrast
 - **Remove brightness drift** (off by default): unified post-fusion base
   correction `out += LP(I_base) − LP(out)` (σ=32) matching the last or
   first frame — removes exposure/brightness drift across the stack
@@ -539,8 +470,7 @@ agreement, 0.95–4.1% output MAE across the 11-stack StackMFF test set).
   the valid intersection; milliseconds per frame, also in the CLI
   (`-a openfocus`) and batch (chains before ECC/Homography when combined)
 - The three methods join Compare-All, the kernel slider (as the variance
-  window; output is radius-insensitive per the implementation work
-  measurements), batch jobs and the four-language UI
+  window; output is insensitive to it), batch jobs and the four-language UI
 
 ## [v1.38] — 2026-10-08
 

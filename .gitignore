@@ -88,7 +88,6 @@ assets/demo_stack/.openfocus_cache/
 /OpenFocusData/
 
 # Local-only: disassembly/strings of third-party binaries must never be published
-tools/OpenFocus_repro/evidence/
 # Local GUI screenshots / scratch
 .shots/
 shot_tmp.py

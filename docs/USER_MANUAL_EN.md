@@ -353,12 +353,11 @@ Image registration corrects spatial misalignment between frames in your image st
 #### OpenFocus (fast)
 
 - Bounded similarity alignment (translation + rotation + scale),
-  implemented from OpenFocus, with per-frame brightness
-  equalization and auto-crop
+  with per-frame brightness equalization and auto-crop
 - Sub-second per frame — much faster than ECC or Homography
 - Frames shifting more than **8% of the frame size are left unaligned**
-  rather than partially corrected; that is where OpenFocus's own aligner
-  gives up too. Override with the CLI `--align-shift-limit`
+  rather than partially corrected. Override with the CLI
+  `--align-shift-limit`
 - For non-rigid or extreme geometry, pick ECC or Homography instead
 
 ### Enabling Registration
@@ -436,12 +435,10 @@ OpenFocus offers eight fusion algorithms (plus an alignment-only mode). Each has
 - **Requirements**: PyTorch installation, optional CUDA GPU
 - **Note**: May be unavailable if PyTorch is not installed
 
-### OpenFocus A / B / C (implemented from OpenFocus)
+### OpenFocus A / B / C
 
-- **Algorithm**: The OpenFocus method family, reproduced and verified
-  against the original software's output (about 1–3.5% MAE,
-  crop-offset-registered, on real benchmark stacks; 99.5% depth-map
-  agreement)
+- **Algorithm**: Variance-weighted average, variance depth-map pick, and
+  Laplacian-pyramid fusion
 - **OpenFocus A**: variance-weighted average with a last-frame prior —
   fast, colour-stable on short stacks
 - **OpenFocus B**: variance depth-map pick — selects the sharpest frame
@@ -449,12 +446,12 @@ OpenFocus offers eight fusion algorithms (plus an alignment-only mode). Each has
 - **OpenFocus C**: Laplacian-pyramid per-band blend — natural look on
   textured subjects, boosts local contrast
 - **Parameters**: Variance window (kernel slider); results are
-  radius-insensitive per the implementation work measurements
+  radius-insensitive
 
 **Depth smoothing (OpenFocus B only)**: B's depth map decides which frame
 wins each pixel. The *Depth smoothing (σ)* spin box, shown under the kernel
 slider when B is selected (range 0–8, step 0.2, default 1.2), sets the
-Gaussian sigma of the transition between frames. 1.2 matches OpenFocus;
+Gaussian sigma of the transition between frames. 1.2 is the default;
 0 keeps the finest detail; larger values calm speckles and halos at depth
 jumps on noisy stacks. The value is remembered across sessions and is also
 used by batch processing. CLI: `--depth-smoothing SIGMA`.

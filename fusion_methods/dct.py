@@ -198,7 +198,7 @@ if __name__ == "__main__":
     t_start = time.time()
     
     # 修改这里的路径为你实际的图片文件夹
-    TARGET_DIR = r"C:\Users\dell\Pictures\OpenFocus\StackMFF V2 Used\Bug"
+    TARGET_DIR = os.path.join("images", "stack")
     OUTPUT_FILE = os.path.join(TARGET_DIR, "Fused_Result_Optimized.tif")
     
     BLOCK_SIZE = 8

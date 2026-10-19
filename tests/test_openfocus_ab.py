@@ -1,4 +1,4 @@
-"""Regression tests for the implemented OpenFocus-derived features:
+"""Regression tests for the OpenFocus A/B/C features:
 OpenFocus A/B fusion methods, base correction (brightness drift), and the
 OpenFocus fast alignment (bounded phase correlation)."""
 import numpy as np
@@ -153,7 +153,7 @@ class TestOpenFocusC:
         assert float(out.mean()) > 1.0
 
     def test_pyramid_boosts_local_contrast(self):
-        """implemented OpenFocus behaviour: C raises high-frequency
+        """C raises high-frequency
         energy above both inputs (the documented 'contrast and glare' side
         effect of per-band decisions)."""
         from fusion_methods.openfocus_ab import openfocus_c_impl
@@ -342,9 +342,8 @@ class TestOpenFocusAlignment:
         assert res(out[1], out[0]) < res(f1, base) * 0.75
 
     # ------------------------------------------------------------------
-    # 位移上限：实测 §7.2 —— OpenFocus 在 ~6–8% 之上放弃追踪。默认从
-    # 25% 降到 8%，且超限**放弃**而非钳制（钳制会得到半错位 + 裁掉大块
-    # 有效区）。
+    # 位移上限：默认从 25% 降到 8%，且超限**放弃**而非钳制（钳制会得到
+    # 半错位 + 裁掉大块有效区）。
     # ------------------------------------------------------------------
     def _shift_only_stack(self, shift_px, size=(120, 240)):
         base = make_two_focus_stack(size)[0]
@@ -352,10 +351,10 @@ class TestOpenFocusAlignment:
         f1 = np.roll(base, -shift_px, axis=1)
         return base, f1
 
-    def test_default_shift_limit_is_OpenFocus_parsimonious(self):
+    def test_default_shift_limit_is_parsimonious(self):
         from core.registration import _OF_MAX_SHIFT_RATIO
         assert _OF_MAX_SHIFT_RATIO <= 0.08, (
-            "the default must stay at OpenFocus's give-up point (§7.2); a wider "
+            "the default must stay at the parsimonious 8% limit; a wider "
             "default re-introduces half-corrected large shifts")
 
     def test_shift_over_limit_drops_alignment(self):
@@ -417,8 +416,7 @@ class TestOpenFocusAlignment:
 
 def test_openfocus_b_depth_smoothing_controls_transition():
     """depth_smoothing changes the depth transition (0 = median only; larger
-    = wider, which calms speckle on noisy texture); default (None) equals the
-    OpenFocus-matched 1.2."""
+    = wider, which calms speckle on noisy texture); default (None) is 1.2."""
     from fusion_methods.openfocus_ab import openfocus_b_impl
     rng = np.random.default_rng(3)
     tex = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)

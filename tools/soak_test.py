@@ -180,7 +180,7 @@ def main():
     # your own photo folder, or the sections are skipped with a notice —
     # indexing an empty list used to crash the harness before any case ran.
     photo_root = os.environ.get(
-        "OPENFOCUS_SOAK_DIR", r"C:\Users\dell\Pictures\OpenFocus")
+        "OPENFOCUS_SOAK_DIR", os.path.expanduser("~"))
     hetao = load_stack(os.path.join(photo_root, "hetao_aligned_stabled"))
     samples = load_stack(os.path.join(photo_root, "Samples1"))
     if hetao:

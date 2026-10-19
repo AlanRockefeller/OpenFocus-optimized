@@ -15,13 +15,13 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
 > [!NOTE]
 > **2026.10.18 · v1.56 — correctness pass.** EXIF-rotated photos now load upright and export with a neutral orientation tag; mixed 8/16-bit stacks fuse correctly; folder frames sort naturally (`img2` before `img10`); DCT keeps the input size and DTCWT no longer tiles (and seams) just because an image is large; depth maps follow the same frame order/alignment as the render; Japanese/Spanish survive a restart; WebP input and drag-export work.
 
-> **2026.10.15 · v1.54–v1.55** — **3D model export** (depth map + fused image as a textured OBJ for Blender/MeshLab), **camera RAW input** (DNG, CR2/CR3, NEF, ARW, RAF, … developed to 16-bit with one exposure mapping for the whole stack) and a **depth-smoothing control for OpenFocus B** (OpenFocus's Smoothing knob; also `--depth-smoothing` on the CLI).
+> **2026.10.15 · v1.54–v1.55** — **3D model export** (depth map + fused image as a textured OBJ for Blender/MeshLab), **camera RAW input** (DNG, CR2/CR3, NEF, ARW, RAF, … developed to 16-bit with one exposure mapping for the whole stack) and a **depth-smoothing control for OpenFocus B** (also `--depth-smoothing` on the CLI).
 
 > **2026.10.15 · v1.52–v1.53 — retouch brush & a quality pass.** New **Retouch** tool (`Ctrl+T`): paint pixels from a source frame onto the result to fix halos — it auto-picks the sharpest frame under the brush. **DTCWT** rebuilt (+5 dB on the ground-truth benchmark), **GFG-FGF** now follows its paper ([#5](https://github.com/Xinzhe99/OpenFocus/issues/5)) and no longer drops small in-focus objects. Smoother workflow: no modal popup after every render, live progress, optional load-scale prompt, per-method kernel memory, Ctrl+S saves the selected output.
 
 > **2026.10.14 · v1.50–v1.51** — dust-map flat-field fixes, in-place background updates with per-version release notes.
 
-> **2026.10.13 · v1.39–v1.49 — the OpenFocus era.** *OpenFocus A/B/C* (variance-weighted average, variance depth-map pick, Laplacian pyramid) implemented and verified against the original binary: 99.5% depth-map agreement, ~1% MAE on real stacks. Plus a fast bounded-similarity alignment (translation + rotation + scale), dust-map flat-field correction, per-pixel depth maps for every index-deciding method, an alignment-only mode, and single-choice dropdowns for all algorithm picking.
+> **2026.10.13 · v1.39–v1.49** — **OpenFocus A/B/C** (variance-weighted average, variance depth-map pick, Laplacian pyramid), a fast bounded-similarity alignment (translation + rotation + scale), dust-map flat-field correction, per-pixel depth maps for every index-deciding method, an alignment-only mode, and single-choice dropdowns for all algorithm picking.
 
 **Earlier**: v1.28–v1.37 — pip CLI, scale bars, multi-page TIFF, crash recovery, background updates, undo/redo · v1.21–v1.27 — portable mode, self-update, `.ofproj`, 16-bit pipeline, JA/ES · v1.9–v1.20 — wipe compare, themes, compare-all, quick preview. Full history in the [Changelog](./CHANGELOG.md).
 
@@ -47,7 +47,7 @@ Full details, including the portable mode and the log folder, are in the [User M
 ## 💻 Command Line Usage
 Beyond the GUI, OpenFocus ships as a pip-installable CLI on [PyPI](https://pypi.org/project/openfocus/) — Windows, macOS and Linux, no Python GUI stack required:
 ```bash
-pip install openfocus          # all 8 fusion methods (4 classical + OpenFocus-derived OpenFocus A/B/C)
+pip install openfocus          # all 8 fusion methods (4 classical + OpenFocus A/B/C)
 pip install "openfocus[ai]"    # + the AI (StackMFF-V4) model, weights included
 pip install "openfocus[raw]"   # + camera RAW input (rawpy / LibRaw)
 openfocus --input ./stack_folder --output ./result/fused.png
@@ -136,7 +136,7 @@ OpenFocus is a PyQt6-based multi-focus registration and fusion workstation that 
 - **Dual-Tree Complex Wavelet Transform (DTCWT)**: Multi-scale, multi-orientation fusion with one consistent decision per pixel and level.
 - **GFG-FGF**: Gaussian-like four-neighbourhood gradient operator + fast guided filter (Fu et al., 2024), well suited to microscopy.
 - **StackMFF V4**: Pretrained deep model (GPU optional).
-- **OpenFocus A / B / C**: The OpenFocus method family (weighted average / depth-map pick / pyramid), implemented and verified against the original software's output.
+- **OpenFocus A / B / C**: Variance-weighted average, variance depth-map pick, and Laplacian-pyramid fusion.
 
 ### Registration Algorithms
 - **OpenFocus (fast)**: Bounded similarity alignment (translation + rotation + scale) with brightness equalization and auto-crop — sub-second per frame.
@@ -159,23 +159,6 @@ OpenFocus is a PyQt6-based multi-focus registration and fusion workstation that 
 | DTCWT | 39.4 | 36.1 | 33.9 | 8 s |
 
 OpenFocus A (weighted average) is a deliberately soft look and is not built for this test. Reproduce with `python tools/synthetic_benchmark.py [--noise 3] [--scene small]`.
-
-### OpenFocus vs. OpenFocus
-
-| | OpenFocus | OpenFocus 8 |
-|---|---|---|
-| Price / license | Free, MIT, source available | Commercial (Lite/Pro/Premium) |
-| Platforms | Windows, macOS, CLI on Linux | Windows, macOS |
-| Fusion methods | 8 (incl. OpenFocus's A/B/C family, AI model) | 3 (A/B/C) |
-| Retouch brush | ✓ with sharpest-frame auto-pick | ✓ |
-| Alignment | 3 methods (similarity, ECC, homography) | 1 |
-| Depth maps | ✓ for every index-deciding method, 16-bit export | ✓ |
-| One-click compare of all methods (wipe view) | ✓ | render each method separately |
-| Command line | ✓ (`pip install openfocus`, Linux too) | ✓ (paid editions) |
-| Batch, dust map, scale bar, 16-bit, multi-page TIFF | ✓ | ✓ |
-| Camera RAW input | ✓ (LibRaw, 16-bit) | ✓ |
-| 3D model export (textured OBJ) | ✓ | ✓ |
-| Camera/rail control | – | ✓ |
 
 > **License Notice:** Every fusion/registration algorithm included comes from open-source research implementations. When using or redistributing them, please follow each algorithm’s original license terms in addition to the OpenFocus MIT license.
 
