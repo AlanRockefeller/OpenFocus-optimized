@@ -10,6 +10,10 @@ OpenFocus delivers focus stacking quality that rivals commercial-grade software,
   <a href="https://doi.org/10.5281/zenodo.23050823"><img src="https://img.shields.io/badge/DOI-10.5281%2Fzenodo.23050823-0078D7?logo=doi&logoColor=white" alt="DOI" /></a>
 </p>
 
+<p align="left">
+  <a href="https://github.com/Xinzhe99/OpenFocus"><img src="https://img.shields.io/badge/%E5%B9%BF%E5%91%8A%E4%BD%8D%E6%8B%9B%E7%A7%9F-Ad_Space_for_Rent-orange?style=for-the-badge" alt="广告位招租 / Ad Space for Rent" /></a>
+</p>
+
 ## 📢 News
 
 > [!NOTE]
