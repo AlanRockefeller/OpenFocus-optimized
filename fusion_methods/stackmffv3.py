@@ -284,9 +284,13 @@ def model_probabilities(frames, model_path, use_gpu, sigma=0.0):
     h, w = frames[0].shape[:2]
     ph, pw = (-h) % PAD_ALIGN, (-w) % PAD_ALIGN
 
-    batch = torch.zeros(1, len(frames), h + ph, w + pw)
+    # Build at the frame size and replicate-pad once, as the fusion does
+    # (_stackmffv3_batch_impl): allocating at the padded size left a zero
+    # band that the pad below then doubled, so the depth map saw a black
+    # border the fusion never did.
+    batch = torch.zeros(1, len(frames), h, w)
     for f, bgr in enumerate(frames):
-        batch[0, f, :h, :w] = torch.from_numpy(_gray01(bgr))
+        batch[0, f] = torch.from_numpy(_gray01(bgr))
     if ph or pw:
         batch = F.pad(batch, (0, pw, 0, ph), mode='replicate')
 

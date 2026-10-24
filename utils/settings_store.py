@@ -4,6 +4,7 @@ All user-tunable state on the main window (thread count, tile parameters,
 registration downscale, AI batch size and output mode, GPU toggle, UI language,
 recently opened stacks) survives restarts through this module.
 """
+import json
 import os
 import sys
 from typing import Any
@@ -37,6 +38,11 @@ LAST_DIALOG_DIR_KEY = "ui/last_dialog_dir"
 # The "AI runs on the CPU" warning is informational and repeat-per-launch
 # annoying; once the user says "don't show again" it must stay gone.
 AI_CPU_WARNING_DISMISSED_KEY = "rendering/ai_cpu_warning_dismissed"
+# The two brightness options are remembered per fusion method
+# (MainWindow.brightness_option_for); the global exposure_match /
+# base_frame_correct fields only mirror the last one toggled.
+BRIGHTNESS_BY_METHOD_KEY = "fusion/brightness_by_method"
+_BRIGHTNESS_OPTIONS = ("exposure_match", "base_correct")
 
 # window attribute -> (settings key, default, cast)
 _PERSISTED_FIELDS = {
@@ -183,6 +189,33 @@ def _cast(raw: Any, kind: Any, default: Any) -> Any:
         return default
 
 
+def brightness_memory_to_json(memory) -> str:
+    """{(option, method): bool} -> JSON text {option: {method: bool}}."""
+    nested: dict = {}
+    for (option, method), enabled in (memory or {}).items():
+        nested.setdefault(str(option), {})[str(method)] = bool(enabled)
+    return json.dumps(nested, sort_keys=True)
+
+
+def brightness_memory_from_json(raw) -> dict:
+    """Inverse of brightness_memory_to_json; anything malformed is dropped."""
+    try:
+        nested = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(nested, dict):
+        return {}
+    memory = {}
+    for option in _BRIGHTNESS_OPTIONS:
+        per_method = nested.get(option)
+        if not isinstance(per_method, dict):
+            continue
+        for method, enabled in per_method.items():
+            if isinstance(method, str) and isinstance(enabled, bool):
+                memory[(option, method)] = enabled
+    return memory
+
+
 def load_window_settings(window) -> None:
     """Restore persisted preferences onto window attributes (defaults kept)."""
     settings = get_settings()
@@ -193,6 +226,10 @@ def load_window_settings(window) -> None:
             setattr(window, attr, _cast(settings.value(key), kind, default))
         else:
             setattr(window, attr, getattr(window, attr, default))
+
+    if settings.contains(BRIGHTNESS_BY_METHOD_KEY):
+        window._brightness_by_method = brightness_memory_from_json(
+            settings.value(BRIGHTNESS_BY_METHOD_KEY))
 
     raw_recent = settings.value(RECENT_FILES_KEY, []) or []
     if not isinstance(raw_recent, list):
@@ -210,6 +247,8 @@ def save_window_settings(window) -> None:
     settings = get_settings()
     for attr, (key, default, _kind) in _PERSISTED_FIELDS.items():
         settings.setValue(key, getattr(window, attr, default))
+    settings.setValue(BRIGHTNESS_BY_METHOD_KEY, brightness_memory_to_json(
+        getattr(window, "_brightness_by_method", {})))
     settings.setValue(LANGUAGE_KEY, trans.current_lang)
     settings.setValue(RECENT_FILES_KEY, list(getattr(window, "recent_files", [])))
     settings.setValue(RECENT_PROJECTS_KEY, list(getattr(window, "recent_projects", [])))
