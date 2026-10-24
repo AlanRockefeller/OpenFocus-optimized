@@ -40,7 +40,8 @@ ehthumbs.db
 Desktop.ini
 
 # Project specific
-# Ignore .pth model files (weights/stackmffv4.pth was committed before this rule and stays tracked)
+# Ignore .pth model files except the shipped StackMFF V3 checkpoint
+!weights/stackmff_v3_final.pth
 *.pth
 .temp/
 
@@ -88,7 +89,6 @@ assets/demo_stack/.openfocus_cache/
 /OpenFocusData/
 
 # Local-only: disassembly/strings of third-party binaries must never be published
-tools/helicon_repro/evidence/
 # Local GUI screenshots / scratch
 .shots/
 shot_tmp.py

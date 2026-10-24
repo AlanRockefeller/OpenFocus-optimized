@@ -160,7 +160,8 @@ def test_dct_long_stack_keeps_winner_index_past_255():
     stack = [blurred] * FRAMES_OVER_UINT8
     stack[280] = winner
 
-    fused = MultiFocusFusion(algorithm="dct", use_gpu=False).fuse(
+    fused = MultiFocusFusion(algorithm="dct", use_gpu=False,
+                             exposure_match=False).fuse(
         input_source=stack, img_resize=None, block_size=8, kernel_size=7)
 
     assert np.array_equal(fused, winner), "DCT did not select the frame beyond index 255"
@@ -239,14 +240,14 @@ class TestStackFootprintTiling:
         assert _stack_footprint_exceeds(f10, 2048)
 
 
-class TestStackMFFV4EffectiveTiling:
+class TestStackMFFV3EffectiveTiling:
     """The AI tiled path must shrink tiles/batches so one model call stays
     within frames x pixels budget (2 tiles x 120 frames used to request a
     16GB conv allocation -> DefaultCPUAllocator OOM)."""
 
     def _tiling(self, n, block=1024, h=1637, w=1783, ov=256, pref=2):
-        from core.multi_focus_fusion import _stackmffv4_effective_tiling
-        return _stackmffv4_effective_tiling(n, block, h, w, ov, pref)
+        from core.multi_focus_fusion import _ai_effective_tiling
+        return _ai_effective_tiling(n, block, h, w, ov, pref)
 
     def test_moderate_stack_unchanged(self):
         # 40 frames x 2 tiles x 1024^2 == budget exactly: keep user settings
@@ -278,8 +279,8 @@ class TestStackMFFV4EffectiveTiling:
         assert batch >= 1
 
     def test_budget_respected_across_range(self):
-        from core.multi_focus_fusion import STACKMFFV4_IMAGE_BUDGET
-        budget = STACKMFFV4_IMAGE_BUDGET * 1024 * 1024
+        from core.multi_focus_fusion import AI_IMAGE_BUDGET
+        budget = AI_IMAGE_BUDGET * 1024 * 1024
         for n in (40, 60, 80, 120, 200, 300, 600):
             blk, batch, coords = self._tiling(n)
             assert n * batch * blk * blk <= budget, f"budget blown at {n} frames"
@@ -310,3 +311,36 @@ def test_dtcwt_keeps_odd_frame_size():
               for i in range(3)]
     out = MultiFocusFusion("dtcwt").fuse(frames)
     assert out.shape == (75, 99, 3)
+
+
+def test_dct_output_keeps_input_size(two_focus_stack):
+    """The block grid used to trim up to 7 px off the bottom/right, while the
+    tiled path returned full size — output geometry depended on tiling."""
+    h, w = 122, 161  # deliberately not multiples of 8
+    stack = make_two_focus_stack((h, w))
+
+    whole = MultiFocusFusion(algorithm="dct", tile_enabled=False).fuse(stack)
+    assert whole.shape == (h, w, 3)
+
+    tiled = MultiFocusFusion(algorithm="dct", tile_enabled=True,
+                             tile_block_size=64, tile_overlap=16,
+                             tile_threshold=10).fuse(stack)
+    assert tiled.shape == (h, w, 3)
+
+
+def test_dtcwt_is_not_tiled_only_because_of_size(monkeypatch, two_focus_stack):
+    """Tiling a globally-defined transform leaves a seam at the block grid;
+    with a small stack the whole-image path must be used even for large
+    frames (the size-only rule used to tile anything above 2048 px)."""
+    calls = []
+
+    def _forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("dtcwt was tiled despite a small activity budget")
+
+    monkeypatch.setattr(MultiFocusFusion, "_fuse_tiled", _forbidden)
+    fusion = MultiFocusFusion(algorithm="dtcwt", tile_enabled=True,
+                              tile_threshold=10)
+    out = fusion.fuse(input_source=two_focus_stack)
+    assert out.shape[:2] == (120, 160)
+    assert calls == []

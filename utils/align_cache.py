@@ -14,7 +14,20 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from utils.image_utils import imwrite_auto
+
 CACHE_DIR_NAME = ".openfocus_cache"
+
+
+def _read_frame(path: str) -> Optional[np.ndarray]:
+    """Read a cached frame through np.fromfile (unicode-safe on Windows)."""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
 
 
 def _signature(folder: str, filenames: List[str], align_options: Tuple[bool, bool],
@@ -60,7 +73,7 @@ def load_aligned(folder: str, filenames: List[str], align_options: Tuple[bool, b
         frames = []
         for i in range(len(filenames)):
             frame_path = os.path.join(cdir, f"aligned_{i:04d}.png")
-            img = cv2.imread(frame_path, cv2.IMREAD_UNCHANGED)
+            img = _read_frame(frame_path)
             if img is None:
                 return None
             frames.append(img)
@@ -87,7 +100,10 @@ def save_aligned(folder: str, filenames: List[str], aligned_images: List[np.ndar
         os.makedirs(cdir, exist_ok=True)
         for i, img in enumerate(aligned_images):
             frame_path = os.path.join(cdir, f"aligned_{i:04d}.png")
-            if not cv2.imwrite(frame_path, img):
+            # cv2.imwrite/imread cannot handle non-ASCII paths on Windows
+            # (a stack under 中文目录 silently never cached); go through the
+            # project's unicode-safe helpers instead.
+            if not imwrite_auto(frame_path, img):
                 return
         with open(os.path.join(cdir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump({"signature": sig, "count": len(aligned_images),

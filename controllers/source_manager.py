@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox, QD
 from core.workers import StackLoadWorker
 from dialogs import DownsampleDialog
 from utils import show_message_box, show_warning_box
-from ui.styles import MESSAGE_BOX_STYLE
+from ui import styles as ui_styles
 from locales import trans
 
 
@@ -55,7 +55,7 @@ class SourceManager:
             yes_btn.setText(trans.t("btn_continue"))
         if no_btn:
             no_btn.setText(trans.t("btn_cancel_generic"))
-        msg.setStyleSheet(MESSAGE_BOX_STYLE)
+        msg.setStyleSheet(ui_styles.MESSAGE_BOX_STYLE)
         return msg.exec() == QMessageBox.StandardButton.Yes
 
     def _start_load_worker(self, folder=None, video=None, filepaths=None,
@@ -92,7 +92,7 @@ class SourceManager:
                         show_warning_box(window, trans.t("msg_load_failed"),
                                          trans.t("msg_load_stack_failed_text"), message)
                     return
-                if filepaths and not self._confirm_mixed_sizes(images):
+                if not self._confirm_mixed_sizes(images):
                     return
                 if append and not self._confirm_append_dimensions(images):
                     return
@@ -161,9 +161,8 @@ class SourceManager:
         if callable(dont_ask) and dont_ask():
             window.ask_load_scale = False
             window.load_scale_default = scale
-            action = getattr(window, "ui_objs", {}).get("action_ask_load_scale")
-            if action is not None:
-                action.setChecked(False)
+            # No menu action to mirror any more: the flag lives in the
+            # Advanced settings page and is read from the window attribute.
             persist = getattr(window, "persist_settings", None)
             if callable(persist):
                 persist()
@@ -171,6 +170,8 @@ class SourceManager:
 
     def load_image_stack(self, folder_path: str, append: bool = False) -> None:
         window = self.window
+        from utils.logging_setup import log_action
+        log_action("load_stack", folder=folder_path, append=append)
 
         # 同一文件夹再次导入按"重新加载"处理：追加只会得到帧数翻倍的
         # 重复栈（恢复会话后再导入、拖同一文件夹两次都触发过）
@@ -438,14 +439,9 @@ class SourceManager:
             yes_btn.setText(trans.t("btn_continue"))
         if no_btn:
             no_btn.setText(trans.t("btn_cancel_generic"))
-        msg.setStyleSheet(MESSAGE_BOX_STYLE)
+        msg.setStyleSheet(ui_styles.MESSAGE_BOX_STYLE)
         ret = msg.exec()
         return ret == QMessageBox.StandardButton.Yes
-
-    def refresh_current_source_view(self) -> None:
-        index = getattr(self.window, "current_display_index", -1)
-        if index >= 0:
-            self.window.update_source_view(index)
 
     def clear_image_stack(self) -> None:
         window = self.window
@@ -462,6 +458,13 @@ class SourceManager:
         window.current_display_index = -1
 
         window.label_manager.reset_labels()
+
+        # The sharpness strip belongs to the stack that was just dropped; left
+        # alone it kept drawing the old frame count's bars and highlight under
+        # an empty source list.
+        curve = getattr(window, "sharpness_curve", None)
+        if curve is not None:
+            curve.clear()
 
         window.transform_manager.reload_image_stack(initial_index=None)
 
@@ -528,9 +531,9 @@ class SourceManager:
             self.clear_image_stack()
             return
 
+        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
-        window.push_undo()
         self._pop_sequence(window.image_filenames, row)
         self._pop_sequence(window.raw_images, row)
         self._pop_sequence(getattr(window, "base_images", None), row)
@@ -568,9 +571,9 @@ class SourceManager:
             self.clear_image_stack()
             return
 
+        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
-        window.push_undo()
         rows.sort(reverse=True)
 
         for row in rows:

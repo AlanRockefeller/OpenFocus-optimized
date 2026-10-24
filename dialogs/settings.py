@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
 )
-from ui.styles import PRIMARY_BLUE
+from ui.styles import PRIMARY_BLUE, help_button_style
 from locales import trans
+from widgets.stepper import StepperSpinBox
 from utils import resource_path
 
 
@@ -31,63 +32,6 @@ class DurationDialog(QDialog):
         self.duration = 500  # 默认500毫秒
 
         # 应用深色主题
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 30px;
-            }}
-            QSpinBox::up-button, QSpinBox::down-button {{
-                width: 30px;
-            }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
-                background-color: #555;
-            }}
-            QSpinBox::up-arrow, QSpinBox::down-arrow {{
-                width: 10px;
-                height: 10px;
-            }}
-            QSpinBox::up-arrow:disabled, QSpinBox::down-button:disabled {{
-                image: none;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-            QPushButton:pressed {{
-                background-color: #333;
-            }}
-            QGroupBox {{
-                color: #ffffff;
-                border: 1px solid #555;
-                border-radius: 5px;
-                margin-top: 10px;
-                font-weight: normal;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
@@ -97,17 +41,20 @@ class DurationDialog(QDialog):
 
         # 标签
         label = QLabel(trans.t("dialog_duration_label"))
-        label.setMinimumWidth(120)
+        # Width follows the text: a fixed 120 px clipped "Dauer (ms)" and
+        # was far too narrow for the longer translations.
+        label.setMinimumWidth(max(120, label.sizeHint().width()))
 
         # 旋转框
-        self.duration_spinbox = QSpinBox()
+        self.duration_spinbox = StepperSpinBox(minimum=50, maximum=10000,
+                                               decimals=0, step=50,
+                                               value=self.duration)
         self.duration_spinbox.setRange(50, 10000)  # 50ms到10秒
         self.duration_spinbox.setValue(self.duration)
         self.duration_spinbox.setSingleStep(50)  # 每次增加50ms
         self.duration_spinbox.setSuffix(" ms")
-        self.duration_spinbox.setButtonSymbols(QSpinBox.ButtonSymbols.UpDownArrows)
         self.duration_spinbox.setMinimumHeight(30)
-        self.duration_spinbox.setMinimumWidth(150)
+        self.duration_spinbox.setMinimumWidth(180)
 
         duration_layout.addWidget(label)
         duration_layout.addWidget(self.duration_spinbox)
@@ -118,6 +65,7 @@ class DurationDialog(QDialog):
         button_layout.addStretch()
 
         self.ok_button = QPushButton(trans.t('btn_ok'))
+        self.ok_button.setObjectName("primaryButton")
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.accept)
 
@@ -150,66 +98,8 @@ class DownsampleDialog(QDialog):
         self.max_percent = max(1, min(100, int(round(max_scale * 100))))
         self.scale_percent = min(max(1, int(initial_scale * 100)), self.max_percent)
 
-        # 应用深色主题（亮色主题下沿用应用级亮色样式，不强加深色）
-        from ui.styles import CURRENT_THEME as _theme
-        self._dark = _theme != "light"
-        if self._dark:
-            self._apply_dark_style()
-
+        # Styling comes from the generated application stylesheet.
         self._build_layout()
-
-    def _apply_dark_style(self):
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSlider::groove:horizontal {{
-                border: 1px solid #333;
-                height: 6px;
-                background: #202020;
-                margin: 2px 0;
-                border-radius: 3px;
-            }}
-            QSlider::handle:horizontal {{
-                background: #888;
-                border: 1px solid #555;
-                width: 14px;
-                height: 14px;
-                margin: -5px 0;
-                border-radius: 7px;
-            }}
-            QSlider::handle:horizontal:hover {{
-                background: #aaa;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: {PRIMARY_BLUE};
-                border-radius: 3px;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 30px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-        """)
 
     def _build_layout(self):
         layout = QVBoxLayout(self)
@@ -231,27 +121,7 @@ class DownsampleDialog(QDialog):
         self.decrease_btn.setAutoRepeatInterval(50)  # 重复间隔
         self.decrease_btn.clicked.connect(lambda: self.slider.setValue(self.slider.value() - 1))
         
-        # 小按钮样式
-        btn_style = """
-            QPushButton {
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 0px;
-                border-radius: 4px;
-                font-weight: bold;
-                font-size: 18px;
-            }
-            QPushButton:hover {
-                background-color: #555;
-            }
-            QPushButton:pressed {
-                background-color: #333;
-            }
-        """
-        if self._dark:
-            self.decrease_btn.setStyleSheet(btn_style)
-
+        # The generated stylesheet styles these via objectName="stepButton".
         # 滑块
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(1, self.max_percent)
@@ -268,8 +138,6 @@ class DownsampleDialog(QDialog):
         self.increase_btn.setAutoRepeatDelay(300)  # 长按延迟
         self.increase_btn.setAutoRepeatInterval(50)  # 重复间隔
         self.increase_btn.clicked.connect(lambda: self.slider.setValue(self.slider.value() + 1))
-        if self._dark:
-            self.increase_btn.setStyleSheet(btn_style)
 
         # 旋转框
         self.spinbox = QSpinBox()
@@ -277,7 +145,10 @@ class DownsampleDialog(QDialog):
         self.spinbox.setRange(1, self.max_percent)
         self.spinbox.setValue(self.scale_percent)
         self.spinbox.setSuffix("%")
-        self.spinbox.setFixedWidth(60)
+        # A fixed 60 px was narrower than the widget needs with its suffix and
+        # QSS padding (77 px minimum), so "100%" rendered as "10(". Let it
+        # size itself, with a floor that keeps the layout stable.
+        self.spinbox.setMinimumWidth(80)
 
         # 连接信号
         self.slider.valueChanged.connect(self.spinbox.setValue)
@@ -291,7 +162,7 @@ class DownsampleDialog(QDialog):
 
         # 提示信息
         hint_label = QLabel(trans.t('ds_hint'))
-        hint_label.setStyleSheet("color: #aaa; font-size: 11px; font-style: italic;")
+        hint_label.setObjectName("mutedLabel")
         hint_label.setWordWrap(True)
         layout.addWidget(hint_label)
 
@@ -306,6 +177,7 @@ class DownsampleDialog(QDialog):
         button_layout.addStretch()
 
         self.ok_button = QPushButton(trans.t('btn_ok'))
+        self.ok_button.setObjectName("primaryButton")
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.accept)
 
@@ -335,35 +207,6 @@ class TileSettingsDialog(QDialog):
         self.resize(420, 260)
 
         # 应用与其他对话框一致的深色样式
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 28px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
@@ -387,12 +230,10 @@ class TileSettingsDialog(QDialog):
         # tile_block_size
         block_layout = QHBoxLayout()
         block_layout.addWidget(QLabel(trans.t("dialog_tile_block_size")))
-        self.spin_block = QSpinBox()
-        self.spin_block.setRange(1, 16384)
-        self.spin_block.setSingleStep(1)
-        self.spin_block.setValue(1024)
-        # 移除右侧的增减按钮以便用户直接输入或使用键盘/滑块调整
-        self.spin_block.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_block = StepperSpinBox(minimum=1, maximum=16384,
+                                         decimals=0, step=1, value=1024)
+        # The -/+ pair needs room; 90 px was sized for a button-less spin.
+        self.spin_block.setMinimumWidth(150)
         block_layout.addWidget(self.spin_block)
         block_layout.addStretch()
         g_layout.addLayout(block_layout)
@@ -400,12 +241,9 @@ class TileSettingsDialog(QDialog):
         # tile_overlap
         overlap_layout = QHBoxLayout()
         overlap_layout.addWidget(QLabel(trans.t("dialog_tile_overlap")))
-        self.spin_overlap = QSpinBox()
-        self.spin_overlap.setRange(0, 4096)
-        self.spin_overlap.setSingleStep(1)
-        self.spin_overlap.setValue(256)
-        # 移除右侧的增减按钮
-        self.spin_overlap.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_overlap = StepperSpinBox(minimum=0, maximum=4096,
+                                           decimals=0, step=1, value=256)
+        self.spin_overlap.setMinimumWidth(150)
         overlap_layout.addWidget(self.spin_overlap)
         overlap_layout.addStretch()
         g_layout.addLayout(overlap_layout)
@@ -413,12 +251,9 @@ class TileSettingsDialog(QDialog):
         # tile_threshold
         threshold_layout = QHBoxLayout()
         threshold_layout.addWidget(QLabel(trans.t("dialog_tile_threshold")))
-        self.spin_threshold = QSpinBox()
-        self.spin_threshold.setRange(256, 131072)
-        self.spin_threshold.setSingleStep(1)
-        self.spin_threshold.setValue(2048)
-        # 移除右侧的增减按钮
-        self.spin_threshold.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_threshold = StepperSpinBox(minimum=256, maximum=131072,
+                                             decimals=0, step=1, value=2048)
+        self.spin_threshold.setMinimumWidth(150)
         threshold_layout.addWidget(self.spin_threshold)
         threshold_layout.addStretch()
         g_layout.addLayout(threshold_layout)
@@ -427,14 +262,13 @@ class TileSettingsDialog(QDialog):
 
         # Buttons: help and OK/Cancel
         btn_layout = QHBoxLayout()
-        help_btn = QPushButton("")
-        help_btn.setToolTip("Show help for tile settings")
+        help_btn = QPushButton("?")
+        help_btn.setToolTip(trans.t("help_btn_tile"))
         help_btn.setFixedSize(26, 26)
-        help_btn.setIcon(QIcon(resource_path('assets', 'help_white.svg')))
-        help_btn.setIconSize(QSize(18, 18))
-        help_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; padding: 0px; }"
-        )
+        # Text "?" styled by objectName: the old white SVG icon
+        # vanished on the light dialog background.
+        help_btn.setObjectName("helpButton")
+        help_btn.setStyleSheet(help_button_style())
         help_btn.clicked.connect(self.show_help)
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
@@ -497,35 +331,6 @@ class RegistrationSettingsDialog(QDialog):
         self.setWindowTitle(trans.t("dialog_reg_title"))
         self.resize(360, 140)
 
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 28px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
@@ -535,7 +340,7 @@ class RegistrationSettingsDialog(QDialog):
         g_layout = QHBoxLayout(group)
 
         lbl = QLabel(trans.t("dialog_reg_downscale"))
-        lbl.setMinimumWidth(120)
+        lbl.setMinimumWidth(max(120, lbl.sizeHint().width()))
         g_layout.addWidget(lbl)
 
         self.spin_downscale = QSpinBox()
@@ -544,20 +349,21 @@ class RegistrationSettingsDialog(QDialog):
         # 默认值会在 load_defaults 中设置
         self.spin_downscale.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.spin_downscale.setValue(1024)
+        # A usable minimum: sizeHint for a NoButtons spin is only ~45 px.
+        self.spin_downscale.setMinimumWidth(90)
         g_layout.addWidget(self.spin_downscale)
         g_layout.addStretch()
 
         layout.addWidget(group)
 
         btn_layout = QHBoxLayout()
-        help_btn = QPushButton("")
-        help_btn.setToolTip("Show help for registration settings")
+        help_btn = QPushButton("?")
+        help_btn.setToolTip(trans.t("help_btn_registration"))
         help_btn.setFixedSize(26, 26)
-        help_btn.setIcon(QIcon(resource_path('assets', 'help_white.svg')))
-        help_btn.setIconSize(QSize(18, 18))
-        help_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; padding: 0px; }"
-        )
+        # Text "?" styled by objectName: the old white SVG icon
+        # vanished on the light dialog background.
+        help_btn.setObjectName("helpButton")
+        help_btn.setStyleSheet(help_button_style())
         help_btn.clicked.connect(self.show_help)
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
@@ -605,35 +411,6 @@ class ThreadSettingsDialog(QDialog):
         self.resize(420, 160)
 
         # Apply the same dark dialog styling as TileSettingsDialog
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 28px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
@@ -643,13 +420,15 @@ class ThreadSettingsDialog(QDialog):
         g_layout = QHBoxLayout(group)
 
         lbl = QLabel(trans.t("dialog_thread_label"))
-        lbl.setMinimumWidth(140)
+        lbl.setMinimumWidth(max(140, lbl.sizeHint().width()))
         g_layout.addWidget(lbl)
 
-        self.spin_threads = QSpinBox()
+        self.spin_threads = StepperSpinBox(minimum=1, maximum=256,
+                                           decimals=0, step=1)
         self.spin_threads.setRange(1, 256)
         self.spin_threads.setSingleStep(1)
-        self.spin_threads.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        # A usable minimum: sizeHint for a NoButtons spin is only ~45 px.
+        self.spin_threads.setMinimumWidth(90)
         g_layout.addWidget(self.spin_threads)
         g_layout.addStretch()
 
@@ -657,14 +436,13 @@ class ThreadSettingsDialog(QDialog):
 
         # Buttons: help and OK/Cancel (match Tile/Registration style)
         btn_layout = QHBoxLayout()
-        help_btn = QPushButton("")
-        help_btn.setToolTip("Show help for application settings")
+        help_btn = QPushButton("?")
+        help_btn.setToolTip(trans.t("help_btn_app"))
         help_btn.setFixedSize(26, 26)
-        help_btn.setIcon(QIcon(resource_path('assets', 'help_white.svg')))
-        help_btn.setIconSize(QSize(18, 18))
-        help_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; padding: 0px; }"
-        )
+        # Text "?" styled by objectName: the old white SVG icon
+        # vanished on the light dialog background.
+        help_btn.setObjectName("helpButton")
+        help_btn.setStyleSheet(help_button_style())
         help_btn.clicked.connect(self.show_help)
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
@@ -703,61 +481,31 @@ class ThreadSettingsDialog(QDialog):
         self.accept()
 
 
-class StackMFFV4BatchSettingsDialog(QDialog):
-    """StackMFF V4 Batch Size settings dialog for tile batch processing."""
+class AIBatchSettingsDialog(QDialog):
+    """StackMFF V3 Batch Size settings dialog for tile batch processing."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.parent_window = parent
-        self.setWindowTitle(trans.t("dialog_stackmffv4_batch_title"))
+        self.setWindowTitle(trans.t("dialog_ai_batch_title"))
         self.resize(420, 160)
 
         # Apply the same dark dialog styling as other settings dialogs
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QSpinBox {{
-                background-color: #3c3c3c;
-                color: #ffffff;
-                border: 1px solid #555;
-                padding: 5px;
-                selection-background-color: {PRIMARY_BLUE};
-                min-height: 28px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 6px 12px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
         from PyQt6.QtWidgets import QGroupBox
 
-        group = QGroupBox(trans.t("dialog_stackmffv4_batch_group"))
+        group = QGroupBox(trans.t("dialog_ai_batch_group"))
         g_layout = QHBoxLayout(group)
 
-        lbl = QLabel(trans.t("dialog_stackmffv4_batch_label"))
-        lbl.setMinimumWidth(140)
+        lbl = QLabel(trans.t("dialog_ai_batch_label"))
+        lbl.setMinimumWidth(max(140, lbl.sizeHint().width()))
         g_layout.addWidget(lbl)
 
-        self.spin_batch_size = QSpinBox()
-        self.spin_batch_size.setRange(1, 16)
-        self.spin_batch_size.setSingleStep(1)
-        self.spin_batch_size.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_batch_size = StepperSpinBox(minimum=1, maximum=16,
+                                              decimals=0, step=1)
+        self.spin_batch_size.setMinimumWidth(150)
         g_layout.addWidget(self.spin_batch_size)
         g_layout.addStretch()
 
@@ -765,14 +513,13 @@ class StackMFFV4BatchSettingsDialog(QDialog):
 
         # Buttons: help and OK/Cancel
         btn_layout = QHBoxLayout()
-        help_btn = QPushButton("")
-        help_btn.setToolTip("Show help for StackMFF V4 batch settings")
+        help_btn = QPushButton("?")
+        help_btn.setToolTip(trans.t("help_btn_ai_batch"))
         help_btn.setFixedSize(26, 26)
-        help_btn.setIcon(QIcon(resource_path('assets', 'help_white.svg')))
-        help_btn.setIconSize(QSize(18, 18))
-        help_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: none; padding: 0px; }"
-        )
+        # Text "?" styled by objectName: the old white SVG icon
+        # vanished on the light dialog background.
+        help_btn.setObjectName("helpButton")
+        help_btn.setStyleSheet(help_button_style())
         help_btn.clicked.connect(self.show_help)
         btn_layout.addWidget(help_btn)
         btn_layout.addStretch()
@@ -790,13 +537,13 @@ class StackMFFV4BatchSettingsDialog(QDialog):
 
     def show_help(self):
         from dialogs.help import HelpDialog
-        help_text = trans.t("dialog_stackmffv4_batch_help_text")
-        dlg = HelpDialog(trans.t("dialog_stackmffv4_batch_help_title"), help_text, parent=self)
+        help_text = trans.t("dialog_ai_batch_help_text")
+        dlg = HelpDialog(trans.t("dialog_ai_batch_help_title"), help_text, parent=self)
         dlg.exec()
 
     def load_defaults(self):
         if self.parent_window:
-            val = getattr(self.parent_window, "stackmffv4_batch_size", 2)
+            val = getattr(self.parent_window, "ai_batch_size", 2)
             try:
                 self.spin_batch_size.setValue(int(val))
             except Exception:
@@ -807,7 +554,7 @@ class StackMFFV4BatchSettingsDialog(QDialog):
     def on_accept(self):
         val = int(self.spin_batch_size.value())
         if self.parent_window:
-            setattr(self.parent_window, "stackmffv4_batch_size", val)
+            setattr(self.parent_window, "ai_batch_size", val)
             if hasattr(self.parent_window, "persist_settings"):
                 self.parent_window.persist_settings()
         self.accept()

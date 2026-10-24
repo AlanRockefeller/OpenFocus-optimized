@@ -113,7 +113,8 @@ class RenderWorker(QThread):
         tile_threshold=None,
         reg_downscale_width=None,
         thread_count: int = DEFAULT_THREAD_COUNT,
-        stackmffv4_batch_size: int = 2,
+        ai_batch_size: int = 2,
+        ai_mode: str = "soft",
         roi_rect=None,
         roi_mode="crop", # 'crop' or 'paste'
         roi_base_index=0,
@@ -126,6 +127,8 @@ class RenderWorker(QThread):
         base_frame: str = "none",
         sort_mode: str = "asc",
         depth_smoothing: float = None,
+        blend_smoothing: float = None,
+        exposure_match: bool = False,
     ):
         super().__init__()
         self.raw_images = raw_images
@@ -157,17 +160,23 @@ class RenderWorker(QThread):
         self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
         # OpenFocus B 深度图过渡 σ（None = 默认 1.2）
         self.depth_smoothing = depth_smoothing
+        # OpenFocus A/C 混合平滑 σ（None = 各自默认：A 2.0 / C 3.0）
+        self.blend_smoothing = blend_smoothing
+        # 融合前曝光匹配：对齐与融合必须使用同一个亮度端（末帧）
+        self.exposure_match = bool(exposure_match)
         self.kernel_slider_value = kernel_slider_value
         # Tile params passed from UI (may be None -> use fusion defaults)
         self.tile_enabled = tile_enabled
         self.tile_block_size = tile_block_size
         self.tile_overlap = tile_overlap
         self.tile_threshold = tile_threshold
-        # StackMFF V4 批量处理大小
-        self.stackmffv4_batch_size = max(1, int(stackmffv4_batch_size)) if stackmffv4_batch_size else 2
+        # StackMFF V3 批量处理大小
+        self.ai_batch_size = max(1, int(ai_batch_size)) if ai_batch_size else 2
+        # StackMFF V3 输出模式：'soft' 概率加权混合 / 'hard' 逐像素取帧
+        self.ai_mode = ai_mode if ai_mode in ("soft", "hard") else "soft"
         # Registration downscale width passed from UI (optional)
         self.reg_downscale_width = reg_downscale_width
-        # GPU 加速开关（仅影响 StackMFF-V4；经典算法本身固定 CPU）
+        # GPU 加速开关（仅影响 StackMFF-V3；经典算法本身固定 CPU）
         self.use_gpu = bool(use_gpu)
         self.is_cancelled = False
         # 对比渲染模式：显式指定算法，覆盖 UI 单选按钮的选择
@@ -277,11 +286,14 @@ class RenderWorker(QThread):
         # OpenFocus 快速对齐先跑（全局平移，毫秒级）；勾选了 ECC/单应性时
         # 在其结果上继续精配准——粗对齐让后续特征匹配更稳。
         if self.need_align_openfocus:
+            bright_ref = "last" if self.exposure_match else "first"
             if self.reg_downscale_width is not None:
                 fast = ImageRegistration(method="openfocus",
-                                         downscale_width=self.reg_downscale_width)
+                                         downscale_width=self.reg_downscale_width,
+                                         brightness_reference=bright_ref)
             else:
-                fast = ImageRegistration(method="openfocus")
+                fast = ImageRegistration(method="openfocus",
+                                         brightness_reference=bright_ref)
             images = fast.process(images, output_path=None,
                                   thread_count=self.thread_count,
                                   should_cancel=should_cancel)
@@ -362,14 +374,16 @@ class RenderWorker(QThread):
             tile_block_size=(self.tile_block_size if self.tile_block_size is not None else TILE_BLOCK_SIZE),
             tile_overlap=(self.tile_overlap if self.tile_overlap is not None else TILE_OVERLAP),
             tile_threshold=(self.tile_threshold if self.tile_threshold is not None else TILE_THRESHOLD),
-            stackmffv4_batch_size=self.stackmffv4_batch_size,
+            ai_batch_size=self.ai_batch_size,
+            ai_mode=self.ai_mode,
             base_frame=self.base_frame,
             sort_mode=self.sort_mode,
+            exposure_match=self.exposure_match,
         )
 
         # Classical algorithms are CPU-only (see AGENTS.md); only the neural
         # model actually uses the GPU, so only query the device for it.
-        if algorithm == "stackmffv4":
+        if algorithm == "stackmffv3":
             info = fusion.get_info()
             device_name = info['device']
         else:
@@ -422,15 +436,17 @@ class RenderWorker(QThread):
                 kernel_size=kernel_size,
                 thread_count=self.thread_count,
                 depth_smoothing=self.depth_smoothing,
+                blend_smoothing=self.blend_smoothing,
                 **fuse_cancel,
             )
             result = quantize_fuse_output(result, is_16bit)
-        elif algorithm == "stackmffv4":
-            model_path = resource_path("weights", "stackmffv4.pth")
+        elif algorithm == "stackmffv3":
+            model_path = resource_path("weights", "stackmff_v3_final.pth")
             result = fusion.fuse(
                 input_source=images,
                 img_resize=None,
                 model_path=model_path,
+                mode=self.ai_mode,
                 thread_count=self.thread_count,
                 **fuse_cancel,
             )
@@ -460,7 +476,7 @@ class RenderWorker(QThread):
         elif self.rb_gfg_checked:
             return "gfgfgf"
         elif self.rb_d_checked:
-            return "stackmffv4"
+            return "stackmffv3"
         elif self.rb_ofa_checked:
             return "openfocus_a"
         elif self.rb_ofb_checked:
@@ -499,21 +515,28 @@ class BatchWorker(QThread):
 
     def __init__(self, folder_paths, output_type, output_path, processing_settings, reg_downscale_width=None,
                  tile_enabled=None, tile_block_size=None, tile_overlap=None, tile_threshold=None, thread_count: int = 4,
-                 stackmffv4_batch_size: int = 2,
+                 ai_batch_size: int = 2,
+                 ai_mode: str = "soft",
                  import_mode="multiple_folders", split_method=None, split_param=None,
-                 single_folder_images_with_times=None, use_gpu: bool = True):
+                 single_folder_images_with_times=None, use_gpu: bool = True,
+                 exposure_match: bool = False):
         super().__init__()
         self.folder_paths = folder_paths
         self.output_type = output_type
         self.output_path = output_path
         self.processing_settings = processing_settings
+        # Files this run actually wrote, newest last. The dialog surfaces them in
+        # the output list so a finished batch is inspectable like a manual
+        # render instead of vanishing into a message box.
+        self.written_paths = []
         self.is_cancelled = False
         self.import_mode = import_mode
         self.split_method = split_method
         self.split_param = split_param
         self.single_folder_images_with_times = single_folder_images_with_times or []
-        # GPU 加速开关（仅影响 StackMFF-V4）
+        # GPU 加速开关（仅影响 StackMFF-V3）
         self.use_gpu = bool(use_gpu)
+        self.exposure_match = bool(exposure_match)
 
         from core.image_loader import ImageStackLoader
         self.image_loader = ImageStackLoader()
@@ -523,11 +546,29 @@ class BatchWorker(QThread):
         self.tile_block_size = tile_block_size
         self.tile_overlap = tile_overlap
         self.tile_threshold = tile_threshold
-        self.stackmffv4_batch_size = max(1, int(stackmffv4_batch_size)) if stackmffv4_batch_size else 2
+        self.ai_batch_size = max(1, int(ai_batch_size)) if ai_batch_size else 2
+        # StackMFF V3 输出模式
+        self.ai_mode = ai_mode if ai_mode in ("soft", "hard") else "soft"
         try:
             self.thread_count = max(1, int(thread_count))
         except Exception:
             self.thread_count = 4
+
+    def _registration_width(self, images) -> int | None:
+        """Registration downscale width for this stack.
+
+        The batch dialog exposes a *ratio* of the stack's own width, so a
+        4000 px folder and a 900 px folder are both scaled sensibly; 100%
+        keeps whatever the main window is configured with.
+        """
+        ratio = self.processing_settings.get('reg_scale_percent', 100)
+        if ratio is None or int(ratio) >= 100:
+            return self.reg_downscale_width
+        try:
+            widest = max(int(img.shape[1]) for img in images)
+        except Exception:
+            return self.reg_downscale_width
+        return max(64, int(round(widest * int(ratio) / 100.0)))
 
     def _save_image(self, path: str, image, extension: str, scale_cfg=None) -> bool:
         """Save with the user-selected JPG quality; other formats use defaults."""
@@ -542,7 +583,10 @@ class BatchWorker(QThread):
         if scale_cfg:
             from utils import scalebar
             image = scalebar.burn(image, scale_cfg)
-        return imwrite_auto(path, image, params)
+        ok = imwrite_auto(path, image, params)
+        if ok and path not in self.written_paths:
+            self.written_paths.append(path)
+        return ok
 
     def run(self):
         """执行批处理"""
@@ -578,7 +622,8 @@ class BatchWorker(QThread):
                     'success': success_count,
                     'total': total_count,
                     'failed': failed_stacks,
-                    'cancelled': self.is_cancelled
+                    'cancelled': self.is_cancelled,
+                    'outputs': list(self.written_paths),
                 }
                 self.finished.emit(results)
             else:
@@ -604,7 +649,8 @@ class BatchWorker(QThread):
                     'success': success_count,
                     'total': total_count,
                     'failed': failed_folders,
-                    'cancelled': self.is_cancelled
+                    'cancelled': self.is_cancelled,
+                    'outputs': list(self.written_paths),
                 }
                 self.finished.emit(results)
 
@@ -681,7 +727,10 @@ class BatchWorker(QThread):
             if align_of:
                 # OpenFocus 快速对齐先跑（全局平移，毫秒级）
                 from core.registration import ImageRegistration
-                fast = ImageRegistration(method="openfocus")
+                fast = ImageRegistration(
+                    method="openfocus",
+                    brightness_reference=("last" if self.exposure_match
+                                          else "first"))
                 aligned_images = fast.process(
                     aligned_images, output_path=None,
                     thread_count=self.thread_count,
@@ -698,8 +747,9 @@ class BatchWorker(QThread):
 
             if mode:
                 from core.registration import ImageRegistration
-                if self.reg_downscale_width is not None:
-                    registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
+                width = self._registration_width(aligned_images)
+                if width is not None:
+                    registration = ImageRegistration(method=mode, downscale_width=width)
                 else:
                     registration = ImageRegistration(method=mode)
                 aligned_images = registration.process(
@@ -714,15 +764,16 @@ class BatchWorker(QThread):
             fusion_method = None
         if fusion_method:
             fusion_params = self.processing_settings.get('fusion_params', {}).copy()
-            if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
-                fusion_params["model_path"] = resource_path("weights", "stackmffv4.pth")
+            if fusion_method == "stackmffv3" and "model_path" not in fusion_params:
+                fusion_params["model_path"] = resource_path("weights", "stackmff_v3_final.pth")
 
             tile_kwargs = {}
             tile_kwargs.setdefault('tile_enabled', self.tile_enabled if self.tile_enabled is not None else True)
             tile_kwargs.setdefault('tile_block_size', self.tile_block_size if self.tile_block_size is not None else TILE_BLOCK_SIZE)
             tile_kwargs.setdefault('tile_overlap', self.tile_overlap if self.tile_overlap is not None else TILE_OVERLAP)
             tile_kwargs.setdefault('tile_threshold', self.tile_threshold if self.tile_threshold is not None else TILE_THRESHOLD)
-            tile_kwargs.setdefault('stackmffv4_batch_size', self.stackmffv4_batch_size)
+            tile_kwargs.setdefault('ai_batch_size', self.ai_batch_size)
+            tile_kwargs.setdefault('ai_mode', self.ai_mode)
 
             # 16-bit inputs are normalized to 0-1 float for fusion and
             # quantized back afterwards; aligned exports keep the original
@@ -734,12 +785,18 @@ class BatchWorker(QThread):
             if aligned_for_export is None:
                 del aligned_images  # 融合期间原 uint16 栈纯属悬挂占用
 
+            # The dialog writes these into fusion_params (they are per-method
+            # there); older callers put them at the top level. Read both.
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
                 base_frame=fusion_params.pop(
-                    'base_frame', self.processing_settings.get('base_frame', 'none')),
+                    'base_frame',
+                    self.processing_settings.get('base_frame', 'none')),
                 sort_mode=fusion_params.pop(
-                    'sort_mode', self.processing_settings.get('sort_mode', 'asc')),
+                    'sort_mode',
+                    self.processing_settings.get('sort_mode', 'asc')),
+                exposure_match=fusion_params.pop(
+                    'exposure_match', self.exposure_match),
                 **tile_kwargs)
 
             if fusion_method == "guided_filter":
@@ -784,7 +841,7 @@ class BatchWorker(QThread):
                     should_cancel=lambda: self.is_cancelled,
                 )
             elif fusion_method in ("openfocus_a", "openfocus_b", "openfocus_c"):
-                kernel_size = fusion_params.get('kernel_size', 7)
+                kernel_size = fusion_params.get('kernel_size', 11)
                 if kernel_size % 2 == 0:
                     kernel_size = max(1, kernel_size - 1)
                 result = fusion.fuse(
@@ -793,14 +850,18 @@ class BatchWorker(QThread):
                     kernel_size=kernel_size,
                     thread_count=self.thread_count,
                     depth_smoothing=fusion_params.get('depth_smoothing'),
+                    blend_smoothing=fusion_params.get('blend_smoothing'),
                     should_cancel=lambda: self.is_cancelled,
                 )
-            elif fusion_method == "stackmffv4":
-                model_path = fusion_params.get('model_path', resource_path("weights", "stackmffv4.pth"))
+            elif fusion_method == "stackmffv3":
+                model_path = fusion_params.get('model_path')
+                if not model_path:
+                    model_path = resource_path("weights", "stackmff_v3_final.pth")
                 result = fusion.fuse(
                     input_source=fusion_input,
                     img_resize=None,
                     model_path=model_path,
+                    mode=fusion_params.get('ai_mode', self.ai_mode),
                     thread_count=self.thread_count,
                     should_cancel=lambda: self.is_cancelled,
                 )
@@ -851,7 +912,10 @@ class BatchWorker(QThread):
 
             # OpenFocus 快速对齐先跑（若勾选）
             if "openfocus" in reg_methods:
-                fast = ImageRegistration(method="openfocus")
+                fast = ImageRegistration(
+                    method="openfocus",
+                    brightness_reference=("last" if self.exposure_match
+                                          else "first"))
                 aligned_images = fast.process(
                     images, output_path=None, thread_count=self.thread_count,
                     should_cancel=lambda: self.is_cancelled)
@@ -869,8 +933,9 @@ class BatchWorker(QThread):
                 mode = None
 
             if mode:
-                if getattr(self, 'reg_downscale_width', None) is not None:
-                    registration = ImageRegistration(method=mode, downscale_width=self.reg_downscale_width)
+                width = self._registration_width(aligned_images)
+                if width is not None:
+                    registration = ImageRegistration(method=mode, downscale_width=width)
                 else:
                     registration = ImageRegistration(method=mode)
                 aligned_images = registration.process(
@@ -888,9 +953,9 @@ class BatchWorker(QThread):
         if fusion_method:
             fusion_params = dict(
                 self.processing_settings.get('fusion_params', {}) or {})
-            if fusion_method == "stackmffv4" and "model_path" not in fusion_params:
+            if fusion_method == "stackmffv3" and "model_path" not in fusion_params:
                 fusion_params = dict(fusion_params)
-                fusion_params["model_path"] = resource_path("weights", "stackmffv4.pth")
+                fusion_params["model_path"] = resource_path("weights", "stackmff_v3_final.pth")
             
             # 创建相应算法的融合器实例
             # 优先使用 processing_settings 中的 fusion_params 中可能包含的 tile 覆盖值
@@ -915,9 +980,13 @@ class BatchWorker(QThread):
             fusion = MultiFocusFusion(
                 algorithm=fusion_method, use_gpu=self.use_gpu,
                 base_frame=fusion_params.pop(
-                    'base_frame', self.processing_settings.get('base_frame', 'none')),
+                    'base_frame',
+                    self.processing_settings.get('base_frame', 'none')),
                 sort_mode=fusion_params.pop(
-                    'sort_mode', self.processing_settings.get('sort_mode', 'asc')),
+                    'sort_mode',
+                    self.processing_settings.get('sort_mode', 'asc')),
+                exposure_match=fusion_params.pop(
+                    'exposure_match', self.exposure_match),
                 **tile_kwargs)
 
             # 调用fuse方法执行融合：与单文件夹路径使用同一套 16-bit 输入/输出契约，

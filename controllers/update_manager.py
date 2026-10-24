@@ -23,6 +23,11 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from utils import self_update
 from utils.updater import DownloadCancelled
 
+# Download/stage threads that did not stop in time; kept alive instead of
+# being terminated (see BatchManager for the rationale).
+_ORPHAN_THREADS: list = []
+
+
 STATE_IDLE = "idle"
 STATE_CHECKING = "checking"
 STATE_DOWNLOADING = "downloading"
@@ -575,5 +580,4 @@ class UpdateManager(QObject):
             if thread is not None and thread.isRunning():
                 thread.quit()
                 if not thread.wait(wait_ms):
-                    thread.terminate()
-                    thread.wait(500)
+                    _ORPHAN_THREADS.append(thread)

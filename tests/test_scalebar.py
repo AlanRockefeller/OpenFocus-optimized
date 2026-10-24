@@ -112,3 +112,14 @@ class TestDrawing:
         img = np.zeros((1000, 1000, 3), np.uint8)
         out = draw_scale_bar(img, 0.1, "bottom-right", "white")
         assert out[-100:, -300:].max() > 200
+
+
+@pytest.mark.parametrize("shape", [(16, 16), (8, 200), (5, 520), (220, 20)])
+def test_tiny_or_extreme_frames_do_not_crash(shape):
+    """The tight-frame fallback pushed bar_y1 past bar_y2, so PIL rejected
+    the rectangle and every small export failed with ValueError."""
+    from utils.scalebar import burn
+
+    img = np.full(shape + (3,), 128, np.uint8)
+    out = burn(img, {"px_um": 0.5, "position": "bottom-right", "color": "auto"})
+    assert out.shape == img.shape and out.dtype == np.uint8

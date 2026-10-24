@@ -76,3 +76,22 @@ def test_config_requires_batch_mode(tmp_path):
     cfg.write_text("{}", encoding="utf-8")
     rc = _run_cli(["-i", fa, "-o", str(tmp_path / "x.png"), "--config", str(cfg)])
     assert rc == 2
+
+
+def test_multiple_folders_require_output_dir(tmp_path, capsys):
+    fa, fb, _out = _make_stacks(tmp_path)
+    rc = _run_cli(["-i", fa, fb, "-o", str(tmp_path / "single.png")])
+    assert rc == 2
+    assert "--output-dir" in capsys.readouterr().err
+
+
+def test_exposure_match_defaults_on_and_can_be_disabled(tmp_path):
+    """v1.57: the pipeline-level exposure match is on by default, and
+    --no-exposure-match restores the old brightness behaviour."""
+    from core.cli import build_parser
+    parser = build_parser()
+    assert parser.parse_args(["-i", "x", "-o", "y.png"]).exposure_match is True
+    assert parser.parse_args(["-i", "x", "-o", "y.png",
+                              "--no-exposure-match"]).exposure_match is False
+    assert parser.parse_args(["-i", "x", "-o", "y.png",
+                              "--exposure-match"]).exposure_match is True

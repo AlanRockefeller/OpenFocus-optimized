@@ -17,7 +17,8 @@ import cv2
 import numpy as np
 
 BAR_FRACTION = 0.12  # bar spans ~12% of the image width
-_VALID_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left")
+_VALID_POSITIONS = ("bottom-right", "bottom-left", "top-right", "top-left",
+                    "custom")
 _VALID_COLORS = ("auto", "white", "black")
 
 # µm per physical unit, for names appearing in ImageJ / OME metadata
@@ -144,31 +145,53 @@ def format_length(um: float) -> str:
     return f"{um:g} µm"
 
 
-def _load_font(size: int):
-    if size in _font_cache:
-        return _font_cache[size]
+def _load_font(size: int, family: str = None, bold: bool = False):
+    """A PIL font at `size`, preferring `family` when one is named.
+
+    The cache key includes the family and the weight. Caching by size alone
+    meant the first font requested was reused for every later one, so picking
+    a typeface in the dialog had no effect on the drawn bar.
+    """
+    key = (int(size), (family or "").strip().lower(), bool(bold))
+    if key in _font_cache:
+        return _font_cache[key]
+
     font = None
     try:
         from PIL import ImageFont
-        for path in _FONT_CANDIDATES:
-            try:
-                font = ImageFont.truetype(path, size)
-                break
-            except Exception:
-                continue
+        wanted = (family or "").strip()
+        # A named family first: PIL resolves it against the system fonts and
+        # raises when the family is absent, which lets us fall through.
+        if wanted:
+            candidates = [f"{wanted}-Bold.ttf", f"{wanted}.ttf", wanted]
+            if not bold:
+                candidates = [f"{wanted}.ttf", wanted] + candidates[:1]
+            for name in candidates:
+                try:
+                    font = ImageFont.truetype(name, size)
+                    break
+                except Exception:
+                    continue
+        if font is None:
+            for path in _FONT_CANDIDATES:
+                try:
+                    font = ImageFont.truetype(path, size)
+                    break
+                except Exception:
+                    continue
         if font is None and sys_platform() == "linux":
             import glob
-            for pattern in ("/usr/share/fonts/**/*.ttf",):
-                for path in sorted(glob.glob(pattern, recursive=True))[:80]:
-                    try:
-                        font = ImageFont.truetype(path, size)
-                        break
-                    except Exception:
-                        continue
+            for path in sorted(glob.glob("/usr/share/fonts/**/*.ttf",
+                                         recursive=True))[:80]:
+                try:
+                    font = ImageFont.truetype(path, size)
                     break
+                except Exception:
+                    continue
     except Exception:
         font = None
-    _font_cache[size] = font
+
+    _font_cache[key] = font
     return font
 
 
@@ -187,7 +210,13 @@ def _region_mean(img, x1: int, y1: int, x2: int, y2: int) -> float:
 
 def draw_scale_bar(img: np.ndarray, px_um: float,
                    position: str = "bottom-right",
-                   color: str = "auto") -> np.ndarray:
+                   color: str = "auto",
+                   font_family: str = None,
+                   font_size: float = 0.0,
+                   font_bold: bool = False,
+                   text_align: str = "auto",
+                   custom_x: float = None,
+                   custom_y: float = None) -> np.ndarray:
     """Return a copy of ``img`` (BGR) with a scale bar burned into a corner.
 
     No-op (same array) when calibration is missing or implausible. Drawing
@@ -200,6 +229,10 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
         position = "bottom-right"
     if color not in _VALID_COLORS:
         color = "auto"
+    if text_align not in ("auto", "left", "center", "right"):
+        text_align = "auto"
+    if position == "custom" and (custom_x is None or custom_y is None):
+        position = "bottom-right"
 
     if img.dtype != np.uint8:
         # 16-bit（或 0-255 float）结果：PIL 画不了。在 8-bit 渲染上画，
@@ -225,9 +258,27 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     bar_px = max(8, int(round(bar_um / px_um)))
     thickness = max(2, int(round(h * 0.004)))
     margin = max(10, int(round(min(h, w) * 0.02)))
-    font_size = max(14, int(round(h * 0.022)))
+    # Very small frames made the "tight frame" fallback below push bar_y1
+    # past bar_y2, which PIL rejects with ValueError and turned every small
+    # export into a failure. Keep the whole motif inside the canvas.
+    margin = min(margin, max(1, h // 4), max(1, w // 4))
+    bar_px = min(bar_px, max(4, w - 2 * margin))
+    thickness = min(thickness, max(1, h // 3))
+    # Font size must leave room for the bar + gap + label inside the frame.
+    # A hard floor of 14 px made the label taller than a 60 px frame, so it
+    # landed on the bar; shrink instead (never below 8 px, where a real font
+    # stops being legible and the cv2 fallback takes over).
+    # 0 (the default) keeps the automatic size; anything else is the user's
+    # explicit choice, still capped so it cannot overflow the frame.
+    auto_size = max(8, min(int(round(h * 0.022)),
+                           int((h - 2 * margin - thickness) / 2.6)))
+    if font_size and float(font_size) > 0:
+        font_size = max(6, min(int(round(float(font_size))),
+                               max(8, (h - 2 * margin - thickness) // 2)))
+    else:
+        font_size = auto_size
 
-    font = _load_font(font_size)
+    font = _load_font(font_size, font_family, font_bold)
     label = format_length(bar_um)
     if font is None:
         label = label.replace("µ", "u")
@@ -243,31 +294,64 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
             label, cv2.FONT_HERSHEY_SIMPLEX, font_size / 30.0,
             max(1, font_size // 14))
 
-    gap = max(3, font_size // 6)
+    # Gap between the label and the bar. PIL's getbbox() ignores the stroke
+    # it draws around the glyphs, so a gap of a few pixels let the label sit
+    # directly on the bar (measured: text bottom row 186, bar row 187 — they
+    # touched on a 200 px-tall frame). The gap now includes the stroke.
+    stroke_w = max(1, font_size // 14)
+    gap = max(4, font_size // 3) + stroke_w
     stroke = 1 if thickness <= 3 else 2
 
     # Horizontal placement
-    if position.endswith("right"):
+    if position == "custom":
+        bar_x1 = int(round(float(custom_x) * (w - bar_px)))
+        bar_x2 = bar_x1 + bar_px
+    elif position.endswith("right"):
         bar_x2 = w - margin
         bar_x1 = bar_x2 - bar_px
-        text_x = bar_x2 - text_w  # right-aligned with the bar
     else:
         bar_x1 = margin
         bar_x2 = bar_x1 + bar_px
+
+    # Label alignment relative to the bar: "auto" keeps the old behaviour
+    # (flush with the outer end), the others are explicit requests.
+    if text_align == "left":
         text_x = bar_x1
-    # Vertical placement (text sits beside the bar, away from the edge)
-    if position.startswith("bottom"):
+    elif text_align == "center":
+        text_x = bar_x1 + (bar_px - text_w) // 2
+    elif text_align == "right":
+        text_x = bar_x2 - text_w
+    else:
+        text_x = (bar_x2 - text_w) if position.endswith("right") else bar_x1
+    # Vertical placement: the label always sits ABOVE the bar, in all four
+    # corners. "Above" is the only arrangement that keeps the two from
+    # touching when the label is wider than the bar or the frame is short.
+    if position == "custom":
+        bar_y1 = int(round(float(custom_y) * (h - thickness)))
+        bar_y2 = bar_y1 + thickness
+        text_y = bar_y1 - gap - text_h
+        if text_y < 0:
+            text_y = bar_y2 + gap      # no room above -> label below the bar
+    elif position.startswith("bottom"):
         bar_y2 = h - margin
         bar_y1 = bar_y2 - thickness
         text_y = bar_y1 - gap - text_h
-        if text_y < margin:  # tight frame: drop the text inside the bar zone
-            text_y = bar_y1 - text_h - 2
-            bar_y2 = h - margin
-            bar_y1 = max(margin, bar_y2 - thickness)
+        if text_y < 0:
+            # Not enough room above: push the whole motif down as far as it
+            # goes rather than letting the label slide onto the bar.
+            shift = -text_y
+            text_y = 0
+            bar_y1 += shift
+            bar_y2 = min(h - 1, bar_y2 + shift)
     else:
         bar_y1 = margin
         bar_y2 = bar_y1 + thickness
         text_y = bar_y2 + gap
+
+    # Clamp defensively: any negative/overflowing coordinate pair reaches PIL
+    # as an invalid rectangle (y1 < y0) and aborts the export.
+    bar_x1, bar_x2 = sorted((min(max(bar_x1, 0), w), min(max(bar_x2, 0), w)))
+    bar_y1, bar_y2 = sorted((min(max(bar_y1, 0), h), min(max(bar_y2, 0), h)))
 
     if color == "auto":
         mean = _region_mean(img, bar_x1 - margin, bar_y1 - margin,
@@ -282,16 +366,21 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
                     bar_x2 + stroke, bar_y2 + stroke), fill=edge_rgb)
     draw.rectangle((bar_x1, bar_y1, bar_x2, bar_y2), fill=bar_rgb)
 
+    # Keep the label inside the canvas: PIL clips silently, but a label cut
+    # in half is worse than a nudged one.
+    text_x = max(0, min(int(text_x), max(0, w - text_w - 1)))
+    text_y = max(0, min(int(text_y), max(0, h - text_h - 1)))
+
     if font is not None:
         draw.text((text_x, text_y), label, font=font, fill=bar_rgb,
-                  stroke_width=max(1, font_size // 14), stroke_fill=edge_rgb)
+                  stroke_width=stroke_w, stroke_fill=edge_rgb)
         out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         return out
 
     out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
     cv2.putText(out, label, (text_x, text_y + text_h),
                 cv2.FONT_HERSHEY_SIMPLEX, font_size / 30.0, bar_rgb,
-                max(1, font_size // 14), cv2.LINE_AA)
+                stroke_w, cv2.LINE_AA)
     return out
 
 
@@ -323,22 +412,43 @@ def effective_px_um(window) -> Optional[float]:
     return None
 
 
-def export_cfg(window) -> Optional[dict]:
-    """Config passed to burn() at export time; None when disabled/unknown."""
+def export_cfg(window, target: str = "output") -> Optional[dict]:
+    """Config passed to burn() at export time; None when disabled/unknown.
+
+    `target` honours the dialog's "apply to" choice: a bar scoped to the
+    source stack must not appear on exported fused images, and vice versa.
+    """
     if not getattr(window, "scale_bar_enabled", False):
+        return None
+    where = getattr(window, "scale_bar_target", "all") or "all"
+    if where != "all" and where != target:
         return None
     px_um = effective_px_um(window)
     if not px_um or px_um <= 0:
         return None
-    return {
+    cfg = {
         "px_um": px_um,
         "position": getattr(window, "scale_bar_position", "bottom-right"),
         "color": getattr(window, "scale_bar_color", "auto"),
+        "font_family": getattr(window, "scale_bar_font_family", "") or None,
+        "font_size": float(getattr(window, "scale_bar_font_size", 0.0) or 0.0),
+        "font_bold": bool(getattr(window, "scale_bar_font_bold", False)),
+        "text_align": getattr(window, "scale_bar_text_align", "auto"),
+        "custom_x": getattr(window, "scale_bar_custom_x", None),
+        "custom_y": getattr(window, "scale_bar_custom_y", None),
     }
+    return cfg
 
 
 def burn(img: np.ndarray, cfg: Optional[dict]) -> np.ndarray:
     """Apply draw_scale_bar from an export_cfg dict; passthrough on None."""
     if not cfg:
         return img
-    return draw_scale_bar(img, cfg["px_um"], cfg["position"], cfg["color"])
+    return draw_scale_bar(
+        img, cfg["px_um"], cfg["position"], cfg["color"],
+        font_family=cfg.get("font_family"),
+        font_size=cfg.get("font_size", 0.0),
+        font_bold=cfg.get("font_bold", False),
+        text_align=cfg.get("text_align", "auto"),
+        custom_x=cfg.get("custom_x"),
+        custom_y=cfg.get("custom_y"))

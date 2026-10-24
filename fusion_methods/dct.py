@@ -93,6 +93,22 @@ def dct_focus_stack_fusion(
     # 归一化并获取尺寸
     normalized_images, (h, w) = _normalize_image_stack(images)
 
+    # Keep the output size identical to the input. The block grid used to
+    # trim up to block_size-1 rows/cols off the bottom/right, so a 700x900
+    # stack produced 696x896 while the tiled path returned full size —
+    # geometry changed with the tiling switch. Pad with edge replication and
+    # crop the fused result back instead.
+    orig_h, orig_w = h, w
+    pad_h = ((h + block_size - 1) // block_size) * block_size
+    pad_w = ((w + block_size - 1) // block_size) * block_size
+    if (pad_h, pad_w) != (h, w):
+        normalized_images = [
+            cv2.copyMakeBorder(img, 0, pad_h - h, 0, pad_w - w,
+                               cv2.BORDER_REPLICATE)
+            for img in normalized_images
+        ]
+        h, w = pad_h, pad_w
+
     # 计算对齐后的尺寸 (必须是 block_size 的整数倍)
     h_trim = (h // block_size) * block_size
     w_trim = (w // block_size) * block_size
@@ -164,6 +180,10 @@ def dct_focus_stack_fusion(
         # 赋值
         fused_image[mask] = source_layer[mask]
 
+    if (orig_h, orig_w) != (h_trim, w_trim):
+        # drop the replicated padding so the result matches the source stack
+        fused_image = fused_image[:orig_h, :orig_w].copy()
+
     if output_path:
         from utils.image_utils import imwrite_auto
         imwrite_auto(output_path, fused_image)
@@ -178,7 +198,7 @@ if __name__ == "__main__":
     t_start = time.time()
     
     # 修改这里的路径为你实际的图片文件夹
-    TARGET_DIR = r"C:\Users\dell\Pictures\Helicon Focus\StackMFF V2 Used\Bug"
+    TARGET_DIR = os.path.join("images", "stack")
     OUTPUT_FILE = os.path.join(TARGET_DIR, "Fused_Result_Optimized.tif")
     
     BLOCK_SIZE = 8

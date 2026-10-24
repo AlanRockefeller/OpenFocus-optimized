@@ -1,8 +1,7 @@
 """The performance rewrites must not change what the algorithms compute.
 
 Each test pins an optimized path to a compact copy of the implementation it
-replaced: DTCWT and the guided filter are required to stay bit-identical,
-the StackMFF-V4 inference optimization to agree on all but exact near-ties.
+replaced: DTCWT and the guided filter are required to stay bit-identical.
 """
 import numpy as np
 import pytest
@@ -189,44 +188,6 @@ def test_guided_filter_is_bit_identical_to_reference(thread_count):
     frames.append(twin)
     fused = gff_impl(frames, None, kernel_size=31, thread_count=thread_count)
     assert np.array_equal(fused, _reference_gff(frames))
-
-
-# --------------------------------------------------------------------------
-# StackMFF-V4 inference optimization
-# --------------------------------------------------------------------------
-
-def test_stackmffv4_inference_optimization_preserves_focus_map():
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("torchvision")
-    import os
-    from core.models.stackmffv4_network import StackMFF_V4
-    from fusion_methods.stackmffv4 import _optimize_for_inference
-
-    weights = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "weights", "stackmffv4.pth")
-    if not os.path.isfile(weights):
-        pytest.skip("model weights not present")
-    state = torch.load(weights, map_location="cpu", weights_only=True)
-    state = {k.replace('module.', ''): v for k, v in state.items()}
-
-    def load():
-        model = StackMFF_V4()
-        model.load_state_dict(state)
-        return model.eval()
-
-    reference = load()
-    optimized = _optimize_for_inference(load(), torch.device("cpu"))
-    assert not any(isinstance(m, torch.nn.BatchNorm2d) for m in optimized.modules())
-
-    frames = _textured_stack(n=4, size=(128, 256))
-    x = torch.from_numpy(np.stack(
-        [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
-    ).astype(np.float32) / 255.0)[None]
-    with torch.inference_mode():
-        _, ref_idx = reference(x)
-        _, opt_idx = optimized(x)
-    agreement = (ref_idx == opt_idx).float().mean().item()
-    assert agreement >= 0.999, f"focus maps agree on only {agreement:.4%}"
 
 
 # --------------------------------------------------------------------------

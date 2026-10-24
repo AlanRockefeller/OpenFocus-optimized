@@ -1,9 +1,10 @@
 """QSettings-backed persistence for user preferences and recent files.
 
 All user-tunable state on the main window (thread count, tile parameters,
-registration downscale, StackMFF-V4 batch size, GPU toggle, UI language,
+registration downscale, AI batch size and output mode, GPU toggle, UI language,
 recently opened stacks) survives restarts through this module.
 """
+import json
 import os
 import sys
 from typing import Any
@@ -17,6 +18,10 @@ APPLICATION = "OpenFocus"
 MAX_RECENT_FILES = 8
 MAX_RECENT_PROJECTS = 8
 
+# First-run theme. Light reads better on a fresh install for most users; a
+# saved preference always wins, so an existing dark-theme user stays dark.
+DEFAULT_THEME = "light"
+
 RECENT_FILES_KEY = "recent/files"
 RECENT_PROJECTS_KEY = "recent/projects"
 LANGUAGE_KEY = "ui/language"
@@ -25,8 +30,19 @@ MAIN_SPLITTER_KEY = "ui/main_splitter"
 RIGHT_SPLITTER_KEY = "ui/right_splitter"
 DRAG_FORMAT_KEY = "export/drag_format"
 LAST_UPDATE_CHECK_KEY = "updates/last_check_epoch"
+# Release tag whose startup banner the user dismissed: the same
+# version must not nag again, a newer one re-shows the banner.
+UPDATE_BANNER_DISMISSED_KEY = "updates/banner_dismissed_tag"
 LAST_STACK_FOLDER_KEY = "ui/last_stack_folder"
 LAST_DIALOG_DIR_KEY = "ui/last_dialog_dir"
+# The "AI runs on the CPU" warning is informational and repeat-per-launch
+# annoying; once the user says "don't show again" it must stay gone.
+AI_CPU_WARNING_DISMISSED_KEY = "rendering/ai_cpu_warning_dismissed"
+# The two brightness options are remembered per fusion method
+# (MainWindow.brightness_option_for); the global exposure_match /
+# base_frame_correct fields only mirror the last one toggled.
+BRIGHTNESS_BY_METHOD_KEY = "fusion/brightness_by_method"
+_BRIGHTNESS_OPTIONS = ("exposure_match", "base_correct")
 
 # window attribute -> (settings key, default, cast)
 _PERSISTED_FIELDS = {
@@ -36,20 +52,24 @@ _PERSISTED_FIELDS = {
     "tile_overlap": ("rendering/tile_overlap", 256, int),
     "tile_threshold": ("rendering/tile_threshold", 2048, int),
     "reg_downscale_width": ("registration/downscale_width", 1024, int),
-    "stackmffv4_batch_size": ("rendering/stackmffv4_batch_size", 2, int),
+    "ai_batch_size": ("rendering/ai_batch_size", 2, int),
+    "ai_mode": ("fusion/ai_mode", "soft", "str"),
     "use_gpu": ("rendering/use_gpu", True, "bool"),
     "align_cache_enabled": ("rendering/align_cache_enabled", True, "bool"),
     "restore_last_stack": ("ui/restore_last_stack", False, "bool"),
-    "ui_theme": ("ui/theme", "dark", "str"),
+    "ui_theme": ("ui/theme", DEFAULT_THEME, "str"),
     "scale_bar_enabled": ("export/scale_bar_enabled", False, "bool"),
     "scale_um_per_px_manual": ("export/scale_um_per_px_manual", 0.0, "float"),
     "scale_bar_position": ("export/scale_bar_position", "bottom-right", "str"),
+    "scale_bar_target": ("export/scale_bar_target", "all", "str"),
     "scale_bar_color": ("export/scale_bar_color", "auto", "str"),
     "base_frame_correct": ("fusion/base_frame_correct", False, "bool"),
+    "exposure_match": ("fusion/exposure_match", True, "bool"),
     "stack_reverse_order": ("fusion/stack_reverse_order", False, "bool"),
     "ask_load_scale": ("ui/ask_load_scale", True, "bool"),
     "load_scale_default": ("ui/load_scale_default", 1.0, "float"),
     "ofb_depth_smoothing": ("fusion/ofb_depth_smoothing", 1.2, "float"),
+    "of_blend_smoothing": ("fusion/of_blend_smoothing", 3.0, "float"),
 }
 
 
@@ -169,16 +189,47 @@ def _cast(raw: Any, kind: Any, default: Any) -> Any:
         return default
 
 
+def brightness_memory_to_json(memory) -> str:
+    """{(option, method): bool} -> JSON text {option: {method: bool}}."""
+    nested: dict = {}
+    for (option, method), enabled in (memory or {}).items():
+        nested.setdefault(str(option), {})[str(method)] = bool(enabled)
+    return json.dumps(nested, sort_keys=True)
+
+
+def brightness_memory_from_json(raw) -> dict:
+    """Inverse of brightness_memory_to_json; anything malformed is dropped."""
+    try:
+        nested = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(nested, dict):
+        return {}
+    memory = {}
+    for option in _BRIGHTNESS_OPTIONS:
+        per_method = nested.get(option)
+        if not isinstance(per_method, dict):
+            continue
+        for method, enabled in per_method.items():
+            if isinstance(method, str) and isinstance(enabled, bool):
+                memory[(option, method)] = enabled
+    return memory
+
+
 def load_window_settings(window) -> None:
     """Restore persisted preferences onto window attributes (defaults kept)."""
     settings = get_settings()
     if getattr(window, "ui_theme", None) not in ("dark", "light"):
-        window.ui_theme = "dark"
+        window.ui_theme = DEFAULT_THEME
     for attr, (key, default, kind) in _PERSISTED_FIELDS.items():
         if settings.contains(key):
             setattr(window, attr, _cast(settings.value(key), kind, default))
         else:
             setattr(window, attr, getattr(window, attr, default))
+
+    if settings.contains(BRIGHTNESS_BY_METHOD_KEY):
+        window._brightness_by_method = brightness_memory_from_json(
+            settings.value(BRIGHTNESS_BY_METHOD_KEY))
 
     raw_recent = settings.value(RECENT_FILES_KEY, []) or []
     if not isinstance(raw_recent, list):
@@ -196,18 +247,35 @@ def save_window_settings(window) -> None:
     settings = get_settings()
     for attr, (key, default, _kind) in _PERSISTED_FIELDS.items():
         settings.setValue(key, getattr(window, attr, default))
+    settings.setValue(BRIGHTNESS_BY_METHOD_KEY, brightness_memory_to_json(
+        getattr(window, "_brightness_by_method", {})))
     settings.setValue(LANGUAGE_KEY, trans.current_lang)
     settings.setValue(RECENT_FILES_KEY, list(getattr(window, "recent_files", [])))
     settings.setValue(RECENT_PROJECTS_KEY, list(getattr(window, "recent_projects", [])))
 
 
+def _supported_languages():
+    """Codes the running build can actually render.
+
+    Read from the translation manager rather than a literal tuple: the old
+    hardcoded list silently dropped any newly added pack, so picking a new
+    language was saved but ignored on the next launch (that is exactly what
+    happened to ja/es in v1.50).
+    """
+    try:
+        from locales import trans
+        return tuple(trans.translations)
+    except Exception:  # pragma: no cover - settings must never import-fail
+        return ("en", "zh", "ja", "es")
+
+
 def get_saved_language():
-    """Return the persisted language code ('en'/'zh') or None for auto-detect."""
+    """Return the persisted language code or None for auto-detect."""
     settings = get_settings()
     if not settings.contains(LANGUAGE_KEY):
         return None
     lang = str(settings.value(LANGUAGE_KEY, "")).lower()
-    return lang if lang in ("en", "zh") else None
+    return lang if lang in _supported_languages() else None
 
 
 def save_window_layout(window) -> None:
@@ -223,13 +291,39 @@ def save_window_layout(window) -> None:
         pass
 
 
+# A window smaller than this is unusable (no menu bar, no canvas).
+_MIN_RESTORABLE_WIDTH = 640
+_MIN_RESTORABLE_HEIGHT = 480
+
+
 def restore_window_layout(window) -> None:
-    """Restore window geometry and splitter positions saved on last close."""
+    """Restore window geometry and splitter positions saved on last close.
+
+    A saved geometry is rejected when it is unusable or off-screen. Qt stores
+    whatever size the window had when it closed, and a window created at a
+    tiny size (by a script, a screenshot harness, or a broken layout) would
+    otherwise be restored as a sliver the user cannot grab — the app looked
+    like it failed to start.
+    """
     settings = get_settings()
     try:
         geo = settings.value(WINDOW_GEOMETRY_KEY)
         if geo is not None:
             window.restoreGeometry(geo)
+            size = window.size()
+            screens = window.screen() or (
+                window.windowHandle().screen() if window.windowHandle() else None)
+            if (size.width() < _MIN_RESTORABLE_WIDTH
+                    or size.height() < _MIN_RESTORABLE_HEIGHT):
+                window.resize(max(size.width(), 1280),
+                              max(size.height(), 800))
+            if screens is not None:
+                available = screens.availableGeometry()
+                frame = window.frameGeometry()
+                if not available.intersects(frame):
+                    window.move(available.center() - window.rect().center())
+                    window.resize(min(1280, available.width()),
+                                  min(800, available.height()))
         main_state = settings.value(MAIN_SPLITTER_KEY)
         if main_state is not None and hasattr(window, "main_splitter"):
             window.main_splitter.restoreState(main_state)
@@ -252,7 +346,9 @@ def set_drag_export_format(window, fmt: str) -> None:
     fmt = fmt.lower()
     if fmt == ".tiff":
         fmt = ".tif"
-    if fmt not in (".jpg", ".png", ".tif"):
+    # The context menu offers WebP; rejecting it here made that entry a
+    # silent no-op (the drag stayed JPG while the menu looked selectable).
+    if fmt not in (".jpg", ".png", ".webp", ".tif"):
         return
     window.drag_export_format = fmt
     get_settings().setValue(DRAG_FORMAT_KEY, fmt)

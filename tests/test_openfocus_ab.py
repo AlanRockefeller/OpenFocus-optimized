@@ -1,6 +1,6 @@
-"""Regression tests for the reverse-engineered Helicon-derived features:
+"""Regression tests for the OpenFocus A/B/C features:
 OpenFocus A/B fusion methods, base correction (brightness drift), and the
-OpenFocus fast alignment (bounded phase correlation)."""
+OpenFocus fast alignment (bounded similarity, NCC translation)."""
 import numpy as np
 import cv2
 import pytest
@@ -34,8 +34,10 @@ class TestOpenFocusAB:
         right = cv2.cvtColor(out[:, 80:], cv2.COLOR_BGR2GRAY).astype(int)
         l0 = cv2.cvtColor(frames[0][:, :80], cv2.COLOR_BGR2GRAY).astype(int)
         r1 = cv2.cvtColor(frames[1][:, 80:], cv2.COLOR_BGR2GRAY).astype(int)
-        assert np.abs(left - l0).mean() < 1.0
-        assert np.abs(right - r1).mean() < 1.0
+        # Each frame is exposure-matched to the last frame before the hard
+        # pick, so identical-brightness frames still differ by <=1 LSB.
+        assert np.abs(left - l0).mean() < 1.5
+        assert np.abs(right - r1).mean() < 1.5
 
     def test_b_tie_picks_first_frame(self):
         """Identical frames: np.argmax tie-break is the first frame."""
@@ -86,6 +88,16 @@ class TestOpenFocusAB:
             cv2.imwrite(str(tmp_path / f"f{i}.png"), frame)
         out = openfocus_b_impl(str(tmp_path), None, 7)
         assert out.shape[:2] == (60, 80)
+
+    def test_directory_order_is_natural(self, tmp_path):
+        """Frame order decides the last-frame prior/base reference, so
+        `img10` must not sort before `img2` (plain lexicographic order)."""
+        from fusion_methods.openfocus_ab import _collect_images
+        for i in (1, 2, 10):
+            cv2.imwrite(str(tmp_path / f"img{i}.png"),
+                        np.full((8, 8, 3), i * 10, np.uint8))
+        frames = _collect_images(str(tmp_path))
+        assert [int(f[0, 0, 0]) for f in frames] == [10, 20, 100]
 
     @pytest.mark.parametrize("method", ["openfocus_a", "openfocus_b",
                                         "openfocus_c"])
@@ -153,7 +165,7 @@ class TestOpenFocusC:
         assert float(out.mean()) > 1.0
 
     def test_pyramid_boosts_local_contrast(self):
-        """Reverse-engineered Helicon behaviour: C raises high-frequency
+        """C raises high-frequency
         energy above both inputs (the documented 'contrast and glare' side
         effect of per-band decisions)."""
         from fusion_methods.openfocus_ab import openfocus_c_impl
@@ -169,7 +181,7 @@ class TestBaseCorrection:
         return [base[0].astype(np.float32) * 0.6,
                 base[1].astype(np.float32)]
 
-    def test_default_off(self):
+    def test_default_base_frame_is_none(self):
         from core.multi_focus_fusion import MultiFocusFusion
         f = MultiFocusFusion(algorithm="openfocus_b", use_gpu=False)
         assert f.base_frame == "none"
@@ -180,7 +192,8 @@ class TestBaseCorrection:
         lp = lambda x: cv2.GaussianBlur(
             np.asarray(x, np.float32), (0, 0), 32).mean()
         out = MultiFocusFusion(algorithm="openfocus_b", use_gpu=False,
-                               base_frame="last").fuse(
+                               base_frame="last",
+                               exposure_match=False).fuse(
             input_source=list(stack), img_resize=None, kernel_size=7)
         assert abs(lp(out) - lp(stack[1])) < 3.0
 
@@ -190,31 +203,48 @@ class TestBaseCorrection:
         lp = lambda x: cv2.GaussianBlur(
             np.asarray(x, np.float32), (0, 0), 32).mean()
         out = MultiFocusFusion(algorithm="openfocus_b", use_gpu=False,
-                               base_frame="first").fuse(
+                               base_frame="first",
+                               exposure_match=False).fuse(
             input_source=list(stack), img_resize=None, kernel_size=7)
         assert abs(lp(out) - lp(stack[0])) < 4.0
 
-    def test_none_leaves_blend_untouched(self):
+    def test_exposure_match_calibrates_before_fusion(self):
+        """The pipeline scales every frame to the last frame's mean before
+        the focus measure, for every fusion method."""
+        from core.multi_focus_fusion import MultiFocusFusion
+        stack = self._drifted_stack()
+        lp = lambda x: cv2.GaussianBlur(
+            np.asarray(x, np.float32), (0, 0), 32).mean()
+        for algo in ("openfocus_a", "openfocus_b", "guided_filter"):
+            out = MultiFocusFusion(algorithm=algo, use_gpu=False,
+                                   base_frame="none",
+                                   exposure_match=True).fuse(
+                input_source=list(stack), img_resize=None, kernel_size=7)
+            assert abs(lp(out) - lp(stack[1])) < 3.0, algo
+
+    def test_exposure_match_off_leaves_stack_untouched(self):
+        """`exposure_match=False` must preserve the historical behaviour."""
         from core.multi_focus_fusion import MultiFocusFusion
         stack = self._drifted_stack()
         lp = lambda x: cv2.GaussianBlur(
             np.asarray(x, np.float32), (0, 0), 32).mean()
         out = MultiFocusFusion(algorithm="openfocus_b", use_gpu=False,
-                               base_frame="none").fuse(
+                               base_frame="none",
+                               exposure_match=False).fuse(
             input_source=list(stack), img_resize=None, kernel_size=7)
-        # no correction: the blend sits between the two frames
-        assert lp(stack[0]) + 10 < lp(out) < lp(stack[1]) - 10
+        assert lp(out) < lp(stack[1]) - 10
 
     def test_works_for_every_algorithm(self):
-        """The base correction is a post-step at the unified exit: classical
-        and tiled paths must both honour it."""
+        """`base_frame="last"` remains a post-step at the unified exit:
+        classical and tiled paths must both honour it."""
         from core.multi_focus_fusion import MultiFocusFusion
         stack = self._drifted_stack()
         lp = lambda x: cv2.GaussianBlur(
             np.asarray(x, np.float32), (0, 0), 32).mean()
         for algo in ("guided_filter", "gfgfgf"):
             out = MultiFocusFusion(algorithm=algo, use_gpu=False,
-                                   base_frame="last").fuse(
+                                   base_frame="last",
+                                   exposure_match=False).fuse(
                 input_source=list(stack), img_resize=None, kernel_size=7)
             assert abs(lp(out) - lp(stack[1])) < 4.0, algo
 
@@ -246,6 +276,20 @@ class TestOpenFocusAlignment:
         reg = ImageRegistration(method="openfocus")
         out = reg.process([base, dark], output_path=None, thread_count=2)
         assert abs(float(out[1].mean()) - float(base.mean())) < 12.0
+
+    def test_last_reference_also_calibrates_the_first_frame(self):
+        """With the fusion exposure target (last frame), the anchor frame is
+        calibrated too. It used to keep gain 1.0 — the handler copied
+        images[0] verbatim — so one frame stayed at the old exposure while
+        every other frame was moved to the last frame's level."""
+        from core.registration import ImageRegistration
+        base, f1 = self._shifted_stack()
+        dark = (f1.astype(np.float32) * 0.6).astype(np.uint8)
+        reg = ImageRegistration(method="openfocus",
+                                brightness_reference="last")
+        out = reg.process([base, dark], output_path=None, thread_count=2)
+        assert abs(float(out[0].mean()) - float(dark.mean())) < 12.0
+        assert abs(float(out[1].mean()) - float(dark.mean())) < 12.0
 
     def test_registered_in_supported_methods(self):
         from core.registration import ImageRegistration
@@ -319,9 +363,26 @@ class TestOpenFocusAlignment:
         assert np.abs(out[1].astype(int)[2:-2, 2:-2]
                       - out[0].astype(int)[2:-2, 2:-2]).mean() < 3.0
 
+    def test_sharp_vs_defocused_pair_recovers_translation(self):
+        """Regression: phase correlation reported 145 px for a true 16 px
+        shift when the frames had different focus. The translation must come
+        from a measure that survives defocus (NCC found 15.93 px)."""
+        from core.registration import _of_translation_ncc, _of_gray_est
+        base = make_two_focus_stack((240, 320))[0]
+        f = cv2.warpAffine(cv2.GaussianBlur(base, (0, 0), 4.5),
+                           np.float32([[1, 0, 16], [0, 1, 11]]), (320, 240))
+        _ncc, dx, dy = _of_translation_ncc(_of_gray_est(f, 480),
+                                          _of_gray_est(base, 480))
+        assert abs(abs(dx) - 16.0) < 1.5, dx
+        assert abs(abs(dy) - 11.0) < 1.5, dy
+
     def test_defocus_frames_still_align(self):
-        """失焦 + 位移的帧仍要对齐（高通预处理 + 置信门限 + 链式回退
-        的组合效果）。σ11 级的极端模糊物理上不可恢复，不在此列。"""
+        """失焦 + 位移的帧仍要对齐。
+
+        相位相关在「清晰 vs 失焦」帧对上会给出完全错误的峰（同一对帧真值
+        16 px，它报 145 px），NCC 模板搜索在同一对帧上给出 15.93 px。这里
+        断言的是重对齐后的残差，而不是某个估计器细节。
+        """
         from core.registration import ImageRegistration
         base = make_two_focus_stack((240, 320))[0]
         f1 = cv2.warpAffine(cv2.GaussianBlur(base, (0, 0), 3.5),
@@ -342,9 +403,8 @@ class TestOpenFocusAlignment:
         assert res(out[1], out[0]) < res(f1, base) * 0.75
 
     # ------------------------------------------------------------------
-    # 位移上限：逆向实证 §7.2 —— Helicon 在 ~6–8% 之上放弃追踪。默认从
-    # 25% 降到 8%，且超限**放弃**而非钳制（钳制会得到半错位 + 裁掉大块
-    # 有效区）。
+    # 位移上限：默认从 25% 降到 8%，且超限**放弃**而非钳制（钳制会得到
+    # 半错位 + 裁掉大块有效区）。
     # ------------------------------------------------------------------
     def _shift_only_stack(self, shift_px, size=(120, 240)):
         base = make_two_focus_stack(size)[0]
@@ -352,10 +412,10 @@ class TestOpenFocusAlignment:
         f1 = np.roll(base, -shift_px, axis=1)
         return base, f1
 
-    def test_default_shift_limit_is_helicon_parsimonious(self):
+    def test_default_shift_limit_is_parsimonious(self):
         from core.registration import _OF_MAX_SHIFT_RATIO
         assert _OF_MAX_SHIFT_RATIO <= 0.08, (
-            "the default must stay at Helicon's give-up point (§7.2); a wider "
+            "the default must stay at the parsimonious 8% limit; a wider "
             "default re-introduces half-corrected large shifts")
 
     def test_shift_over_limit_drops_alignment(self):
@@ -417,8 +477,7 @@ class TestOpenFocusAlignment:
 
 def test_openfocus_b_depth_smoothing_controls_transition():
     """depth_smoothing changes the depth transition (0 = median only; larger
-    = wider, which calms speckle on noisy texture); default (None) equals the
-    Helicon-matched 1.2."""
+    = wider, which calms speckle on noisy texture); default (None) is 1.2."""
     from fusion_methods.openfocus_ab import openfocus_b_impl
     rng = np.random.default_rng(3)
     tex = rng.integers(0, 255, (64, 96, 3), dtype=np.uint8)
@@ -432,3 +491,145 @@ def test_openfocus_b_depth_smoothing_controls_transition():
     err = lambda o: np.abs(o.astype(int) - tex.astype(int))[:, 40:56].mean()
     assert (sharp != soft).any()
     assert err(sharp) < 3.0 and err(soft) < 3.0
+
+
+class TestSmoothingParity:
+    """Helicon exposes exactly one Smoothing knob for methods A and C, and no
+    Radius for C. Our A/C ignored their smoothing entirely (A hardcoded σ2,
+    C hardcoded σ3) and C showed a Radius slider that did nothing."""
+
+    def _stack(self):
+        return make_two_focus_stack((120, 160))
+
+    @pytest.mark.parametrize("algo", ["openfocus_a", "openfocus_c"])
+    def test_blend_smoothing_changes_the_output(self, algo):
+        from core.multi_focus_fusion import MultiFocusFusion
+        frames = self._stack()
+        sharp = MultiFocusFusion(algorithm=algo, use_gpu=False).fuse(
+            input_source=[f.copy() for f in frames], blend_smoothing=0.0)
+        soft = MultiFocusFusion(algorithm=algo, use_gpu=False).fuse(
+            input_source=[f.copy() for f in frames], blend_smoothing=6.0)
+        assert not np.array_equal(sharp, soft), (
+            f"{algo}: blend_smoothing had no effect on the output")
+
+    @pytest.mark.parametrize("algo,default", [("openfocus_a", 2.0),
+                                              ("openfocus_c", 3.0)])
+    def test_default_smoothing_is_the_documented_sigma(self, algo, default):
+        from core.multi_focus_fusion import MultiFocusFusion
+        frames = self._stack()
+        implied = MultiFocusFusion(algorithm=algo, use_gpu=False).fuse(
+            input_source=[f.copy() for f in frames])
+        explicit = MultiFocusFusion(algorithm=algo, use_gpu=False).fuse(
+            input_source=[f.copy() for f in frames], blend_smoothing=default)
+        assert np.array_equal(implied, explicit), (
+            f"{algo}: the default must be sigma {default}")
+
+    def test_openfocus_c_has_no_radius(self):
+        """C's kernel_size is inert: Helicon's Method C has no Radius, so the
+        wrapper must not let the slider imply one."""
+        from fusion_methods.openfocus_ab import openfocus_c_impl
+        frames = self._stack()
+        a = openfocus_c_impl([f.copy() for f in frames], kernel_size=3)
+        b = openfocus_c_impl([f.copy() for f in frames], kernel_size=21)
+        assert np.array_equal(a, b)
+
+    def test_smoothing_is_per_method(self, qapp):
+        """The spin box carries one value per method: switching methods must
+        never hand A's blend sigma to C (or B's depth sigma to A).
+
+        A full OpenFocus window cannot be constructed inside this suite (Qt
+        access-violates on teardown here), so the real methods are bound onto
+        a stub that only provides what they touch.
+        """
+        import main
+        from PyQt6.QtWidgets import QSlider
+
+        window = type("Stub", (), {})()
+        window.ui_objs = {}
+        window._kernel_by_mode = {}
+        window._smoothing_by_method = {}
+        window.ofb_depth_smoothing = 1.2
+        window.of_blend_smoothing = 3.0
+        window.depth_smooth_row = None
+        window.smooth_widget = None
+        window.lbl_kernel = None
+        window.slider_smooth = QSlider()
+        window.current_kernel_mode = None
+        window.persist_settings = lambda: None
+        window._SMOOTHING_DEFAULTS = dict(main.OpenFocus._SMOOTHING_DEFAULTS)
+        window._methods = {"method": "openfocus_a"}
+        window.current_fusion_method = lambda: window._methods["method"]
+        for name in ("smoothing_for_method", "set_ofb_depth_smoothing"):
+            setattr(window, name, main.OpenFocus.__dict__[name].__get__(window))
+
+        def select(method):
+            window._methods["method"] = method
+
+        select("openfocus_a")
+        assert window.smoothing_for_method("openfocus_a") == 2.0
+        window.set_ofb_depth_smoothing(7.5)
+        assert window.smoothing_for_method("openfocus_a") == 7.5
+        select("openfocus_b")
+        assert window.smoothing_for_method("openfocus_b") == 1.2
+        select("openfocus_c")
+        assert window.smoothing_for_method("openfocus_c") == 3.0
+        # a shared single field would have leaked A's 7.5 into C
+        assert window.of_blend_smoothing == 7.5
+        assert window.smoothing_for_method("openfocus_c") == 3.0
+
+    def test_radius_slider_is_hidden_for_c(self):
+        """Static check: update_slider_availability must hide the radius row
+        for C (Helicon's Method C has no Radius parameter)."""
+        from pathlib import Path
+        src = (Path("main.py").read_text(encoding="utf-8"))
+        assert 'self.smooth_widget.setVisible(spec is not None' in src
+        assert 'label_blend_smoothing' in src
+        assert 'smoothing_for_method' in src
+
+
+class TestRotationScaleTolerance:
+    """Helicon exposes rotation and magnification as their own tolerance
+    parameters. Ours had a shift limit only, so a mis-estimated 5° rotation
+    or 1.05 scale (the coarse-search bounds) was applied instead of refused —
+    corner error grows with the image diagonal."""
+
+    def test_rotation_beyond_tolerance_is_refused(self):
+        from core.registration import ImageRegistration
+        base = make_two_focus_stack((240, 320))[0]
+        h, w = base.shape[:2]
+        # 9° is past the 8° estimate bound, so the estimator cannot represent
+        # it; the frame must stay put rather than take a wrong correction.
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), 9.0, 1.0)
+        f1 = cv2.warpAffine(base, M, (w, h))
+        out = ImageRegistration(method="openfocus").process(
+            [base.copy(), f1], output_path=None, thread_count=2)
+        raw = np.abs(f1.astype(int)[8:-8, 8:-8]
+                     - base.astype(int)[8:-8, 8:-8]).mean()
+        got = np.abs(out[1].astype(int)[8:-8, 8:-8]
+                     - out[0].astype(int)[8:-8, 8:-8]).mean()
+        # an applied rotation would leave a large residual anyway; what must
+        # NOT happen is a partial (half-corrected) transform
+        assert got > raw * 0.9
+
+    def test_rotation_within_tolerance_is_aligned(self):
+        from core.registration import ImageRegistration
+        base = make_two_focus_stack((240, 320))[0]
+        h, w = base.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), 3.0, 1.0)
+        f1 = cv2.warpAffine(base, M, (w, h))
+        out = ImageRegistration(method="openfocus").process(
+            [base.copy(), f1], output_path=None, thread_count=2)
+        raw = np.abs(f1.astype(int)[8:-8, 8:-8]
+                     - base.astype(int)[8:-8, 8:-8]).mean()
+        got = np.abs(out[1].astype(int)[10:-10, 10:-10]
+                     - out[0].astype(int)[10:-10, 10:-10]).mean()
+        assert got < raw * 0.5
+
+    def test_limits_are_configurable(self):
+        from core import registration as reg
+        assert reg._OF_MAX_ROTATION_DEG == 8.0
+        assert reg._OF_MAX_SCALE_DELTA == 0.05
+        import inspect
+        params = inspect.signature(reg._align_openfocus_impl).parameters
+        assert "max_rotation_deg" in params
+        assert "max_scale_delta" in params
