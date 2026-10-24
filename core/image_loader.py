@@ -30,6 +30,7 @@ except ImportError:
     RAWPY_AVAILABLE = False
 
 from utils.image_utils import to_display_uint8
+from utils.sorting import natural_sort_key
 
 RAW_FORMATS = {'.dng', '.cr2', '.cr3', '.crw', '.nef', '.nrw', '.arw', '.srf',
                '.sr2', '.raf', '.orf', '.rw2', '.raw', '.pef', '.srw', '.3fr',
@@ -61,8 +62,14 @@ def decode_image(path: str) -> Optional[np.ndarray]:
     ext = os.path.splitext(path)[1].lower()
     if ext in RAW_FORMATS:
         return _read_raw(path)
+    # IMREAD_IGNORE_ORIENTATION is required: modern OpenCV already rotates by
+    # the EXIF Orientation tag itself, so letting apply_exif_orientation run
+    # afterwards applied every transform twice (portrait phone shots loaded
+    # sideways). The PIL fallback below does not rotate on its own, so the
+    # single explicit pass is the only orientation step for both paths.
     img = cv2.imdecode(np.fromfile(path, dtype=np.uint8),
-                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+                       cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR
+                       | cv2.IMREAD_IGNORE_ORIENTATION)
     if img is None:
         # OpenCV ships no HEIC/HEIF decoder: fall back to Pillow
         img = _read_via_pil(path)
@@ -77,7 +84,7 @@ def _read_exif_bytes(path: str) -> bytes:
         return b""
     try:
         ext = os.path.splitext(path)[1].lower()
-        if ext not in ('.jpg', '.jpeg', '.tif', '.tiff', '.png'):
+        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.tif', '.tiff', '.png', '.webp'):
             return b""
         with PILImage.open(path) as pil_img:
             return pil_img.info.get('exif', b"") or b""
@@ -109,7 +116,7 @@ def apply_exif_orientation(path: str, img: np.ndarray) -> np.ndarray:
         return img
     try:
         ext = os.path.splitext(path)[1].lower()
-        if ext not in ('.jpg', '.jpeg', '.tif', '.tiff'):
+        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.tif', '.tiff', '.png', '.webp'):
             return img
         with PILImage.open(path) as pil_img:
             orientation = pil_img.getexif().get(274, 1)
@@ -129,6 +136,14 @@ def _read_via_pil(path: str) -> Optional[np.ndarray]:
     failed file instead of raising.
     """
     if not PIL_AVAILABLE:
+        return None
+    # Pillow's TIFF decoder ABORTS the process (0xC0000409) on compressed
+    # 16-bit TIFFs — LZW, PackBits and colour LZW all reproduce it on Pillow
+    # 11.1.0/Windows, and `cv2.imwrite` writes LZW by default. A try/except
+    # cannot catch a native abort, so a stack of otherwise-readable frames
+    # would take the whole app down. OpenCV decodes every one of those files
+    # correctly, so TIFF simply never goes through Pillow.
+    if os.path.splitext(path)[1].lower() in ('.tif', '.tiff'):
         return None
     try:
         with PILImage.open(path) as pil_img:
@@ -258,7 +273,8 @@ def _decode_source(path: str, scale_factor: float):
 class ImageStackLoader:
     """图像栈加载器"""
 
-    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
+    SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp',
+                         '.tiff', '.tif', '.webp'}
     if HEIF_AVAILABLE:
         SUPPORTED_FORMATS |= {'.heic', '.heif'}
     if RAWPY_AVAILABLE:
@@ -306,10 +322,11 @@ class ImageStackLoader:
         if not image_files:
             return False, "No supported image files found in the folder", [], []
 
-        image_files.sort(key=lambda x: x[0])
+        image_files.sort(key=lambda x: natural_sort_key(x[0]))
 
         loaded_images = []
         filenames = []
+        loaded_paths = []
         failed_count = 0
         self.source_exif = b""
         # Reset per load: one loader instance serves the whole session, so a
@@ -330,12 +347,14 @@ class ImageStackLoader:
                     stem = os.path.splitext(filename)[0]
                     for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
+                        loaded_paths.append(full_path)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
                 if data is not None:
                     self._note_stack_metadata(full_path, scale_factor)
                     loaded_images.append(data)
+                    loaded_paths.append(full_path)
                     filenames.append(filename)
                 else:
                     failed_count += 1
@@ -347,7 +366,11 @@ class ImageStackLoader:
             return False, "Could not load any image files", [], []
 
         self.images = loaded_images
-        self.image_paths = [f[1] for f in image_files[:len(loaded_images)]]
+        # One path per *frame*: a multi-page TIFF contributes the same
+        # container path for each of its pages, and a failed file must not
+        # shift the remaining paths (get_image_info used to report the wrong
+        # file for every frame after either case).
+        self.image_paths = loaded_paths
 
         message = f"Loaded {len(loaded_images)} image(s)"
         if failed_count > 0:
@@ -413,6 +436,7 @@ class ImageStackLoader:
 
         loaded_images = []
         filenames = []
+        loaded_paths = []
         failed_count = 0
         sources = _collapse_repeats(list(filepaths))
         # see load_from_folder: calibration must not stick across stacks
@@ -436,6 +460,7 @@ class ImageStackLoader:
                     stem = os.path.splitext(os.path.basename(full_path))[0]
                     for page_no, page in enumerate(data, start=1):
                         loaded_images.append(page)
+                        loaded_paths.append(full_path)
                         filenames.append(f"{stem}_page_{page_no:03d}.tif")
                     continue
 
@@ -444,6 +469,7 @@ class ImageStackLoader:
                     continue
                 self._note_stack_metadata(full_path, scale_factor)
                 loaded_images.append(data)
+                loaded_paths.append(full_path)
                 filenames.append(os.path.basename(full_path))
             except Exception as e:
                 failed_count += 1
@@ -453,7 +479,7 @@ class ImageStackLoader:
             return False, "Could not load any image files", [], []
 
         self.images = loaded_images
-        self.image_paths = list(sources)
+        self.image_paths = loaded_paths
 
         message = f"Loaded {len(loaded_images)} image(s)"
         if failed_count > 0:
@@ -486,25 +512,19 @@ class ImageStackLoader:
     def _cv_to_pixmap(self, cv_img: np.ndarray, max_size: Optional[Tuple[int, int]] = None):
         # Imported lazily: the headless PyPI package uses this module for
         # decoding without PyQt6 installed.
-        from PyQt6.QtGui import QPixmap, QImage
-        rgb_img = cv2.cvtColor(to_display_uint8(cv_img), cv2.COLOR_BGR2RGB)
+        from utils.image_utils import cv2_to_pixmap
 
         if max_size is not None:
-            h, w = rgb_img.shape[:2]
+            h, w = cv_img.shape[:2]
             max_w, max_h = max_size
 
             scale = min(max_w / w, max_h / h)
             if scale < 1.0:
                 new_w = int(w * scale)
                 new_h = int(h * scale)
-                rgb_img = cv2.resize(rgb_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-        h, w, ch = rgb_img.shape
-        bytes_per_line = ch * w
-
-        q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-
-        return QPixmap.fromImage(q_img)
+        return cv2_to_pixmap(cv_img)
 
     def get_image_info(self, index: int) -> dict:
         if not self.images or index < 0 or index >= len(self.images):
@@ -593,7 +613,7 @@ class ImageStackLoader:
                 if ts is not None:
                     return ts
                 return float('inf')
-            return item[0]
+            return natural_sort_key(item[0])
 
         loaded_data.sort(key=get_sort_key)
 

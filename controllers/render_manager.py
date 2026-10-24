@@ -4,26 +4,37 @@ from typing import Any, List, Optional
 import cv2
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import QApplication, QMessageBox, QDialog
 
 from utils import show_message_box, show_warning_box
-from utils.image_utils import to_display_uint8
-from core.multi_focus_fusion import is_stackmffv4_available
+from utils.image_utils import cv2_to_pixmap
+from core.multi_focus_fusion import is_ai_fusion_available
+from core.render_context import build_render_context
 from core.workers import RenderWorker
 from dialogs import ROIRenderOptionsDialog  # Import the new dialog
 from locales import trans
 
-PREVIEW_MAX_SIDE = 1200
+# A quick preview must be *obviously* quicker, not marginally so. The old
+# absolute cap of 1200 px did almost nothing at the sizes people actually use:
+# a 1344 px stack shrank by 11%, and the extra downscale plus the forced
+# re-registration of the small frames made the "quick" path slower than the
+# full render (measured 7.7 s vs 6.1 s on a 1344x1021 stack with ECC). Scaling
+# by a fraction fixes the class of problem instead of one resolution: half the
+# linear size is a quarter of the pixels, so the transform-heavy methods really
+# do finish faster. The floor keeps the draft legible and avoids a preview that
+# is slower because of per-tile / per-batch overhead.
+PREVIEW_SCALE = 0.5
+PREVIEW_MIN_SIDE = 320
 
 
 def _downscale_for_preview(img):
-    """Scale a frame so its longest side is at most PREVIEW_MAX_SIDE."""
+    """Halve a frame (never below PREVIEW_MIN_SIDE on the long edge)."""
     h, w = img.shape[:2]
     longest = max(h, w)
-    if longest <= PREVIEW_MAX_SIDE:
+    target = max(PREVIEW_MIN_SIDE, int(round(longest * PREVIEW_SCALE)))
+    if target >= longest:
         return img
-    scale = PREVIEW_MAX_SIDE / float(longest)
+    scale = target / float(longest)
     return cv2.resize(img, (int(round(w * scale)), int(round(h * scale))),
                       interpolation=cv2.INTER_AREA)
 
@@ -39,7 +50,7 @@ class RenderManager:
         "openfocus_a": "OpenFocus A",
         "openfocus_b": "OpenFocus B",
         "openfocus_c": "OpenFocus C",
-        "stackmffv4": "AI",
+        "stackmffv3": "StackMFF-V3",
     }
     # UI 展示（进度/输出列表/信息行）走 i18n 标签；ALGORITHM_DISPLAY 仅作
     # 非代码兜底与文件名无关
@@ -48,7 +59,7 @@ class RenderManager:
         "dct": "radio_dct",
         "dtcwt": "radio_dtcwt",
         "gfgfgf": "radio_gfg",
-        "stackmffv4": "radio_stackmff",
+        "stackmffv3": "radio_stackmff",
         "openfocus_a": "radio_openfocus_a",
         "openfocus_b": "radio_openfocus_b",
         "openfocus_c": "radio_openfocus_c",
@@ -72,6 +83,64 @@ class RenderManager:
         self._preview_mode = False
         # What the *running* render was launched with; see start_render().
         self._render_context: Optional[dict] = None
+
+    def _confirm_cpu_ai_render(self, force_algorithm: str | None = None) -> bool:
+        """Warn before starting a CPU-only AI render; True means go ahead.
+
+        StackMFF V3 is roughly 30-90x slower on a CPU than the classical
+        methods, and on a low-spec machine a large stack can leave the whole
+        computer unresponsive for a long time. Users with no accelerator get
+        told that once, with a "don't show this again" opt-out, instead of
+        waiting minutes with no explanation.
+
+        Compare-all drives methods programmatically and must not stop for a
+        modal box mid-run, so it is skipped.
+        """
+        if force_algorithm is not None:
+            return True
+        window = self.window
+        try:
+            algorithm = window.current_fusion_method()
+        except Exception:
+            return True
+        if algorithm != "stackmffv3" or not getattr(window, "use_gpu", True):
+            # A user who explicitly disabled GPU acceleration has already
+            # been told; the setting is the opt-out.
+            return True
+
+        from utils.settings_store import (AI_CPU_WARNING_DISMISSED_KEY,
+                                          get_settings)
+        settings = get_settings()
+        if settings.value(AI_CPU_WARNING_DISMISSED_KEY, False, type=bool):
+            return True
+
+        from core.multi_focus_fusion import is_ai_fusion_available, torch_device_kind
+        if not is_ai_fusion_available():
+            return True  # torch missing: the render itself will say so
+        if torch_device_kind() not in (None, "N/A"):
+            return True  # CUDA or MPS available: nothing to warn about
+
+        from PyQt6.QtWidgets import QCheckBox, QMessageBox
+        from utils import style_message_box
+
+        box = QMessageBox(window)
+        style_message_box(box)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(trans.t("ai_cpu_warning_title"))
+        box.setText(trans.t("ai_cpu_warning_text"))
+        dont_show = QCheckBox(trans.t("ai_cpu_warning_dont_show"))
+        box.setCheckBox(dont_show)
+        start_btn = box.addButton(trans.t("btn_render"),
+                                  QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(trans.t("btn_cancel_generic"),
+                      QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(start_btn)
+        box.exec()
+
+        if dont_show.isChecked():
+            settings.setValue(AI_CPU_WARNING_DISMISSED_KEY, True)
+            settings.sync()
+        return box.clickedButton() is start_btn
 
     def _abort_compare_run(self) -> None:
         """Abort a chained comparison whose next render failed to start."""
@@ -99,7 +168,7 @@ class RenderManager:
             window.combo_fusion.setEnabled(True)
         except Exception:
             pass
-        # StackMFF-V4 availability is owned by the torch probe: blanket-enabling
+        # StackMFF-V3 availability is owned by the torch probe: blanket-enabling
         # it here re-armed an unavailable backend after every render.
         hook = getattr(window, "refresh_method_availability", None)
         if callable(hook):
@@ -148,11 +217,12 @@ class RenderManager:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_render_need_images_text"))
             return
 
-        # 与融合下拉同序（stackmffv4 在 openfocus 族之前）
-        methods = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
-                   "openfocus_a", "openfocus_b", "openfocus_c"]
-        if not is_stackmffv4_available():
-            methods.remove("stackmffv4")
+        # Same order as the fusion dropdown: AI, the OpenFocus family, then
+        # the classical back-ends.
+        methods = ["stackmffv3", "openfocus_a", "openfocus_b", "openfocus_c",
+                   "guided_filter", "dct", "dtcwt", "gfgfgf"]
+        if not is_ai_fusion_available():
+            methods.remove("stackmffv3")
 
         self._compare_queue = list(methods)
         self._compare_total = len(methods)
@@ -212,6 +282,10 @@ class RenderManager:
             self._abort_compare_run()
             return
 
+        if not self._confirm_cpu_ai_render(force_algorithm):
+            self._abort_compare_run()
+            return
+
         if force_algorithm:
             # Compare-all mode drives the next renders programmatically; the
             # button doubles as a cancel affordance and everything else stays
@@ -247,6 +321,15 @@ class RenderManager:
         except Exception:
             pass
 
+        def _brightness(win, option, method):
+            """Per-method brightness option (duck-typed hosts may not have it)."""
+            getter = getattr(win, "brightness_option_for", None)
+            if callable(getter):
+                return bool(getter(option, method))
+            return bool(getattr(win, "exposure_match", True)) if option == (
+                "exposure_match") else bool(
+                    getattr(win, "base_frame_correct", False))
+
         fusion_method = window.current_fusion_method()
         alignment_method = window.current_alignment_method()
         need_align_homography = alignment_method == "homography"
@@ -264,14 +347,15 @@ class RenderManager:
         if kernel_slider_value % 2 == 0:
             kernel_slider_value = max(1, kernel_slider_value - 1)
 
-        if force_algorithm is None and fusion_method == "stackmffv4" \
-                and not is_stackmffv4_available():
+        if force_algorithm is None and fusion_method == "stackmffv3" \
+                and not is_ai_fusion_available():
             show_warning_box(
                 window,
                 trans.t("msg_stackmff_unavailable_title"),
                 trans.t("msg_stackmff_unavailable_text"),
             )
-            window.set_fusion_method("guided_filter")
+            window.set_fusion_method(
+                getattr(window, "_first_available_method", lambda: "guided_filter")())
             self._restore_ui_controls()
             return
 
@@ -303,10 +387,19 @@ class RenderManager:
         # excluded, effective_stack() returns the live lists unchanged.
         stack_images, stack_filenames, included_idx = window.effective_stack()
         preview_downscale = getattr(window, 'chk_quick_preview', None)
+        # Compare-all is a *producing* operation: the whole point is to fill the
+        # output history with one result per method so they can be compared.
+        # Honouring the quick-preview checkbox there rendered eight throwaway
+        # drafts, so the run completed with nothing added to the history - the
+        # user saw a fusion run and no output, with only the last draft left on
+        # the canvas. A draft per method is also unusable for comparison: each
+        # is downscaled and none survives.
+        compare = bool(getattr(self, '_compare_mode', False))
         self._preview_mode = bool(
             preview_downscale is not None
             and preview_downscale.isChecked()
             and not use_roi_aligned_images
+            and not compare
         )
         if use_roi_aligned_images:
             # ROI模式下使用已经对齐的图像栈，跳过额外的配准
@@ -320,14 +413,34 @@ class RenderManager:
             effective_last_alignment_options = (False, True, False)  # 表示ECC已完成
         elif self._preview_mode:
             # Quick preview: downscale the stack so the draft render finishes
-            # in a fraction of the time; alignment always reruns on the small
-            # frames (the full-resolution aligned cache does not apply).
+            # in a fraction of the time.
             source_images = [_downscale_for_preview(img) for img in stack_images]
-            effective_need_align_homography = need_align_homography
-            effective_need_align_ecc = need_align_ecc
-            effective_aligned_images = source_images
-            effective_is_aligned = False
-            effective_last_alignment_options = (False, False, False)
+            # Registration is usually the most expensive stage and it does not
+            # get cheaper in proportion: on a 1344x1021 stack with ECC the
+            # fusion itself is 0.2-0.5 s while ECC takes seconds, so forcing a
+            # fresh alignment for every draft made "quick preview" slower than
+            # the full render. When the current stack is already aligned, reuse
+            # that alignment (downscaled to the draft size) instead of rerunning
+            # it; the alignment is a global transform, so scaling it to the
+            # preview grid is exact.
+            reusable = (
+                window.is_images_aligned
+                and getattr(window, "aligned_images", None)
+                and len(window.aligned_images) == len(stack_images)
+            )
+            if reusable:
+                effective_need_align_homography = False
+                effective_need_align_ecc = False
+                effective_aligned_images = [
+                    _downscale_for_preview(img) for img in window.aligned_images]
+                effective_is_aligned = True
+                effective_last_alignment_options = (False, False, False)
+            else:
+                effective_need_align_homography = need_align_homography
+                effective_need_align_ecc = need_align_ecc
+                effective_aligned_images = source_images
+                effective_is_aligned = False
+                effective_last_alignment_options = (False, False, False)
         elif (need_align_homography or need_align_ecc) \
                 and not window.is_images_aligned \
                 and getattr(window, "align_cache_enabled", True):
@@ -392,10 +505,21 @@ class RenderManager:
             "preview": self._preview_mode,
             "roi": roi_rect is not None,
             "all_filenames": list(window.image_filenames or []),
+            "roi_rect": ((float(roi_rect.x()), float(roi_rect.y()),
+                          float(roi_rect.width()), float(roi_rect.height()))
+                         if roi_rect is not None else None),
+            "roi_mode": roi_mode,
+            "roi_base_index": roi_base_index,
+            "algorithm": force_algorithm or fusion_method,
+            "aligned": bool(effective_is_aligned),
             "filenames": list(stack_filenames),
             "included": list(included_idx),
         }
 
+        from utils.logging_setup import log_action
+        log_action("render_start", method=fusion_method,
+                   align=alignment_method, preview=self._preview_mode,
+                   frames=len(window.raw_images or []))
         self.worker = RenderWorker(
             source_images,
             effective_aligned_images,
@@ -408,7 +532,7 @@ class RenderManager:
             fusion_method == "dct",
             fusion_method == "dtcwt",
             fusion_method == "gfgfgf",
-            fusion_method == "stackmffv4",
+            fusion_method == "stackmffv3",
             kernel_slider_value,
             tile_enabled=getattr(window, "tile_enabled", None),
             tile_block_size=getattr(window, "tile_block_size", None),
@@ -416,7 +540,8 @@ class RenderManager:
             tile_threshold=getattr(window, "tile_threshold", None),
             reg_downscale_width=getattr(window, "reg_downscale_width", None),
             thread_count=getattr(window, "thread_count", 4),
-            stackmffv4_batch_size=getattr(window, "stackmffv4_batch_size", 2),
+            ai_batch_size=getattr(window, "ai_batch_size", 2),
+            ai_mode=getattr(window, "ai_mode", "soft"),
             roi_rect=roi_rect,
             roi_mode=roi_mode,
             roi_base_index=roi_base_index,
@@ -426,11 +551,20 @@ class RenderManager:
             rb_ofa_checked=fusion_method == "openfocus_a",
             rb_ofb_checked=fusion_method == "openfocus_b",
             rb_ofc_checked=fusion_method == "openfocus_c",
-            base_frame="last" if getattr(window, "base_frame_correct", False)
-                else "none",
+            base_frame="last" if _brightness(window, "base_correct",
+                                             fusion_method) else "none",
             sort_mode="desc" if getattr(window, "stack_reverse_order", False)
                 else "asc",
             depth_smoothing=getattr(window, "ofb_depth_smoothing", None),
+            # Per-method smoothing: the spin box shows the sigma of the
+            # selected method, so the render must use that method's value —
+            # a shared field sent A's blend sigma to C after a switch.
+            # Duck-typed hosts (tests, preview stubs) may not implement it.
+            blend_smoothing=(
+                window.smoothing_for_method(fusion_method)
+                if callable(getattr(window, "smoothing_for_method", None))
+                else getattr(window, "of_blend_smoothing", None)),
+            exposure_match=_brightness(window, "exposure_match", fusion_method),
         )
 
         self._progress_first_t = None
@@ -453,6 +587,10 @@ class RenderManager:
         device_name: str,
     ) -> None:
         window = self.window
+        from utils.logging_setup import log_action
+        log_action("render_finished", preview=bool(
+            (self._render_context or {}).get("preview")),
+            seconds=round(fusion_time, 2))
         self._hide_progress_bar()
         context = self._render_context
         preview = context["preview"] if context else getattr(self, '_preview_mode', False)
@@ -482,6 +620,16 @@ class RenderManager:
             _logging.getLogger("openfocus").warning(
                 "render result discarded: stack changed while rendering")
             window.statusBar().showMessage(message, 8000)
+            # Nothing will chain the next comparison method any more (the
+            # queue is only advanced from the normal completion path), so an
+            # untouched compare run left the render button disabled forever
+            # with a stale "-1/0" progress label.
+            if getattr(self, "_compare_mode", False):
+                self._compare_mode = False
+                self._compare_queue = []
+                self._compare_current = None
+            self._render_context = None
+            self._dispose_worker()
             self._restore_ui_controls()
             return
 
@@ -508,8 +656,37 @@ class RenderManager:
                         window.btn_preview_roi.blockSignals(False)
 
                 window.output_manager.show_fusion_result()
+                new_context = None
                 if not preview:
-                    window.output_manager.update_output_list_for_fusion()
+                    try:
+                        ctx = context or {}
+                        new_context = build_render_context(
+                            processed_images,
+                            fusion_result,
+                            filenames=ctx.get("filenames")
+                            or list(window.image_filenames or []),
+                            algorithm=((self._compare_current if compare else None)
+                                       or ctx.get("algorithm")
+                                       or window.current_fusion_method()),
+                            alignment_options=ctx.get("alignment_options"),
+                            # Only claim registration fill when the worker
+                            # actually fused warped frames. A stack that was
+                            # aligned earlier but rendered with no alignment
+                            # request uses the raw frames.
+                            aligned=bool(registration_performed
+                                         or (ctx.get("roi")
+                                             and ctx.get("aligned"))),
+                            roi_rect=ctx.get("roi_rect"),
+                            roi_mode=ctx.get("roi_mode"),
+                        )
+                        window.last_render_context = new_context
+                    except Exception:
+                        import logging
+                        logging.getLogger("openfocus").exception(
+                            "could not record render provenance; "
+                            "the output will not be retouchable")
+                    window.output_manager.update_output_list_for_fusion(
+                        context=new_context)
 
                 # Tag the newest output entry with the method that made it
                 method = getattr(self, '_compare_current', None) if compare else None
@@ -518,6 +695,7 @@ class RenderManager:
                     if item is not None:
                         item.setText(
                             f"{item.text()} — {self.algo_display_name(method)}")
+                        window.output_manager.update_record_label(0, item.text())
 
                 # New output: refresh the wipe B-side history, keep selection
                 if getattr(window, "wipe_active", False):
@@ -552,11 +730,7 @@ class RenderManager:
                         # touching the full-resolution output history
                         first = processed_images[0] if processed_images else None
                         if first is not None:
-                            first = to_display_uint8(first)
-                            rgb_image = cv2.cvtColor(first, cv2.COLOR_BGR2RGB)
-                            h, w, _ch = rgb_image.shape
-                            q_image = QImage(rgb_image.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-                            window.lbl_result_img.set_display_pixmap(QPixmap.fromImage(q_image))
+                            window.lbl_result_img.set_display_pixmap(cv2_to_pixmap(first))
                         window.result_control_bar.setVisible(False)
                         print("Preview registration completed (not added to output history)")
                     else:
@@ -575,6 +749,13 @@ class RenderManager:
                         # wipe view may be scrubbing through
                         if getattr(window, "wipe_active", False):
                             window.refresh_wipe_controls()
+
+                        # Align-only runs have no fused image, so the output
+                        # list used to stay empty and the aligned frames were
+                        # unreachable. Publish them as a folder entry that can
+                        # be re-saved.
+                        if not preview:
+                            self._publish_aligned_stack(window, processed_images)
 
                         print("Registration completed successfully!")
                 else:
@@ -704,7 +885,41 @@ class RenderManager:
             else:
                 # 恢复 UI 控件
                 self._restore_ui_controls()
-            self.worker = None
+            self._dispose_worker()
+
+    def _publish_aligned_stack(self, window, frames) -> None:
+        """Stage an align-only result as a folder the output list can show."""
+        try:
+            from controllers.output_manager import publish_aligned_stack
+
+            publish_aligned_stack(window, frames)
+        except Exception as exc:  # never fail a render over the listing
+            import logging
+            logging.getLogger("openfocus").warning(
+                "could not publish the aligned stack: %s", exc)
+
+    def _dispose_worker(self) -> None:
+        """Release the finished RenderWorker without destroying a live QThread.
+
+        Dropping the last Python reference to a QThread that is still
+        finishing makes Qt destroy the C++ object underneath a running
+        thread: the worker emits its result from inside run(), so by the
+        time this slot runs the thread may not have returned yet. Qt then
+        aborts the process in Qt6Core.dll (exception 0xc0000409) — the crash
+        seen after ECC + AI renders. deleteLater() defers destruction to the
+        event loop, which only runs once the thread is really gone.
+        """
+        worker = self.worker
+        self.worker = None
+        if worker is None:
+            return
+        # deleteLater() is enough on its own: Qt posts the deferred delete to
+        # the event loop, which runs the destruction only after run() has
+        # returned. Never wait() here — this slot runs on the GUI thread and
+        # the worker is the thread that would have to finish first.
+        dispose = getattr(worker, "deleteLater", None)
+        if dispose is not None:
+            dispose()
 
     def _progress_widgets(self):
         """Lazily created status-bar progress bar + stage label.
@@ -757,6 +972,10 @@ class RenderManager:
         window = self.window
         bar = getattr(self, "_status_bar_progress", None)
         if bar is not None and total > 0:
+            # Range first, then value: Qt clamps a value outside the current
+            # range, so setting the value while the bar is still in its
+            # indeterminate (0..0) mode silently drops it and the bar looks
+            # frozen for the rest of the run.
             bar.setRange(0, int(total))
             bar.setValue(int(done))
         now = _time.time()
@@ -780,7 +999,7 @@ class RenderManager:
         # must not leave the controller in preview mode.
         self._preview_mode = False
         self._render_context = None
-        self.worker = None
+        self._dispose_worker()
         self._hide_progress_bar()
 
         if getattr(self, '_compare_mode', False):

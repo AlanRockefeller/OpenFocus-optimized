@@ -1,6 +1,17 @@
 import sys
 import os
 
+# Two OpenMP runtimes reach this process: Intel MKL (through numpy/scipy from
+# the Anaconda distribution) and torch's own libiomp5md.dll. Whichever loads
+# second aborts the process with "OMP: Error #15 ... already initialized" —
+# observed as a hard crash the moment an ECC + AI render started, because that
+# is the first code path that touches both. The variable must be set before
+# numpy or torch is imported, so it lives here rather than in a helper module.
+# Intel documents it as unsupported-but-safe for this exact case; the
+# alternative (rebuilding numpy or torch against a single runtime) is not
+# something a user install can do.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 # In --noconsole (windowed) PyInstaller builds sys.stdout/stderr are None, and
 # any print() then crashes with AttributeError ('NoneType' object has no
 # attribute 'write'). Route them to the null device instead.
@@ -19,10 +30,11 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QDialog,
+    QPushButton,
 )
 from PyQt6.QtCore import Qt, QThread, QUrl, QEvent, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
-from PyQt6.QtGui import QFont, QIcon, QDesktopServices, QDragEnterEvent, QDropEvent, QImage, QPixmap
+from PyQt6.QtGui import QFont, QIcon, QDesktopServices, QDragEnterEvent, QDropEvent, QPixmap
 from core import ImageStackLoader
 from core.app import OpenFocusApplication, process_command_line_args
 from core.workers import ROIAlignmentWorker
@@ -35,7 +47,7 @@ from dialogs import (
     BatchProcessingDialog,
     TileSettingsDialog,
     ThreadSettingsDialog,
-    StackMFFV4BatchSettingsDialog,
+    AIBatchSettingsDialog,
     ROIRenderOptionsDialog,
 )
 from dialogs.help import RenderMethodHelpDialog
@@ -52,7 +64,7 @@ from utils import (
     style_message_box,
     resource_path,
 )
-from utils.image_utils import to_display_uint8
+from utils.image_utils import cv2_to_pixmap
 from utils.settings_store import (
     load_window_settings,
     save_window_settings,
@@ -81,13 +93,59 @@ from controllers.update_manager import (
     STATE_READY,
     STATE_STAGING,
 )
-from core import is_stackmffv4_available
+from core import is_ai_fusion_available
 from constants import (
     WINDOW_WIDTH, WINDOW_HEIGHT,
     TILE_BLOCK_SIZE, TILE_OVERLAP, TILE_THRESHOLD,
     REG_DOWNSCALE_WIDTH, DEFAULT_THREAD_COUNT,
-    STACKMFFV4_BATCH_SIZE,
+    AI_BATCH_SIZE,
 )
+
+# QThreads still running when the app shuts down. They are kept alive at
+# module scope instead of being terminated: QThread.terminate() on a thread
+# inside cv2/torch native code can corrupt the process, and dropping the last
+# reference aborts it ("QThread: Destroyed while thread is still running").
+_ORPHAN_THREADS: list = []
+
+
+def _shutdown_worker(worker, timeout_ms=1500):
+    """Ask a QThread to stop, then wait; never terminate it.
+
+    Cancellation is polled between pipeline stages, so a worker deep inside
+    cv2/torch cannot be interrupted. Killing it with terminate() mid-native-
+    call is undefined behaviour; park the reference at module scope instead
+    (the process is exiting).
+    """
+    if worker is None:
+        return
+    cancel = getattr(worker, "cancel", None)
+    if callable(cancel):
+        try:
+            cancel()
+        except Exception:
+            pass
+    elif hasattr(worker, "is_cancelled"):
+        worker.is_cancelled = True
+    if worker.isRunning():
+        worker.quit()  # no-op for run() overrides, harmless otherwise
+        if not worker.wait(timeout_ms):
+            _ORPHAN_THREADS.append(worker)
+
+
+def _apply_font_family(qss: str, ui_font: str, mono_font: str) -> str:
+    """Swap the stylesheet's font stacks for the resolved families.
+
+    The old code replaced one literal string; when the generator changed its
+    font stack the replacement silently stopped matching and the QSS kept its
+    own family. Match every stack the generator can emit.
+    """
+    for stack in ('"Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif',
+                  '"Segoe UI", "Microsoft YaHei"'):
+        qss = qss.replace(stack, ui_font)
+    for stack in ('Consolas, "Segoe UI", monospace',):
+        qss = qss.replace(stack, mono_font)
+    return qss
+
 
 def update_manager_for(window) -> UpdateManager:
     """Return (creating on first use) the window's update manager.
@@ -109,6 +167,14 @@ class OpenFocus(QMainWindow):
 
     def __init__(self):
         super().__init__()
+
+        # Logging must exist however the class is constructed: the packaged
+        # app calls setup_logging() from the __main__ block, but tests,
+        # scripts and embeddings that import this module never reach it, and
+        # then every action log silently vanished.
+        from utils.logging_setup import setup_logging, log_session_start
+        setup_logging()
+        log_session_start()
 
         self.setWindowTitle("OpenFocus")
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -154,12 +220,14 @@ class OpenFocus(QMainWindow):
         self.reg_downscale_width = REG_DOWNSCALE_WIDTH
         # 全局线程数设置，默认4（可在 Settings 中修改）
         self.thread_count = DEFAULT_THREAD_COUNT
-        # StackMFF V4 批量大小设置，默认2（可在 Settings 中修改）
-        self.stackmffv4_batch_size = STACKMFFV4_BATCH_SIZE
+        # StackMFF V3 批量大小设置，默认2（可在 Settings 中修改）
+        self.ai_batch_size = AI_BATCH_SIZE
         # GPU 加速开关（Settings 菜单可切换，QSettings 持久化）
         self.use_gpu = True
         # 基底校正（消除亮度漂移）：默认关闭，右面板开关控制
         self.base_frame_correct = False
+        # 融合前曝光匹配：默认开启；整栈标定到末帧，所有算法共用
+        self.exposure_match = True
         # 恢复持久化设置与最近文件（语言需在菜单构建前应用）
         load_window_settings(self)
         load_drag_export_format(self)
@@ -235,7 +303,8 @@ class OpenFocus(QMainWindow):
         # 2. 主容器
         main_container = QWidget()
         self.setCentralWidget(main_container)
-        main_layout = QHBoxLayout(main_container)
+        # 垂直：顶部可选更新横幅 + 主分割器。横幅默认隐藏，隐藏时不占高度。
+        main_layout = QVBoxLayout(main_container)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
@@ -255,6 +324,8 @@ class OpenFocus(QMainWindow):
         
         # --- A1/A2. 图像视图面板 ---
         source_panel = create_source_panel()
+        self._panel_widgets = [source_panel.widget]
+        self.lbl_source_title = source_panel.title
         self.lbl_source_img = source_panel.image_label
         self.source_control_bar = source_panel.control_bar
         self.stack_slider = source_panel.slider
@@ -272,6 +343,8 @@ class OpenFocus(QMainWindow):
         # self.lbl_source_img.roiDeleted.connect(lambda: self.btn_preview_roi.setChecked(False))
 
         result_panel = create_result_panel()
+        self._panel_widgets.append(result_panel.widget)
+        self.lbl_result_title = result_panel.title
         self.lbl_result_img = result_panel.image_label
         self.result_control_bar = result_panel.control_bar
         self.result_slider = result_panel.slider
@@ -330,6 +403,7 @@ class OpenFocus(QMainWindow):
         self.combo_fusion = right_panel_components.combo_fusion
         self.combo_align = right_panel_components.combo_align
         self.chk_base_correct = right_panel_components.chk_base_correct
+        self.chk_exposure_match = right_panel_components.chk_exposure_match
         self.chk_reverse_order = right_panel_components.chk_reverse_order
         # 帧序方向：False=asc（文件序，默认）/ True=desc（倒序栈）
         self.stack_reverse_order = False
@@ -337,10 +411,18 @@ class OpenFocus(QMainWindow):
         self.lbl_kernel = right_panel_components.lbl_kernel
         self.lbl_smooth_value = right_panel_components.smooth_value_label
         self.smooth_widget = right_panel_components.smooth_widget
+        self.ai_mode_widget = right_panel_components.ai_mode_widget
+        self.lbl_ai_mode = right_panel_components.lbl_ai_mode
+        self.radio_ai_soft = right_panel_components.radio_ai_soft
+        self.radio_ai_hard = right_panel_components.radio_ai_hard
+        # AI 输出模式：soft=概率加权混合（默认）/ hard=逐像素取最可能帧
+        self.ai_mode = "soft"
         self.depth_smooth_row = right_panel_components.depth_smooth_row
         self.lbl_depth_smooth = right_panel_components.lbl_depth_smooth
         self.spin_depth_smooth = right_panel_components.spin_depth_smooth
-        self.spin_depth_smooth.setValue(float(getattr(self, "ofb_depth_smoothing", 1.2) or 0.0))
+        # 先按当前方法显示它自己的 σ（A/B/C 各有默认与记忆值）
+        self.spin_depth_smooth.setValue(
+            float(self.smoothing_for_method(self.current_fusion_method())))
         self.spin_depth_smooth.valueChanged.connect(self.set_ofb_depth_smoothing)
         self.source_images_label = right_panel_components.source_images_label
         self.file_list = right_panel_components.file_list
@@ -356,12 +438,10 @@ class OpenFocus(QMainWindow):
         self.main_splitter.addWidget(right_panel_components.widget)
         bind_right_panel(self, right_panel_components)
 
-        # 持久化开关同步到复选框：属性在 UI 构建前已由 load_window_settings
-        # 恢复（v1.39 起基底校正存在"属性已恢复、复选框仍显示未勾"的不一致，
-        # 这里一并修复）。blockSignals 避免重复触发持久化。
-        self.chk_base_correct.blockSignals(True)
-        self.chk_base_correct.setChecked(bool(self.base_frame_correct))
-        self.chk_base_correct.blockSignals(False)
+        # 两个亮度开关按当前算法取值（OpenFocus A/B/C 默认两者都开，
+        # 其余算法沿用历史默认）。不能直接用全局属性：那会把上一次
+        # 会话里别的算法的选择带进来。
+        self._sync_brightness_checkboxes()
         self.chk_reverse_order.blockSignals(True)
         self.chk_reverse_order.setChecked(bool(
             getattr(self, "stack_reverse_order", False)))
@@ -377,6 +457,7 @@ class OpenFocus(QMainWindow):
             lambda title, message: show_warning_box(self, title, message))
         self.update_manager.manual_download_needed.connect(self._open_releases_page)
         self.update_manager.restart_requested.connect(self._quit_for_update)
+        self._build_update_banner()
         self._build_update_indicator()
         QTimer.singleShot(0, self._probe_stackmff_availability_async)
 
@@ -428,7 +509,8 @@ class OpenFocus(QMainWindow):
         total_width = self.width()
         self.main_splitter.setSizes([int(total_width * 0.75), int(total_width * 0.25)])
 
-        main_layout.addWidget(self.main_splitter)
+        main_layout.addWidget(self.update_banner)
+        main_layout.addWidget(self.main_splitter, 1)
 
     def eventFilter(self, obj, event):
         """Global event filter to handle Space key and Delete key interactions."""
@@ -531,19 +613,38 @@ class OpenFocus(QMainWindow):
         except Exception:
             self.lbl_status_memory.setText(trans.t('status_ram').format('N/A'))
 
-        # GPU
-        if not getattr(self, 'use_gpu', True):
-            # User disabled GPU acceleration (Settings menu)
-            self.lbl_status_gpu.setText(trans.t('status_gpu').format('CPU*'))
-            return
-        # Read the probe's cached result: importing torch here (UI thread,
-        # on a timer) froze the window for seconds and raced the probe thread
-        from core.multi_focus_fusion import torch_device_kind
+        # GPU. Rule the user asked for: when this machine has no usable
+        # accelerator, say N/A — never "CPU", which sounds like the render
+        # fell back mid-run. "CPU*" (classical methods are CPU-only by
+        # design) is only meaningful when an accelerator actually exists.
+        from core.multi_focus_fusion import (torch_device_kind,
+                                             is_ai_fusion_available)
         try:
-            kind = torch_device_kind()
-            self.lbl_status_gpu.setText(trans.t('status_gpu').format(kind or '…'))
+            if not getattr(self, 'use_gpu', True):
+                kind = 'N/A'                      # user disabled it
+            elif not is_ai_fusion_available():
+                kind = 'N/A'                      # torch not installed
+            else:
+                kind = torch_device_kind()
+                if kind is None:
+                    # Resolve once in the background; until then assume none.
+                    self._probe_device_kind_async()
+                    kind = 'N/A'
+                if kind not in ('CUDA', 'MPS'):
+                    kind = 'N/A'
+                elif not self._ai_method_selected():
+                    # Accelerator present but the selected method is one of
+                    # the CPU-only classical ones.
+                    kind = 'CPU*'
+            self.lbl_status_gpu.setText(trans.t('status_gpu').format(kind))
         except Exception:
             self.lbl_status_gpu.setText(trans.t('status_gpu').format('Err'))
+
+    def _ai_method_selected(self) -> bool:
+        try:
+            return self.combo_fusion.currentData() == "stackmffv3"
+        except Exception:
+            return False
 
     # --- 逻辑控制 ---
 
@@ -553,21 +654,35 @@ class OpenFocus(QMainWindow):
     UNDO_LIMIT = 20
 
     def _capture_stack_state(self) -> dict:
+        """Snapshot stack membership for undo, without copying pixels.
+
+        Every stack mutation (rotate, flip, resize, delete, drag-reorder,
+        flat-field correction) replaces the array objects instead of writing
+        into them, so list references are a valid snapshot and undo costs
+        O(frames) memory instead of a full second copy of the stack.
+        Invariant: never modify a frame array in place after push_undo().
+        """
         return {
-            "raw": [im.copy() for im in self.raw_images],
+            "raw": list(self.raw_images),
             "filenames": list(self.image_filenames),
             "source_paths": list(getattr(self, "image_source_paths", [])),
-            "base": [im.copy() for im in getattr(self, "base_images", [])],
+            "base": list(getattr(self, "base_images", [])),
             "excluded": set(getattr(self, "excluded_frames", set())),
             "current": getattr(self, "current_img_index", 0),
+            "scale": float(getattr(self, "current_scale_factor", 1.0) or 1.0),
+            "base_scale": float(getattr(self, "base_scale_factor", 1.0) or 1.0),
         }
 
     def push_undo(self) -> None:
-        """Snapshot the stack BEFORE a mutation. Cheap enough for stacks of
-        realistic depth (references are copied, pixels duplicated) and it makes
-        every destructive operation reversible."""
+        """Snapshot the stack before a mutation.
+
+        Snapshots hold references (see _capture_stack_state), so the undo
+        limit is about edit history, not memory.
+        """
         if getattr(self, "_undo_guard", False):
             return
+        # Any stack mutation makes the saved project stale.
+        self._mark_project_dirty()
         self._undo_stack.append(self._capture_stack_state())
         if len(self._undo_stack) > self.UNDO_LIMIT:
             self._undo_stack.pop(0)
@@ -575,12 +690,16 @@ class OpenFocus(QMainWindow):
         self._refresh_undo_actions()
 
     def _restore_stack_state(self, state: dict) -> None:
-        self.raw_images = [im.copy() for im in state["raw"]]
+        self.raw_images = list(state["raw"])
         self.image_filenames = list(state["filenames"])
         self.image_source_paths = list(state["source_paths"])
-        self.base_images = [im.copy() for im in state["base"]]
+        self.base_images = list(state["base"])
         self.excluded_frames = set(state["excluded"])
         self.current_img_index = state["current"]
+        # Resize is undoable too; without the scale factors the Resize dialog
+        # reopened with the post-resize percentage while showing the old pixels.
+        self.current_scale_factor = float(state.get("scale", 1.0) or 1.0)
+        self.base_scale_factor = float(state.get("base_scale", 1.0) or 1.0)
         # The restored stack invalidates every derived result, exactly like
         # rotate/flip do.
         self.transform_manager.invalidate_processing_results(
@@ -650,8 +769,8 @@ class OpenFocus(QMainWindow):
 
     def reset_to_default(self):
         """重置到默认状态"""
-        # 重置渲染方法 - 默认 Guided Filter
-        self.set_fusion_method("guided_filter")
+        # 重置渲染方法 - 默认 AI（StackMFF V3）
+        self.set_fusion_method("stackmffv3")
 
         # 重置配准选项 - 默认 ECC
         self.set_alignment_method("ecc")
@@ -682,34 +801,65 @@ class OpenFocus(QMainWindow):
 
     def _configure_fusion_method_availability(self) -> None:
         """Disable fusion methods whose dependencies are not installed."""
-        self._stackmff_available = bool(is_stackmffv4_available())
+        self._stackmff_available = bool(is_ai_fusion_available())
         self.refresh_method_availability()
+
+    def _probe_device_kind_async(self) -> None:
+        """Resolve CUDA/MPS in the background, only once something needs it.
+
+        Called when the neural method is selected. Importing torch costs ~2.1 s
+        and ~193 MB, which is why it is not done at startup any more.
+        """
+        import threading
+        if getattr(self, "_device_probe_started", False):
+            return
+        self._device_probe_started = True
+
+        def worker():
+            from core.multi_focus_fusion import ensure_torch_device_kind
+            ensure_torch_device_kind()
+
+        threading.Thread(target=worker, daemon=True,
+                         name="torch-device-probe").start()
 
     def _probe_stackmff_availability_async(self) -> None:
         """Probe torch availability off the UI thread, then apply the result."""
         import threading
 
         def worker():
-            available = is_stackmffv4_available()
+            available = is_ai_fusion_available()
             self._stackmff_probe_done.emit(available)
 
         threading.Thread(target=worker, daemon=True, name="stackmff-probe").start()
 
+        # The neural method is the default, so a default selection still needs
+        # the accelerator resolved. Only pay for it when that is the case: a
+        # user whose preference is a classical method never loads torch.
+        try:
+            if self.combo_fusion.currentData() == "stackmffv3":
+                self._probe_device_kind_async()
+        except Exception:
+            pass
+
     def _apply_stackmff_availability(self, available: bool) -> None:
         self._stackmff_available = bool(available)
         self.refresh_method_availability()
+        # The probe is what fills the cached device kind. Without this call the
+        # status bar kept its "GPU: …" placeholder until some unrelated timer
+        # tick happened to run, so a finished probe still looked unfinished.
+        self._update_dynamic_status()
 
     def refresh_method_availability(self) -> None:
         """Re-apply the cached torch-probe result to the method controls.
 
         Other code paths (render restore, batch restore) blanket-enable the
-        fusion combo, which silently re-armed StackMFF-V4 on machines without
+        fusion combo, which silently re-armed StackMFF-V3 on machines without
         torch until the next restart."""
         available = getattr(self, '_stackmff_available', None)
         if available is None:
             return
         combo = self.combo_fusion
-        i = combo.findData("stackmffv4")
+        i = combo.findData("stackmffv3")
         if i < 0:
             return
         # 下拉项级禁用：模型项 setEnabled(False) 让它在弹出列表里置灰
@@ -721,8 +871,21 @@ class OpenFocus(QMainWindow):
             i,
             trans.t("msg_stackmff_unavailable_text") if not available else "",
             Qt.ItemDataRole.ToolTipRole)
-        if not available and combo.currentData() == "stackmffv4":
-            self.set_fusion_method("guided_filter")
+        if not available and combo.currentData() == "stackmffv3":
+            # Fall back to the first ENABLED entry: AI is the default now, so
+            # a torch-less machine would otherwise land on a disabled item.
+            self.set_fusion_method(self._first_available_method())
+
+    def _first_available_method(self) -> str:
+        """First selectable fusion method in the dropdown (skips disabled)."""
+        combo = self.combo_fusion
+        for row in range(combo.count()):
+            item = combo.model().item(row)
+            if item is not None and item.isEnabled():
+                code = combo.itemData(row)
+                if code:
+                    return code
+        return "guided_filter"
 
     # --- Update check ---
 
@@ -731,16 +894,107 @@ class OpenFocus(QMainWindow):
 
         The state machine lives in UpdateManager: quiet checks are
         rate-limited to one request per day and never open a dialog; a manual
-        check reports "up to date" / network failures in a message box.
+        check reports "up to date" / network failures in a message box. A
+        manual check also re-arms the banner for a version that was dismissed.
         """
         if not quiet:
             self._show_status_message(trans.t('update_checking'), 3000)
+            self._set_banner_dismissed_tag("")
         self.update_manager.check(quiet=quiet)
 
     # --- Update execution (background download / restart) ---
 
     def _update_manager(self) -> UpdateManager:
         return update_manager_for(self)
+
+    # --- Startup update banner ---
+
+    def _build_update_banner(self) -> None:
+        """Top-of-window reminder for a release the startup check found.
+
+        The banner is the only update UI a user sees without opening a menu:
+        the background check stays quiet, so without it a new release went
+        unnoticed until the user happened to open Help. Dismissal is
+        per-version (see utils.settings_store.UPDATE_BANNER_DISMISSED_KEY).
+        """
+        from widgets.update_banner import UpdateBanner
+        self.update_banner = UpdateBanner(self)
+        self.update_banner.update_requested.connect(self._on_banner_update_clicked)
+        self.update_banner.whats_new_requested.connect(self._show_whats_new)
+        self.update_banner.dismissed.connect(self._on_banner_dismissed)
+
+    def _banner_dismissed_tag(self) -> str:
+        try:
+            from utils.settings_store import (UPDATE_BANNER_DISMISSED_KEY,
+                                              get_settings)
+            return str(get_settings().value(UPDATE_BANNER_DISMISSED_KEY, "") or "")
+        except Exception:
+            return ""
+
+    def _set_banner_dismissed_tag(self, tag: str) -> None:
+        try:
+            from utils.settings_store import (UPDATE_BANNER_DISMISSED_KEY,
+                                              get_settings)
+            settings = get_settings()
+            if tag:
+                settings.setValue(UPDATE_BANNER_DISMISSED_KEY, tag)
+            else:
+                settings.remove(UPDATE_BANNER_DISMISSED_KEY)
+        except Exception:
+            pass
+
+    def _on_banner_dismissed(self, tag: str) -> None:
+        self._set_banner_dismissed_tag(tag or self.update_manager.tag)
+
+    def _show_update_banner(self, tag: str, ready: bool = False) -> None:
+        """Show the startup reminder unless this exact version was dismissed."""
+        banner = getattr(self, "update_banner", None)
+        if banner is None or not tag:
+            return
+        if not ready and tag == self._banner_dismissed_tag():
+            return
+        from constants import APP_VERSION
+        banner.show_for(tag, APP_VERSION, ready=ready)
+
+    def _on_banner_update_clicked(self) -> None:
+        """Primary action: install when staged, otherwise start the update."""
+        manager = self._update_manager()
+        tag = getattr(self.update_banner, "tag", "") or manager.tag
+        if manager.staged_tag():
+            self.install_update_now()
+            return
+        if manager.zip_url:
+            if manager.can_self_update():
+                self._apply_update_and_restart(manager.zip_url, tag)
+            else:
+                self._download_and_launch_update(manager.setup_url, tag)
+            return
+        self._open_releases_page()
+
+    def _show_whats_new(self) -> None:
+        """'What's new': release notes when the check fetched them, else the
+        releases page (a build with no notes has nothing to show inline)."""
+        notes = getattr(self._update_manager(), "notes", "") or ""
+        if not notes:
+            self._open_releases_page()
+            return
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser, QVBoxLayout
+        dialog = QDialog(self)
+        dialog.setWindowTitle(trans.t('update_available_title'))
+        dialog.resize(620, 460)
+        # Same theme rule as the other dialogs (light strips the dark inline
+        # style, dark adds the control QSS); style_message_box only accepts a
+        # QMessageBox and raises on a plain QDialog.
+        # Styling comes from the generated application stylesheet.
+        layout = QVBoxLayout(dialog)
+        view = QTextBrowser(dialog)
+        view.setPlainText(notes)
+        layout.addWidget(view)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _build_update_indicator(self) -> None:
         """Status-bar widget: background download progress / "restart to update"."""
@@ -835,10 +1089,26 @@ class OpenFocus(QMainWindow):
             if ready:
                 action.setText(trans.t('menu_install_update').format(version=tag))
 
+    def startup_update_check(self) -> None:
+        """Startup entry point: staged build, then the quiet daily check.
+
+        Runs on a timer after the window is up. `start_idle` restores an
+        already-staged build without a network call; its state goes straight
+        to READY, before any state_changed listener existed, so the banner is
+        raised here explicitly.
+        """
+        self.update_manager.start_idle()
+        staged = self.update_manager.staged_tag()
+        if staged:
+            self._show_update_banner(staged, ready=True)
+
     def _on_update_state(self, state: str, tag: str, percent: int) -> None:
         if state == STATE_READY and tag:
             self._show_status_message(
                 trans.t('update_status_ready').format(version=tag), 8000)
+            # The build finished downloading: the banner's action flips from
+            # "update now" to "restart", even if the banner was hidden.
+            self._show_update_banner(tag, ready=True)
         self._refresh_update_indicator()
 
     def _on_update_action_clicked(self) -> None:
@@ -901,10 +1171,65 @@ class OpenFocus(QMainWindow):
         self.stack_reverse_order = bool(enabled)
         self.persist_settings()
 
-    def set_base_correct(self, enabled: bool) -> None:
-        """右面板开关：消除亮度漂移（基底校正到末帧）。"""
-        self.base_frame_correct = bool(enabled)
+    def set_ai_mode(self, mode: str) -> None:
+        """右面板单选：AI 输出模式（soft=概率加权，hard=逐像素取帧）。"""
+        mode = mode if mode in ("soft", "hard") else "soft"
+        self.ai_mode = mode
         self.persist_settings()
+
+    # 两个亮度选项都按算法独立记忆：它们是"这次融合用哪条曝光策略"，
+    # 而不是全局偏好。OpenFocus A/B/C 默认两者都开（它们没有内置标定，
+    # 这正是它们与 Helicon 的 A/B/C 最接近的行为）；其余算法沿用历史
+    # 默认（曝光匹配开、亮度漂移关）。
+    _BRIGHTNESS_DEFAULTS = {
+        "exposure_match": {"openfocus_a": True, "openfocus_b": True,
+                           "openfocus_c": True},
+        "base_correct": {"openfocus_a": True, "openfocus_b": True,
+                         "openfocus_c": True},
+    }
+
+    def brightness_option_for(self, option: str, method: str = None) -> bool:
+        """Value of 'exposure_match' / 'base_correct' for *method*."""
+        method = method or self.current_fusion_method()
+        memory = self.__dict__.setdefault("_brightness_by_method", {})
+        key = (option, method)
+        if key in memory:
+            return bool(memory[key])
+        defaults = self._BRIGHTNESS_DEFAULTS.get(option, {})
+        if method in defaults:
+            return bool(defaults[method])
+        # legacy global default: exposure matching on, base correction off
+        return option == "exposure_match"
+
+    def _set_brightness_option(self, option: str, enabled: bool) -> None:
+        method = self.current_fusion_method()
+        self.__dict__.setdefault("_brightness_by_method", {})[
+            (option, method)] = bool(enabled)
+        if option == "exposure_match":
+            self.exposure_match = bool(enabled)
+        else:
+            self.base_frame_correct = bool(enabled)
+        self.persist_settings()
+
+    def _sync_brightness_checkboxes(self, method: str = None) -> None:
+        """Show the selected method's own values in the two checkboxes."""
+        for widget_name, option in (
+                ("chk_exposure_match", "exposure_match"),
+                ("chk_base_correct", "base_correct")):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            widget.setChecked(self.brightness_option_for(option, method))
+            widget.blockSignals(False)
+
+    def set_base_correct(self, enabled: bool) -> None:
+        """右面板开关：融合后的低频基底校正（按算法记忆）。"""
+        self._set_brightness_option("base_correct", enabled)
+
+    def set_exposure_match(self, enabled: bool) -> None:
+        """右面板开关：融合前把整栈曝光标定到末帧（按算法记忆）。"""
+        self._set_brightness_option("exposure_match", enabled)
 
     def _show_update_result(self, state: str, tag: str, page_url: str,
                             zip_url: str = "", setup_url: str = "") -> None:
@@ -913,8 +1238,10 @@ class OpenFocus(QMainWindow):
         if state == "update":
             manager = self._update_manager()
             staged = bool(manager.staged_tag())
-            # A background check must never nag: the status bar and the Help
-            # menu carry "ready to install" until the user acts on it.
+            # A background check must never open a modal box, but it does show
+            # the in-window banner: without it the startup check was invisible
+            # to anyone who does not watch the status bar.
+            self._show_update_banner(tag, ready=staged)
             if not manager.manual_check:
                 return
             box = QMessageBox(self)
@@ -986,6 +1313,9 @@ class OpenFocus(QMainWindow):
         from PyQt6.QtWidgets import QFileDialog
         from utils.project_file import validate_project, apply_project, PROJECT_SUFFIX
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+        if not self._confirm_discard_project_changes(
+                "msg_discard_unsaved_project"):
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, trans.t('menu_open_project'),
             get_last_dialog_dir(), f"OpenFocus Project (*{PROJECT_SUFFIX})")
@@ -998,7 +1328,7 @@ class OpenFocus(QMainWindow):
         set_last_dialog_dir(path)
         self.project_path = path
         apply_project(self, state)
-        self._update_project_title()
+        self._clear_project_dirty()
         self.add_recent_project(path)
 
     def save_project_dialog(self, save_as: bool = False) -> None:
@@ -1023,7 +1353,7 @@ class OpenFocus(QMainWindow):
         ok, err = save_project(self, target)
         if ok:
             self.project_path = target
-            self._update_project_title()
+            self._clear_project_dirty()
             self._show_status_message(
                 trans.t('msg_project_saved').format(path=target), 5000)
         else:
@@ -1031,9 +1361,46 @@ class OpenFocus(QMainWindow):
                              trans.t('msg_project_save_failed').format(err=err))
 
     def _update_project_title(self) -> None:
+        """Window title: project name plus an unsaved-changes marker.
+
+        Every other editor marks a modified document; without it the user had
+        no way to tell whether the current state was saved, and closing threw
+        the state away silently.
+        """
         import os as _os
-        name = _os.path.basename(self.project_path) if getattr(self, "project_path", None) else None
-        self.setWindowTitle(f"OpenFocus — {name}" if name else "OpenFocus")
+        name = (_os.path.basename(self.project_path)
+                if getattr(self, "project_path", None) else None)
+        mark = "*" if getattr(self, "_project_dirty", False) else ""
+        if name:
+            self.setWindowTitle(f"OpenFocus — {name}{mark}")
+        else:
+            self.setWindowTitle(f"OpenFocus{mark}" if mark else "OpenFocus")
+
+    def _mark_project_dirty(self) -> None:
+        if not getattr(self, "_project_dirty", False):
+            self._project_dirty = True
+            self._update_project_title()
+
+    def _clear_project_dirty(self) -> None:
+        self._project_dirty = False
+        self._update_project_title()
+
+    def _confirm_discard_project_changes(self, action_key: str) -> bool:
+        """Ask before an action that would drop unsaved project state."""
+        if not getattr(self, "_project_dirty", False):
+            return True
+        box = QMessageBox(self)
+        style_message_box(box)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(trans.t("msg_warning"))
+        box.setText(trans.t(action_key))
+        discard = box.addButton(trans.t("btn_discard_changes"),
+                                QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(trans.t("btn_continue"),
+                      QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(discard)
+        box.exec()
+        return box.clickedButton() is discard
 
     def load_demo_stack(self) -> None:
         """Load the bundled demo stack (no downsample dialog)."""
@@ -1152,6 +1519,48 @@ class OpenFocus(QMainWindow):
         self._update_download_worker = worker  # keep a reference
         worker.start()
 
+    def remove_scale_bar(self, where: str) -> None:
+        """Remove the bar from one canvas, or from everywhere.
+
+        "Apply to" is a scope, so removing one canvas leaves the bar on the
+        other; removing the last canvas (or choosing "everywhere") turns the
+        bar off. The old handler only rewrote the scope, so "remove
+        everywhere" set it back to `all` and the bar stayed visible.
+        """
+        if not getattr(self, "scale_bar_enabled", False):
+            self.statusBar().showMessage(trans.t("scalebar_none_msg"), 6000)
+            return
+        scope = getattr(self, "scale_bar_target", "all") or "all"
+        if where == "all" or scope == where:
+            self.scale_bar_enabled = False
+        elif scope == "all":
+            self.scale_bar_target = "output" if where == "source" else "source"
+        self.persist_settings()
+        self.refresh_annotation_views()
+        # Complete literals: the i18n scanner cannot resolve a computed key.
+        message = {
+            "source": trans.t("scalebar_removed_source"),
+            "output": trans.t("scalebar_removed_output"),
+            "all": trans.t("scalebar_removed_all"),
+        }.get(where, trans.t("scalebar_none_msg"))
+        self.statusBar().showMessage(message, 6000)
+
+    def refresh_annotation_views(self) -> None:
+        """Redraw both canvases after label or scale-bar state changes."""
+        try:
+            if self.current_display_index is not None and self.stack_images:
+                self.update_source_view(self.current_display_index)
+        except Exception:
+            pass
+        try:
+            item = self.output_list.currentItem()
+            if item is not None:
+                self.output_manager.display_output_image_in_result_view(item)
+            elif self.fusion_result is not None:
+                self.output_manager.show_fusion_result()
+        except Exception:
+            pass
+
     def show_scale_bar_dialog(self) -> None:
         """Configure the exported-image scale bar with a live preview."""
         from dialogs.scalebar import ScaleBarDialog
@@ -1162,45 +1571,105 @@ class OpenFocus(QMainWindow):
         from dialogs.depthmap import DepthMapDialog
         DepthMapDialog(self).exec()
 
-    def show_retouch_dialog(self) -> None:
-        """Retouch brush on the selected (or newest) fusion result; the edit
-        lands in the output history as a new entry."""
-        from utils.retouch import frames_matching
-        selected = self.export_manager.selected_output()
-        result = selected[0] if selected else self.fusion_result
-        if result is None:
+    def show_retouch_dialog(self, item=None) -> None:
+        """Retouch one output selected by identity, not by row order.
+
+        `item` is the entry the user right-clicked; menu/shortcut calls pass
+        None, in which case the visible selection decides.  With no selection
+        a chooser lists every output and marks which ones have provenance.
+        """
+        from dialogs.retouch import RetouchDialog, RetouchResultChooser
+
+        # QAction.triggered passes a `checked` bool; treat it as "no item".
+        if item is not None and not hasattr(item, "data"):
+            item = None
+
+        if self.output_list.count() == 0:
             show_warning_box(self, trans.t("msg_no_result_title"),
                              trans.t("retouch_need_result"))
             return
-        frames = frames_matching(
-            result,
-            self.registration_results if self.registration_results else None,
-            self.aligned_images if getattr(self, "is_images_aligned", False) else None,
-            self.raw_images)
-        if not frames:
-            show_warning_box(self, trans.t("msg_warning"),
-                             trans.t("retouch_size_mismatch"))
-            return
-        from dialogs.retouch import RetouchDialog
-        dlg = RetouchDialog(self, result, frames, names=self.image_filenames)
-        if not dlg.exec():
-            return
-        edited = dlg.edited_result()
-        if edited is None:
-            return
-        self.fusion_result = edited
-        self.output_manager.update_output_list_for_fusion()
-        item = self.output_list.item(0)
-        base = selected[1] if selected else None
-        if item is not None:
-            item.setText((base or item.text()) + "_Retouched")
-        self.output_manager.show_fusion_result()
+
+        if item is None:
+            selected = self.output_list.selectedItems()
+            if len(selected) > 1:
+                show_warning_box(self, trans.t("msg_warning"),
+                                 trans.t("retouch_multi_selection"))
+                return
+            if len(selected) == 1:
+                item = selected[0]
+
+        if item is None:
+            chooser = RetouchResultChooser(self)
+            if not chooser.exec():
+                return
+            item = chooser.selected_item()
+            if item is None:
+                return
+
+        self.output_list.clearSelection()
+        item.setSelected(True)
+        self.output_list.setCurrentItem(item)
+
+        while True:
+            record = self.output_manager.record_for_item(item)
+            if record is None or not record.retouchable:
+                show_warning_box(self, trans.t("msg_warning"),
+                                 trans.t("retouch_no_source"))
+                return
+
+            try:
+                dlg = RetouchDialog(
+                    self, record=record,
+                    apply_callback=self._apply_retouch_output)
+            except Exception as exc:  # noqa: BLE001 - preparation failure
+                show_message_box(
+                    self, trans.t("msg_error"), trans.t("msg_proc_error"),
+                    str(exc), QMessageBox.Icon.Critical)
+                return
+            dlg.exec()
+            if not getattr(dlg, "change_requested", False):
+                return
+
+            chooser = RetouchResultChooser(self)
+            if not chooser.exec():
+                return
+            new_item = chooser.selected_item()
+            if new_item is None:
+                return
+            item = new_item
+            self.output_list.clearSelection()
+            item.setSelected(True)
+            self.output_list.setCurrentItem(item)
+
+    def _apply_retouch_output(self, base_record, image):
+        """Publish the edited buffer; the dialog stays open on failure."""
         try:
-            from utils import recovery
-            recovery.write_snapshot(self)
-        except Exception:
-            pass
-        self.statusBar().showMessage(trans.t("retouch_applied"), 6000)
+            self.output_manager.add_retouched_output(base_record, image)
+            self.statusBar().showMessage(
+                trans.t("retouch_applied") + " · " + trans.t("retouch_unexported"),
+                8000)
+            try:
+                from utils import recovery
+                recovery.write_snapshot(self)
+            except Exception:
+                pass
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - reported in the dialog
+            return False, str(exc)
+
+    def show_advanced_settings_dialog(self) -> None:
+        """One page for tiling, registration, AI and the convenience toggles."""
+        from dialogs.advanced_settings import AdvancedSettingsDialog
+        AdvancedSettingsDialog(self).exec()
+
+    def show_compare_dialog(self) -> None:
+        """Side-by-side comparison of several fusion methods on this stack."""
+        if not self.raw_images or len(self.raw_images) < 2:
+            show_warning_box(self, trans.t("msg_no_images_title"),
+                             trans.t("msg_render_need_images_text"))
+            return
+        from dialogs.compare import CompareDialog
+        CompareDialog(self).exec()
 
     def show_dust_map_dialog(self) -> None:
         """Flat-field (dust map) correction from a defocused white shot."""
@@ -1280,7 +1749,10 @@ class OpenFocus(QMainWindow):
             try:
                 # 获取原始图片并根据需要叠加标签
                 original_pixmap = self.get_or_create_source_pixmap(index)
-                display_pixmap = self.label_manager.apply_labels_to_source_pixmap(original_pixmap, index)
+                from utils import scalebar
+                display_pixmap = self.label_manager.apply_labels_to_source_pixmap(
+                    original_pixmap, index,
+                    scale_cfg=scalebar.export_cfg(self, target="source"))
 
                 # 使用自定义label处理缩放和缩放重置
                 self.lbl_source_img.set_display_pixmap(display_pixmap)
@@ -1310,10 +1782,10 @@ class OpenFocus(QMainWindow):
     
     def current_fusion_method(self) -> str:
         """当前选中的融合算法代码（下拉单选的唯一读取入口）。"""
-        from ui.right_panel import FUSION_ITEMS
+        from ui.right_panel import FUSION_ITEMS, FUSION_DEFAULT
         code = self.combo_fusion.currentData()
         codes = {c for c, _k, _h in FUSION_ITEMS}
-        return code if code in codes else "guided_filter"
+        return code if code in codes else FUSION_DEFAULT
 
     def current_alignment_method(self) -> str:
         """当前选中的对齐算法代码：none | homography | ecc | openfocus。"""
@@ -1402,11 +1874,45 @@ class OpenFocus(QMainWindow):
                 self.slider_smooth.setValue(min(hi, memory.get(mode, default)))
             self.current_kernel_mode = mode
         else:
+            # AI has no kernel: leaving the row visible showed "Kernel: 11"
+            # next to a slider that changed nothing.
             self.smooth_widget.setEnabled(False)
             self.slider_smooth.setRange(1, 51)
             self.current_kernel_mode = None
+        # 平滑行：B 平滑深度图；A/C 平滑混合（Helicon 的 A/C 只有
+        # Smoothing 一个参数）。三种方法共用同一行，标签与取值各自独立。
         if getattr(self, "depth_smooth_row", None) is not None:
-            self.depth_smooth_row.setVisible(method == "openfocus_b")
+            is_a = method == "openfocus_a"
+            is_b = method == "openfocus_b"
+            is_c = method == "openfocus_c"
+            self.depth_smooth_row.setVisible(is_a or is_b or is_c)
+            blend = is_a or is_c
+            label_key = ("label_blend_smoothing" if blend
+                         else "label_depth_smoothing")
+            hint_key = ("label_blend_smoothing_hint" if blend
+                        else "label_depth_smoothing_hint")
+            self.lbl_depth_smooth.setText(trans.t(label_key))
+            self.lbl_depth_smooth.setToolTip(trans.t(hint_key))
+            self.spin_depth_smooth.setToolTip(trans.t(hint_key))
+            value = self.smoothing_for_method(method)
+            self.spin_depth_smooth.blockSignals(True)
+            self.spin_depth_smooth.setValue(float(value))
+            self.spin_depth_smooth.blockSignals(False)
+        # C 没有 Radius（Helicon 的 Method C 只有 Smoothing）：隐藏滑块
+        # 而不是留一个改了也不影响输出的控件。
+        # AI 输出模式只在选中神经网络时出现：其他算法没有概率图可分配。
+        if getattr(self, "ai_mode_widget", None) is not None:
+            self.ai_mode_widget.setVisible(method == "stackmffv3")
+        if getattr(self, "smooth_widget", None) is not None:
+            # 只在当前方法真的用得到 kernel 时显示：C 没有半径参数，AI
+            # 也没有，留着只会显示一个改了不影响输出的数字。
+            self.smooth_widget.setVisible(spec is not None
+                                          and method != "openfocus_c")
+        # Duck-typed hosts (tests bind update_slider_availability onto a stub)
+        # may not provide the checkbox sync.
+        sync = getattr(self, "_sync_brightness_checkboxes", None)
+        if callable(sync):
+            sync(method)
         # 滑块含义标签随算法切换（每个算法的 kernel 含义不同）
         label_key = self._KERNEL_LABELS.get(self.current_kernel_mode,
                                             "label_kernel")
@@ -1423,11 +1929,49 @@ class OpenFocus(QMainWindow):
     # --- Wipe A/B compare ---
 
     def _bgr_to_pixmap(self, image) -> QPixmap:
-        image = to_display_uint8(image)
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        height, width, _channels = rgb_image.shape
-        q_image = QImage(rgb_image.data, width, height, 3 * width, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(q_image)
+        return cv2_to_pixmap(image)
+
+    def _wipe_pixmap(self, kind: str, index: int, image):
+        """Pixmap for one side of the wipe, cached across slider steps.
+
+        Both halves used to be re-converted from numpy on every step of
+        either slider: 12 MP -> uint8 -> RGB -> pixmap is ~27 ms per side,
+        so dragging one slider re-rendered the other side for nothing.
+        The cache holds the source array itself, so its identity cannot be
+        recycled by a later allocation while an entry is alive.
+
+        Only the B side gets the registered labels burnt in — that is what
+        the pre-cache code did for each side, kept as-is. The label state is
+        part of the key: enabling labels must not keep serving the cached
+        unlabeled pixmap.
+        """
+        if image is None:
+            return None
+        cache = getattr(self, "_wipe_pix_cache", None)
+        if cache is None:
+            cache = self._wipe_pix_cache = {}
+        labeled = (kind == "right"
+                   and self.label_manager.is_enabled_for_target("registered"))
+        from utils import scalebar
+        scale_cfg = scalebar.export_cfg(self) if kind == "right" else None
+        # Include the scaled-bar configuration in the key: without it a
+        # cached pixmap kept showing a bar after it was removed (or kept
+        # hiding one after it was added), until the frame changed.
+        scale_key = (None if scale_cfg is None
+                     else tuple(sorted(scale_cfg.items())))
+        entry = cache.get(kind)
+        if (entry is not None and entry[0] is image and entry[1] == index
+                and entry[2] == labeled and entry[3] == scale_key):
+            return entry[4]
+        display = image
+        if labeled or scale_cfg:
+            display = self.label_manager.display_bgr_image(
+                "registered", image, index, scale_cfg=scale_cfg)
+        pixmap = self._bgr_to_pixmap(display)
+        if len(cache) > 4:
+            cache.clear()
+        cache[kind] = (image, index, labeled, scale_key, pixmap)
+        return pixmap
 
     def set_wipe_mode(self, enabled: bool) -> None:
         """Toggle the A/B wipe compare page of the result panel."""
@@ -1504,31 +2048,39 @@ class OpenFocus(QMainWindow):
         self.lbl_wipe_right_index.setText(trans.t("wipe_result_fmt").format(value + 1))
         self._update_wipe_images()
 
-    def _wipe_left_image(self):
+    def _wipe_left_index(self) -> int:
         if self.chk_wipe_follow_left.isChecked():
-            index = self.current_display_index
-        else:
-            index = self.slider_wipe_left.value()
+            return self.current_display_index
+        return self.slider_wipe_left.value()
+
+    def _wipe_left_image(self):
+        index = self._wipe_left_index()
         if 0 <= index < len(self.raw_images):
             return self.raw_images[index]
         return None
 
+    def _wipe_right_index(self) -> int:
+        if self.chk_wipe_follow_right.isChecked():
+            return 0
+        return self.slider_wipe_right.value()
+
     def _wipe_right_image(self):
+        """Raw B-side frame; labels and bit-depth conversion happen once, in
+        _wipe_pixmap, so the result can be cached by identity."""
         if self.chk_wipe_follow_right.isChecked():
             # The most recent render
             if self.fusion_result is not None:
-                return self.label_manager.prepare_bgr_image("registered", self.fusion_result, 0)
+                return self.fusion_result
             if self.registration_results:
-                return self.label_manager.prepare_bgr_image(
-                    "registered", self.registration_results[self.current_result_index if self.current_result_index >= 0 else 0], 0)
+                return self.registration_results[
+                    self.current_result_index if self.current_result_index >= 0 else 0]
             return None
         index = self.slider_wipe_right.value()
         if 0 <= index < len(self.fusion_results):
-            return self.label_manager.prepare_bgr_image("registered", self.fusion_results[index], index)
+            return self.fusion_results[index]
         # registration-only session: B shows the aligned frame instead
         if 0 <= index < len(self.registration_results):
-            return self.label_manager.prepare_bgr_image(
-                "registered", self.registration_results[index], index)
+            return self.registration_results[index]
         return None
 
     def _wipe_right_shows_registration(self) -> bool:
@@ -1543,8 +2095,8 @@ class OpenFocus(QMainWindow):
 
         left_image = self._wipe_left_image()
         right_image = self._wipe_right_image()
-        left_pix = self._bgr_to_pixmap(left_image) if left_image is not None else None
-        right_pix = self._bgr_to_pixmap(right_image) if right_image is not None else None
+        left_pix = self._wipe_pixmap("left", self._wipe_left_index(), left_image)
+        right_pix = self._wipe_pixmap("right", self._wipe_right_index(), right_image)
 
         if self.chk_wipe_follow_left.isChecked():
             left_idx = self.current_display_index
@@ -1580,6 +2132,11 @@ class OpenFocus(QMainWindow):
         """打开视频文件选择对话框"""
         self.source_manager.prompt_and_load_video()
     
+    def show_feedback_dialog(self) -> None:
+        """Report a bug or suggestion, with the session log attached."""
+        from dialogs.feedback import FeedbackDialog
+        FeedbackDialog(self).exec()
+
     def show_environment_info(self):
         """显示环境信息对话框"""
         dialog = EnvironmentInfoDialog(self)
@@ -1604,14 +2161,32 @@ class OpenFocus(QMainWindow):
     
     def on_splitter_moved(self, pos, index):
         """分割器移动时重新缩放图像"""
-        self.source_manager.refresh_current_source_view()
-        self.output_manager.refresh_current_result_view()
-    
+        # The image labels re-fit themselves in resizeEvent from the pixmaps
+        # they already hold; rebuilding those pixmaps from the numpy stack
+        # here cost 55-165 ms per event while dragging the splitter.
+        self._refresh_image_views()
+
     def resizeEvent(self, event):
         """窗口大小改变时重新缩放图像"""
         super().resizeEvent(event)
-        self.source_manager.refresh_current_source_view()
-        self.output_manager.refresh_current_result_view()
+        self._refresh_image_views()
+
+    def _refresh_image_views(self) -> None:
+        """Repaint the image panels after a size change.
+
+        MagnifierLabel (and WipeCompareWidget) recompute their fit, zoom and
+        pan from the pixmap they already hold whenever they are resized, so
+        a repaint is all that is needed — re-running the numpy -> uint8 ->
+        pixmap pipeline here re-uploaded a 12 MP frame per resize event
+        (measured 165 ms/event while dragging the window edge).
+        """
+        for label in (getattr(self, "lbl_source_img", None),
+                      getattr(self, "lbl_result_img", None)):
+            if label is not None and label.isVisible():
+                label.update()
+        wipe = getattr(self, "wipe_widget", None)
+        if wipe is not None and self.wipe_active:
+            wipe.update()
 
     def toggle_roi_mode(self, enabled: bool):
         """Toggle ROI selection mode. 
@@ -1763,15 +2338,7 @@ class OpenFocus(QMainWindow):
         
         try:
             image = self.roi_aligned_images[index]
-            image = to_display_uint8(image)
-            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            height, width, _channels = rgb_image.shape
-            bytes_per_line = 3 * width
-            
-            q_image = QImage(rgb_image.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(q_image)
-            
-            self.lbl_result_img.set_display_pixmap(pixmap)
+            self.lbl_result_img.set_display_pixmap(cv2_to_pixmap(image))
             self.lbl_result_info.setText(f"{index + 1} / {len(self.roi_aligned_images)}")
             # ROI模式下保持控制栏可见，以便用户切换图像
             self.result_control_bar.setVisible(True)
@@ -1789,16 +2356,21 @@ class OpenFocus(QMainWindow):
             self.btn_preview_roi.setChecked(False)
 
     def apply_dark_theme(self):
-        """启动时按持久化的主题应用样式（默认暗色）"""
-        self.apply_theme(getattr(self, "ui_theme", "dark"))
+        """Apply the persisted theme at startup (light on a fresh install)."""
+        from utils.settings_store import DEFAULT_THEME
+        self.apply_theme(getattr(self, "ui_theme", DEFAULT_THEME))
 
     def apply_theme(self, theme: str) -> None:
         """Apply the 'dark' or 'light' theme immediately and persist it.
 
-        dark  = the custom dark QSS (unchanged look from previous versions)
-        light = native light palette with the custom stylesheet cleared, so
-                every control is guaranteed readable without per-widget
-                light variants of the many hardcoded dark styles
+        Both themes are generated from the same design tokens, so this is a
+        single code path: clear any per-widget leftovers, install the
+        generated sheet on the application, then let widgets that paint by
+        hand (image panels, banner, help buttons) refresh their own palette.
+
+        The old implementation stripped every inline stylesheet in light mode
+        and relied on a hand-written light sheet, which is why light mode kept
+        losing the panels' own styling.
         """
         from ui.styles import get_theme_style, set_current_theme
         theme = "light" if theme == "light" else "dark"
@@ -1806,49 +2378,60 @@ class OpenFocus(QMainWindow):
         ui_font = get_ui_font_family()
         mono_font = get_monospace_font_family()
 
-        if theme == "light":
-            # Strip every inline dark stylesheet (they are all dark-designed),
-            # remembering originals so switching back to dark restores them.
-            if not getattr(self, "_inline_styles_saved", None):
-                saved = []
-                for wdg in self.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QWidget"]).QWidget):
-                    try:
-                        ss = wdg.styleSheet()
-                        if ss:
-                            saved.append((wdg, ss))
-                            wdg.setStyleSheet("")
-                    except RuntimeError:
-                        pass
-                self._inline_styles_saved = saved
-            self.setStyleSheet("")
-            app = QApplication.instance()
-            if app is not None:
-                app.setStyleSheet("")
-                app.setPalette(app.style().standardPalette())
-            from ui.styles import get_app_light_style
-            app.setStyleSheet(
-                get_app_light_style()
-                .replace('"Segoe UI", "Microsoft YaHei"', ui_font)
-                .replace('Consolas, "Segoe UI", monospace', mono_font))
-        else:
-            # Restore the inline dark-designed styles captured for light mode
-            for wdg, ss in getattr(self, "_inline_styles_saved", None) or []:
-                try:
-                    wdg.setStyleSheet(ss)
-                except RuntimeError:
-                    pass
-            self._inline_styles_saved = None
-            # Clear the app-level light stylesheet + palette first — leaving
-            # it in place kept plain containers white and tooltips/scrollbars
-            # light after a light->dark switch.
-            app = QApplication.instance()
-            if app is not None:
-                app.setStyleSheet("")
-                app.setPalette(app.style().standardPalette())
-            style_sheet = get_theme_style(theme).replace('"Segoe UI", "Microsoft YaHei"', ui_font).replace('Consolas, "Segoe UI", monospace', mono_font)
-            self.setStyleSheet(style_sheet)
+        # Drop stylesheets captured by the previous (light) implementation.
+        for wdg, _ss in getattr(self, "_inline_styles_saved", None) or []:
+            try:
+                wdg.setStyleSheet("")
+            except RuntimeError:
+                pass
+        self._inline_styles_saved = None
+        self.setStyleSheet("")
 
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet("")
+            app.setPalette(app.style().standardPalette())
+            app.setStyleSheet(_apply_font_family(get_theme_style(theme),
+                                                 ui_font, mono_font))
+
+        # Re-colour themed inline widgets that the light pass above strips:
+        # the update banner must survive that sweep with a readable palette.
+        banner = getattr(self, "update_banner", None)
+        if banner is not None:
+            banner.apply_theme(theme)
+        # Image panels carry their own QSS (title bar / canvas / control bar);
+        # it must be rebuilt for the new palette.
+        from ui.image_panels import apply_panel_theme
+        for panel in getattr(self, "_panel_widgets", []):
+            try:
+                apply_panel_theme(panel, theme)
+            except RuntimeError:
+                pass
+        # The active theme must be recorded BEFORE any inline style is
+        # recomputed and before dialogs are constructed: help_button_style()
+        # with no argument reads CURRENT_THEME, so refreshing the "?" chips
+        # first re-applied the OLD theme's colours (the dark chip survived the
+        # switch to light). Dialogs opened later read the same global.
         set_current_theme(theme)
+        # Inline "?" button styles are captured at creation; re-apply them for
+        # the new theme or the dark chip stays dark on the light panel.
+        from ui.styles import help_button_style
+        for widget in self.findChildren(QPushButton):
+            try:
+                if widget.objectName() == "helpButton":
+                    widget.setStyleSheet(help_button_style(theme))
+            except RuntimeError:
+                pass
+        # Numeric steppers paint their -/+ buttons from inline sheets built at
+        # creation, so without this they keep the old theme's colours (a black
+        # stepper on the light panel).
+        from widgets.stepper import StepperSpinBox
+        for widget in self.findChildren(StepperSpinBox):
+            try:
+                widget.reapply_theme()
+            except RuntimeError:
+                pass
+
         self._enable_dark_title_bar(dark=(theme != "light"))
         if hasattr(self, "ui_objs") and "menu_theme" in self.ui_objs:
             for act in self.ui_objs["menu_theme"].actions():
@@ -1947,9 +2530,9 @@ class OpenFocus(QMainWindow):
         dialog = ThreadSettingsDialog(self)
         dialog.exec()
 
-    def show_stackmffv4_batch_settings(self):
-        """显示 StackMFF V4 批量大小设置对话框"""
-        dialog = StackMFFV4BatchSettingsDialog(self)
+    def show_ai_batch_settings(self):
+        """显示 StackMFF V3 批量大小设置对话框"""
+        dialog = AIBatchSettingsDialog(self)
         dialog.exec()
 
     def rotate_stack(self, rotation_code):
@@ -2018,8 +2601,26 @@ class OpenFocus(QMainWindow):
         # Nothing new may start once we are on the way out (update downloads
         # check this flag before they begin).
         self._shutting_down = True
+        # A retouched output lives in memory until exported; exiting must not
+        # silently throw those pixels away.
+        if (not getattr(self, '_restart_for_update', False)
+                and hasattr(self, "output_manager")
+                and not self.output_manager.confirm_unexported_on_exit()):
+            self._shutting_down = False
+            event.ignore()
+            return
         # Shutting down discards in-flight results without a word; ask first
         # (the self-update restart has already stopped the workers itself).
+        # Unsaved project state: every editor asks before discarding it.
+        # Skip during the update restart (the session is restored anyway).
+        if (not getattr(self, '_restart_for_update', False)
+                and getattr(self, "_project_dirty", False)):
+            if not self._confirm_discard_project_changes(
+                    "msg_discard_unsaved_project_quit"):
+                self._shutting_down = False
+                event.ignore()
+                return
+
         if not getattr(self, '_restart_for_update', False) and self._has_work_in_flight():
             box = QMessageBox(self)
             style_message_box(box)
@@ -2049,24 +2650,6 @@ class OpenFocus(QMainWindow):
         from utils import recovery
         recovery.write_snapshot(self)
         recovery.mark_clean_exit()
-
-        def _shutdown_worker(worker, timeout_ms=1500):
-            """Wait for a QThread to finish, terminating as a last resort.
-
-            The reference is parked on the window instead of dropped: dropping
-            the last reference to a still-running QThread aborts the process
-            with "QThread: Destroyed while thread is still running".
-            """
-            if worker is None:
-                return
-            if worker.isRunning():
-                worker.quit()  # no-op for run() overrides, harmless otherwise
-                if not worker.wait(timeout_ms):
-                    worker.terminate()
-                    worker.wait(1000)
-                if not hasattr(self, '_dying_workers'):
-                    self._dying_workers = []
-                self._dying_workers.append(worker)
 
         # Stop ROI alignment worker if running
         if getattr(self, 'roi_alignment_worker', None) is not None:
@@ -2137,6 +2720,13 @@ class OpenFocus(QMainWindow):
 
     def set_use_gpu(self, enabled: bool) -> None:
         """Toggle GPU acceleration (Settings menu); applies to future renders."""
+        if enabled:
+            # Nothing to accelerate without a device; the menu item is disabled
+            # in that case, but a saved project or a scripted call could still
+            # ask for it.
+            from utils.platform_utils import has_compute_gpu
+            if not has_compute_gpu():
+                enabled = False
         self.use_gpu = bool(enabled)
         self._update_dynamic_status()
         self.persist_settings()
@@ -2146,9 +2736,36 @@ class OpenFocus(QMainWindow):
         self.restore_last_stack = bool(enabled)
         self.persist_settings()
 
+    # 平滑默认值：B 深度图 σ、A 加权混合 σ、C 金字塔混合 σ
+    _SMOOTHING_DEFAULTS = {
+        "openfocus_a": 2.0,
+        "openfocus_b": 1.2,
+        "openfocus_c": 3.0,
+    }
+
+    def smoothing_for_method(self, method: str) -> float:
+        """Smoothing σ the user has set for *method* (or its default).
+
+        A and C blend their frames and B smooths a depth map, so one shared
+        value would silently apply A's sigma to C or B's to A after a method
+        switch.
+        """
+        memory = self.__dict__.setdefault("_smoothing_by_method", {})
+        if method in memory:
+            return float(memory[method])
+        return float(self._SMOOTHING_DEFAULTS.get(method, 1.2))
+
     def set_ofb_depth_smoothing(self, value: float) -> None:
-        """OpenFocus B depth-transition sigma (persisted)."""
-        self.ofb_depth_smoothing = float(value)
+        """Smoothing spin box: per-method sigma (see smoothing_for_method)."""
+        method = self.current_fusion_method()
+        value = float(value)
+        if method in ("openfocus_a", "openfocus_c"):
+            self.of_blend_smoothing = value
+        elif method == "openfocus_b":
+            self.ofb_depth_smoothing = value
+        else:
+            return
+        self.__dict__.setdefault("_smoothing_by_method", {})[method] = value
         self.persist_settings()
 
     def set_ask_load_scale(self, enabled: bool) -> None:
@@ -2207,13 +2824,16 @@ class OpenFocus(QMainWindow):
                 self.persist_settings()
                 self.rebuild_recent_projects_menu()
             return
+        if not self._confirm_discard_project_changes(
+                "msg_discard_unsaved_project"):
+            return
         ok, err, state = validate_project(path)
         if not ok:
             show_warning_box(self, trans.t('msg_error'), err)
             return
         self.project_path = path
         apply_project(self, state)
-        self._update_project_title()
+        self._clear_project_dirty()
         self.add_recent_project(path)
 
     def _clear_recent_projects(self) -> None:
@@ -2278,6 +2898,13 @@ class OpenFocus(QMainWindow):
         # Update Menus
         if hasattr(self, 'ui_objs'):
              for key, obj in self.ui_objs.items():
+                # Language entries keep their endonym. The generic loop used
+                # the ui_objs key ('action_lang_zh') as a translation key, so
+                # in a Japanese UI the Chinese entry rendered as
+                # "中文（简体）" — the same language under a different name
+                # depending on the current UI language.
+                if key.startswith('action_lang_') and isinstance(obj, QAction):
+                    continue
                 t_key = obj.property("trans_key")
                 if not t_key:
                     t_key = key
@@ -2299,12 +2926,21 @@ class OpenFocus(QMainWindow):
                 if hint_key:
                     c.combo_fusion.setItemData(
                         i, trans.t(hint_key), Qt.ItemDataRole.ToolTipRole)
+        # set_panel_label elides to the panel width and keeps the full string
+        # in the tooltip; plain setText here re-broke the row on language
+        # switch after the panel had already fitted it.
+        from ui.right_panel import set_panel_label
         if getattr(c, 'chk_base_correct', None) is not None:
-            c.chk_base_correct.setText(trans.t('chk_base_correct'))
-            c.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+            set_panel_label(c.chk_base_correct, trans.t('chk_base_correct'),
+                            trans.t('chk_base_correct_hint'))
+        if getattr(c, 'chk_exposure_match', None) is not None:
+            set_panel_label(c.chk_exposure_match,
+                            trans.t('chk_exposure_match'),
+                            trans.t('chk_exposure_match_hint'))
         if getattr(c, 'chk_reverse_order', None) is not None:
-            c.chk_reverse_order.setText(trans.t('chk_reverse_order'))
-            c.chk_reverse_order.setToolTip(trans.t('chk_reverse_order_hint'))
+            set_panel_label(c.chk_reverse_order,
+                            trans.t('chk_reverse_order'),
+                            trans.t('chk_reverse_order_hint'))
 
         c.registration_group.setTitle(trans.t('group_registration'))
         for i, (_code, key, hint_key) in enumerate(ALIGN_ITEMS):
@@ -2324,9 +2960,28 @@ class OpenFocus(QMainWindow):
         if not busy:
             c.btn_render.setText(trans.t('btn_render'))
         c.btn_compare.setText(trans.t('btn_compare_all'))
-        c.btn_compare.setToolTip(trans.t('btn_compare_all_hint'))
+        # ElidingButton elides for the current width itself; setting the hint
+        # after setText keeps the shortcut description rather than the label.
+        c.btn_compare.setToolTip(
+            f"{c.btn_compare.full_text()}\n{trans.t('btn_compare_all_hint')}")
+        # Panel titles are QLabels built once at startup; without this they
+        # kept the language the app was launched in ("Source Stack"/"Output"
+        # stayed English after switching to Polish).
+        if hasattr(self, 'lbl_source_title'):
+            self.lbl_source_title.setText(' ' + trans.t('panel_source_stack'))
+        if hasattr(self, 'lbl_result_title'):
+            self.lbl_result_title.setText(trans.t('panel_output'))
         c.chk_quick_preview.setText(trans.t('chk_quick_preview'))
         c.chk_quick_preview.setToolTip(trans.t('chk_quick_preview_hint'))
+        # The AI output-mode block was never retranslated: switching to any
+        # language left "AI 输出方式 / 软融合 / 硬融合" in Chinese, because
+        # these widgets only got their text once, at construction.
+        c.lbl_ai_mode.setText(trans.t('label_ai_mode'))
+        c.lbl_ai_mode.setToolTip(trans.t('label_ai_mode_hint'))
+        set_panel_label(c.radio_ai_soft, trans.t('radio_ai_soft'),
+                        trans.t('radio_ai_soft_hint'))
+        set_panel_label(c.radio_ai_hard, trans.t('radio_ai_hard'),
+                        trans.t('radio_ai_hard_hint'))
         
         # ROI Button
         if hasattr(self, 'btn_preview_roi'):
@@ -2351,11 +3006,12 @@ class OpenFocus(QMainWindow):
                 self, 'registration_results', None) and hasattr(self, 'lbl_result_img'):
             self.lbl_result_img.setText(trans.t('result_hint'))
 
-        # Update language checked state
-        for lang_code, key in (('en', 'action_lang_en'), ('zh', 'action_lang_zh'),
-                               ('ja', 'action_lang_ja'), ('es', 'action_lang_es')):
-            if key in self.ui_objs:
-                self.ui_objs[key].setChecked(trans.current_lang == lang_code)
+        # Update language checked state. Derived from the registered actions
+        # instead of a hardcoded list: a newly added pack kept its stale tick
+        # because this loop only knew about four codes.
+        for key, action in list(getattr(self, 'ui_objs', {}).items()):
+            if key.startswith('action_lang_') and hasattr(action, 'setChecked'):
+                action.setChecked(trans.current_lang == key[len('action_lang_'):])
 
         self.sharpness_curve.set_tooltip_base(trans.t('sharpness_curve_tooltip'))
 
@@ -2367,24 +3023,19 @@ class OpenFocus(QMainWindow):
             self.chk_wipe_follow_right.setText(trans.t('wipe_follow_latest'))
         if 'action_gpu_accel' in getattr(self, 'ui_objs', {}):
             self.ui_objs['action_gpu_accel'].setToolTip(trans.t('msg_gpu_accel_hint'))
-            self.ui_objs['action_align_cache'].setText(trans.t('action_align_cache'))
-            self.ui_objs['action_align_cache'].setToolTip(trans.t('action_align_cache_hint'))
-            self.ui_objs['action_restore_last_stack'].setText(trans.t('action_restore_last_stack'))
+        # The tuning knobs live in the Advanced settings page now, so there are
+        # no menu actions to retranslate here.
         if getattr(self, 'lbl_depth_smooth', None) is not None:
             self.lbl_depth_smooth.setText(trans.t('label_depth_smoothing'))
             self.lbl_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
             self.spin_depth_smooth.setToolTip(trans.t('label_depth_smoothing_hint'))
-        if 'action_ask_load_scale' in getattr(self, 'ui_objs', {}):
-            self.ui_objs['action_ask_load_scale'].setText(trans.t('action_ask_load_scale'))
-            self.ui_objs['action_ask_load_scale'].setToolTip(trans.t('action_ask_load_scale_hint'))
-        if 'action_auto_download' in getattr(self, 'ui_objs', {}):
-            act = self.ui_objs['action_auto_download']
-            act.setToolTip(trans.t('action_auto_download_hint'))
-            act.setChecked(bool(self.update_manager.auto_download))
         # The install action carries a {version} placeholder, so the trans_key
         # sweep above cannot render it; the indicator does (and hides it when
         # no build is staged).
         self._refresh_update_indicator()
+        banner = getattr(self, "update_banner", None)
+        if banner is not None:
+            banner.retranslate()
         self.rebuild_recent_menu()
         self.rebuild_recent_projects_menu()
 
@@ -2410,6 +3061,9 @@ if __name__ == "__main__":
     # File logging first so every later step leaves a trace in the log
     from utils.logging_setup import setup_logging, get_logger
     setup_logging()
+    from utils.logging_setup import log_session_start, log_action
+    log_session_start()
+    log_action("startup", args=str(sys.argv[1:]) if len(sys.argv) > 1 else "-")
     _log = get_logger()
 
     # Diagnostics: capture every unhandled exception (slots abort silently
@@ -2578,7 +3232,7 @@ if __name__ == "__main__":
     # Background updates: reuse an already staged build, then check quietly
     # (once a day, rate-limited inside the manager) and download any newer
     # release in the background so "update now" is instant.
-    QTimer.singleShot(4000, window.update_manager.start_idle)
+    QTimer.singleShot(4000, window.startup_update_check)
 
     # First-run quick-start guide (once ever)
     from utils.settings_store import get_settings

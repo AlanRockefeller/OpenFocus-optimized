@@ -3,8 +3,7 @@
 A focus stack already encodes a height field: the depth map says, per
 pixel, which focal plane was sharp. Exporting it as a mesh with the fused
 image as texture gives a quick 3D view of the subject (Blender, MeshLab,
-Windows 3D Viewer, any glTF/OBJ tool) — Helicon Focus sells this as its
-"3D model" feature.
+Windows 3D Viewer, any glTF/OBJ tool).
 
 Output: <name>.obj + <name>.mtl + <name>_texture.png side by side.
 The mesh is a regular grid (two triangles per cell) downsampled so the

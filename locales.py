@@ -1,5 +1,7 @@
 
 import datetime
+import os
+
 from PyQt6.QtCore import QObject, pyqtSignal
 
 class TranslationManager(QObject):
@@ -9,26 +11,26 @@ class TranslationManager(QObject):
         super().__init__()
         self.current_lang = 'en'
         
-        # Auto-detect system language via QLocale (best practice); fall back
-        # to the legacy UTC+8 heuristic when detection fails.
+        # Auto-detect from the system locale. The lookup is table-driven off
+        # the packs that actually loaded, so adding locales_xx.py is enough to
+        # make 'xx' selectable AND auto-detected; nothing here needs editing.
+        # The legacy UTC+8 fallback stays for hosts where QLocale reports an
+        # unusable value (some stripped Linux images answer 'C').
+        detected = None
         try:
             from PyQt6.QtCore import QLocale
-            name = QLocale.system().name()  # e.g. 'zh_CN', 'ja_JP', 'es_ES'
-            if name.startswith('zh'):
-                self.current_lang = 'zh'
-            elif name.startswith('ja'):
-                self.current_lang = 'ja'
-            elif name.startswith('es'):
-                self.current_lang = 'es'
-            else:
-                raise ValueError('unsupported locale')
+            name = QLocale.system().name() or ""  # e.g. 'zh_CN', 'pt_BR'
+            detected = self._match_locale(name)
         except Exception:
+            detected = None
+        if detected is None:
             try:
                 offset = datetime.datetime.now().astimezone().utcoffset()
                 if offset is not None and int(offset.total_seconds()) == 28800:
-                    self.current_lang = 'zh'
+                    detected = 'zh'
             except Exception:
                 pass
+        self._pending_autodetect = detected
 
         self.translations = {
             'en': {
@@ -40,10 +42,35 @@ class TranslationManager(QObject):
                 'menu_save_project': 'Save Project',
                 'menu_save_project_as': 'Save Project As…',
                 'msg_project_saved': 'Project saved: {path}',
+                'btn_discard_changes': 'Discard changes',
+                'msg_discard_unsaved_project': 'The current stack has unsaved project changes. Open another project and discard them?',
+                'msg_discard_unsaved_project_quit': 'The current stack has unsaved project changes. Quit and discard them?',
+
                 'msg_project_save_failed': 'Failed to save project: {err}',
                 'menu_recent': 'Open Recent',
                 'action_save_multipage_tiff': 'Save as Multi-page TIFF',
                 'menu_depth_map': 'Depth Map…',
+                'action_method_compare': 'Compare methods…',
+                'action_method_compare_hint': 'Render several methods and compare them side by side',
+                'compare_title': 'Method comparison',
+                'compare_pick': 'Methods:',
+                'compare_run': 'Render selected',
+                'compare_cancel': 'Cancel',
+                "compare_hint": "Left-drag: move region; release: keep it. Wheel: magnification. Right-drag: pan. Ctrl+wheel: zoom source.",
+                "compare_mode": "Preview:",
+                "compare_size": "Preview size (px):",
+                "compare_fullscreen": "Fullscreen (F11)",
+                "compare_exit_fullscreen": "Exit fullscreen (F11)",
+                "compare_roi": "ROI preview (fast)",
+                "compare_full": "Full-image fusion",
+                "compare_levels": "Wavelet levels:",
+                "compare_preview_note": "Changes update automatically. ROI preview fuses the selected area with surrounding context; use full-image fusion to check the final appearance.",
+                "compare_stopping": "Cancelling the current operation…",
+                'compare_reference': 'Source stack',
+                'compare_frame_of': 'Frame {i} / {n} — {name}',
+                'compare_no_image': 'Not rendered yet',
+                'compare_need_method': 'Select at least one method.',
+                'compare_need_stack': 'Load a focus stack first.',
                 'depth_dialog_title': 'Depth Map (Focus Position)',
                 'depth_method': 'Measure from:',
                 'depth_colormap': 'Color map:',
@@ -58,11 +85,19 @@ class TranslationManager(QObject):
                 'msg_update_in_progress': 'An update download is already in progress.',
                 'depth_new_scheme_default': 'My scheme',
                 'depth_computing': 'Computing… frame {i}/{n}',
+                'depth_ai_note': 'Per-pixel source frame (AI classification)',
+                'depth_ai_note_hint': 'The network decides, for every pixel, which input frame it comes from, so the map is still read as a frame index (0..N-1) - the decision is just made by the model per pixel instead of by a sharpness measure.',
+                'depth_computing_ai': 'Classifying frames…',
                 'depth_ready': 'Done — preview updated. Save colorized or raw 16-bit below.',
                 'depth_saved': 'Saved: {path}',
                 'depth_save_color': 'Save Colorized…',
                 'depth_save_raw': 'Save Raw 16-bit…',
                 'depth_export_3d': 'Export 3D (OBJ)…',
+                'depth_tab_map': 'Depth map',
+                'depth_tab_3d': '3D surface',
+                'depth_3d_reset': 'Reset view',
+                'depth_3d_detail': 'Detail',
+                'depth_3d_detail_hint': 'Higher = more detail, heavier. The change applies live.',
                 'depth_export_3d_hint': 'Textured 3D surface from the depth map and the fused image (OBJ + MTL + PNG; opens in Blender, MeshLab, 3D Viewer). Invert depth axis flips near and far.',
                 'depth_relief': '3D relief:',
                 'depth_relief_hint': 'Height of the 3D surface as a percentage of the image\'s longest side.',
@@ -80,8 +115,19 @@ class TranslationManager(QObject):
                 'depth_map_stale': 'The preview is still the map from the previous method — press Compute to refresh.',
                 'depth_overlay_missing': 'Overlay needs a rendered fusion result — run a render first.',
                 'menu_scale_bar': 'Scale Bar…',
+                'menu_scale_remove': 'Remove scale bar',
+                'scalebar_remove_source': 'From the source stack',
+                'scalebar_remove_output': 'From the result',
+                'scalebar_remove_all': 'From everywhere',
+                'scalebar_removed_source': 'Scale bar removed from the source stack.',
+                'scalebar_removed_output': 'Scale bar removed from the result.',
+                'scalebar_removed_all': 'Scale bar removed from the source stack and the result.',
+                'scalebar_none_msg': 'The scale bar is not shown.',
+                'action_scale_add': 'Add / edit scale bar…',
+                'compare_params': 'Parameters:',
                 'dialog_scalebar_title': 'Scale Bar',
                 'scalebar_enable': 'Draw scale bar on exported images',
+                'scalebar_enable': 'Enable scale bar',
                 'scalebar_px_um': 'Pixel size (µm/px):',
                 'scalebar_manual_hint': 'Enter the pixel size manually when image metadata has no calibration.',
                 'scalebar_detected': 'Auto-detected from image metadata: {value} µm/px (metadata takes priority over the manual value).',
@@ -89,7 +135,24 @@ class TranslationManager(QObject):
                 'scalebar_position': 'Position:',
                 'scalebar_pos_br': 'Bottom right', 'scalebar_pos_bl': 'Bottom left',
                 'scalebar_pos_tr': 'Top right', 'scalebar_pos_tl': 'Top left',
+                'scalebar_section_place': 'Placement',
+                'scalebar_section_calibration': 'Calibration',
+                'scalebar_section_text': 'Label style',
+                'scalebar_pos_custom': 'Custom',
+                'scalebar_font': 'Font',
+                'scalebar_font_size': 'Size',
+                'scalebar_font_auto': '0 = automatic',
+                'scalebar_bold': 'Bold',
+                'scalebar_text_align': 'Text alignment',
+                'scalebar_align_auto': 'Automatic',
+                'scalebar_align_left': 'Left',
+                'scalebar_align_center': 'Centre',
+                'scalebar_align_right': 'Right',
                 'scalebar_color': 'Color:',
+                'scalebar_target': 'Apply to',
+                'scalebar_target_all': 'Source stack and result',
+                'scalebar_target_source': 'Source stack only',
+                'scalebar_target_output': 'Result only',
                 'scalebar_color_auto': 'Auto (inverse of background)',
                 'scalebar_color_white': 'White', 'scalebar_color_black': 'Black',
                 'scalebar_preview': 'Preview (approximate)',
@@ -108,6 +171,7 @@ class TranslationManager(QObject):
                 'action_delete': 'Delete',
                 'action_gpu_accel': 'GPU Acceleration',
                 'msg_gpu_accel_hint': 'When unchecked, all processing is forced to CPU. Enable this if GPU drivers cause problems.',
+                'msg_gpu_accel_unavailable': 'No CUDA or Apple-silicon GPU detected on this machine.',
                 'action_restore_last_stack': 'Restore Last Stack on Startup',
                 'action_ask_load_scale': 'Ask for Loading Scale on Import',
                 'action_ask_load_scale_hint': 'When off, every import uses the last chosen scale without a prompt (stacks can still be downscaled later via Edit → Resize).',
@@ -152,6 +216,12 @@ class TranslationManager(QObject):
                 'update_bg_downloading': 'Downloading update {version}… {percent}%',
                 'update_status_preparing': 'Preparing the update…',
                 'update_status_ready': 'OpenFocus {version} is ready to install',
+                'update_banner_new_version': 'OpenFocus {version} is available',
+                'update_banner_ready': 'OpenFocus {version} is ready to install',
+                'update_banner_hint': 'You are on {current}.',
+                'btn_update_now': 'Update now',
+                'btn_see_whats_new': "What's new",
+                'update_dismissed_hint': "This reminder stays hidden until the next version. Help → Check for Updates brings it back.",
                 'update_status_failed': 'Update download failed',
                 'update_restored_session': 'Session restored after the update.',
                 'update_applied': 'Updated to OpenFocus {version}.',
@@ -167,19 +237,21 @@ class TranslationManager(QObject):
                 'msg_undo_done': 'Undone.',
                 'msg_redo_done': 'Redone.',
                 'radio_openfocus_a': 'OpenFocus - A',
-                'radio_openfocus_a_hint': 'Variance-weighted average with a last-frame prior (reverse-engineered from Helicon Focus Method A). Fast, keeps colours stable on short stacks.',
+                'radio_openfocus_a_hint': 'Variance-weighted average with a last-frame prior. Fast, keeps colours stable on short stacks.',
                 'radio_openfocus_b': 'OpenFocus - B',
-                'radio_openfocus_b_hint': 'Variance depth-map selection (reverse-engineered from Helicon Focus Method B). Picks the sharpest frame per pixel; best on smooth surfaces and microscopy.',
+                'radio_openfocus_b_hint': 'Variance depth-map selection. Picks the sharpest frame per pixel; best on smooth surfaces and microscopy.',
                 'radio_openfocus_c': 'OpenFocus - C',
-                'radio_openfocus_c_hint': 'Laplacian-pyramid fusion (reverse-engineered from Helicon Focus Method C). Blends per frequency band; boosts local contrast — natural-looking results on textured subjects.',
+                'radio_openfocus_c_hint': 'Laplacian-pyramid fusion. Blends per frequency band; boosts local contrast — natural-looking results on textured subjects.',
                 'check_align_none': 'No alignment',
                 'check_align_none_hint': 'Fuse the frames as loaded, without any registration.',
                 'check_align_of': 'OpenFocus (fast)',
-                'check_align_of_hint': 'Fast bounded similarity alignment (translation + rotation + scale, reverse-engineered from Helicon) with brightness equalization and auto-crop. Sub-second per frame; frames shifting more than 8% of the frame size are left unaligned rather than half-corrected (the point where Helicon gives up too). Pick ECC or Homography for non-rigid or extreme geometry.',
+                'check_align_of_hint': 'Fast bounded similarity alignment (translation + rotation + scale) with brightness equalization and auto-crop. Sub-second per frame; frames shifting more than 8% of the frame size are left unaligned rather than half-corrected. Pick ECC or Homography for non-rigid or extreme geometry.',
                 'chk_base_correct': 'Remove brightness drift',
-                'chk_base_correct_hint': "After fusion, match the output's low frequencies to the last frame (base correction). Removes exposure/brightness drift across the stack — essential for time-lapse stacks.",
+                'chk_exposure_match': 'Match exposure before fusion',
+                'chk_exposure_match_hint': "Scales every frame to the last frame's mean before the focus measure, so a darker or lighter frame cannot win or lose on brightness alone. Computed on the whole stack (tiled output stays seamless) and applied to every fusion method. On by default (always on for OpenFocus A/B/C, which have no built-in calibration).",
+                'chk_base_correct_hint': "After fusion, matches the result's low-frequency brightness to the last frame (or first, for a reversed stack). Removes exposure drift the focus measure cannot see, e.g. a time-lapse stack whose illumination changed between shots. Applies to every method; on by default for OpenFocus A/B/C.",
                 'chk_reverse_order': 'Reverse stack order (far-to-near sweep)',
-                'chk_reverse_order_hint': 'For stacks swept far-to-near: reverses the frames so the OpenFocus A/B/C base reference, last-frame prior and depth-map labels anchor to the intended end. Otherwise the file order is kept (same as Helicon).',
+                'chk_reverse_order_hint': 'For stacks swept far-to-near: reverses the frames so the OpenFocus A/B/C base reference, last-frame prior and depth-map labels anchor to the intended end. Otherwise the file order is kept.',
                 'radio_no_fusion': 'Alignment only (no fusion)',
                 'radio_no_fusion_hint': 'Registers the stack and shows the aligned frames in the output list — no fusion step. Choose a fusion method to render a fused image.',
                 'menu_dust_map': 'Dust Map (Flat-field)',
@@ -191,6 +263,8 @@ class TranslationManager(QObject):
                 'dust_no_file': 'No white-field image selected',
                 'dust_stack_frame': 'Frame:',
                 'dust_remove_hint': 'Remove the selected frame from the stack after applying (it is a defocused shot)',
+                'dust_size': 'Dust size (σ):',
+                'dust_size_hint': 'Radius of the gain-field extraction, in pixels. Must be a little larger than the dust specks themselves: too small follows the white shot noise, too large blurs the specks away (the old fixed 32 px removed only ~9% of the dust contrast). 4 px suits typical sensor dust; raise it for large soft blobs or heavy vignetting.',
                 'dust_preview': 'Preview gain field',
                 'dust_no_preview': 'Gain-field preview appears here',
                 'dust_before': 'Before (frame 1)',
@@ -210,6 +284,7 @@ class TranslationManager(QObject):
                 'batch_no_method_title': 'No Fusion Method Selected',
                 'batch_no_method_text': 'Select a fusion method before starting a batch job — otherwise nothing is written.',
                 'batch_done_title': 'Batch Processing Complete',
+                'batch_added_to_outputs': '{n} batch result(s) added to the output list.',
                 'batch_done_success': 'Successfully processed: {success}/{total} folders',
                 'batch_done_failed': 'Failed to process {count} folder(s):',
                 'batch_error_title': 'Batch Processing Error',
@@ -280,7 +355,14 @@ class TranslationManager(QObject):
                 'action_retouch': 'Retouch Result…',
                 'action_retouch_hint': 'Brush pixels from a source frame onto the fused result to fix halos or wrongly picked details.',
                 'retouch_title': 'Retouch Result',
-                'retouch_intro': 'Paint over a defect to copy the pixels of a source frame there. With auto-pick on, each stroke takes the frame that is sharpest under the brush.',
+                'retouch_result_title': 'Fused result (retouch here)',
+                'retouch_intro': 'Hold LEFT on either canvas to magnify; wheel changes the power. The left shows the locked source frame, the right the result — paint on the right to copy pixels from the source.',
+                'retouch_current': 'Current result',
+                'retouch_stack': "Source stack",
+                'retouch_stack_hint': "Pick the frame to copy pixels from; each thumbnail shows where that frame is sharp.",
+                'retouch_show_sharpness': "Show sharpness map",
+                'retouch_show_sharpness_hint': "Tint the frame by local detail: green areas are sharp (good source), red areas are flat.",
+                'retouch_auto_badge': "(auto)",
                 'retouch_frame': 'Source frame {i}/{n}: {name}',
                 'retouch_auto': 'Auto-pick sharpest frame per stroke',
                 'retouch_auto_hint': 'At the start of each stroke, the frame with the most local detail under the brush is selected.',
@@ -292,15 +374,70 @@ class TranslationManager(QObject):
                 'retouch_undo': 'Undo',
                 'retouch_redo': 'Redo',
                 'retouch_fit': 'Fit to Window (F)',
+                'retouch_fit_short': 'Fit (F)',
+                'retouch_layout_side_short': 'Both',
+                'retouch_layout_focus_short': 'Result',
+                'retouch_before_short': 'Before',
+                'retouch_peek_short': 'Source',
                 'retouch_keys': 'Left-drag: paint · Wheel: zoom · Right/middle-drag: pan · [ ]: brush size · , .: previous/next frame · Ctrl+Z / Ctrl+Y: undo/redo',
                 'retouch_apply': 'Apply as New Output',
+                'retouch_apply_close': 'Apply & Close',
                 'retouch_need_result': 'Render a fusion result first, then retouch it.',
                 'retouch_size_mismatch': 'No source frames match the result\'s size (ROI renders and resized stacks cannot be retouched).',
                 'retouch_applied': 'Retouched result added to the output list.',
+                'retouch_tools': 'Tools',
+                'retouch_diameter': 'Diameter (px)',
+                'retouch_state_unsaved': 'Unsaved changes',
+                'retouch_change_result': 'Change Result…',
+                'retouch_layout_side': 'Side by Side',
+                'retouch_layout_focus': 'Focus Result',
+                'retouch_view_before': 'View Before',
+                'retouch_peek_source': 'Peek Source',
+                'retouch_tool_source': 'Source Brush (B)',
+                'retouch_tool_restore': 'Restore Brush (E)',
+                'retouch_restore_all': 'Restore All…',
+                'retouch_restore_all_confirm': 'Discard all retouching in this session and restore the image you opened?',
+                'retouch_apply_hint': 'Adds a new output entry. Export it from the main window to write a file.',
+                'retouch_close_title': 'Unsaved retouching',
+                'retouch_close_text': 'Apply the current retouching as a new output before closing?',
+                'retouch_chooser_title': 'Choose a Result to Retouch',
+                'retouch_chooser_hint': 'Select a fusion result with recorded source frames.',
+                'retouch_unexported': 'Not exported',
+                'retouch_output_suffix': 'Retouched {n}',
+                'retouch_unexported_text': '{count} retouched output(s) have not been exported.',
+                'retouch_source_unavailable': 'This source frame has no valid pixels here.',
+                'retouch_stroke_too_large': 'This stroke covers too much area; retouch it in smaller parts.',
+                'retouch_sharpness_legend': 'Local-detail reference (low → high). Noise and texture also respond; confirm against the original.',
+                'retouch_zoom_100': '100%',
+                'retouch_multi_selection': 'Retouch one result at a time.',
+                'retouch_no_source': 'The source frames for this result cannot be verified. Render it again to retouch it.',
+                'retouch_history_evicted': 'Older undo steps were dropped to stay within the memory budget.',
+                'retouch_shortcuts': 'Wheel: zoom · right/middle-drag or Space+drag: pan · F: fit · 1: 100% · [ ]: diameter · , .: frame · Tab: before · Alt: source · Ctrl+Z/Y: undo/redo · Ctrl+Enter: apply',
+                'retouch_help': 'The left canvas is read-only; paint on the right. Both share zoom and position; each stroke copies from the selected source frame.',
                 'action_add_label': 'Add Label',
                 'menu_del_label': 'Delete Label',
-                'action_del_reg_label': 'Delete Registered Stack Labels',
-                'action_del_input_label': 'Delete Input Stack Labels',
+                'menu_labels': 'Labels',
+                'menu_remove_labels': 'Remove labels',
+                'advanced_settings_title': 'Advanced Settings…',
+                'advanced_settings_hint': 'Tiling, registration, AI and startup behaviour in one place',
+                'advanced_settings_intro': 'These settings affect speed and memory. Defaults are tuned for a typical desktop.',
+                'advanced_tab_performance': 'Performance',
+                'advanced_tab_registration': 'Registration',
+                'advanced_tab_ai': 'AI',
+                'advanced_tab_other': 'Startup & updates',
+                'advanced_tile_enabled': 'Use tiled fusion for large images',
+                'advanced_tile_enabled_hint': 'Off forces whole-frame fusion, which needs much more memory.',
+                'advanced_tile_block': 'Tile size (px)',
+                'advanced_tile_overlap': 'Tile overlap (px)',
+                'advanced_tile_threshold': 'Tile above (px)',
+                'advanced_tile_note': 'A smaller tile uses less memory but can shift the result by a couple of levels; the overlap must stay well below the tile size.',
+                'advanced_threads': 'Worker threads',
+                'advanced_reg_width': 'Registration downscale width (px)',
+                'advanced_ai_batch': 'AI tiles per batch',
+                'advanced_ai_mode': 'AI output mode',
+                'action_del_reg_label': 'From the result',
+                'action_del_input_label': 'From the source stack',
+                'action_del_all_labels': 'From everywhere',
                 
                 # Menu Tools
                 'menu_tools': 'Tools',
@@ -309,17 +446,36 @@ class TranslationManager(QObject):
                 # Menu Settings
                 'menu_settings': 'Settings',
                 'menu_language': 'Language',
-                'action_lang_en': 'English',
-                'action_lang_zh': '中文（简体）',
-                'action_lang_ja': '日本語',
-                'action_lang_es': 'Español',
                 'action_thread_settings': 'Thread Settings',
                 'action_reg_settings': 'Registration Settings',
                 'action_tile_settings': 'Tile Settings',
-                'action_stackmffv4_batch_settings': 'AI Batch Size',
+                'action_ai_batch_settings': 'AI Batch Size',
                 
                 # Menu Help
                 'menu_help': 'Help',
+                'action_send_feedback': 'Send feedback…',
+                'action_send_feedback_hint': 'Report a bug or suggest a feature — the session log is attached automatically',
+                'feedback_title': 'Send feedback',
+                'feedback_head': 'Found a bug or have a suggestion? Open an issue on GitHub — copy the log below with one click and paste it into the report. You can also export the full log as a zip.',
+                'feedback_intro': 'Describe what happened — the more detail, the easier it is to fix. The session log below is attached automatically.',
+                'feedback_copy_log': 'Copy log to clipboard',
+                'feedback_open_issues': 'Open GitHub Issues',
+                'feedback_copied': 'Session log copied to the clipboard. Paste it into the issue.',
+                'feedback_type': 'Type:',
+                'feedback_type_bug': 'Bug',
+                'feedback_type_feature': 'Feature request',
+                'feedback_title_label': 'Title:',
+                'feedback_title_hint': 'Short summary, e.g. "Fusion freezes on 40 MP stacks"',
+                'feedback_description': 'Description:',
+                'feedback_description_hint': 'What did you do, what did you expect, what happened instead?',
+                'feedback_log_section': 'Session log (attached automatically):',
+                'feedback_log_hint': 'Full logs live in: {path}',
+                'feedback_send_github': 'Report on GitHub',
+                'feedback_send_email': 'Send by e-mail',
+                'feedback_export': 'Export feedback package',
+                'feedback_need_title': 'Please add a short title first.',
+                'feedback_email_hint': 'Your mail client opened with the report prefilled. Attach the session log if asked: {path}',
+                'feedback_exported': 'Feedback package saved to: {path}',
                 'action_env_info': 'Environment Info',
                 'action_contact': 'Contact Us',
                 
@@ -329,7 +485,13 @@ class TranslationManager(QObject):
                 'radio_dct': 'DCT',
                 'radio_dtcwt': 'DTCWT',
                 'radio_gfg': 'GFG-FGF',
-                'radio_stackmff': 'AI',
+                'radio_stackmff': 'AI (StackMFF-V3)',
+                'label_ai_mode': 'AI output',
+                'label_ai_mode_hint': 'How the neural network combines the frames',
+                'radio_ai_soft': 'Soft blend (weighted)',
+                'radio_ai_soft_hint': 'Each output pixel is a probability-weighted mix of the source frames: smooth transitions, no hard seams',
+                'radio_ai_hard': 'Hard pick (single frame)',
+                'radio_ai_hard_hint': 'Each output pixel is copied from the most probable frame: crisp per-pixel selection, can show seams at near-ties',
                 'group_registration': 'Registration',
                 'check_align_ecc': 'ECC',
                 'check_align_homography': 'Homography',
@@ -338,11 +500,17 @@ class TranslationManager(QObject):
                 'label_kernel_dct': 'DCT median kernel:',
                 'label_kernel_gfg': 'GFG initial kernel:',
                 'label_kernel_of': 'Variance window (px):',
+                'label_blend_smoothing': 'Blend smoothing (σ):',
+                'label_blend_smoothing_hint': 'How widely OpenFocus A (weighted average) or C (Laplacian pyramid) blends between frames. Larger values soften transitions and halos; 0 keeps the crispest per-pixel choice but can speckle on noisy stacks.',
                 'label_depth_smoothing': 'Depth smoothing (σ):',
-                'label_depth_smoothing_hint': 'Width of the transition between frames in OpenFocus B\'s depth map. 1.2 matches Helicon; 0 keeps the finest detail; larger values calm speckles and halos at depth jumps on noisy stacks.',
+                'label_depth_smoothing_hint': 'Width of the transition between frames in OpenFocus B\'s depth map. 1.2 is the default; 0 keeps the finest detail; larger values calm speckles and halos at depth jumps on noisy stacks.',
                 'btn_reset': 'Reset Default',
                 'btn_render': '▶ Start Render',
                 'label_source_images': 'Source Images: {}',
+                'btn_select_all': 'All',
+                'btn_select_all_hint': 'Include every frame in the render',
+                'btn_select_none': 'None',
+                'btn_select_none_hint': 'Exclude every frame from the render',
                 'label_output': 'Output: {}',
                 'btn_roi': 'ROI',
                 'btn_render_processing': '⏳ Processing...',
@@ -350,6 +518,10 @@ class TranslationManager(QObject):
                 # Status Panel
                 'status_loaded': 'Loaded: {}',
                 'status_gpu': 'GPU: {}',
+                'help_btn_tile': 'Show help for tile settings',
+                'help_btn_registration': 'Show help for registration settings',
+                'help_btn_app': 'Show help for application settings',
+                'help_btn_ai_batch': 'Show help for StackMFF V3 batch settings',
                 'status_res': 'Res: {}',
                 'status_ram': 'RAM: {}',
                 'status_loaded_fmt': 'Loaded: {} ({:.1f} MB/img)',
@@ -378,6 +550,9 @@ class TranslationManager(QObject):
                 'msg_display_fusion_failed_text': 'Failed to display the fusion result.',
                 'msg_display_registration_failed_text': 'Failed to display the registration result.',
                 'msg_no_images_title': 'No Images',
+                'ai_cpu_warning_title': 'AI Fusion Without a GPU',
+                'ai_cpu_warning_text': 'No CUDA or MPS device was found, so the AI method (StackMFF V3) runs on the CPU.\n\nExpect it to be roughly 30-90x slower than the classical methods, and on a high-resolution or deep stack it can take a very long time. On a low-spec machine this may make the whole computer unresponsive until the render finishes.\n\nTips: turn on Quick preview to tune settings first, lower the stack resolution, or pick guided filter / GFG-FGF for a fast result.',
+                'ai_cpu_warning_dont_show': "Don't show this again",
                 'msg_no_images_rotate': 'No images to rotate.',
                 'msg_no_images_flip': 'No images to flip.',
                 'msg_no_images_resize': 'No images to resize.',
@@ -388,7 +563,7 @@ class TranslationManager(QObject):
                 'msg_reload_error_text': 'An error occurred while reloading the image stack.',
                 'msg_render_need_images_text': 'Please load at least 2 images before rendering.',
                 'msg_stackmff_unavailable_title': 'AI Unavailable',
-                'msg_stackmff_unavailable_text': 'AI requires torch + torchvision. Please install them or choose another fusion method.',
+                'msg_stackmff_unavailable_text': 'AI requires torch. Please install them or choose another fusion method.',
                 'msg_save_failed_title': 'Save Failed',
                 'msg_save_failed_text': 'Failed to save the image.',
                 'msg_save_failed_info_write': 'Unable to write image to the specified file path.',
@@ -519,8 +694,16 @@ class TranslationManager(QObject):
                 'batch_mode_multi': 'Multiple Folders (one stack per folder)',
                 'batch_mode_single': 'Single Folder (auto-split into multiple stacks)',
                 'batch_stack_folders': 'Image Stack Folders',
-                'batch_path_placeholder': 'Type a path and press Enter to refresh',
                 'batch_btn_add': 'Add Folders',
+                'batch_path_placeholder': 'Type or paste a folder path and press Enter',
+                'batch_path_invalid': 'Not a folder:',
+                'batch_pick_title': 'Select image stack folders',
+                'batch_pick_path_hint': 'Type or paste a folder path, then press Enter',
+                'batch_pick_home': 'Home',
+                'batch_pick_pictures': 'Pictures',
+                'batch_pick_desktop': 'Desktop',
+                'batch_pick_documents': 'Documents',
+                'batch_no_folders': 'No folders added yet — use “Add Folder” above to pick the stacks to process.',
                 'batch_btn_remove': 'Remove Selected',
                 'batch_single_split_settings': 'Single Folder Split Settings',
                 'batch_folder_none': 'Folder: (none)',
@@ -540,13 +723,21 @@ class TranslationManager(QObject):
                 'batch_format_label': 'Format:',
                 'batch_quality_label': 'Quality:',
                 'batch_output_location': 'Output Location',
+                'batch_output_group': 'Output',
+                'batch_section_method': 'Method',
+                'batch_section_params': 'Parameters',
+                'batch_section_options': 'Options',
+                'batch_save_aligned_hint': 'Also write the aligned frames next to the fused result.',
                 'batch_out_subfolder': 'Create subfolder in source folder',
                 'batch_subfolder_name': 'Subfolder Name:',
                 'batch_out_same': 'Same as source folder',
                 'batch_out_custom': 'Specify output folder',
                 'batch_btn_browse': 'Browse...',
                 'batch_save_aligned': 'Save Aligned Image Stack',
+                'batch_save_aligned_forced': 'Align-only output IS the aligned stack, so this is always on.',
                 'batch_proc_options': 'Processing Options',
+                'batch_downscale': 'Registration downscale:',
+                'batch_downscale_hint': 'Downscales registration only (never the output). 100% uses the configured width.',
                 'batch_lbl_fusion': 'Fusion Method: {}',
                 'batch_lbl_reg': 'Registration Methods: {}',
                 'batch_lbl_kernel': 'Kernel Size: {}',
@@ -557,6 +748,24 @@ class TranslationManager(QObject):
                 'help_render_title': 'Fusion Help',
                 'help_registration_title': 'Registration Help',
                 'help_tile_title': 'Tile Settings Help',
+                'help_render_body': '''<h3>Fusion Methods</h3>
+<p><b>Guided Filter</b><br/>Edge-preserving fusion tuned for practical scenes. Adjust the radius slider to trade sharpness for smoothness.</p>
+<p><b>DCT</b><br/>Block-wise DCT variance with consistency verification; the fastest method, fully CPU-based, crisp edges.</p>
+<p><b>DTCWT</b><br/>Dual-tree complex wavelet fusion across scales and orientations; best for intricate high-frequency content.</p>
+<p><b>GFG-FGF</b><br/>Gaussian-like four-neighbourhood gradient with fast guided-filter refinement (Fu et al., 2024); well suited to microscopy.</p>
+<p><b>StackMFF-V3</b><br/>Classifies every pixel by its most probable source frame, then blends (soft) or picks one frame (hard). Order-invariant, any stack length, strongest results with minimal tuning; fastest with a GPU.</p>
+<p><b>OpenFocus A / B / C</b><br/><b>A</b> variance-weighted average with a last-frame prior (fast, colour-stable). <b>B</b> variance depth-map pick (sharpest frame per pixel; smooth surfaces, microscopy). <b>C</b> Laplacian-pyramid per-band blend (natural on textures). A and B take a variance window; C has no radius, only Smoothing.</p>''',
+                'help_registration_body': '''<h3>Registration Methods</h3>
+<p>Alignment is a single choice: pick one method per render, or "No alignment" to fuse the frames as loaded.</p>
+<p><b>No alignment</b><br/>Skips registration; fastest, and correct when the stack is already aligned (fixed rig).</p>
+<p><b>Homography</b><br/>Feature-based (SIFT + RANSAC) projective alignment; ideal for global geometric correction.</p>
+<p><b>ECC</b><br/>Enhanced Correlation Coefficient refinement at sub-pixel level; good for fine adjustments or when features are unreliable.</p>
+<p><b>OpenFocus (fast)</b><br/>Bounded similarity (translation + rotation + scale) with brightness equalization and auto-crop; sub-second per frame. Frames shifting more than 8% of the frame size are left unaligned rather than half-corrected. Use ECC or Homography for non-rigid or extreme geometry.</p>''',
+                'help_tile_body': '''<h3>Tile Settings</h3>
+<p><b>Enable tiled processing</b>: process large images in blocks to reduce peak memory.</p>
+<p><b>Block size</b>: side length of each square tile (512–2048 is typical).</p>
+<p><b>Overlap</b>: pixels shared between adjacent tiles so the seams blend instead of showing a hard edge.</p>
+<p><b>Threshold</b>: images whose longest side exceeds this are tiled; smaller ones are fused whole.</p>''',
 
                 'dialog_tile_title': 'Tile Settings',
                 'dialog_tile_group': 'Tile Options',
@@ -617,11 +826,11 @@ class TranslationManager(QObject):
         operations (e.g., guided filtering).</p>''',
 
                 # AI Batch settings dialog
-                'dialog_stackmffv4_batch_title': 'AI Batch Settings',
-                'dialog_stackmffv4_batch_group': 'Batch Processing',
-                'dialog_stackmffv4_batch_label': 'Batch Size:',
-                'dialog_stackmffv4_batch_help_title': 'AI Batch Settings Help',
-                'dialog_stackmffv4_batch_help_text': '''<h3>AI Batch Settings</h3>
+                'dialog_ai_batch_title': 'AI Batch Settings',
+                'dialog_ai_batch_group': 'Batch Processing',
+                'dialog_ai_batch_label': 'Batch Size:',
+                'dialog_ai_batch_help_title': 'AI Batch Settings Help',
+                'dialog_ai_batch_help_text': '''<h3>AI Batch Settings</h3>
         <p>This setting controls the batch size when processing tiles with the AI
         neural network fusion algorithm. Batch processing allows multiple tiles to be
         processed in parallel on the GPU, improving efficiency.</p>
@@ -648,6 +857,11 @@ class TranslationManager(QObject):
                 'label_target_stack': 'Target Stack:',
                 'label_target_input': 'Input Image Stack',
                 'label_target_registered': 'Registered Image Stack',
+                'output_aligned_stack': 'Aligned stack ({n} frames)',
+                'output_aligned_staged': 'Aligned frames staged in: {path}',
+                'output_save_aligned_title': 'Choose a folder for the aligned stack',
+                'output_save_aligned_same': 'That is the staging folder; pick another one.',
+                'output_save_aligned_done': '{n} aligned frames saved to {path}',
                 'label_format': 'Format String:',
                 'label_start_val': 'Starting Value:',
                 'label_interval': 'Interval:',
@@ -657,6 +871,17 @@ class TranslationManager(QObject):
                 'label_font_family': 'Font Family:',
                 'label_custom_text': 'Custom Text:',
                 'label_range': 'Range:',
+                'label_group_target': 'Placement',
+                'label_group_text': 'Content',
+                'label_group_look': 'Appearance',
+                'label_position': 'Position',
+                'label_colors': 'Colours',
+                'label_preview': 'Preview',
+                'label_preview_hint': 'This is how frame 1 will read: {n!r}',
+                'label_preview_empty': 'Nothing will be drawn: the format and the custom text are both empty.',
+                'label_format_hint': 'Use {value} for the frame number, or type a fixed caption.',
+                'label_range_hint': 'Which frames get the label: All, 3-7, or 1,4,9',
+                'label_custom_text_hint': 'Used only when the format string is empty.',
                 'label_transparent_bg': 'Transparent Background',
                 'label_bg_color': 'Background Color:',
                 'label_choose_bg': 'Choose Background Color',
@@ -666,6 +891,8 @@ class TranslationManager(QObject):
                 'btn_ok': 'OK',
                 'btn_cancel': 'Cancel',
 
+                'msg_label_draw_failed_title': 'Label could not be drawn',
+                'msg_label_draw_failed_text': 'The settings were saved but drawing failed:',
                 'msg_config_saved_title': 'Configuration Saved',
                 'msg_config_saved_text': 'Label configuration saved successfully!',
                 'msg_config_saved_info': 'The labels are now visible on the selected stack and will be included when saving.',
@@ -676,6 +903,7 @@ class TranslationManager(QObject):
                 'msg_no_input_labels': 'No Labels',
                 'msg_input_labels_disabled': 'Input stack labels are not enabled.',
                 'msg_input_labels_removed': 'Labels removed from Input Stack.',
+                'msg_all_labels_removed': 'Labels removed from both stacks.',
                 
                  # Folder Import Dialog
                 'import_folder_title': 'Import Folder',
@@ -699,10 +927,35 @@ class TranslationManager(QObject):
                 'menu_save_project': '保存工程',
                 'menu_save_project_as': '工程另存为…',
                 'msg_project_saved': '工程已保存：{path}',
+                'btn_discard_changes': '放弃更改',
+                'msg_discard_unsaved_project': '当前栈有未保存的工程更改。要打开另一个工程并放弃这些更改吗？',
+                'msg_discard_unsaved_project_quit': '当前栈有未保存的工程更改。要退出并放弃它们吗？',
+
                 'msg_project_save_failed': '工程保存失败：{err}',
                 'menu_recent': '最近打开',
                 'action_save_multipage_tiff': '保存为多页 TIFF',
                 'menu_depth_map': '深度图…',
+                'action_method_compare': '方法对比…',
+                'action_method_compare_hint': '渲染多个算法并排对比',
+                'compare_title': '方法对比',
+                'compare_pick': '选择算法：',
+                'compare_run': '渲染所选',
+                'compare_cancel': '取消',
+                "compare_hint": "左键拖动选区，松开后固定；滚轮调整倍率；右键平移；Ctrl+滚轮缩放源图。",
+                "compare_mode": "预览方式：",
+                "compare_size": "预览窗口大小 (px)：",
+                "compare_fullscreen": "全屏（F11）",
+                "compare_exit_fullscreen": "退出全屏（F11）",
+                "compare_roi": "ROI 局部预览（快速）",
+                "compare_full": "整图融合对照",
+                "compare_levels": "小波分解层数：",
+                "compare_preview_note": "修改参数后自动更新。ROI 预览融合选区及周边区域；检查最终效果时可切换到整图融合对照。",
+                "compare_stopping": "正在取消当前操作…",
+                'compare_reference': '原图像栈',
+                'compare_frame_of': '第 {i} / {n} 帧 — {name}',
+                'compare_no_image': '尚未渲染',
+                'compare_need_method': '请至少选择一个算法。',
+                'compare_need_stack': '请先载入图像栈。',
                 'depth_dialog_title': '深度图（焦点位置）',
                 'depth_method': '度量来源：',
                 'depth_colormap': '伪彩色：',
@@ -717,11 +970,19 @@ class TranslationManager(QObject):
                 'msg_update_in_progress': '已有更新正在下载中。',
                 'depth_new_scheme_default': '我的配色',
                 'depth_computing': '计算中… 第 {i}/{n} 帧',
+                'depth_ai_note': '逐像素来源帧（AI 分类）',
+                'depth_ai_note_hint': '网络对每个像素判断它最可能来自哪一帧，因此深度图仍以帧序号（0..N-1）表示，只是这个判断由模型逐像素给出，而不是靠清晰度度量。',
+                'depth_computing_ai': '正在分类各帧…',
                 'depth_ready': '完成——预览已更新。可在下方保存伪彩图或 16-bit 原始图。',
                 'depth_saved': '已保存：{path}',
                 'depth_save_color': '保存伪彩图…',
                 'depth_save_raw': '保存 16-bit 原始图…',
                 'depth_export_3d': '导出 3D 模型（OBJ）…',
+                'depth_tab_map': '深度图',
+                'depth_tab_3d': '3D 曲面',
+                'depth_3d_reset': '重置视角',
+                'depth_3d_detail': '细节',
+                'depth_3d_detail_hint': '越高细节越多、越吃性能，拖动即时生效。',
                 'depth_export_3d_hint': '由深度图和融合结果生成带纹理的 3D 表面（OBJ + MTL + PNG，可用 Blender、MeshLab、3D 查看器打开）。“反转深度轴”可交换远近。',
                 'depth_relief': '3D 起伏高度：',
                 'depth_relief_hint': '3D 表面的高度，占图像长边的百分比。',
@@ -739,8 +1000,19 @@ class TranslationManager(QObject):
                 'depth_map_stale': '预览仍是上一个方法的深度图——点击“计算”刷新。',
                 'depth_overlay_missing': '叠加需要已渲染的融合结果——请先完成一次渲染。',
                 'menu_scale_bar': '比例尺…',
+                'menu_scale_remove': '删除比例尺',
+                'scalebar_remove_source': '从源图像栈',
+                'scalebar_remove_output': '从结果',
+                'scalebar_remove_all': '全部删除',
+                'scalebar_removed_source': '已从源图像栈移除比例尺。',
+                'scalebar_removed_output': '已从结果移除比例尺。',
+                'scalebar_removed_all': '已从源图像栈和结果移除比例尺。',
+                'scalebar_none_msg': '比例尺当前未显示。',
+                'action_scale_add': '添加/编辑比例尺…',
+                'compare_params': '参数：',
                 'dialog_scalebar_title': '比例尺',
                 'scalebar_enable': '在导出的图像上绘制比例尺',
+                'scalebar_enable': '启用比例尺',
                 'scalebar_px_um': '像素大小（µm/px）:',
                 'scalebar_manual_hint': '图像元数据没有标定时手动输入像素大小。',
                 'scalebar_detected': '已从图像元数据自动检测：{value} µm/px（元数据优先于手动值）。',
@@ -748,7 +1020,24 @@ class TranslationManager(QObject):
                 'scalebar_position': '位置:',
                 'scalebar_pos_br': '右下', 'scalebar_pos_bl': '左下',
                 'scalebar_pos_tr': '右上', 'scalebar_pos_tl': '左上',
+                'scalebar_section_place': '位置',
+                'scalebar_section_calibration': '标定',
+                'scalebar_section_text': '文字样式',
+                'scalebar_pos_custom': '自定义',
+                'scalebar_font': '字体',
+                'scalebar_font_size': '字号',
+                'scalebar_font_auto': '0 = 自动',
+                'scalebar_bold': '粗体',
+                'scalebar_text_align': '文字对齐',
+                'scalebar_align_auto': '自动',
+                'scalebar_align_left': '左侧',
+                'scalebar_align_center': '居中',
+                'scalebar_align_right': '右侧',
                 'scalebar_color': '颜色:',
+                'scalebar_target': '应用到',
+                'scalebar_target_source': '仅源图像栈',
+                'scalebar_target_output': '仅结果',
+                'scalebar_target_all': '源图像栈和结果',
                 'scalebar_color_auto': '自动（与背景反色）',
                 'scalebar_color_white': '白色', 'scalebar_color_black': '黑色',
                 'scalebar_preview': '预览（近似效果）',
@@ -767,6 +1056,7 @@ class TranslationManager(QObject):
                 'action_delete': '删除',
                 'action_gpu_accel': 'GPU 加速',
                 'msg_gpu_accel_hint': '取消勾选后所有处理强制使用 CPU。当 GPU 驱动异常时可开启此选项。',
+                'msg_gpu_accel_unavailable': '本机未检测到 CUDA 或 Apple 芯片 GPU。',
                 'action_restore_last_stack': '启动时恢复上次图像栈',
                 'action_ask_load_scale': '导入时询问加载缩放比例',
                 'action_ask_load_scale_hint': '关闭后每次导入直接使用上次选择的比例，不再弹窗（之后仍可通过 编辑 → 调整大小 缩小）。',
@@ -810,6 +1100,12 @@ class TranslationManager(QObject):
                 'update_bg_downloading': '正在后台下载更新 {version}… {percent}%',
                 'update_status_preparing': '正在准备更新…',
                 'update_status_ready': 'OpenFocus {version} 已就绪，可立即安装',
+                'update_banner_new_version': 'OpenFocus {version} 现已发布',
+                'update_banner_ready': 'OpenFocus {version} 已就绪，可立即安装',
+                'update_banner_hint': '当前版本 {current}。',
+                'btn_update_now': '立即更新',
+                'btn_see_whats_new': '查看新功能',
+                'update_dismissed_hint': '该提醒在本版本内不再出现；帮助 → 检查更新 可重新打开。',
                 'update_status_failed': '更新下载失败',
                 'update_restored_session': '已恢复更新前的工作现场。',
                 'update_applied': '已更新到 OpenFocus {version}。',
@@ -825,19 +1121,21 @@ class TranslationManager(QObject):
                 'msg_undo_done': '已撤销。',
                 'msg_redo_done': '已重做。',
                 'radio_openfocus_a': 'OpenFocus - A',
-                'radio_openfocus_a_hint': '方差加权平均 + 末帧先验（逆向复现自 Helicon Focus Method A）。快速、短栈色彩稳定。',
+                'radio_openfocus_a_hint': '方差加权平均 + 末帧先验。快速、短栈色彩稳定。',
                 'radio_openfocus_b': 'OpenFocus - B',
-                'radio_openfocus_b_hint': '方差深度图选择法（逆向复现自 Helicon Focus Method B）。逐像素挑选最清晰帧，平滑表面与显微场景最佳。',
+                'radio_openfocus_b_hint': '方差深度图选择法。逐像素挑选最清晰帧，平滑表面与显微场景最佳。',
                 'radio_openfocus_c': 'OpenFocus - C',
-                'radio_openfocus_c_hint': '拉普拉斯金字塔融合（逆向复现自 Helicon Focus Method C）。按频段独立混合、增益局部对比度——纹理题材观感最自然。',
+                'radio_openfocus_c_hint': '拉普拉斯金字塔融合。按频段独立混合、增益局部对比度——纹理题材观感最自然。',
                 'check_align_none': '不对齐',
                 'check_align_none_hint': '按加载原样直接融合，不做任何配准。',
                 'check_align_of': 'OpenFocus（快速）',
-                'check_align_of_hint': '快速有界相似变换对齐（平移+旋转+缩放，逆向复刻自 Helicon）+ 亮度均衡 + 自动裁边。亚秒级每帧；位移超过帧尺寸 8% 的帧放弃对齐而非强行半校正（Helicon 同样在此处放弃）。非刚性/极端几何请改选 ECC 或单应性。',
+                'check_align_of_hint': '快速有界相似变换对齐（平移+旋转+缩放）+ 亮度均衡 + 自动裁边。亚秒级每帧；位移超过帧尺寸 8% 的帧放弃对齐而非强行半校正。非刚性/极端几何请改选 ECC 或单应性。',
                 'chk_base_correct': '消除亮度漂移',
-                'chk_base_correct_hint': '融合后将输出的低频基底对齐到末帧（基底校正），消除帧间曝光/亮度漂移——延时堆栈刚需。默认关闭。',
+                'chk_exposure_match': '融合前匹配曝光',
+                'chk_exposure_match_hint': '融合前把每一帧的均值标定到末帧，避免偏暗或偏亮的帧仅因亮度而赢/输清晰度判定。增益按整栈计算（分块输出无接缝），所有融合方法生效。默认开启。',
+                'chk_base_correct_hint': '融合后把结果的低频亮度对齐到末帧（倒序栈则为首帧）。消除清晰度判定看不到的曝光漂移，例如拍摄间照明变化的延时栈。对所有算法生效；OpenFocus A/B/C 默认开启。',
                 'chk_reverse_order': '反转帧序（远→近扫描的栈）',
-                'chk_reverse_order_hint': '对按"由远到近"扫描的栈反转帧序，使 OpenFocus A/B/C 的基底参考端、末帧先验与深度图标签落在预期的一端；其余情况保持文件序（与 Helicon 行为一致）。',
+                'chk_reverse_order_hint': '对按"由远到近"扫描的栈反转帧序，使 OpenFocus A/B/C 的基底参考端、末帧先验与深度图标签落在预期的一端；其余情况保持文件序。',
                 'radio_no_fusion': '仅对齐（不融合）',
                 'radio_no_fusion_hint': '只做配准，把对齐后的帧序列输出到结果列表——不执行融合。需要合成图时请选择具体融合算法。',
                 'menu_dust_map': '尘点图（平场校正）',
@@ -849,6 +1147,8 @@ class TranslationManager(QObject):
                 'dust_no_file': '未选择白场图',
                 'dust_stack_frame': '帧：',
                 'dust_remove_hint': '应用后从栈中移除该帧（它是失焦的白场照）',
+                'dust_size': '尘点尺度（σ）：',
+                'dust_size_hint': '增益场的提取半径（像素）。应略大于尘点本身：太小会跟住白场噪声，太大会把尘点一起抹平（旧的固定 32px 只能去掉约 9% 的尘点对比度）。4px 适合常见传感器尘点；大片柔和暗斑或明显渐晕时调大。',
                 'dust_preview': '预览增益场',
                 'dust_no_preview': '增益场预览',
                 'dust_before': '校正前（第 1 帧）',
@@ -868,6 +1168,7 @@ class TranslationManager(QObject):
                 'batch_no_method_title': '未选择融合方法',
                 'batch_no_method_text': '请先选择一种融合方法再开始批处理，否则不会输出任何文件。',
                 'batch_done_title': '批处理完成',
+                'batch_added_to_outputs': '已将 {n} 个批处理结果加入输出列表。',
                 'batch_done_success': '成功处理：{success}/{total} 个文件夹',
                 'batch_done_failed': '{count} 个文件夹处理失败：',
                 'batch_error_title': '批处理出错',
@@ -938,7 +1239,14 @@ class TranslationManager(QObject):
                 'action_retouch': '修饰结果…',
                 'action_retouch_hint': '用画笔把源帧的像素刷到融合结果上，修复光晕或选错帧的细节。',
                 'retouch_title': '修饰结果',
-                'retouch_intro': '在瑕疵处涂抹，即可用某一源帧的像素替换该处。开启自动选帧后，每一笔都会选用画笔下最清晰的那一帧。',
+                'retouch_result_title': '融合结果（在此修饰）',
+                'retouch_intro': '在任一画布按住左键放大，滚轮调节倍率。左侧显示锁定的源帧，右侧为融合结果——在右侧涂抹即可用源帧像素替换。',
+                'retouch_current': '当前结果',
+                'retouch_stack': "源图像栈",
+                'retouch_stack_hint': "选择要复制像素的帧；每个缩略图显示该帧哪里清晰。",
+                'retouch_show_sharpness': "显示清晰度图",
+                'retouch_show_sharpness_hint': "按局部细节给帧着色：绿色区域清晰（适合作为源），红色区域平坦。",
+                'retouch_auto_badge': "（自动）",
                 'retouch_frame': '源帧 {i}/{n}：{name}',
                 'retouch_auto': '每一笔自动选最清晰帧',
                 'retouch_auto_hint': '每一笔开始时，自动选择画笔下局部细节最多的帧。',
@@ -950,15 +1258,70 @@ class TranslationManager(QObject):
                 'retouch_undo': '撤销',
                 'retouch_redo': '重做',
                 'retouch_fit': '适应窗口（F）',
+                'retouch_fit_short': '适应（F）',
+                'retouch_layout_side_short': '并排',
+                'retouch_layout_focus_short': '结果',
+                'retouch_before_short': '修饰前',
+                'retouch_peek_short': '源帧',
                 'retouch_keys': '左键拖动：涂抹 · 滚轮：缩放 · 右键/中键拖动：平移 · [ ]：画笔大小 · , .：上一/下一帧 · Ctrl+Z / Ctrl+Y：撤销/重做',
                 'retouch_apply': '作为新输出应用',
+                'retouch_apply_close': '应用并关闭',
                 'retouch_need_result': '请先渲染出融合结果，再进行修饰。',
                 'retouch_size_mismatch': '没有与结果尺寸一致的源帧（ROI 渲染和缩放后的栈无法修饰）。',
                 'retouch_applied': '修饰后的结果已加入输出列表。',
+                'retouch_tools': '工具',
+                'retouch_diameter': '直径（px）',
+                'retouch_state_unsaved': '未应用更改',
+                'retouch_change_result': '更换结果…',
+                'retouch_layout_side': '并排',
+                'retouch_layout_focus': '专注结果',
+                'retouch_view_before': '查看修饰前',
+                'retouch_peek_source': '暂看源帧',
+                'retouch_tool_source': '源帧画笔（B）',
+                'retouch_tool_restore': '还原画笔（E）',
+                'retouch_restore_all': '还原全部…',
+                'retouch_restore_all_confirm': '放弃本次会话的所有修饰，恢复到打开时的底图？',
+                'retouch_apply_hint': '仅加入输出列表；需要在主窗口导出后才会写入文件。',
+                'retouch_close_title': '有未应用的修饰',
+                'retouch_close_text': '关闭前是否将当前修饰应用为新输出？',
+                'retouch_chooser_title': '选择要修饰的结果',
+                'retouch_chooser_hint': '请选择一张有来源记录的融合结果。',
+                'retouch_unexported': '未导出',
+                'retouch_output_suffix': '修饰 {n}',
+                'retouch_unexported_text': '有 {count} 个修饰结果尚未导出。',
+                'retouch_source_unavailable': '该源帧在此位置没有有效像素。',
+                'retouch_stroke_too_large': '本笔覆盖范围过大，请分段修饰。',
+                'retouch_sharpness_legend': '局部细节参考（低 → 高）；噪声和纹理也会响应，请查看原图确认。',
+                'retouch_zoom_100': '100%',
+                'retouch_multi_selection': '一次只能修饰一张结果。',
+                'retouch_no_source': '无法确认该结果的取材来源，请重新渲染。',
+                'retouch_history_evicted': '为控制内存，较早的撤销步骤已被淘汰。',
+                'retouch_shortcuts': '滚轮：缩放 · 右键/中键或空格+拖动：平移 · F：适应 · 1：100% · [ ]：直径 · , .：换帧 · Tab：修饰前 · Alt：源帧 · Ctrl+Z/Y：撤销/重做 · Ctrl+Enter：应用',
+                'retouch_help': '左侧画布只读，请在右侧涂抹。两侧共享倍率和位置；每一笔都从当前选中的源帧取材。',
                 'action_add_label': '添加标签',
                 'menu_del_label': '删除标签',
-                'action_del_reg_label': '删除已配准堆栈标签',
-                'action_del_input_label': '删除输入堆栈标签',
+                'menu_labels': '标签',
+                'menu_remove_labels': '删除标签',
+                'advanced_settings_title': '高级设置…',
+                'advanced_settings_hint': '分块、配准、AI 与启动行为集中在一处',
+                'advanced_settings_intro': '这些设置影响速度与内存占用。默认值已针对常见桌面环境调优。',
+                'advanced_tab_performance': '性能',
+                'advanced_tab_registration': '配准',
+                'advanced_tab_ai': 'AI',
+                'advanced_tab_other': '启动与更新',
+                'advanced_tile_enabled': '大图使用分块融合',
+                'advanced_tile_enabled_hint': '关闭后强制整图融合，内存占用会大幅上升。',
+                'advanced_tile_block': '分块尺寸（像素）',
+                'advanced_tile_overlap': '分块重叠（像素）',
+                'advanced_tile_threshold': '超过此尺寸分块（像素）',
+                'advanced_tile_note': '较小的分块更省内存，但结果可能相差数个色阶；重叠必须明显小于分块尺寸。',
+                'advanced_threads': '工作线程数',
+                'advanced_reg_width': '配准下采样宽度（像素）',
+                'advanced_ai_batch': 'AI 每批瓦片数',
+                'advanced_ai_mode': 'AI 输出方式',
+                'action_del_reg_label': '从结果（融合/配准）',
+                'action_del_input_label': '从源图像栈',
+                'action_del_all_labels': '全部删除',
                 
                 # Menu Tools
                 'menu_tools': '工具',
@@ -967,27 +1330,52 @@ class TranslationManager(QObject):
                 # Menu Settings
                 'menu_settings': '设置',
                 'menu_language': '语言',
-                'action_lang_en': 'English',
-                'action_lang_zh': '简体中文',
-                'action_lang_ja': '日本語',
-                'action_lang_es': 'Español',
                 'action_thread_settings': '线程设置',
                 'action_reg_settings': '配准设置',
                 'action_tile_settings': '分块设置',
-                'action_stackmffv4_batch_settings': 'AI 批量大小',
+                'action_ai_batch_settings': 'AI 批量大小',
                 
                 # Menu Help
                 'menu_help': '帮助',
+                'action_send_feedback': '反馈问题…',
+                'action_send_feedback_hint': '报告问题或提出建议——将自动附上本次运行日志',
+                'feedback_title': '反馈问题',
+                'feedback_head': '遇到问题或想提建议？在 GitHub 上提交 Issue，一键复制下方日志粘贴到报告里；也可以将完整日志导出为 zip 附件。',
+                'feedback_intro': '描述遇到的问题——细节越多越容易定位。下方会自动附上本次运行的日志。',
+                'feedback_copy_log': '复制日志到剪贴板',
+                'feedback_open_issues': '打开 GitHub Issues',
+                'feedback_copied': '本次运行日志已复制到剪贴板，可直接粘贴到 Issue 中。',
+                'feedback_type': '类型：',
+                'feedback_type_bug': '问题',
+                'feedback_type_feature': '功能建议',
+                'feedback_title_label': '标题：',
+                'feedback_title_hint': '简短概括，例如“40MP 图像栈融合时卡死”',
+                'feedback_description': '描述：',
+                'feedback_description_hint': '你做了什么操作、期望的结果是什么、实际发生了什么？',
+                'feedback_log_section': '本次运行日志（自动附上）：',
+                'feedback_log_hint': '完整日志位于：{path}',
+                'feedback_send_github': '在 GitHub 提交 Issue',
+                'feedback_send_email': '通过邮件发送',
+                'feedback_export': '导出反馈包',
+                'feedback_need_title': '请先填写一个简短标题。',
+                'feedback_email_hint': '邮件客户端已打开并预填了内容。如需附件，请添加日志文件：{path}',
+                'feedback_exported': '反馈包已保存到：{path}',
                 'action_env_info': '环境信息',
                 'action_contact': '联系我们',
                 
                 # Right Panel
                 'group_fusion': '融合算法',
                 'radio_guided_filter': '引导滤波',
-                'radio_dct': '余弦离散变换',
-                'radio_dtcwt': '双数复小波变换',
-                'radio_gfg': '引导滤波2',
-                'radio_stackmff': 'AI',
+                'radio_dct': '离散余弦变换 (DCT)',
+                'radio_dtcwt': '双树复小波变换 (DTCWT)',
+                'radio_gfg': '梯度域引导滤波 (GFG-FGF)',
+                'radio_stackmff': 'AI (StackMFF-V3)',
+                'label_ai_mode': 'AI 输出方式',
+                'label_ai_mode_hint': '神经网络如何组合各帧',
+                'radio_ai_soft': '软融合（概率加权）',
+                'radio_ai_soft_hint': '每个像素由各帧按概率加权混合：过渡平滑，无硬接缝',
+                'radio_ai_hard': '硬融合（单帧选取）',
+                'radio_ai_hard_hint': '每个像素直接取自最可能的帧：选择锐利，概率接近时可能出现接缝',
                 'group_registration': '图像配准',
                 'check_align_ecc': 'ECC',
                 'check_align_homography': 'Homography',
@@ -996,11 +1384,17 @@ class TranslationManager(QObject):
                 'label_kernel_dct': 'DCT 中值核:',
                 'label_kernel_gfg': 'GFG 初始核:',
                 'label_kernel_of': '方差窗口 (px):',
+                'label_blend_smoothing': '混合平滑（σ）：',
+                'label_blend_smoothing_hint': 'OpenFocus A（加权平均）或 C（拉普拉斯金字塔）在帧间过渡的尺度。数值越大过渡越柔、光晕越少；0 保留最锐的逐像素选择，但在噪声栈上易出现斑点。',
                 'label_depth_smoothing': '深度过渡平滑（σ）：',
-                'label_depth_smoothing_hint': 'OpenFocus B 深度图中帧间过渡的宽度。1.2 与 Helicon 一致；0 保留最细的细节；调大可压制噪声栈在深度跳变处的斑点与光晕。',
+                'label_depth_smoothing_hint': 'OpenFocus B 深度图中帧间过渡的宽度。1.2 为默认值；0 保留最细的细节；调大可压制噪声栈在深度跳变处的斑点与光晕。',
                 'btn_reset': '重置默认',
                 'btn_render': '▶ 开始渲染',
                 'label_source_images': '源图像: {}',
+                'btn_select_all': '全选',
+                'btn_select_all_hint': '所有帧都参与渲染',
+                'btn_select_none': '全不选',
+                'btn_select_none_hint': '所有帧都不参与渲染',
                 'label_output': '输出: {}',
                 'btn_roi': '选择感兴趣区域',
                 'btn_update_restart': '更新并重新启动',
@@ -1009,6 +1403,10 @@ class TranslationManager(QObject):
                 # Status Panel
                 'status_loaded': '已加载: {}',
                 'status_gpu': 'GPU: {}',
+                'help_btn_tile': '显示瓦片设置帮助',
+                'help_btn_registration': '显示配准设置帮助',
+                'help_btn_app': '显示应用设置帮助',
+                'help_btn_ai_batch': '显示 StackMFF V3 批处理设置帮助',
                 'status_res': '分辨率: {}',
                 'status_ram': '内存: {}',
                 'status_loaded_fmt': '已加载: {} ({:.1f} MB/张)',
@@ -1037,6 +1435,9 @@ class TranslationManager(QObject):
                 'msg_display_fusion_failed_text': '显示融合结果失败。',
                 'msg_display_registration_failed_text': '显示配准结果失败。',
                 'msg_no_images_title': '没有图像',
+                'ai_cpu_warning_title': '无 GPU 时使用 AI 融合',
+                'ai_cpu_warning_text': '未检测到 CUDA 或 MPS 设备，AI 算法（StackMFF V3）将使用 CPU 运行。\n\n预计比经典算法慢约 30–90 倍，高分辨率或深栈需要很长时间。在低配置电脑上，渲染期间可能让整台电脑卡顿、无响应。\n\n建议：先用“快速预览”调参数，或降低栈分辨率，或改用导向滤波 / GFG-FGF 快速出图。',
+                'ai_cpu_warning_dont_show': '不再提示',
                 'msg_no_images_rotate': '没有可旋转的图像。',
                 'msg_no_images_flip': '没有可翻转的图像。',
                 'msg_no_images_resize': '没有可缩放的图像。',
@@ -1047,7 +1448,7 @@ class TranslationManager(QObject):
                 'msg_reload_error_text': '重新加载图像栈时发生错误。',
                 'msg_render_need_images_text': '渲染前请至少加载 2 张图像。',
                 'msg_stackmff_unavailable_title': 'AI 不可用',
-                'msg_stackmff_unavailable_text': 'AI 需要 torch + torchvision。请安装或选择其他融合方法。',
+                'msg_stackmff_unavailable_text': 'AI 需要 torch。请安装或选择其他融合方法。',
                 'msg_save_failed_title': '保存失败',
                 'msg_save_failed_text': '保存图像失败。',
                 'msg_save_failed_info_write': '无法写入指定的文件路径。',
@@ -1179,8 +1580,16 @@ class TranslationManager(QObject):
                 'batch_mode_multi': '多个文件夹 (每个文件夹一组)',
                 'batch_mode_single': '单个文件夹 (自动分割为多组)',
                 'batch_stack_folders': '图像栈文件夹',
-                'batch_path_placeholder': '输入路径并按回车以刷新',
                 'batch_btn_add': '添加文件夹',
+                'batch_path_placeholder': '输入或粘贴文件夹路径，按回车添加',
+                'batch_path_invalid': '不是有效文件夹：',
+                'batch_pick_title': '选择图像栈文件夹',
+                'batch_pick_path_hint': '输入或粘贴文件夹路径，按回车跳转',
+                'batch_pick_home': '主目录',
+                'batch_pick_pictures': '图片',
+                'batch_pick_desktop': '桌面',
+                'batch_pick_documents': '文档',
+                'batch_no_folders': '尚未添加文件夹——点击上方「添加文件夹」选择要处理的图像栈。',
                 'batch_btn_remove': '移除选中项',
                 'batch_single_split_settings': '单文件夹分割设置',
                 'batch_folder_none': '文件夹: (无)',
@@ -1200,13 +1609,21 @@ class TranslationManager(QObject):
                 'batch_format_label': '格式:',
                 'batch_quality_label': '质量:',
                 'batch_output_location': '输出位置',
+                'batch_output_group': '输出',
+                'batch_section_method': '算法',
+                'batch_section_params': '参数',
+                'batch_section_options': '选项',
+                'batch_save_aligned_hint': '同时把配准后的各帧写出（与融合结果并列）。',
                 'batch_out_subfolder': '在源文件夹中创建子文件夹',
                 'batch_subfolder_name': '子文件夹名称:',
                 'batch_out_same': '与源文件夹相同',
                 'batch_out_custom': '指定输出文件夹',
                 'batch_btn_browse': '浏览...',
                 'batch_save_aligned': '保存已配准图像栈',
+                'batch_save_aligned_forced': '仅对齐时输出就是配准后的图像栈，因此此项始终启用。',
                 'batch_proc_options': '处理选项',
+                'batch_downscale': '配准下采样比例：',
+                'batch_downscale_hint': '只降低配准阶段的分辨率（不影响输出）。100% 使用当前设置的宽度。',
                 'batch_lbl_fusion': '融合方法: {}',
                 'batch_lbl_reg': '配准方法: {}',
                 'batch_lbl_kernel': '核大小: {}',
@@ -1217,12 +1634,35 @@ class TranslationManager(QObject):
                 'help_render_title': '融合帮助',
                 'help_registration_title': '配准帮助',
                 'help_tile_title': '分块设置帮助',
+                'help_render_body': '''<h3>融合方法</h3>
+<p><b>引导滤波</b><br/>保边融合，适合多数场景。调节半径滑块在锐度与平滑之间取舍。</p>
+<p><b>DCT</b><br/>分块 DCT 方差 + 一致性校验；速度最快，纯 CPU，边缘锐利。</p>
+<p><b>DTCWT</b><br/>双树复小波多尺度、多方向融合；适合细节密集的高频内容。</p>
+<p><b>GFG-FGF</b><br/>类高斯四邻域梯度 + 快速引导滤波（Fu 等，2024）；尤其适合显微图像。</p>
+<p><b>StackMFF-V3</b><br/>逐像素判断最可能来自哪一帧，再按概率混合（软融合）或直接取该帧（硬融合）。与帧序无关、支持任意栈长；调整少、效果强，有 GPU 时最快。</p>
+<p><b>OpenFocus A / B / C</b><br/><b>A</b> 方差加权平均 + 末帧先验（快、色彩稳定）。<b>B</b> 方差深度图选择（逐像素取最清晰帧；适合平滑表面与显微）。<b>C</b> 拉普拉斯金字塔逐带混合（纹理题材观感自然）。A、B 有方差窗口；C 没有半径，只有平滑。</p>''',
+                'help_registration_body': '''<h3>配准方法</h3>
+<p>对齐方式是单选：每次渲染只选一种，或选「不对齐」按加载原样融合。</p>
+<p><b>不对齐</b><br/>跳过配准；最快，适用于已经对齐的栈（固定机位）。</p>
+<p><b>单应性</b><br/>基于特征（SIFT + RANSAC）的投影对齐；适合需要全局几何校正的场景。</p>
+<p><b>ECC</b><br/>增强相关系数，亚像素级精修；适合细微调整或特征不可靠时。</p>
+<p><b>OpenFocus（快速）</b><br/>有界相似变换（平移 + 旋转 + 缩放）+ 亮度均衡 + 自动裁边；每帧亚秒级。位移超过帧尺寸 8% 的帧放弃对齐而非半校正。非刚性或极端几何请改用 ECC 或单应性。</p>''',
+                'help_tile_body': '''<h3>分块设置</h3>
+<p><b>启用分块</b>：把大图切成小块处理，降低峰值内存。</p>
+<p><b>块大小</b>：每个正方形块的边长（常用 512–2048）。</p>
+<p><b>重叠</b>：相邻块共享的像素数，用于消除拼接缝。</p>
+<p><b>阈值</b>：长边超过该值的图才会分块，小图整幅融合。</p>''',
 
                 # Add Label Dialog
                 'add_label_title': '添加标签配置',
                 'label_target_stack': '目标堆栈:',
                 'label_target_input': '输入图像栈',
                 'label_target_registered': '已配准图像栈',
+                'output_aligned_stack': '已对齐图像栈（{n} 帧）',
+                'output_aligned_staged': '已对齐的帧暂存于：{path}',
+                'output_save_aligned_title': '选择已对齐图像栈的保存位置',
+                'output_save_aligned_same': '这是暂存目录，请选择其他位置。',
+                'output_save_aligned_done': '{n} 个已对齐帧已保存到 {path}',
                 'label_format': '格式字符串:',
                 'label_start_val': '起始值:',
                 'label_interval': '步长:',
@@ -1232,6 +1672,17 @@ class TranslationManager(QObject):
                 'label_font_family': '字体:',
                 'label_custom_text': '自定义文本:',
                 'label_range': '范围:',
+                'label_group_target': '放置',
+                'label_group_text': '内容',
+                'label_group_look': '外观',
+                'label_position': '位置',
+                'label_colors': '颜色',
+                'label_preview': '预览',
+                'label_preview_hint': '第 1 帧将显示为：{n!r}',
+                'label_preview_empty': '不会绘制任何内容：格式字符串和自定义文本都是空的。',
+                'label_format_hint': '用 {value} 表示帧编号，也可以直接输入固定文字。',
+                'label_range_hint': '哪些帧加标签：All、3-7 或 1,4,9',
+                'label_custom_text_hint': '仅在格式字符串为空时使用。',
                 'label_transparent_bg': '背景透明',
                 'label_bg_color': '背景颜色:',
                 'label_choose_bg': '选择背景颜色',
@@ -1241,6 +1692,8 @@ class TranslationManager(QObject):
                 'btn_ok': '确定',
                 'btn_cancel': '取消',
 
+                'msg_label_draw_failed_title': '标签无法绘制',
+                'msg_label_draw_failed_text': '设置已保存，但绘制失败：',
                 'msg_config_saved_title': '配置已保存',
                 'msg_config_saved_text': '标签配置保存成功！',
                 'msg_config_saved_info': '标签现在可见于选定的堆栈，并将在保存时包含在内。',
@@ -1251,6 +1704,7 @@ class TranslationManager(QObject):
                 'msg_no_input_labels': '无标签',
                 'msg_input_labels_disabled': '输入堆栈标签未启用。',
                 'msg_input_labels_removed': '已从输入堆栈移除标签。',
+                'msg_all_labels_removed': '已从两个堆栈中删除标签。',
                 
                 # Folder Import Dialog
                 'import_folder_title': '导入文件夹',
@@ -1286,11 +1740,11 @@ class TranslationManager(QObject):
         ''',
 
                 # AI Batch settings dialog
-                'dialog_stackmffv4_batch_title': 'AI 批量设置',
-                'dialog_stackmffv4_batch_group': '批量处理',
-                'dialog_stackmffv4_batch_label': '批量大小 (Batch Size):',
-                'dialog_stackmffv4_batch_help_title': 'AI 批量设置帮助',
-                'dialog_stackmffv4_batch_help_text': '''<h3>AI 批量设置</h3>
+                'dialog_ai_batch_title': 'AI 批量设置',
+                'dialog_ai_batch_group': '批量处理',
+                'dialog_ai_batch_label': '批量大小 (Batch Size):',
+                'dialog_ai_batch_help_title': 'AI 批量设置帮助',
+                'dialog_ai_batch_help_text': '''<h3>AI 批量设置</h3>
         <p>此设置控制使用 AI 神经网络融合算法处理分块时的批量大小。
         批量处理允许在 GPU 上并行处理多个分块，提高效率。</p>
 
@@ -1339,15 +1793,105 @@ class TranslationManager(QObject):
             }
         }
 
-        # Community language packs (ja/es); missing keys fall back to English
+        self._load_language_packs()
+
+        # Apply the detected language only now: the packs had to exist first,
+        # otherwise a locale whose pack failed to load would leave
+        # current_lang pointing at a table that is not in the dict.
+        pending = getattr(self, "_pending_autodetect", None)
+        if pending and pending in self.translations:
+            self.current_lang = pending
+        self._pending_autodetect = None
+
+    # -- language packs ------------------------------------------------------
+
+    # Ordered so the menu lists languages consistently no matter what the
+    # filesystem returns. 'en'/'zh' live inline in this module; 'ja'/'es' ship
+    # in locales_extra.py; everything else is one locales_<code>.py module.
+    PACK_ORDER = ("en", "zh", "ja", "es", "de", "fr", "ru", "ko", "pt", "it",
+                  "nl", "pl")
+    LANG_NAMES = {
+        "en": "English", "zh": "中文", "ja": "日本語", "es": "Español",
+        "de": "Deutsch", "fr": "Français", "ru": "Русский",
+        "ko": "한국어", "pt": "Português", "it": "Italiano",
+        "nl": "Nederlands", "pl": "Polski",
+    }
+
+    @staticmethod
+    def _match_locale(name: str):
+        """Map a QLocale name ('pt_BR', 'zh_Hans_CN') onto a pack code."""
+        if not name:
+            return None
+        low = name.lower().replace("-", "_")
+        primary = low.split("_")[0]
+        # QLocale answers 'C'/'POSIX' when no user locale is configured; there
+        # is no such pack, and treating it as a code would blank the UI.
+        if primary in ("c", "posix"):
+            return None
+        # QLocale marks simplified Chinese as 'zh_Hans_CN'; both scripts use
+        # the same zh pack, which is Simplified.
+        if primary in ("zh", "ja", "ko"):
+            return primary
+        # Portuguese: one pack covers both, labelled pt-BR in the source text.
+        if primary == "pt":
+            return "pt"
+        return primary or None
+
+    def _load_language_packs(self) -> None:
+        """Merge every community pack into self.translations.
+
+        Packs are discovered as modules rather than hardcoded: adding a
+        language means dropping a locales_<code>.py file next to this one with
+        a PACK dict. A broken pack must never be swallowed silently — the
+        completeness tests iterate the merged table, so a bare `pass` once let
+        the whole Japanese pack vanish while every test stayed green.
+        """
+        import importlib
+        import pkgutil
+
+        loaded = {"en", "zh"}  # defined inline above
+
+        # locales_extra.py keeps ja/es in one dict for the original release.
         try:
             from locales_extra import EXTRA_TRANSLATIONS
             for lang_code, lang_dict in EXTRA_TRANSLATIONS.items():
                 self.translations.setdefault(lang_code, {}).update(lang_dict)
-        except Exception as exc:
-            # 语言包损坏时绝不能静默吞掉：四语完整性测试依赖这里的日志，
-            # 静默 pass 曾让整个日文/西文包失效而测试全绿
+                loaded.add(lang_code)
+        except Exception as exc:  # noqa: BLE001 - report, never hide
             print(f"Warning: extra language pack failed to load: {exc}")
+
+        # One module per language: locales_<code>.py with a PACK dict.
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            files = sorted(os.listdir(here))
+        except OSError as exc:
+            print(f"Warning: cannot scan for language packs: {exc}")
+            return
+        for fname in files:
+            if not (fname.startswith("locales_") and fname.endswith(".py")):
+                continue
+            code = fname[len("locales_"):-len(".py")]
+            # locales_extra.py holds ja/es; locales_help_texts.py holds the
+            # multi-line help HTML for ja/es. Neither is a standalone pack.
+            if code in ("extra", "help_texts") or len(code) != 2 or code in loaded:
+                continue
+            try:
+                module = importlib.import_module(f"locales_{code}")
+                pack = getattr(module, "PACK", None)
+                if not isinstance(pack, dict) or not pack:
+                    raise ValueError("module has no non-empty PACK dict")
+                self.translations.setdefault(code, {}).update(pack)
+                loaded.add(code)
+            except Exception as exc:  # noqa: BLE001 - report, never hide
+                print(f"Warning: language pack '{code}' failed to load: {exc}")
+
+    def available_languages(self):
+        """[(code, display_name)] for every fully loaded pack, menu order."""
+        order = {c: i for i, c in enumerate(self.PACK_ORDER)}
+        codes = [c for c in self.translations if c not in ("en",)]
+        codes.sort(key=lambda c: (order.get(c, 999), c))
+        return [("en", self.LANG_NAMES["en"])] + [
+            (c, self.LANG_NAMES.get(c, c.upper())) for c in codes]
 
     def set_language(self, lang_code):
         if lang_code in self.translations:

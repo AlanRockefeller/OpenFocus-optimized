@@ -17,8 +17,8 @@ The final soak pass caught and fixed two real defects:
    model at once: 2 tiles × 120 frames = 240 images → one 16 GB conv
    allocation → `DefaultCPUAllocator` OOM. Tiles and batch size now shrink
    automatically with depth so a single model call stays within an
-   empirically safe budget (`_stackmffv4_effective_tiling`, 80 units of
-   1024²-frames) — `TestStackMFFV4EffectiveTiling`. Tiles are also 128-aligned
+   empirically safe budget (`_ai_effective_tiling`, 80 units of
+   1024²-frames) — `TestAIEffectiveTiling`. Tiles are also 128-aligned
    because the network's total downsampling is ÷128: a 832 px tile came back
    as a 768 px focus map and crashed the pixel gather.
 
@@ -30,7 +30,7 @@ The final soak pass caught and fixed two real defects:
 | | 40 | 1783×1637 | dct | 2 s | tiled |
 | | 40 | 1783×1637 | dtcwt | 141 s | tiled |
 | | 40 | 1783×1637 | gfgfgf | 8 s | tiled |
-| | 40 | 1783×1637 | AI (StackMFF-V4) | 16.4 min | tiled, batch 2 |
+| | 40 | 1783×1637 | AI (StackMFF-V3) | 16.4 min | tiled, batch 2 |
 | + ECC registration | 40 | → 1775×1626 | ECC → guided / dtcwt / AI | +4–8 s reg | ECC crops to the common valid region by design |
 | High-resolution stack | 24 | 4756×3636 | guided_filter | 54 s | 35 tiles |
 | | 24 | 4756×3636 | dtcwt | 270 s | |
@@ -54,13 +54,23 @@ wall times vary ~2× with background load.
 |--------|----------------|------------------------|--------|
 | DTCWT: cv2 fusion rule, threaded + cache-blocked transforms | 51.4 s → 13.5 s | 154 s → 86 s | bit-identical on the historical v1.38 rule¹ |
 | guided_filter: streamed frames, running argmax | 4.09 s → 3.84 s | 24.1 s → 12.2 s | bit-identical |
-| AI (StackMFF-V4): BatchNorm folded, channels_last on CPU | 122.6 s → 59.1 s | — | 67 of 3 M px pick a neighbouring frame (exact near-ties) |
 | Stack loading: parallel decode (30 × 12 MP JPEG) | — | 1.17 s → 0.23 s | identical |
 
 ¹ v1.52 replaced DTCWT's pairwise per-channel decisions with higher-quality
 N-way shared decisions and a decision-driven low-pass. The retained threaded
 and cache-blocked transform path is now tested bit-for-bit against the v1.55
 serial algorithm; timings above predate that quality change.
+
+Against upstream v1.67, whose DTCWT transforms frames on two threads
+without cache blocking, this fork's DTCWT path measured **3.43 s → 2.33 s
+(1.47× faster)** on a 16 × 1024×768 synthetic stack, with byte-identical
+output.
+
+The StackMFF-V4 BatchNorm-folding / channels_last speedup (122.6 s → 59.1 s)
+was dropped with V4 itself when upstream replaced it by StackMFF V3 in v1.65.
+V3 is an attention-only network with no BatchNorm to fold, and it is already
+fast on CPU (1.28 s for 10 × 512×768 at both inference scales), so the trick
+has no V3 equivalent.
 
 Tiled fusion also accumulates overlapping tiles in a fixed order now;
 previously the overlap bands could differ by one level between two runs
@@ -107,3 +117,40 @@ python tools/soak_test.py --only synth120,io-roundtrip   # just the deep-stack a
 Sections A–C need real photo stacks. Point `OPENFOCUS_SOAK_DIR` at a folder
 containing `hetao_aligned_stabled/` and `Samples1/` to run them; without it
 those sections are skipped with a notice (the synthetic sections still run).
+
+## Interactive latency (the UI, not the fusion)
+
+The soak above measures fusion throughput. Interaction lag is a different
+budget, measured by `tools/ui_perf_probe.py` (offscreen, synthetic stack, no
+window shown):
+
+```bash
+python tools/ui_perf_probe.py --size 4000x3000 --frames 40
+```
+
+Measured on the reference machine, 40 × 12 MP frames + a result on screen
+(medians of 5 interleaved runs against the previous build):
+
+| Gesture | Before | After |
+|---------|--------|-------|
+| Scrub the frame slider (per step) | 39.7 ms | 15.4 ms |
+| Drag the window edge (per event) | 63.7 ms | 10.8 ms |
+| Zoom one notch at 4× | 9.2 ms | 1.0 ms |
+| Re-composite at 4× | 7.3 ms | 1.1 ms |
+| Toggle a wipe A/B frame | 37.9 ms | 2.3 ms |
+
+The four fixes behind those numbers:
+
+1. **`to_display_uint8` no longer copies 8-bit frames** and converts 16-bit
+   through `cv2.convertScaleAbs` (identical output for all 65536 values,
+   232 ms → 16 ms on 24 MP).
+2. **`cv2_to_pixmap` feeds OpenCV's BGR buffer to `QImage.Format_BGR888`**
+   instead of converting to RGB first (11 ms instead of 23 ms per 12 MP frame).
+3. **`MagnifierLabel` resamples only the visible region when zoomed in**,
+   instead of smooth-scaling the whole image and downscaling it again to fit
+   the label (31 ms → 2 ms at 5× on 24 MP), and skips a re-composite when
+   nothing changed.
+4. **Resizing repaints the pixmaps already held** instead of rebuilding them
+   from the numpy stack, and the A/B wipe caches one pixmap per side.
+
+`tests/test_display_paths.py` pins the invariants those changes rely on.

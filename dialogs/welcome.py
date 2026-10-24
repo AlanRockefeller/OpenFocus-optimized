@@ -6,12 +6,12 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from locales import trans
-from ui.styles import CURRENT_MESSAGE_BOX_STYLE
 
 
 class WelcomeDialog(QDialog):
@@ -48,16 +48,26 @@ class WelcomeDialog(QDialog):
         # Demo stack: zero-friction first success
         demo_row = QHBoxLayout()
         demo_btn = QPushButton(trans.t('btn_load_demo'))
+        # Keep the button at its natural width and let the wrapping hint
+        # absorb the remaining space. An Ignored policy made the button
+        # collapse to 0 px next to the hint label.
+        demo_btn.setSizePolicy(QSizePolicy.Policy.Fixed,
+                               QSizePolicy.Policy.Fixed)
+        demo_btn.setToolTip(trans.t('btn_load_demo'))
         demo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         demo_btn.clicked.connect(self._load_demo)
         demo_row.addWidget(demo_btn)
         demo_hint = QLabel(trans.t('btn_load_demo_hint'))
+        # Long translations run to ~850 px on one line in a 480 px dialog.
+        demo_hint.setWordWrap(True)
         # Theme-aware muted colour: the old hardcoded #57606a was ~2:1 on the
         # dark dialog background, effectively invisible.
         demo_hint.setObjectName("welcome_hint")
+        from ui.styles import CURRENT_THEME
+        from utils.design_tokens import palette
         demo_hint.setStyleSheet(
-            "background: transparent;" if self._is_dark() else
-            "color: #57606a; background: transparent;")
+            f"color: {palette(CURRENT_THEME)['textMuted']};"
+            " background: transparent;")
         demo_row.addWidget(demo_hint)
         demo_row.addStretch()
         layout.addLayout(demo_row)
@@ -65,6 +75,7 @@ class WelcomeDialog(QDialog):
         row = QHBoxLayout()
         row.addStretch()
         ok = QPushButton(trans.t('btn_get_started'))
+        ok.setObjectName("primaryButton")
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
         row.addWidget(ok)
@@ -78,19 +89,14 @@ class WelcomeDialog(QDialog):
             self.accept()
 
     def _is_dark(self) -> bool:
-        theme = getattr(self._main_window, "ui_theme", "dark") if self._main_window else "dark"
+        from utils.settings_store import DEFAULT_THEME
+        theme = (getattr(self._main_window, "ui_theme", DEFAULT_THEME)
+                 if self._main_window else DEFAULT_THEME)
         return theme != "light"
 
     def _apply_dialog_style(self):
-        """Keep the dialog readable in whichever theme is active."""
-        theme = getattr(self._main_window, "ui_theme", "dark") if self._main_window else "dark"
-        if theme == "light":
-            self.setStyleSheet("QDialog { background-color: #ffffff; } QLabel { color: #1f2328; }")
-        else:
-            self.setStyleSheet(
-                "QDialog { background-color: #2b2b2b; border: 1px solid #444; }"
-                "QLabel { color: #d0d0d0; }"
-            )
+        """Styling comes from the generated application stylesheet."""
+        self.setStyleSheet("")
 
     def _choose_theme(self, code: str) -> None:
         if self._main_window is not None:
@@ -99,6 +105,8 @@ class WelcomeDialog(QDialog):
         self._sync_theme_buttons()
 
     def _sync_theme_buttons(self) -> None:
-        current = getattr(self._main_window, "ui_theme", "dark") if self._main_window else "dark"
+        from utils.settings_store import DEFAULT_THEME
+        current = (getattr(self._main_window, "ui_theme", DEFAULT_THEME)
+                   if self._main_window else DEFAULT_THEME)
         for code, btn in self._theme_buttons.items():
             btn.setChecked(code == current)

@@ -24,35 +24,8 @@ class EnvironmentInfoDialog(QDialog):
         self.setWindowTitle(trans.t('dialog_env_title'))
         self.resize(600, 500)
 
-        # 应用深色主题
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #1e1e1e;
-            }}
-            QLabel {{
-                color: #ccc;
-            }}
-            QTextEdit {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                border: 1px solid #444;
-                font-family: "" + get_monospace_font_family() + ";"
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-            QPushButton:pressed {{
-                background-color: #333;
-            }}
-        """)
+        # Styling comes from the generated application stylesheet.
+
 
         layout = QVBoxLayout(self)
 
@@ -122,9 +95,9 @@ class EnvironmentInfoDialog(QDialog):
             info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
         info_lines.append("")
 
-        # 检测 PyTorch (StackMFF-V4)
+        # 检测 PyTorch (StackMFF-V3)
         info_lines.append("-" * 60)
-        info_lines.append("PyTorch (Required for StackMFF-V4)")
+        info_lines.append("PyTorch (Required for StackMFF-V3)")
         try:
             import torch
 
@@ -188,8 +161,12 @@ class ContactInfoDialog(QDialog):
     """联系信息对话框"""
 
     def __init__(self, parent=None):
+        # Link colour must follow the theme: a hard-coded white link was
+        # invisible on the white dialog (the GitHub URL simply vanished).
+        link = "#0969da" if getattr(parent, "ui_theme", "dark") == "light" \
+            else "#6cb6ff"
         contact_text = f"""
-        <style>a {{ color: #ffffff; }}</style>
+        <style>a {{ color: {link}; }}</style>
         <h3>{trans.t('contact_info_title')}</h3>
         
     <p>{trans.t('contact_email')}: xiexinzhe@zju.edu.cn</p>
@@ -201,34 +178,8 @@ class ContactInfoDialog(QDialog):
         self.setWindowTitle(trans.t('dialog_contact_title'))
         self.resize(500, 400)
 
-        # 应用深色主题
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #1e1e1e;
-            }}
-            QTextBrowser {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                border: 1px solid #444;
-                font-family: 'Segoe UI', 'Microsoft YaHei';
-                font-size: 13px;
-                selection-background-color: {PRIMARY_BLUE};
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-            QPushButton:pressed {{
-                background-color: #333;
-            }}
-        """)
+        # Styling comes from the generated application stylesheet.
+
 
         layout = QVBoxLayout(self)
 
