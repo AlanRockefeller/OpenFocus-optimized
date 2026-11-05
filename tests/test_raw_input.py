@@ -29,10 +29,48 @@ def test_decode_image_keeps_16bit_and_reads_non_ascii_paths(tmp_path):
     assert out.dtype == np.uint16 and (out == img).all()
 
 
-def test_cli_uses_shared_decoder(monkeypatch, tmp_path):
-    from core import cli
-    calls = []
-    monkeypatch.setattr(il, "decode_image",
-                        lambda p: calls.append(p) or np.zeros((4, 4, 3), np.uint8))
-    out = cli._load_images([str(tmp_path / "a.jpg"), str(tmp_path / "b.jpg")])
-    assert len(out) == 2 and len(calls) == 2
+def test_raf_metadata_probe_does_not_read_the_image_payload(monkeypatch):
+    """Metadata probing must not load an entire potentially huge RAF."""
+    from io import BytesIO
+
+    reads = []
+
+    class RawStream(BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            return super().read(size)
+
+    monkeypatch.setattr(il, "open", lambda *_: RawStream(b"FUJIFILMCCD-RAW " + b"x" * 4096),
+                        raising=False)
+    assert il._read_raw_exif_bytes("frame.RAF") == b""
+    assert reads == [4]
+
+
+def test_scaled_raw_preserves_full_decode_colors_and_size(monkeypatch):
+    """Scaling before the RGB-to-BGR copy must preserve the old pixels."""
+    from types import SimpleNamespace
+
+    rgb = np.random.default_rng(7).integers(0, 65536, (73, 95, 3), dtype=np.uint16)
+
+    class Raw:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def postprocess(self, **_kwargs):
+            return rgb.copy()
+
+    monkeypatch.setattr(il, 'RAWPY_AVAILABLE', True)
+    monkeypatch.setattr(il, 'rawpy', SimpleNamespace(imread=lambda _path: Raw()), raising=False)
+    original = np.ascontiguousarray(rgb[:, :, ::-1])
+    for scale in (0.16, 0.5, 1.0):
+        result = il._decode_one_source('frame.raf', scale)
+        expected = il._downscale_page(original, scale)
+        assert result.error is None
+        assert result.pages[0].dtype == np.uint16
+        assert result.pages[0].flags.c_contiguous
+        np.testing.assert_array_equal(result.pages[0], expected)
+
+

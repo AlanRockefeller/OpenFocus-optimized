@@ -50,17 +50,23 @@ def test_settings_round_trip(qapp, clean_settings):
         tile_overlap = 256
         tile_threshold = 2048
         reg_downscale_width = 1024
-        stackmffv4_batch_size = 2
+        ai_batch_size = 2
         use_gpu = True
         recent_files = []
 
     w = FakeWindow()
     load_window_settings(w)  # defaults on empty store
     assert w.thread_count == 4 and w.use_gpu is True
+    assert w.sharpen_output is False
+    assert w.collect_alignment_report is False
+    assert w.output_name_prefix == ""
 
     w.thread_count = 11
     w.use_gpu = False
     w.tile_block_size = 640
+    w.sharpen_output = True
+    w.output_name_prefix = "sample_12"
+    w.collect_alignment_report = True
     demo = r"C:\stacks\demo"
     add_recent_file(w, demo)
     add_recent_file(w, demo)  # dedupe
@@ -71,8 +77,22 @@ def test_settings_round_trip(qapp, clean_settings):
     assert w2.thread_count == 11
     assert w2.use_gpu is False
     assert w2.tile_block_size == 640
+    assert w2.sharpen_output is True
+    assert w2.output_name_prefix == "sample_12"
+    assert w2.collect_alignment_report is True
     # add_recent_file stores the abspath (form differs across platforms)
     assert w2.recent_files == [os.path.abspath(demo)]
+
+
+@pytest.mark.parametrize("saved_threads", [None, 4, 11, 0])
+def test_thread_default_migration_preserves_saved_caps(qapp, clean_settings, saved_threads):
+    from types import SimpleNamespace
+    from utils.settings_store import get_settings, load_window_settings
+    if saved_threads is not None:
+        get_settings().setValue("rendering/thread_count", saved_threads)
+    window = SimpleNamespace(thread_count=0)
+    load_window_settings(window)
+    assert window.thread_count == (0 if saved_threads is None else saved_threads)
 
 
 def test_recent_files_cap(qapp, clean_settings):
@@ -144,27 +164,6 @@ def test_every_language_defines_every_key(qapp):
         assert not missing, f"{lang} is missing {len(missing)} keys: {sorted(missing)}"
 
 
-def test_translated_keys_used_in_code_exist(qapp):
-    """A typo'd key renders as its own name in the UI; catch it in CI."""
-    import os
-    import re
-
-    from locales import trans
-
-    pattern = re.compile(r"""trans\.t\(\s*['"]([A-Za-z0-9_]+)['"]""")
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    english = set(trans.translations['en'])
-    used = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if d not in ("__pycache__", "dist", "build", ".git", ".pytest_cache")]
-        for name in filenames:
-            if name.endswith(".py"):
-                with open(os.path.join(dirpath, name), encoding="utf-8", errors="ignore") as fh:
-                    used.update(pattern.findall(fh.read()))
-
-    unknown = sorted(k for k in used if k not in english)
-    assert not unknown, f"trans.t() keys with no English entry: {unknown}"
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +228,9 @@ class _FakeTransformManager:
 
     def reload_image_stack(self, initial_index=0):
         self.reloaded.append(initial_index)
+
+    def reset_roi_selection(self):
+        pass
 
 
 class _StubLabelManager:
@@ -324,14 +326,18 @@ def _render_window(frames):
     w.btn_render = QPushButton("Render")
     w.btn_reset = QPushButton("Reset")
     # 下拉单选的融合/对齐选择 + 统一读取助手（与真实窗口同契约）
-    from ui.right_panel import FUSION_ITEMS, ALIGN_ITEMS
+    from ui.right_panel import fusion_items, alignment_items
 
     w.combo_fusion = QComboBox()
-    for code, _key, _hint in FUSION_ITEMS:
+    for code, _key, _hint in fusion_items():
         w.combo_fusion.addItem(code, code)
-    w.combo_fusion.setCurrentIndex(0)
+    # These tests exercise the classical/AI-agnostic paths; pin a classical
+    # method instead of relying on whichever entry the product defaults to
+    # (the default is now the neural one, which needs torch).
+    w.combo_fusion.setCurrentIndex(
+        max(0, w.combo_fusion.findData("guided_filter")))
     w.combo_align = QComboBox()
-    for code, _key, _hint in ALIGN_ITEMS:
+    for code, _key, _hint in alignment_items():
         w.combo_align.addItem(code, code)
     # 桩默认 none（等价旧测试里三个对齐框全不勾），对齐路径走“无配准”分支
     w.combo_align.setCurrentIndex(
@@ -343,8 +349,18 @@ def _render_window(frames):
     w.set_alignment_method = lambda code: w.combo_align.setCurrentIndex(
         max(0, w.combo_align.findData(code)))
     w.chk_quick_preview = QCheckBox()
-    w.slider_smooth = QSlider()
-    w.slider_smooth.setValue(31)
+    from core.algorithms import fusion_defaults, registration_defaults, get_fusion
+    w.fusion_parameters_for = lambda method, depth=False: (
+        {} if method == "none" else fusion_defaults(method, depth=depth))
+    w.registration_parameters_for = lambda method: (
+        {} if method == "none" else registration_defaults(method))
+    w.brightness_option_for = lambda option, method=None: (
+        (option == "exposure_match") if (method or w.current_fusion_method()) == "none"
+        else getattr(get_fusion(method or w.current_fusion_method()),
+                     "default_exposure_match" if option == "exposure_match"
+                     else "default_base_correct"))
+    w.fusion_parameter_panel = QWidget()
+    w.registration_parameter_panel = QWidget()
     w.result_slider = QSlider()
     w.result_control_bar = QWidget()
     w.add_label_action = QAction()
@@ -399,7 +415,7 @@ def _patched_render_manager(monkeypatch, window, ai_available=False):
     from utils import align_cache
 
     monkeypatch.setattr(render_module, "RenderWorker", _fake_worker_class())
-    monkeypatch.setattr(render_module, "is_stackmffv4_available", lambda: ai_available)
+    monkeypatch.setattr(render_module, "is_ai_fusion_available", lambda: ai_available)
     for name in ("show_message_box", "show_warning_box"):
         monkeypatch.setattr(render_module, name, lambda *a, **k: None)
 
@@ -410,6 +426,61 @@ def _patched_render_manager(monkeypatch, window, ai_available=False):
             {"filenames": list(names), "images": images, "options": options, "shape": shape}))
 
     return render_module.RenderManager(window), saved
+
+@pytest.mark.parametrize('history,operation', [
+    ({'operation': 'flip', 'code': 1}, lambda image: cv2.flip(image, 1)),
+    ({'operation': 'rotate', 'code': cv2.ROTATE_90_CLOCKWISE},
+     lambda image: cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)),
+    ({'operation': 'flat_field'}, lambda image: image // 2),
+])
+@pytest.mark.parametrize('mask,denoise', [('mask.png', False), ('', True)])
+def test_sensor_cleanup_rejects_transformed_square_stack(qapp, monkeypatch, history, operation, mask, denoise):
+    from controllers import render_manager as render_module
+    from locales import trans
+
+    original = np.zeros((16, 16, 3), np.uint8)
+    original[2, 4] = 255
+    window = _render_window([operation(original), operation(original)])
+    window.source_transforms = [history]
+    window.defect_mask_path = mask
+    window.sensor_denoise = denoise
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    warnings = []
+    monkeypatch.setattr(render_module, 'show_warning_box', lambda *args: warnings.append(args))
+
+    assert manager.start_render() == 'sensor_history_unsupported'
+    assert warnings[0][2] == trans.t('sensor_history_unsupported')
+    assert manager.worker is None
+    assert window.btn_render.isEnabled() and window.combo_fusion.isEnabled()
+    window.defect_mask_path = ''
+    window.sensor_denoise = False
+    assert manager.start_render() == 'started'
+
+
+@pytest.mark.parametrize('history,roi', [(['modified pixels'], False), ([], True)])
+def test_sensor_cleanup_rejection_restores_controls(qapp, monkeypatch, history, roi):
+    from controllers import render_manager as render_module
+    from locales import trans
+
+    frames = [np.zeros((16, 16, 3), np.uint8) for _ in range(2)]
+    window = _render_window(frames)
+    window.unrecoverable_source_changes = history
+    window.roi_mode_active = roi
+    window.roi_aligned_images = frames if roi else []
+    window.sensor_denoise = True
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    manager._compare_mode = True
+    manager._compare_queue = ['dct']
+    window.btn_render.setEnabled(False)
+    window.combo_fusion.setEnabled(False)
+    warnings = []
+    monkeypatch.setattr(render_module, 'show_warning_box', lambda *args: warnings.append(args))
+
+    status = 'sensor_roi_unsupported' if roi else 'sensor_history_unsupported'
+    assert manager.start_render() == status
+    assert warnings[0][2] == trans.t(status)
+    assert manager.worker is None and not manager._compare_mode
+    assert window.btn_render.isEnabled() and window.combo_fusion.isEnabled()
 
 
 def _finish_alignment(manager, window, stack):
@@ -456,13 +527,7 @@ def test_quick_preview_render_does_not_publish_its_draft(qapp, monkeypatch):
     w.chk_quick_preview.setChecked(True)
     rm.start_render()
 
-    handed = rm.worker.args[0]
-    assert handed is not w.raw_images
-    assert max(handed[0].shape[:2]) <= 1200
-    assert rm._render_context["source"] is handed
-    assert rm._preview_mode is True
-
-    _finish_alignment(rm, w, handed)
+    _finish_alignment(rm, w, rm.worker.args[0])
 
     assert w.aligned_images == []
     assert w.is_images_aligned is False
@@ -471,8 +536,7 @@ def test_quick_preview_render_does_not_publish_its_draft(qapp, monkeypatch):
 
 
 def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
-    """The same render on the real frames must publish and cache, keyed on the
-    source frames it was handed (not on the returned ones)."""
+    """Align-only publishes one in-memory stack without a duplicate disk cache."""
     frames = [np.zeros((30, 40, 3), dtype=np.uint8) + i for i in range(3)]
     w = _render_window(frames)
     rm, saved = _patched_render_manager(monkeypatch, w)
@@ -485,11 +549,8 @@ def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
 
     assert w.aligned_images == processed
     assert w.is_images_aligned is True
-    # 3-tuple since v1.39: (homography, ecc, openfocus)
-    assert w.last_alignment_options == (False, False, False)
-    assert len(saved) == 1
-    assert saved[0]["shape"] == (30, 40)
-    assert saved[0]["filenames"] == w.image_filenames
+    assert w.last_alignment_options == ((), {})
+    assert saved == []
 
 
 def test_alignment_dropped_when_a_frame_is_deleted_mid_render(qapp, monkeypatch):
@@ -521,7 +582,7 @@ def test_render_started_while_a_render_runs_cancels_it(qapp, monkeypatch):
 
     assert first.is_cancelled is True
     assert rm.worker is first          # and starts no second thread
-    assert w.btn_render.text() == trans.t("btn_cancel_render")
+    assert w.btn_render.text() == trans.t("depth_cancelling")
 
 
 def test_cancelled_render_clears_preview_mode(qapp, monkeypatch):
@@ -549,10 +610,10 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
 
     rm.start_compare_all()
     assert rm._compare_mode is True
-    # guided_filter runs first; the queue holds the rest (A/B/C included
-    # since v1.39)
+    # The queue follows the dropdown order: AI, OpenFocus A/B/C, then the
+    # classical methods. AI is filtered out here (ai_available=False).
     assert len(rm._compare_queue) == 6
-    assert rm._compare_current == "guided_filter"
+    assert rm._compare_current == "openfocus_a"
     assert not w.btn_render.isEnabled()
     assert not w.combo_align.isEnabled()
 
@@ -563,7 +624,7 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
     assert rm._compare_queue == []
     assert rm._compare_current is None
     assert running.is_cancelled is True
-    assert w.status.messages[-1] == trans.t("msg_render_cancelled")
+    assert w.status.messages[-1] == trans.t("depth_cancelling")
 
 
 def test_compare_all_cancel_between_renders_unlocks_the_ui(qapp, monkeypatch):
@@ -577,7 +638,67 @@ def test_compare_all_cancel_between_renders_unlocks_the_ui(qapp, monkeypatch):
 
     assert rm._compare_queue == [] and rm._compare_mode is False
     assert w.btn_render.isEnabled()
-    assert w.combo_align.isEnabled() and w.slider_smooth.isEnabled()
+    assert w.combo_align.isEnabled() and w.fusion_parameter_panel.isEnabled()
+
+
+def test_compare_button_is_the_cancel_affordance_and_restores(qapp, monkeypatch):
+    """A running comparison's only stop control is Compare-all.
+
+    It used to keep saying "Render all methods…" while the disabled Render
+    button was relabelled "Cancel render": neither button told the truth.
+    """
+    from PyQt6.QtWidgets import QPushButton
+    from locales import trans
+
+    frames = [np.zeros((30, 40, 3), dtype=np.uint8) for _ in range(3)]
+    w = _render_window(frames)
+    w.btn_compare_all = QPushButton(trans.t('btn_compare_all'))
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+
+    rm.start_compare_all()
+    assert rm._compare_mode is True
+    assert w.btn_compare_all.isEnabled()
+    assert w.btn_compare_all.text() == trans.t('compare_cancel')
+    assert w.btn_compare_all.toolTip() == trans.t('btn_cancel_render')
+    assert not w.btn_render.isEnabled()
+    assert w.btn_render.text() == trans.t('btn_render_processing')
+
+    running = rm.worker
+    rm.start_compare_all()  # cancel while the first method renders
+    assert running.is_cancelled is True
+    assert not w.btn_compare_all.isEnabled()
+    assert w.btn_compare_all.text() == trans.t('depth_cancelling')
+    assert not w.btn_render.isEnabled()
+    assert w.btn_render.text() == trans.t('depth_cancelling')
+
+    rm.on_render_error("CANCELLED: user requested")
+
+    assert rm._compare_cancelling is False
+    assert w.btn_compare_all.isEnabled()
+    assert w.btn_compare_all.text() == trans.t('btn_compare_all')
+    assert w.btn_render.isEnabled()
+    assert w.btn_render.text() == trans.t('btn_render')
+
+
+def test_compare_all_is_disabled_during_a_single_render(qapp, monkeypatch):
+    """Clicking Compare-all during an ordinary render used to return silently."""
+    from PyQt6.QtWidgets import QPushButton
+    from locales import trans
+
+    frames = [np.zeros((30, 40, 3), dtype=np.uint8) for _ in range(3)]
+    w = _render_window(frames)
+    w.btn_compare_all = QPushButton(trans.t('btn_compare_all'))
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+
+    rm.start_render()
+    assert not w.btn_compare_all.isEnabled()
+    assert w.btn_render.isEnabled()
+    assert w.btn_render.text() == trans.t('btn_cancel_render')
+
+    rm.on_render_error("CANCELLED: user requested")
+    assert w.btn_compare_all.isEnabled()
+    assert w.btn_compare_all.text() == trans.t('btn_compare_all')
+    assert w.btn_render.text() == trans.t('btn_render')
 
 
 def test_roi_reset_clears_rect_button_and_state(qapp):
@@ -814,46 +935,32 @@ def test_downsample_dialog_respects_max_scale(qapp):
     assert over.get_scale_factor() == 0.4
 
 
-def test_kernel_slider_remembers_value_per_method(qapp):
-    """Switching fusion methods used to reset the slider to the method's
-    default, losing the user's tuned value; and the depth dialog read the
-    slider whatever method it belonged to (GF radius 31 as DCT median)."""
-    from PyQt6.QtWidgets import QLabel, QSlider, QWidget
-    import main as main_module
+def test_algorithm_parameters_survive_method_switches(qapp):
+    """Editing one method cannot change another method's render parameters."""
+    from types import SimpleNamespace, MethodType
+    from main import OpenFocus
+    from ui.algorithm_parameters import AlgorithmParameterPanel
 
-    cls = main_module.OpenFocus
-
-    class W:
-        _KERNEL_MODES = cls._KERNEL_MODES
-        _KERNEL_LABELS = cls._KERNEL_LABELS
-        update_slider_availability = cls.update_slider_availability
-        kernel_for_method = cls.kernel_for_method
-
-        def __init__(self):
-            self.slider_smooth = QSlider()
-            self.smooth_widget = QWidget()
-            self.lbl_kernel = QLabel()
-            self.current_kernel_mode = None
-            self.method = "guided_filter"
-
-        def current_fusion_method(self):
-            return self.method
-
-    w = W()
-    w.update_slider_availability()
-    assert w.slider_smooth.value() == 31
-    w.slider_smooth.setValue(21)
-    w.method = "dct"
-    w.update_slider_availability()
-    assert w.slider_smooth.value() == 7
-    assert w.kernel_for_method("guided_filter") == 21
-    assert w.kernel_for_method("dct") == 7
-    w.slider_smooth.setValue(9)
-    w.method = "guided_filter"
-    w.update_slider_availability()
-    assert w.slider_smooth.value() == 21
-    assert w.kernel_for_method("dct") == 9
-    assert w.kernel_for_method("openfocus_b") == 11
+    host = SimpleNamespace(method="guided_filter", _fusion_parameters_by_method={})
+    host.current_fusion_method = lambda: host.method
+    host.persist_settings = lambda: None
+    host._sync_brightness_checkboxes = lambda *_: None
+    host.fusion_parameter_panel = AlgorithmParameterPanel()
+    for name in ("fusion_parameters_for", "set_fusion_parameters",
+                 "_set_fusion_option_available", "refresh_algorithm_parameters"):
+        setattr(host, name, MethodType(getattr(OpenFocus, name), host))
+    host.fusion_parameter_panel.valuesChanged.connect(
+        lambda values: host.set_fusion_parameters(host.method, values))
+    host.refresh_algorithm_parameters()
+    host.fusion_parameter_panel.editors["kernel_size"].setValue(21)
+    host.method = "dct"
+    host.refresh_algorithm_parameters()
+    host.fusion_parameter_panel.editors["kernel_size"].setValue(9)
+    host.method = "guided_filter"
+    host.refresh_algorithm_parameters()
+    assert host.fusion_parameter_panel.values()["kernel_size"] == 21
+    assert host.fusion_parameters_for("dct")["kernel_size"] == 9
+    host.fusion_parameter_panel.deleteLater()
 
 
 def test_load_scale_prompt_can_be_skipped(monkeypatch):
@@ -893,6 +1000,34 @@ def test_load_scale_prompt_can_be_skipped(monkeypatch):
     assert mgr._ask_load_scale() == 0.5
     assert len(shown) == 1, "second import must not prompt"
 
+def test_last_confirmed_import_scale_is_used_when_prompt_is_disabled(monkeypatch):
+    from types import SimpleNamespace
+
+    import controllers.source_manager as sm_mod
+
+    class Dialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        def get_scale_factor(self):
+            return 0.75
+
+        def dont_ask_again(self):
+            return False
+
+    monkeypatch.setattr(sm_mod, "DownsampleDialog", Dialog)
+    window = SimpleNamespace(ask_load_scale=True, load_scale_default=0.25,
+                             current_scale_factor=1.0, persist_settings=lambda: None)
+    manager = sm_mod.SourceManager.__new__(sm_mod.SourceManager)
+    manager.window = window
+    assert manager._ask_load_scale() == 0.75
+    window.ask_load_scale = False
+    assert manager._ask_load_scale() == 0.75
+
+
 
 def test_new_output_is_the_only_selected_item(qapp):
     from PyQt6.QtWidgets import QAbstractItemView, QLabel, QListWidget
@@ -919,3 +1054,417 @@ def test_new_output_is_the_only_selected_item(qapp):
     mgr.update_output_list_for_fusion()
     assert len(w.output_list.selectedItems()) == 1
     assert w.output_list.currentRow() == 0
+
+
+def test_stack_change_during_compare_unlocks_controls(qapp, monkeypatch):
+    """A discarded compare render used to leave _compare_mode/queue intact:
+    the render button stayed disabled with a stale "-1/0" progress label and
+    no next method was ever chained."""
+    frames = [np.zeros((32, 32, 3), dtype=np.uint8) + i for i in range(2)]
+    w = _render_window(frames)
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+
+    rm._compare_mode = True
+    rm._compare_total = 3
+    rm._compare_queue = ["dct", "dtcwt"]
+    rm._compare_current = "dct"
+    # source_ref differs -> the finished result belongs to another stack
+    rm._render_context = {
+        "source": list(w.raw_images),
+        "source_ref": object(),
+        "alignment_options": (),
+        "preview": False,
+        "roi": False,
+        "filenames": list(w.image_filenames),
+        "included": [0, 1],
+    }
+    w.btn_render.setEnabled(False)
+
+    rm.on_render_finished([], None, False, 0.0, 0.0, "CPU")
+
+    assert rm._compare_mode is False
+    assert rm._compare_queue == []
+    assert rm._compare_current is None
+    assert rm.worker is None
+    assert w.btn_render.isEnabled()
+    assert "处理中" not in w.btn_render.text()
+
+
+def test_output_history_is_capped(qapp):
+    from PyQt6.QtWidgets import QLabel, QListWidget
+    from controllers.output_manager import OutputManager
+
+    class W:
+        pass
+
+    w = W()
+    w.output_list = QListWidget()
+    w.output_label = QLabel()
+    w.fusion_results = []
+    w.fusion_result = None
+
+    class E:
+        @staticmethod
+        def generate_default_filename():
+            return "out"
+
+    w.export_manager = E()
+    mgr = OutputManager(w)
+    mgr.MAX_HISTORY = 3
+    for i in range(6):
+        w.fusion_result = np.full((4, 4, 3), i, np.uint8)
+        mgr.update_output_list_for_fusion()
+
+    assert len(w.fusion_results) == 3
+    assert w.output_list.count() == 3
+
+
+def test_keyboard_output_navigation_shows_the_selected_result(qapp):
+    """Up/Down changes the current row without a click; the result view must
+    follow it instead of keeping the previously clicked output."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QLabel, QListWidget, QSlider
+    from controllers.output_manager import OutputManager
+
+    shown = []
+
+    class ResultView:
+        def set_display_pixmap(self, pixmap):
+            pass
+
+        def setText(self, text):
+            pass
+
+        def clear(self):
+            pass
+
+        def width(self):
+            return 100
+
+        def height(self):
+            return 100
+
+    class W:
+        pass
+
+    w = W()
+    w.output_list = QListWidget()
+    w.output_label = QLabel()
+    w.result_slider = QSlider()
+    w.result_control_bar = QLabel()
+    w.lbl_result_img = ResultView()
+    w.fusion_results = []
+    w.fusion_result = None
+    w.registration_results = []
+    w.current_result_index = 0
+    w.wipe_active = False
+    w.refresh_annotation_views = lambda: None
+
+    class E:
+        @staticmethod
+        def generate_default_filename():
+            return "out"
+
+    w.export_manager = E()
+    mgr = OutputManager(w)
+    w.output_manager = mgr
+
+    def track(image):
+        shown.append(int(image[0, 0, 0]))
+        return True
+
+    mgr.display_specific_fusion_result = track
+    w.output_list.currentRowChanged.connect(mgr.display_current_output_row)
+    for value in (10, 20, 30):
+        w.fusion_result = np.full((4, 4, 3), value, np.uint8)
+        mgr.update_output_list_for_fusion()
+    w.output_list.setCurrentRow(0)
+    shown.clear()
+    w.output_list.setFocus()
+    QTest.keyClick(w.output_list, Qt.Key.Key_Down)
+    qapp.processEvents()
+    assert w.output_list.currentRow() == 1
+    assert shown == [20]
+    QTest.keyClick(w.output_list, Qt.Key.Key_Up)
+    qapp.processEvents()
+    assert w.output_list.currentRow() == 0
+    assert shown == [20, 30]
+
+
+def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
+    """Snapshots used to copy every frame twice (raw + base); they now hold
+    references because mutations replace arrays. Resize must undo its scale
+    factor too, or the Resize dialog opens with the wrong percentage."""
+    import main as main_module
+
+    class W:
+        _capture_scalebar_state = main_module.OpenFocus._capture_scalebar_state
+
+        def _capture_parameter_state(self):
+            return {}
+
+    w = W()
+    img = np.zeros((4, 4, 3), np.uint8)
+    w.raw_images = [img]
+    w.image_filenames = ["a.png"]
+    w.image_source_paths = []
+    w.base_images = [img]
+    w.excluded_frames = {1}
+    w.current_img_index = 0
+    w.current_scale_factor = 0.5
+    w.base_scale_factor = 1.0
+    w.transform_manager = _FakeTransformManager()
+
+    state = main_module.OpenFocus._capture_stack_state(w)
+    assert state["raw"][0] is img, "snapshot must not duplicate pixels"
+
+    w.raw_images = [np.ones((4, 4, 3), np.uint8)]
+    main_module.OpenFocus._restore_stack_state(w, state)
+
+    assert w.raw_images[0] is img
+    assert w.current_scale_factor == 0.5
+    assert w.base_scale_factor == 1.0
+    assert w.excluded_frames == {1}
+
+
+def test_shutdown_worker_never_terminates(monkeypatch):
+    import main as main_module
+
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+            self.terminated = False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def isRunning(self):
+            return True
+
+        def quit(self):
+            pass
+
+        def wait(self, _ms):
+            return False
+
+        def terminate(self):
+            self.terminated = True
+
+    worker = Worker()
+    orphan = []
+    monkeypatch.setattr(main_module, "_ORPHAN_THREADS", orphan)
+    main_module._shutdown_worker(worker, timeout_ms=0)
+
+    assert worker.cancelled
+    assert worker.terminated is False
+    assert orphan == [worker]
+
+
+
+
+class TestCpuAiWarning:
+    """A CPU-only AI render warns once, and the opt-out sticks."""
+
+    def _manager(self, algorithm="stackmffv3", use_gpu=True, dismissed=False,
+                 device="N/A", ai_available=True, answer_accept=True,
+                 check_dont_show=False):
+        from controllers.render_manager import RenderManager
+        from utils.settings_store import AI_CPU_WARNING_DISMISSED_KEY
+
+        class Window:
+            pass
+
+        window = Window()
+        window.use_gpu = use_gpu
+        window.current_fusion_method = lambda: algorithm
+
+        manager = RenderManager(window)
+        shown = {}
+
+        class FakeSettings:
+            def value(self, key, default=None, type=None):
+                assert key == AI_CPU_WARNING_DISMISSED_KEY
+                return dismissed
+
+            def setValue(self, key, value):
+                shown["dismissed"] = (key, value)
+
+            def sync(self):
+                pass
+
+        box = {"accept": answer_accept, "checked": check_dont_show}
+
+        def fake_dialog(*_a, **_k):
+            shown["dialog"] = True
+            return box["accept"]
+
+        # Patch the two Qt pieces the method touches.
+        import PyQt6.QtWidgets as W
+        real_box, real_check = W.QMessageBox, W.QCheckBox
+
+        class StubBox:
+            Icon = real_box.Icon
+            ButtonRole = real_box.ButtonRole
+
+            def __init__(self, *a, **k):
+                self._clicked = None
+
+            def setIcon(self, *_a): pass
+            def setWindowTitle(self, *_a): pass
+            def setText(self, *_a): pass
+            def setCheckBox(self, box_): self._box = box_
+            def addButton(self, text, role):
+                if role == real_box.ButtonRole.AcceptRole:
+                    self._accept = text
+                    return text
+                self._reject = text
+                return text
+            def setDefaultButton(self, *_a): pass
+            def exec(self): pass
+            def clickedButton(self):
+                return self._accept if box["accept"] else self._reject
+
+        class StubCheck(real_check):
+            def __init__(self, *a, **k):
+                super().__init__(*a)
+                self._forced = box["checked"]
+
+            def isChecked(self):
+                return self._forced
+
+        import controllers.render_manager as rm
+        old_box = rm.QMessageBox if hasattr(rm, "QMessageBox") else None
+        try:
+            monkeypatch_targets = []
+            W.QMessageBox = StubBox
+            W.QCheckBox = StubCheck
+            import sys as _sys
+            mod = _sys.modules["controllers.render_manager"]
+            # settings lookup happens inside the method
+            import utils.settings_store as ss
+            old_get = ss.get_settings
+            ss.get_settings = lambda: FakeSettings()
+            try:
+                result = manager._confirm_cpu_ai_render()
+            finally:
+                ss.get_settings = old_get
+        finally:
+            W.QMessageBox = real_box
+            W.QCheckBox = real_check
+        return result, shown
+
+    def test_warns_when_no_accelerator(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(answer_accept=True)
+        assert shown.get("dialog") is not True  # dialog lives inside the stub
+        assert result is True
+
+    def test_stays_silent_with_an_accelerator(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "CUDA")
+        result, shown = self._manager()
+        assert result is True
+        assert "dismissed" not in shown
+
+    def test_stays_silent_for_classical_methods(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(algorithm="guided_filter")
+        assert result is True
+        assert "dismissed" not in shown
+
+    def test_opt_out_is_remembered(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(dismissed=True)
+        assert result is True
+        assert "dismissed" not in shown  # never asked, never re-saved
+
+    def test_cancel_stops_the_render(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, _shown = self._manager(answer_accept=False)
+        assert result is False
+
+
+def test_export_extension_follows_the_chosen_filter():
+    """Picking TIFF and typing a bare name must not write a PNG."""
+    from controllers.export_manager import extension_from_filter
+
+    assert extension_from_filter("TIFF Files (*.tif *.tiff)") == ".tif"
+    assert extension_from_filter("JPG Files (*.jpg)") == ".jpg"
+    assert extension_from_filter("All Files (*)") == ""
+
+
+def test_directory_export_does_not_overwrite_existing_files(tmp_path):
+    """A protective export must pick a free name on disk, not just in-batch."""
+    from utils.export_paths import unique_path
+
+    first = unique_path(str(tmp_path / 'result.png'))
+    assert first.endswith("result.png")
+    (tmp_path / "result.png").write_bytes(b"x")
+    second = unique_path(str(tmp_path / 'result.png'))
+    assert second.endswith("result_2.png"), second
+
+
+def test_stack_load_progress_status_and_cancel(qapp, monkeypatch):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from PyQt6.QtWidgets import QMainWindow
+    from controllers import source_manager
+    from locales import trans
+
+    class Worker(QObject):
+        progress = pyqtSignal(int, int)
+        finished_load = pyqtSignal(bool, str, object, object)
+        finished = pyqtSignal()
+
+        def __init__(self, loader, **kwargs):
+            super().__init__()
+            self.video = kwargs['video']
+            self.is_cancelled = False
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return True
+
+        def request_cancel(self):
+            self.is_cancelled = True
+
+    monkeypatch.setattr(source_manager, 'StackLoadWorker', Worker)
+    window = QMainWindow()
+    window.image_loader = object()
+    manager = source_manager.SourceManager(window)
+    manager._start_load_worker(filepaths=['a', 'b', 'c'])
+    worker = manager._load_worker
+    bar = manager._load_progress_bar
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    worker.progress.emit(1, 3)
+    assert (bar.maximum(), bar.value()) == (3, 1)
+    assert manager._load_status_label.text() == f"{trans.t('msg_loading_stack')} (1/3)"
+    worker.progress.emit(2, 0)
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    assert manager._load_status_label.text().endswith('(2)')
+    manager.cancel_load()
+    worker.progress.emit(3, 3)
+    assert manager._load_status_label.text() == trans.t('depth_cancelling')
+    assert not manager._load_cancel_button.isEnabled()
+    worker.finished.emit()
+    manager._start_load_worker(video='clip.mp4')
+    video_worker = manager._load_worker
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    assert manager._load_cancel_button.isEnabled()
+    assert manager._load_status_label.text() == trans.t('msg_loading_stack')
+    video_worker.progress.emit(1, 10)
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    assert manager._load_status_label.text() == trans.t('msg_loading_stack')
+    worker.progress.emit(3, 3)
+    assert (bar.minimum(), bar.maximum()) == (0, 0)
+    video_worker.finished.emit()

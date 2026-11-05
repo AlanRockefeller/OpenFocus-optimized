@@ -40,8 +40,9 @@ ehthumbs.db
 Desktop.ini
 
 # Project specific
-# Ignore .pth model files (weights/stackmffv4.pth was committed before this rule and stays tracked)
+# Ignore stray .pth model files but always ship the weights we bundle.
 *.pth
+!weights/*.pth
 .temp/
 
 # AI agent leftovers
@@ -59,6 +60,7 @@ Desktop.ini
 .ecc_inputs.npz
 .zcodeignore
 docs/OpenFocus.spec
+.wrangler/
 
 # Local build spec and stray export screenshots in repo root
 /OpenFocus.spec
@@ -70,8 +72,6 @@ docs/OpenFocus.spec
 /_theme_shots*.py
 /.shot_*.png
 assets/demo_stack/.openfocus_cache/
-
-/.review_skill/
 
 # PyPI build artifacts
 /dist/
@@ -88,7 +88,20 @@ assets/demo_stack/.openfocus_cache/
 /OpenFocusData/
 
 # Local-only: disassembly/strings of third-party binaries must never be published
-tools/helicon_repro/evidence/
 # Local GUI screenshots / scratch
 .shots/
 shot_tmp.py
+
+# Local build leftovers (MSYS2 toolchain extracted/downloaded into the repo root)
+/mingw64/
+/*.pkg.tar.zst
+/.BUILDINFO
+/.MTREE
+/.PKGINFO
+
+# Local probe scratch and generated demo outputs
+/.probe/
+/assets/demo_stack/outputs/
+
+# Local test-run transcripts
+/.pytest_*.txt

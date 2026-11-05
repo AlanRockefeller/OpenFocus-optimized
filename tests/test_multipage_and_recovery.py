@@ -101,7 +101,10 @@ class TestRecovery:
         w.current_alignment_method = lambda: w._alignment
         w.set_fusion_method = lambda code: setattr(w, "_fusion", code)
         w.set_alignment_method = lambda code: setattr(w, "_alignment", code)
-        w.slider_smooth = type("S", (), {"value": lambda s: 21})()
+        from core.algorithms import resolve_fusion_parameters
+        w.fusion_parameters_for = lambda method, depth=False: resolve_fusion_parameters(
+            method, {"kernel_size": 21} if method == "guided_filter" and not depth else None,
+            depth=depth)
         w.chk_quick_preview = type("Q", (), {"isChecked": lambda s: False})()
         w.current_display_index = 0
         w.image_filenames = [f"f{i}.png" for i in range(n)]
@@ -109,7 +112,7 @@ class TestRecovery:
         w.current_scale_factor = 1.0
         w.thread_count, w.tile_enabled = 4, True
         w.tile_block_size, w.tile_overlap, w.tile_threshold = 1024, 256, 2048
-        w.reg_downscale_width, w.stackmffv4_batch_size = 1024, 2
+        w.reg_downscale_width, w.ai_batch_size = 1024, 2
         w.label_manager = _Mgr()
         # the real files must exist for validate_project
         for name in w.image_filenames:

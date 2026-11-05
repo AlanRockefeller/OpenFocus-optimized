@@ -2,12 +2,18 @@
 """Batch processing dialogs."""
 
 import os
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QSignalBlocker
 from PyQt6.QtGui import QFont, QIcon, QTextOption
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
     QHBoxLayout,
+    QAbstractItemView,
+    QGridLayout,
+    QSizePolicy,
+    QScrollArea,
+    QFrame,
+    QWidget,
     QLabel,
     QGroupBox,
     QSpinBox,
@@ -24,7 +30,49 @@ from PyQt6.QtWidgets import (
     QCheckBox,
 )
 from ui.styles import PRIMARY_BLUE, _ARROW_DOWN_DARK
+from core.algorithms import (alignment_steps, fusion_algorithms, get_fusion,
+    registration_parameter_specs, registration_algorithms, resolve_fusion_parameters,
+    resolve_registration_parameters)
+from ui.algorithm_parameters import AlgorithmParameterPanel
 from locales import trans
+from utils.ui_utils import make_folder_path_editable, size_dialog_to_content
+from widgets.stepper import StepperSpinBox
+
+
+BATCH_PICK_DIR_KEY = "batch/last_pick_dir"
+
+# Import workers still running when their dialog is destroyed. Dropping the
+# last reference to a running QThread aborts the process ("QThread: Destroyed
+# while thread is still running"), and waiting on the GUI thread would freeze
+# the window. Track them here until they finish on their own; the cleanup
+# connection belongs to the worker, not the dialog, so it still runs after the
+# dialog is gone.
+_TRACKED_IMPORT_WORKERS: set = set()
+
+
+def _track_import_worker(worker) -> None:
+    _TRACKED_IMPORT_WORKERS.add(worker)
+
+    def release(w=worker):
+        _TRACKED_IMPORT_WORKERS.discard(w)
+        w.deleteLater()
+
+    worker.finished.connect(release)
+
+
+def _section_rule(text: str) -> QLabel:
+    """A short heading that separates sections inside one group box.
+
+    Batch's groups held six unrelated controls each with no visual hierarchy,
+    so the dialog read as one flat list. Sub-headings cost one line and make
+    the categories (method / parameters / options) obvious.
+    """
+    lbl = QLabel(text)
+    lbl.setObjectName("sectionRule")
+    f = lbl.font()
+    f.setBold(True)
+    lbl.setFont(f)
+    return lbl
 
 
 class BatchProcessingDialog(QDialog):
@@ -33,128 +81,58 @@ class BatchProcessingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(trans.t('batch_title'))
-        self.resize(800, 800)  # 增加高度以容纳更多文件夹
         
         # 存储选中的文件夹路径和对应的缩略图
         self.folder_paths = []
         self.folder_thumbnails = []
         self.single_folder_stacks = []
         self.single_folder_images_with_times = []
-        self.single_folder_scale_factor = 1.0
 
         # 获取父窗口的融合和对齐设置
         self.parent_window = parent
+        self.load_scale_factor = float(getattr(parent, 'current_scale_factor', 1.0))
+        self._runtime_settings = {
+            key: getattr(parent, key, default) for key, default in (
+                ('reg_downscale_width', None), ('tile_enabled', True),
+                ('tile_block_size', None), ('tile_overlap', None),
+                ('tile_threshold', None), ('thread_count', 4),
+                ('resource_preference', 'balanced'),
+                ('ai_batch_size', 2), ('use_gpu', True))}
+        # Folder decoding runs on BatchImportWorker; these track the live
+        # request so a late result cannot mutate a replaced preview.
+        self._import_worker = None
+        self._import_generation = 0
+        self._import_busy = False
+
         
-        # 应用深色主题
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #aaaaaa;
-            }}
-            QListWidget {{
-                background-color: #333;
-                border: 1px solid #555;
-            }}
-            QListWidget::item {{
-                padding: 5px;
-                color: #ccc;
-                border-bottom: 1px solid #444;
-            }}
-            QListWidget::item:selected {{
-                background-color: {PRIMARY_BLUE};
-                color: white;
-            }}
-            QListWidget::item:hover {{
-                background-color: #444;
-            }}
-            QComboBox {{
-                background-color: #fff;
-                color: #000;
-                font-weight: normal;
-                border: 1px solid #555;
-                padding: 5px;
-                border-radius: 3px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: #fff;
-                color: #000;
-                selection-background-color: {PRIMARY_BLUE};
-                selection-color: #fff;
-                font-weight: normal;
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: 20px;
-            }}
-            QComboBox::down-arrow {{
-                image: url("{_ARROW_DOWN_DARK}");
-                width: 10px;
-                height: 10px;
-            }}
-            QLineEdit {{
-                background-color: #fff;
-                color: #000;
-                font-weight: normal;
-                border: 1px solid #555;
-                padding: 5px;
-                border-radius: 3px;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-            QPushButton:pressed {{
-                background-color: #333;
-            }}
-            QGroupBox {{
-                color: #ffffff;
-                border: 1px solid #555;
-                border-radius: 5px;
-                margin-top: 10px;
-                font-weight: normal;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }}
-            QRadioButton {{
-                spacing: 5px;
-            }}
-            QRadioButton::indicator {{
-                width: 18px;
-                height: 18px;
-                border-radius: 9px;
-                border: 2px solid #888;
-                background-color: #333;
-            }}
-            QRadioButton::indicator:checked {{
-                background: qradialgradient(cx:0.5, cy:0.5, radius:0.4, fx:0.5, fy:0.5, stop:0 #fff, stop:0.7 #fff, stop:0.71 #333, stop:1 #333);
-            }}
-            QRadioButton::indicator:hover {{
-                border: 2px solid #aaa;
-            }}
-        """)
+        # Dark palette only in dark mode: hard-coding it showed a dark slab in
+        # light mode.
         
         self.init_ui()
     
     def init_ui(self):
         """初始化UI"""
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Everything except the action buttons scrolls. The button bar must
+        # stay reachable no matter how many groups are shown or how short the
+        # screen is.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
 
         import_mode_group = QGroupBox(trans.t('batch_import_mode'))
-        import_mode_layout = QVBoxLayout(import_mode_group)
+        # One row: the two modes are a single either/or choice, and stacking
+        # them wasted a whole line of the dialog for no extra clarity. The
+        # stretch keeps them left-aligned instead of spread across the width.
+        import_mode_layout = QHBoxLayout(import_mode_group)
+        import_mode_layout.setSpacing(18)
 
         self.rb_multiple_folders = QRadioButton(trans.t('batch_mode_multi'))
         self.rb_multiple_folders.setChecked(True)
@@ -164,31 +142,77 @@ class BatchProcessingDialog(QDialog):
         self.rb_single_folder = QRadioButton(trans.t('batch_mode_single'))
         self.rb_single_folder.toggled.connect(self.on_import_mode_changed)
         import_mode_layout.addWidget(self.rb_single_folder)
+        import_mode_layout.addStretch()
+        import_mode_group.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                        QSizePolicy.Policy.Maximum)
 
         layout.addWidget(import_mode_group)
 
         self.folder_group = QGroupBox(trans.t('batch_stack_folders'))
         folder_layout = QVBoxLayout(self.folder_group)
         
-        # 路径输入框（参考demo.py的实现）
+        # No path text box: it only ever seeded the file dialog's start folder,
+        # so the workflow was "paste a path, then also browse to it". The dialog
+        # now reopens where you last picked, and the list below IS the state -
+        # matching the single-folder group, which already showed a label.
+        # Type-or-browse, in one row: the field accepts a path (Enter adds it)
+        # and the button opens the picker. Before this the field only seeded
+        # the picker's start folder, so typing a path did nothing at all -
+        # which is why the folder chooser felt crippled.
+        add_row = QHBoxLayout()
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText(trans.t('batch_path_placeholder'))
-        folder_layout.addWidget(self.path_input)
-        
-        # 添加文件夹按钮
+        self.path_input.setClearButtonEnabled(True)
+        self.path_input.returnPressed.connect(self.add_path_from_field)
+        add_row.addWidget(self.path_input, 1)
         add_folder_btn = QPushButton(trans.t('batch_btn_add'))
         add_folder_btn.clicked.connect(self.add_folders)
-        folder_layout.addWidget(add_folder_btn)
+        self.btn_add_folder = add_folder_btn
+        add_row.addWidget(add_folder_btn)
+        folder_layout.addLayout(add_row)
         
-        # 文件夹列表
+        # 文件夹列表。空列表时显示一行提示——否则中间是一大片没有信息
+        # 的空白，用户不知道是"还没加"还是"加失败了"。
         self.folder_list = QListWidget()
+        # Multi-select: queues are batch by nature, and removing one folder at
+        # a time (the old SingleSelection default) was painful.
+        self.folder_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.folder_list.setIconSize(QSize(60, 60))
+        # Dropping folders anywhere on this dialog queues them as stacks. The
+        # list deliberately does NOT accept drops: an accepting widget would
+        # consume them (QListWidget handles drag events internally), while a
+        # non-accepting one lets Qt bubble them up to the dialog's handler.
+        self.folder_list.setAcceptDrops(False)
+        self.setAcceptDrops(True)
+        # Height follows the content between three and six rows: a fixed
+        # minimum left a large empty block under two queued stacks (the list
+        # was stretched by the scroll page). _fit_folder_list() reapplies it
+        # whenever the list changes.
+        self.folder_list.setMinimumHeight(self._folder_row_height() * 3 + 10)
+        self._folder_list_placeholder = QLabel(trans.t('batch_no_folders'))
+        self._folder_list_placeholder.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        self._folder_list_placeholder.setWordWrap(True)
+        self._folder_list_placeholder.setStyleSheet(
+            "color: #888888; background: transparent; padding: 12px;")
         folder_layout.addWidget(self.folder_list)
+        folder_layout.addWidget(self._folder_list_placeholder)
+        self._update_folder_placeholder()
         
-        # 移除文件夹按钮
-        remove_folder_btn = QPushButton(trans.t('batch_btn_remove'))
-        remove_folder_btn.clicked.connect(self.remove_selected_folders)
-        folder_layout.addWidget(remove_folder_btn)
+        # Remove button: only meaningful when there is something to remove.
+        # Stretched across the full width under an empty list it read as the
+        # primary action of the group.
+        self.remove_folder_btn = QPushButton(trans.t('batch_btn_remove'))
+        self.remove_folder_btn.clicked.connect(self.remove_selected_folders)
+        self.remove_folder_btn.setEnabled(False)
+        self.folder_list.itemSelectionChanged.connect(
+            lambda: self.remove_folder_btn.setEnabled(
+                bool(self.folder_list.selectedItems())))
+        remove_row = QHBoxLayout()
+        remove_row.addStretch()
+        remove_row.addWidget(self.remove_folder_btn)
+        folder_layout.addLayout(remove_row)
         
         layout.addWidget(self.folder_group)
 
@@ -198,7 +222,7 @@ class BatchProcessingDialog(QDialog):
 
         # 显示选取的文件夹路径
         self.single_folder_path_label = QLabel(trans.t('batch_folder_none'))
-        self.single_folder_path_label.setStyleSheet("color: #aaa; font-size: 12px;")
+        self.single_folder_path_label.setObjectName("mutedLabel")
         self.single_folder_path_label.setWordWrap(True)
         single_folder_layout.addWidget(self.single_folder_path_label)
 
@@ -215,10 +239,11 @@ class BatchProcessingDialog(QDialog):
         self.param_label = QLabel(trans.t('batch_images_per_stack'))
         param_layout.addWidget(self.param_label)
 
-        self.param_spinbox = QSpinBox()
+        self.param_spinbox = StepperSpinBox(minimum=2, maximum=1000,
+                                            decimals=0, step=1, value=5)
         self.param_spinbox.setRange(2, 1000)
         self.param_spinbox.setValue(5)
-        self.param_spinbox.setStyleSheet("background-color: #fff; color: #000;")
+        
         self.param_spinbox.valueChanged.connect(self.update_single_folder_preview)
         param_layout.addWidget(self.param_spinbox)
 
@@ -228,26 +253,32 @@ class BatchProcessingDialog(QDialog):
         single_folder_layout.addLayout(param_layout)
 
         self.preview_label = QLabel(trans.t('batch_preview_default'))
-        self.preview_label.setStyleSheet("color: #aaa; font-size: 12px;")
+        self.preview_label.setObjectName("mutedLabel")
         single_folder_layout.addWidget(self.preview_label)
 
         add_single_folder_btn = QPushButton(trans.t('batch_btn_select_split'))
         add_single_folder_btn.clicked.connect(self.add_single_folder)
+        self.btn_add_single_folder = add_single_folder_btn
         single_folder_layout.addWidget(add_single_folder_btn)
 
         layout.addWidget(self.single_folder_group)
         
-        # 保存格式选择
-        format_group = QGroupBox(trans.t('batch_output_format'))
-        format_layout = QHBoxLayout(format_group)
-        
-        format_layout.addWidget(QLabel(trans.t('batch_format_label')))
+        # Output settings: format, quality, destination and the aligned-stack
+        # copy all answer one question ("what gets written where?"), so they
+        # live in ONE group. The aligned-stack checkbox used to float loose at
+        # the bottom of the dialog, outside every group, where it read as a
+        # stray option rather than part of the output.
+        output_group = QGroupBox(trans.t('batch_output_group'))
+        output_layout = QVBoxLayout(output_group)
+
+        format_row = QHBoxLayout()
+        format_row.addWidget(QLabel(trans.t('batch_format_label')))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["JPG", "PNG", "BMP", "TIFF"])
+        self.format_combo.setCurrentText('PNG')
         self.format_combo.currentTextChanged.connect(self.on_format_changed)
-        format_layout.addWidget(self.format_combo)
-        
-        # JPG质量控制（默认隐藏，只有JPG时显示）
+        format_row.addWidget(self.format_combo)
+
         self.quality_label = QLabel(trans.t('batch_quality_label'))
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(0, 100)
@@ -255,219 +286,669 @@ class BatchProcessingDialog(QDialog):
         self.quality_slider.setFixedWidth(150)
         self.quality_value_label = QLabel("100%")
         self.quality_value_label.setFixedWidth(40)
-        self.quality_slider.valueChanged.connect(lambda v: self.quality_value_label.setText(f"{v}%"))
+        self.quality_slider.valueChanged.connect(
+            lambda v: self.quality_value_label.setText(f"{v}%"))
         self.quality_layout = QHBoxLayout()
         self.quality_layout.addWidget(self.quality_label)
         self.quality_layout.addWidget(self.quality_slider)
         self.quality_layout.addWidget(self.quality_value_label)
         self.quality_layout.addStretch()
-        format_layout.addLayout(self.quality_layout)
-        
-        # 初始隐藏质量控制（非JPG格式）
+        format_row.addLayout(self.quality_layout)
+        format_row.addStretch()
+        output_layout.addLayout(format_row)
+        depth_hint = QLabel(trans.t('export_depth_hint'))
+        depth_hint.setWordWrap(True)
+        output_layout.addWidget(depth_hint)
         self.quality_label.setVisible(False)
         self.quality_slider.setVisible(False)
         self.quality_value_label.setVisible(False)
-        
-        format_layout.addStretch()
-        
-        layout.addWidget(format_group)
-        
-        # 输出方式选择
-        output_group = QGroupBox(trans.t('batch_output_location'))
-        output_layout = QVBoxLayout(output_group)
-        
-        # 选项1：在源文件夹中创建子文件夹
+
+        output_layout.addWidget(_section_rule(trans.t('batch_output_location')))
+
         self.rb_subfolder = QRadioButton(trans.t('batch_out_subfolder'))
         self.rb_subfolder.setChecked(True)
         self.rb_subfolder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_subfolder)
-        
-        # 子文件夹名称输入
-        subfolder_layout = QHBoxLayout()
+
+        self.subfolder_controls = QWidget()
+        subfolder_layout = QHBoxLayout(self.subfolder_controls)
+        subfolder_layout.setContentsMargins(0, 0, 0, 0)
         subfolder_layout.addWidget(QLabel(trans.t('batch_subfolder_name')))
         self.subfolder_name = QLineEdit("OpenFocus_Output")
         subfolder_layout.addWidget(self.subfolder_name)
-        output_layout.addLayout(subfolder_layout)
-        
-        # 选项2：与源文件夹相同
+        output_layout.addWidget(self.subfolder_controls)
+
         self.rb_same_folder = QRadioButton(trans.t('batch_out_same'))
         self.rb_same_folder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_same_folder)
-        
-        # 选项3：指定文件夹
+
         self.rb_custom_folder = QRadioButton(trans.t('batch_out_custom'))
         self.rb_custom_folder.toggled.connect(self.on_output_option_changed)
         output_layout.addWidget(self.rb_custom_folder)
-        
-        # 指定文件夹路径选择
-        custom_folder_layout = QHBoxLayout()
+
+        self.custom_folder_controls = QWidget()
+        custom_folder_layout = QHBoxLayout(self.custom_folder_controls)
+        custom_folder_layout.setContentsMargins(0, 0, 0, 0)
         self.custom_folder_path = QLineEdit()
-        self.custom_folder_path.setEnabled(False)
         custom_folder_layout.addWidget(self.custom_folder_path)
-        
         browse_btn = QPushButton(trans.t('batch_btn_browse'))
         browse_btn.clicked.connect(self.browse_output_folder)
-        browse_btn.setEnabled(False)
         self.browse_btn = browse_btn
         custom_folder_layout.addWidget(browse_btn)
-        output_layout.addLayout(custom_folder_layout)
-        
-        layout.addWidget(output_group)
-        
-        # 保存对齐后图像栈的选项
+        output_layout.addWidget(self.custom_folder_controls)
+        self.custom_folder_controls.hide()
+
+        self._save_aligned_pref = False
         self.save_aligned_cb = QCheckBox(trans.t('batch_save_aligned'))
         self.save_aligned_cb.setChecked(False)
-        layout.addWidget(self.save_aligned_cb)
-        
-        # 处理选项信息显示（从主窗口获取）
-        info_group = QGroupBox(trans.t('batch_proc_options'))
-        info_layout = QVBoxLayout(info_group)
-        
-        # 获取当前选中的融合方法（下拉单选）
-        fusion_method = "None"
-        kernel_size_value = None
-        if self.parent_window:
-            code = self.parent_window.current_fusion_method()
-            label_map = {
-                "none": 'radio_no_fusion',
-                "guided_filter": 'radio_guided_filter',
-                "dct": 'radio_dct',
-                "dtcwt": 'radio_dtcwt',
-                "gfgfgf": 'radio_gfg',
-                "stackmffv4": 'radio_stackmff',
-                "openfocus_a": 'radio_openfocus_a',
-                "openfocus_b": 'radio_openfocus_b',
-                "openfocus_c": 'radio_openfocus_c',
-            }
-            if code in label_map:
-                fusion_method = trans.t(label_map[code])
-            if code in ("guided_filter", "dct", "gfgfgf",
-                        "openfocus_a", "openfocus_b", "openfocus_c"):
-                slider_widget = getattr(self.parent_window, "slider_smooth", None)
-                if slider_widget:
-                    kernel_size_value = slider_widget.value()
+        self.save_aligned_cb.setToolTip(trans.t('batch_save_aligned_hint'))
+        self.save_aligned_cb.toggled.connect(self._remember_save_aligned)
+        output_layout.addWidget(self.save_aligned_cb)
+        # Grouped fusion owns the temporary disk output and cannot also write
+        # an aligned copy. The checkbox is unchecked and disabled in that
+        # state; this line says why instead of leaving an inert control.
+        self.save_aligned_note = QLabel()
+        self.save_aligned_note.setObjectName("mutedLabel")
+        self.save_aligned_note.setWordWrap(True)
+        self.save_aligned_note.hide()
+        output_layout.addWidget(self.save_aligned_note)
 
-        # 获取当前选中的配准方法（下拉单选）
-        reg_method_str = "None"
-        if self.parent_window:
-            am = self.parent_window.current_alignment_method()
-            align_map = {
-                "homography": 'check_align_homography',
-                "ecc": 'check_align_ecc',
-                "openfocus": 'check_align_of',
-            }
-            if am in align_map:
-                reg_method_str = trans.t(align_map[am])
-        
-        info_layout.addWidget(QLabel(trans.t('batch_lbl_fusion').format(fusion_method)))
-        info_layout.addWidget(QLabel(trans.t('batch_lbl_reg').format(reg_method_str)))
-        
-        if kernel_size_value is not None:
-            kernel_size = max(1, int(kernel_size_value))
-            if kernel_size % 2 == 0:
-                kernel_size = max(1, kernel_size - 1)
-            info_layout.addWidget(QLabel(trans.t('batch_lbl_kernel').format(kernel_size)))
-        
-        layout.addWidget(info_group)
-        
+        layout.addWidget(output_group)
+
+        # Batch settings. These used to be read-only labels showing whatever the
+        # main window happened to be set to, so a batch run could not use a
+        # different method, alignment or exposure policy than the last manual
+        # render. Every control below feeds get_processing_settings().
+        self.options_group = QGroupBox(trans.t('batch_proc_options'))
+        options_layout = QVBoxLayout(self.options_group)
+        options_layout.setSpacing(8)
+
+        # --- Method ------------------------------------------------------
+        options_layout.addWidget(_section_rule(trans.t('batch_section_method')))
+
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel(trans.t('group_fusion')))
+        self.fusion_combo = QComboBox()
+        from ui.algorithm_combo import fill_fusion_combo
+        # The no-op entry means "no fusion" here just like in the main panel;
+        # "No alignment" belongs to the registration dropdown on the next row.
+        fill_fusion_combo(self.fusion_combo, none_label="radio_no_fusion",
+                          none_hint="radio_no_fusion_hint")
+        if self.fusion_combo.currentData() is None:
+            # A disabled category header is never a method: without a saved
+            # choice the batch default is the explicit no-fusion entry.
+            self.fusion_combo.setCurrentIndex(
+                self.fusion_combo.findData('none'))
+        method_row.addWidget(self.fusion_combo, 1)
+        options_layout.addLayout(method_row)
+
+        align_row = QHBoxLayout()
+        align_row.addWidget(QLabel(trans.t('group_registration')))
+        self.align_combo = QComboBox()
+        self._fill_method_combo(self.align_combo, registration_algorithms())
+        align_row.addWidget(self.align_combo, 1)
+        options_layout.addLayout(align_row)
+
+        # --- Parameters --------------------------------------------------
+        self.params_rule = _section_rule(trans.t('batch_section_params'))
+        options_layout.addWidget(self.params_rule)
+
+        self._fusion_drafts = {}
+        self._registration_drafts = {}
+        self._editing_method = None
+        self._editing_alignment = None
+        self.fusion_parameter_panel = AlgorithmParameterPanel(self)
+        self.registration_parameter_panel = AlgorithmParameterPanel(
+            self, hidden_parameters=('failure_policy',))
+        options_layout.addWidget(self.fusion_parameter_panel)
+        options_layout.addWidget(self.registration_parameter_panel)
+        self.fusion_parameter_panel.valuesChanged.connect(self._remember_fusion_parameters)
+        self.registration_parameter_panel.valuesChanged.connect(self._remember_registration_parameters)
+        params = QGridLayout()
+        params.setColumnStretch(1, 1)
+
+        self.downscale_label = QLabel(trans.t('batch_downscale'))
+        self.downscale_label.setToolTip(trans.t('batch_downscale_hint'))
+        params.addWidget(self.downscale_label, 4, 0)
+        scale_row = QHBoxLayout()
+        self.downscale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.downscale_slider.setRange(20, 100)
+        self.downscale_slider.setSingleStep(5)
+        self.downscale_slider.setPageStep(10)
+        self.downscale_slider.setValue(100)
+        self.downscale_value = QLabel("100%")
+        self.downscale_value.setMinimumWidth(46)
+        self.downscale_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.downscale_slider.valueChanged.connect(
+            lambda v: self.downscale_value.setText(f"{v}%"))
+        scale_row.addWidget(self.downscale_slider, 1)
+        scale_row.addWidget(self.downscale_value)
+        params.addLayout(scale_row, 4, 1)
+        options_layout.addLayout(params)
+
+        # --- Options -----------------------------------------------------
+        options_layout.addWidget(_section_rule(trans.t('batch_section_options')))
+
+        self._grouping_pref = False
+        self.chk_grouping = QCheckBox(trans.t('batch_group_enable'))
+        self.chk_grouping.setToolTip(trans.t('batch_group_hint'))
+        options_layout.addWidget(self.chk_grouping)
+        self.group_controls = QWidget()
+        group_row = QHBoxLayout(self.group_controls)
+        group_row.setContentsMargins(0, 0, 0, 0)
+        group_label = QLabel(trans.t('batch_group_size'))
+        group_label.setToolTip(trans.t('batch_group_hint'))
+        group_row.addWidget(group_label)
+        self.group_size_spin = QSpinBox()
+        self.group_size_spin.setRange(2, 9999)
+        self.group_size_spin.setKeyboardTracking(False)
+        self.group_size_spin.setValue(4)
+        self.group_size_spin.setToolTip(trans.t('batch_group_hint'))
+        group_row.addWidget(self.group_size_spin)
+        group_row.addWidget(QLabel(trans.t('batch_group_overlap')))
+        self.group_overlap_spin = QSpinBox()
+        self.group_overlap_spin.setRange(0, 2)
+        self.group_overlap_spin.setKeyboardTracking(False)
+        self._group_overlap_preference = 1
+        self.group_overlap_spin.setValue(1)
+        self.group_overlap_spin.valueChanged.connect(
+            lambda value: setattr(self, '_group_overlap_preference', value))
+        group_row.addWidget(self.group_overlap_spin)
+        group_row.addStretch()
+        options_layout.addWidget(self.group_controls)
+        self.group_controls.hide()
+        self.group_note = QLabel()
+        self.group_note.setObjectName("mutedLabel")
+        self.group_note.setWordWrap(True)
+        self.group_note.hide()
+        options_layout.addWidget(self.group_note)
+        self.chk_grouping.toggled.connect(self._grouping_changed)
+        self.group_size_spin.valueChanged.connect(self._group_size_changed)
+
+
+        self.chk_reverse_order = QCheckBox(trans.t('chk_reverse_order'))
+        self.chk_reverse_order.setToolTip(trans.t('chk_reverse_order_hint'))
+        options_layout.addWidget(self.chk_reverse_order)
+
+        self.chk_exposure_match = QCheckBox(trans.t('chk_exposure_match'))
+        self.chk_exposure_match.setToolTip(trans.t('chk_exposure_match_hint'))
+        options_layout.addWidget(self.chk_exposure_match)
+
+        self.chk_base_correct = QCheckBox(trans.t('chk_base_correct'))
+        self.chk_base_correct.setToolTip(trans.t('chk_base_correct_hint'))
+        options_layout.addWidget(self.chk_base_correct)
+
+        self.chk_sharpen_output = QCheckBox(trans.t('chk_sharpen_output'))
+        self.chk_sharpen_output.setToolTip(trans.t('chk_sharpen_output_hint'))
+        options_layout.addWidget(self.chk_sharpen_output)
+
+        flat_row = QHBoxLayout()
+        flat_row.addWidget(QLabel(trans.t('dust_from_file')))
+        self.flat_field_path = QLineEdit()
+        self.flat_field_path.setPlaceholderText(trans.t('dust_no_file'))
+        self.flat_field_path.setToolTip(trans.t('batch_flat_field_hint'))
+        flat_row.addWidget(self.flat_field_path, 1)
+        flat_browse = QPushButton(trans.t('dust_browse'))
+        flat_browse.clicked.connect(self._browse_flat_field)
+        flat_row.addWidget(flat_browse)
+        options_layout.addLayout(flat_row)
+
+        from ui.sensor_cleanup import SensorCleanupControls
+        self.sensor_cleanup = SensorCleanupControls(
+            getattr(self.parent_window, 'defect_mask_path', ''),
+            getattr(self.parent_window, 'sensor_denoise', False), show_scope=False)
+        options_layout.addWidget(self.sensor_cleanup)
+        self.sensor_cleanup.path.textChanged.connect(lambda: self.update_single_folder_preview())
+
+        last_dir = self._last_pick_dir()
+        if last_dir:
+            self.path_input.setText(last_dir)
+        # Reflect the cached availability before seeding so the saved method is
+        # applied last and remains the current item even when it is disabled.
+        self._apply_fusion_availability()
+        self._seed_from_parent()
+        self.fusion_combo.currentIndexChanged.connect(self._sync_method_controls)
+        self.align_combo.currentIndexChanged.connect(self._sync_registration_controls)
+        self._fusion_has_specs = False
+        self._registration_has_specs = False
+        self._sync_registration_controls()
+        self._sync_method_controls()
+
+        # Order the dialog by workflow: pick inputs -> choose how to process
+        # -> decide where the results go. The processing group used to sit
+        # after every output control, so the thing you configure first was
+        # the last thing on the page.
+        layout.insertWidget(layout.indexOf(output_group),
+                            self.options_group)
+        # Leftover page height collects here. Without a stretch the scroll
+        # page stretched the folder group to fill the viewport, leaving a
+        # large empty band inside it below the queued stacks.
+        layout.addStretch()
         # 按钮区域
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
         start_btn = QPushButton(trans.t('batch_btn_start'))
+        start_btn.setObjectName("primaryButton")
         start_btn.clicked.connect(self.start_batch_processing)
+        self.btn_start = start_btn
         button_layout.addWidget(start_btn)
         
         cancel_btn = QPushButton(trans.t('batch_btn_cancel'))
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(cancel_btn)
         
-        layout.addLayout(button_layout)
+        # Buttons live in the outer (non-scrolling) layout, pinned to the
+        # bottom of the dialog.
+        button_bar = QWidget()
+        button_bar.setLayout(button_layout)
+        button_layout.setContentsMargins(14, 8, 14, 10)
+        # A separator makes it obvious the bar is fixed while the page above
+        # scrolls under it; without it the last row looked clipped by the bar.
+        button_bar.setObjectName("dialogButtonBar")
+        # A plain QWidget ignores background rules from the stylesheet unless
+        # it is told to paint a styled background; without this the bar stayed
+        # transparent and the scrolled content showed through it.
+        button_bar.setAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Fixed height: the scroll area above takes the remaining space, and
+        # without this the bar was laid out ON TOP of the last rows.
+        button_bar.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                 QSizePolicy.Policy.Fixed)
+        outer.addWidget(button_bar, 0)
         
         # 初始化质量滑块显示状态（确保对话框打开时滑块正确显示）
         self.on_format_changed(self.format_combo.currentText())
-    
+
+        for _control in ("rb_multiple_folders", "rb_single_folder",
+                         "btn_add_folder", "btn_add_single_folder",
+                         "folder_list", "format_combo", "rb_subfolder",
+                         "subfolder_name", "rb_same_folder",
+                         "rb_custom_folder", "custom_folder_path",
+                         "fusion_combo", "align_combo", "chk_reverse_order",
+                         "chk_exposure_match", "chk_base_correct", "chk_grouping",
+                         "group_size_spin", "group_overlap_spin", "btn_start"):
+            _widget = getattr(self, _control, None)
+            if _widget is not None:
+                _widget.setProperty("controlId", _control)
+        size_dialog_to_content(self, scroll, preferred_width=800)
+
+    def _fit_folder_list(self) -> None:
+        """Size the list to its rows (3..6) instead of stretching it."""
+        rows = max(3, min(6, self.folder_list.count()))
+        # setFixedHeight first, then relax the minimum: doing it the other way
+        # round the minimum won and the list never grew past three rows.
+        self.folder_list.setMinimumHeight(self._folder_row_height() * 3 + 10)
+        self.folder_list.setFixedHeight(self._folder_row_height() * rows + 10)
+
+    def _folder_row_height(self) -> int:
+        """Height of one folder row, from a real item when there is one.
+
+        The old estimate (icon + 14) was 74 px against an actual 44 px row, so
+        a three-row list reserved nearly two rows of blank space.
+        """
+        if self.folder_list.count():
+            item = self.folder_list.item(0)
+            if item is not None:
+                hint = item.sizeHint()
+                if hint.height() > 0:
+                    return hint.height()
+        # Fall back to the widget's own row metric before the first item.
+        if self.folder_list.count():
+            vh = self.folder_list.visualItemRect(self.folder_list.item(0)).height()
+            if vh > 0:
+                return vh
+        return self.folder_list.iconSize().height() + 14
+
+    def _update_folder_placeholder(self) -> None:
+        """Show the empty-state hint only while the list has no rows."""
+        placeholder = getattr(self, "_folder_list_placeholder", None)
+        if placeholder is None:
+            return
+        empty = self.folder_list.count() == 0
+        placeholder.setVisible(empty)
+        self.folder_list.setVisible(not empty)
+        self._fit_folder_list()
+
+    def _drop_drag_enter(self, event) -> None:
+        """Accept a drag that carries at least one local directory."""
+        if self._dragged_folders(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragEnterEvent(self, event) -> None:
+        self._drop_drag_enter(event)
+
+    def dragMoveEvent(self, event) -> None:
+        self._drop_drag_enter(event)
+
+    def dropEvent(self, event) -> None:
+        self._drop_event(event)
+
+    @staticmethod
+    def _dragged_folders(event) -> list:
+        """Local directory paths in a drag, in the order they were dropped.
+
+        Files are ignored here on purpose: the folder list is a queue of
+        stacks, and silently turning loose images into a stack would make the
+        list mean two different things.
+        """
+        mime = event.mimeData()
+        if mime is None or not mime.hasUrls():
+            return []
+        folders = []
+        for url in mime.urls():
+            path = url.toLocalFile()
+            if path and os.path.isdir(path):
+                folders.append(os.path.normpath(path))
+        return folders
+
+    def _drop_event(self, event) -> None:
+        folders = self._dragged_folders(event)
+        if not folders:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        # Dropping folders is the multi-folder workflow; switching the radio
+        # here avoids "I dropped five stacks but nothing will be processed"
+        # when the dialog was left on single-folder mode.
+        if not self.rb_multiple_folders.isChecked():
+            self.rb_multiple_folders.setChecked(True)
+            self.on_import_mode_changed()
+        self.add_folders_to_list(folders)
+
+    def showEvent(self, event):
+        """Warm the import worker module before the first drop or pick.
+
+        Importing core.workers pulls in the fusion pipeline (~0.6 s). Doing it
+        here, while the dialog is appearing, keeps the first folder drop from
+        stalling on module import; the work itself is still on the worker.
+        """
+        super().showEvent(event)
+        if not getattr(self, "_import_module_ready", False):
+            self._import_module_ready = True
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, self._warm_import_module)
+
+    @staticmethod
+    def _warm_import_module() -> None:
+        try:
+            from core.workers import BatchImportWorker  # noqa: F401
+        except Exception:
+            pass
+
+    def add_path_from_field(self) -> None:
+        """Add whatever path was typed, expanding env vars and quotes.
+
+        Several paths at once are accepted (separated by ';'): pasting a list
+        from a script or Explorer's address bar is common.
+        """
+        raw = self.path_input.text().strip()
+        if not raw:
+            return
+        added, rejected = 0, []
+        for chunk in raw.replace('\n', ';').split(';'):
+            candidate = chunk.strip().strip('"').strip("'")
+            if not candidate:
+                continue
+            expanded = os.path.expandvars(os.path.expanduser(candidate))
+            if os.path.isdir(expanded):
+                if expanded not in self.folder_paths:
+                    self.add_folder_to_list(expanded)
+                    added += 1
+            else:
+                rejected.append(candidate)
+        if added:
+            self.path_input.clear()
+            from utils.settings_store import get_settings
+            get_settings().setValue(BATCH_PICK_DIR_KEY,
+                                    os.path.dirname(self.folder_paths[-1]))
+        if rejected:
+            self.path_input.setText("; ".join(rejected))
+            self.path_input.setToolTip(trans.t('batch_path_invalid'))
+
     def add_folders(self):
-        """添加多个文件夹（参考demo.py的实现）"""
-        from PyQt6.QtWidgets import QFileDialog, QListView, QTreeView, QAbstractItemView, QLineEdit
-        
-        # 创建文件对话框实例
-        dialog = QFileDialog(self, "Select Image Stack Folders (Multi-Select)")
+        """Pick one or more stack folders.
+
+        The plain QFileDialog had the flaws of every unstyled directory picker:
+        nowhere to type a path, and no shortcuts to where you actually work.
+        This one adds an editable path field (Enter jumps, like Explorer) and a
+        sidebar of recent and standard locations.
+        """
+        from PyQt6.QtWidgets import (QFileDialog, QListView, QTreeView,
+                                     QAbstractItemView, QSplitter, QListWidget,
+                                     QLineEdit, QPushButton)
+
+        dialog = QFileDialog(self, trans.t('batch_pick_title'))
         dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
 
-        # 多选
         for view_class in (QListView, QTreeView):
             view = dialog.findChild(view_class)
             if view:
-                view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+                view.setSelectionMode(
+                    QAbstractItemView.SelectionMode.ExtendedSelection)
 
-        # ✅ 设置初始目录为输入框内容（如果是有效目录）
-        path = self.path_input.text().strip()
-        if os.path.isdir(path):
-            dialog.setDirectory(path)
+        start_dir = self._last_pick_dir()
+        if start_dir:
+            dialog.setDirectory(start_dir)
+
+        # Qt already builds a place list on the left (home / Pictures /
+        # Desktop / Documents) as a QStandardItemModel. Appending to it is the
+        # supported way to add "last used"; inserting a second QListWidget into
+        # the splitter instead produced an empty column beside the real one.
+        make_folder_path_editable(dialog)
+        self._fit_picker_sidebar(dialog)
 
         # 执行对话框并获取结果
         if dialog.exec():
             selected_dirs = dialog.selectedFiles()
             selected_dirs = [d for d in selected_dirs if os.path.isdir(d)]
-            
-            # 处理选中的文件夹
+
+            # Rows appear immediately; only the thumbnails decode on the
+            # worker, so validation and Start see the selection right away.
+            self.add_folders_to_list(selected_dirs)
+
             if selected_dirs:
-                for folder_path in selected_dirs:
-                    if folder_path not in self.folder_paths:
-                        # 添加到路径列表
-                        self.folder_paths.append(folder_path)
-                        
-                        # 获取文件夹中的第一张图像作为缩略图
-                        from core.image_loader import ImageStackLoader
-                        loader = ImageStackLoader()
-                        success, _, images, _ = loader.load_from_folder(folder_path)
-                        
-                        if success and images:
-                            # 创建缩略图
-                            thumbnail = loader.create_thumbnails([images[0]], thumb_size=60)[0]
-                            self.folder_thumbnails.append(thumbnail)
-                        else:
-                            # 如果没有图像，使用空图标
-                            self.folder_thumbnails.append(None)
-                        
-                        # 添加到列表显示
-                        folder_name = os.path.basename(folder_path)
-                        item_text = f"{folder_name}\n{folder_path}"
-                        
-                        item = QListWidgetItem(item_text)
-                        if self.folder_thumbnails[-1]:
-                            item.setIcon(QIcon(self.folder_thumbnails[-1]))
-                        
-                        self.folder_list.addItem(item)
+                # Remember this pick so the next "Add" opens nearby. Stored
+                # under a batch-only key: the shared ui/last_dialog_dir belongs
+                # to single-file dialogs, and a batch folder there would make
+                # the next "Save As" start somewhere unrelated.
+                from utils.settings_store import get_settings
+                get_settings().setValue(BATCH_PICK_DIR_KEY,
+                                        os.path.dirname(selected_dirs[-1]))
+
+
+    def _fit_picker_sidebar(self, dialog) -> None:
+        """Give the place list just enough width for its longest label."""
+        from PyQt6.QtWidgets import QSplitter, QListView
+
+        splitter = dialog.findChild(QSplitter)
+        if splitter is None or splitter.count() < 2:
+            return
+        sidebar = splitter.widget(0)
+        if not isinstance(sidebar, QListView) or sidebar.model() is None:
+            return
+        metrics = sidebar.fontMetrics()
+        widest = 0
+        model = sidebar.model()
+        for row in range(model.rowCount()):
+            text = model.index(row, 0).data() or ""
+            widest = max(widest, metrics.horizontalAdvance(str(text)))
+        # icon + padding + a little slack, clamped so a long folder name cannot
+        # eat the file view.
+        width = max(120, min(230, widest + 58))
+        sidebar.setMaximumWidth(width)
+        sizes = splitter.sizes()
+        if len(sizes) >= 2 and sizes[0] != width:
+            sizes[0] = width
+            sizes[1] = max(1, sum(sizes) - width)
+            splitter.setSizes(sizes)
+
+    def _last_pick_dir(self) -> str:
+        from utils.settings_store import get_settings
+        value = str(get_settings().value(BATCH_PICK_DIR_KEY, "") or "")
+        return value if value and os.path.isdir(value) else ""
+
+    # --- Background folder import ---------------------------------------
+    #
+    # Every entry point that needs decoded pixels (thumbnails, split previews,
+    # drag-and-drop preload) goes through one worker. The dialog keeps only
+    # request state; QPixmap/QIcon are built in the slot because Qt GUI
+    # objects cannot be created off the GUI thread.
+
+    def _start_import(self, mode: str, on_thumbnails=None, on_stack=None,
+                      folder_paths=None, folder_path=None,
+                      sort_by: str = 'filename', scale_factor=None) -> bool:
+        if mode == 'stack' and self.chk_grouping.isChecked():
+            QMessageBox.warning(self, trans.t('msg_error'), trans.t('batch_group_split_error'))
+            return False
+        if self._import_busy:
+            return False
+        from core.workers import BatchImportWorker
+        self._import_generation += 1
+        worker = BatchImportWorker(
+            mode,
+            folder_paths=folder_paths,
+            folder_path=folder_path,
+            scale_factor=(self.load_scale_factor if scale_factor is None
+                          else scale_factor),
+            sort_by=sort_by,
+            exclude_paths=[self.sensor_cleanup.path.text().strip()] if self.sensor_cleanup.path.text().strip() else [],
+            thread_count=self._runtime_settings.get('thread_count', 0),
+            resource_preference=self._runtime_settings.get(
+                'resource_preference', 'balanced'),
+        )
+        self._import_worker = worker
+        self._import_busy = True
+        self._import_callbacks = {'thumbnails': on_thumbnails,
+                                  'stack': on_stack}
+        _track_import_worker(worker)
+        self._set_import_busy(True)
+
+        # Bound methods of this QObject, not lambdas: Qt disconnects them
+        # automatically when the dialog is destroyed, so a worker finishing
+        # after the dialog closed cannot call into a deleted window.
+        if mode == 'stack':
+            worker.stack_loaded.connect(self._on_import_stack_ready)
+        else:
+            worker.folders_loaded.connect(self._on_import_folders_ready)
+        worker.finished.connect(self._on_import_finished)
+        worker.start()
+        return True
+
+    def _on_import_folders_ready(self, results) -> None:
+        callback = self._import_callbacks.get('thumbnails')
+        self._import_busy = False
+        self._set_import_busy(False)
+        if callback is not None:
+            callback(results)
+
+    def _on_import_stack_ready(self, folder, entries, message) -> None:
+        callback = self._import_callbacks.get('stack')
+        self._import_busy = False
+        self._set_import_busy(False)
+        if callback is not None:
+            callback(folder, entries, message)
+
+    def _on_import_finished(self) -> None:
+        worker = self.sender()
+        if worker is not self._import_worker:
+            return
+        self._import_worker = None
+        self._import_callbacks = {}
+        self._import_busy = False
+        self._set_import_busy(False)
+
+    def _set_import_busy(self, busy: bool) -> None:
+        """Disable the actions that would need the data still decoding."""
+        if hasattr(self, 'chk_grouping'):
+            # Recompute rather than blanket-enable: an incompatible mode must
+            # keep grouping disabled once the import finishes.
+            self._sync_option_states()
+        for name in ("btn_start", "btn_add_folder", "btn_add_single_folder"):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(not busy)
+
+    def cancel_imports(self) -> None:
+        """Ask the live import to stop and drop its result."""
+        worker = self._import_worker
+        self._import_generation += 1
+        self._import_busy = False
+        self._import_worker = None
+        if worker is not None:
+            # The worker is tracked at module level, so it stays alive until
+            # it really stops even if this dialog is being destroyed.
+            worker.cancel()
+
+    def closeEvent(self, event):
+        self.cancel_imports()
+        super().closeEvent(event)
+
+    def reject(self):
+        self.cancel_imports()
+        super().reject()
+
+    def accept(self):
+        if self._import_busy:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, trans.t('batch_title'),
+                                    trans.t('batch_import_in_progress'))
+            return
+        self.cancel_imports()
+        super().accept()
+
+    def _append_folder_row(self, folder_path: str) -> None:
+        """Show the folder immediately; its icon arrives with the worker."""
+        item = QListWidgetItem(
+            f"{os.path.basename(folder_path)}\n{folder_path}")
+        self.folder_list.addItem(item)
+        self.folder_thumbnails.append(None)
+        self._update_folder_placeholder()
+
+    def add_folders_to_list(self, folder_paths) -> None:
+        """Register folders now, decode their thumbnails in the background.
+
+        The paths and rows are recorded synchronously so the rest of the
+        dialog (validation, Start) sees the selection immediately; only the
+        preview icon depends on the worker.
+        """
+        pending = []
+        for folder_path in folder_paths:
+            if folder_path in self.folder_paths:
+                continue
+            self.folder_paths.append(folder_path)
+            self._append_folder_row(folder_path)
+            pending.append(folder_path)
+        if pending:
+            self._start_import('thumbnails', folder_paths=pending,
+                               on_thumbnails=self._apply_thumbnails)
+
+    def _apply_thumbnails(self, results) -> None:
+        """Attach decoded first frames to the rows that already exist."""
+        from core.image_loader import ImageStackLoader
+        loader = ImageStackLoader()
+        for folder_path, first in results:
+            if folder_path not in self.folder_paths or first is None:
+                continue
+            index = self.folder_paths.index(folder_path)
+            thumbnail = loader.create_thumbnails([first], thumb_size=60)[0]
+            if index < len(self.folder_thumbnails):
+                self.folder_thumbnails[index] = thumbnail
+            item = self.folder_list.item(index)
+            if item is not None:
+                item.setIcon(QIcon(thumbnail))
+        self._fit_folder_list()
 
     def add_folder_to_list(self, folder_path: str) -> None:
         """添加文件夹到批处理列表（用于拖入场景）"""
         if folder_path in self.folder_paths:
             return
-
-        self.folder_paths.append(folder_path)
-
-        from core.image_loader import ImageStackLoader
-        loader = ImageStackLoader()
-        success, _, images, _ = loader.load_from_folder(folder_path)
-
-        if success and images:
-            thumbnail = loader.create_thumbnails([images[0]], thumb_size=60)[0]
-            self.folder_thumbnails.append(thumbnail)
-        else:
-            self.folder_thumbnails.append(None)
-
-        folder_name = os.path.basename(folder_path)
-        item_text = f"{folder_name}\n{folder_path}"
-
-        item = QListWidgetItem(item_text)
-        if self.folder_thumbnails[-1]:
-            item.setIcon(QIcon(self.folder_thumbnails[-1]))
-
-        self.folder_list.addItem(item)
+        self.add_folders_to_list([folder_path])
 
     def add_single_folder_to_list(self, folder_list):
         """添加单个文件夹到列表"""
@@ -530,22 +1011,21 @@ class BatchProcessingDialog(QDialog):
         if not selected_items:
             return
         
-        for item in selected_items:
-            row = self.folder_list.row(item)
+        # Take rows in DESCENDING order: popping the lowest row first shifts
+        # every later index, so a Ctrl multi-select removed the wrong folders.
+        rows = sorted((self.folder_list.row(it) for it in selected_items),
+                      reverse=True)
+        for row in rows:
             self.folder_list.takeItem(row)
             self.folder_paths.pop(row)
             if row < len(self.folder_thumbnails):
                 self.folder_thumbnails.pop(row)
-    
+        self._update_folder_placeholder()
+
     def on_output_option_changed(self):
         """输出选项改变时的处理"""
-        subfolder_enabled = self.rb_subfolder.isChecked()
-        same_enabled = self.rb_same_folder.isChecked()
-        custom_enabled = self.rb_custom_folder.isChecked()
-        
-        self.subfolder_name.setEnabled(subfolder_enabled)
-        self.custom_folder_path.setEnabled(custom_enabled)
-        self.browse_btn.setEnabled(custom_enabled)
+        self.subfolder_controls.setVisible(self.rb_subfolder.isChecked())
+        self.custom_folder_controls.setVisible(self.rb_custom_folder.isChecked())
     
     def on_import_mode_changed(self):
         """导入模式改变时的处理"""
@@ -554,10 +1034,16 @@ class BatchProcessingDialog(QDialog):
         self.folder_group.setVisible(is_multiple)
         self.single_folder_group.setVisible(not is_multiple)
         
-        self.setFixedHeight(800)
+        # Do NOT pin the dialog to 800 px: on a shorter screen the fixed
+        # height put the button bar off-screen. The scroll area above the
+        # bar already adapts to the available space.
+        self.setMinimumHeight(min(640, self.height()))
         
         # 初始化质量滑块显示状态
         self.on_format_changed(self.format_combo.currentText())
+        # Single-folder mode cannot use grouping; the state is disabled and
+        # explained here instead of surfacing a modal only after Start.
+        self._sync_option_states()
     
     def on_split_method_changed(self, index):
         """分割方式改变时的处理"""
@@ -588,34 +1074,47 @@ class BatchProcessingDialog(QDialog):
             return
         
         split_method = self.split_method_combo.currentIndex()
-        param_value = self.param_spinbox.value()
+        param_value = (int(self.param_spinbox.value()) if split_method == 0
+                       else float(self.param_spinbox.value()))
         
         from core.image_loader import ImageStackLoader
         loader = ImageStackLoader()
-        
+        from utils.sorting import natural_sort_key
+        from utils.path_identity import same_path
+        mask_path = self.sensor_cleanup.path.text().strip()
+        entries = [item for item in self.single_folder_images_with_times
+                   if not mask_path or not same_path(item[0], mask_path)]
+        entries.sort(key=lambda item:
+            natural_sort_key(item[3] if len(item) > 3 else item[0]) if split_method == 0 else
+            (item[2] is None, item[2] or 0, natural_sort_key(item[3] if len(item) > 3 else item[0])))
+
         if split_method == 0:
-            stacks = loader.split_by_count(self.single_folder_images_with_times, param_value)
-            self.preview_label.setText(trans.t('batch_preview_fmt_count').format(len(self.single_folder_images_with_times), len(stacks), param_value))
+            stacks = loader.split_by_count(entries, param_value)
+            self.preview_label.setText(trans.t('batch_preview_fmt_count').format(len(entries), len(stacks), param_value))
         else:
-            stacks = loader.split_by_time_threshold(self.single_folder_images_with_times, param_value)
-            self.preview_label.setText(trans.t('batch_preview_fmt_time').format(len(self.single_folder_images_with_times), len(stacks), param_value))
+            stacks = loader.split_by_time_threshold(entries, param_value)
+            self.preview_label.setText(trans.t('batch_preview_fmt_time').format(len(entries), len(stacks), param_value))
+        self.single_folder_stacks = stacks
     
     def add_single_folder(self):
         """添加单个文件夹（自动分割）"""
         from PyQt6.QtWidgets import QFileDialog
-        from core.image_loader import ImageStackLoader
-        
+
         folder_path = QFileDialog.getExistingDirectory(
-            self, "Select Folder with Multiple Image Stacks", ""
+            self, trans.t('batch_btn_select_split'), ""
         )
-        
+
         if not folder_path:
             return
-        
-        loader = ImageStackLoader()
-        success, message, images_with_times, filenames = loader.load_images_with_timestamps(folder_path)
-        
-        if not success or not images_with_times:
+
+        self._start_import(
+            'stack', folder_path=folder_path,
+            on_stack=self._apply_single_folder_import)
+        return
+
+    def _apply_single_folder_import(self, folder_path, entries, message):
+        """Show a decoded split preview, or report why it could not load."""
+        if not entries:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(
                 self,
@@ -623,17 +1122,16 @@ class BatchProcessingDialog(QDialog):
                 trans.t("msg_load_images_failed_text").format(message=message),
             )
             return
-        
-        self.single_folder_images_with_times = images_with_times
+        self.single_folder_images_with_times = entries
         self.single_folder_folder_path = folder_path
-        self.single_folder_scale_factor = 1.0
 
         # 更新路径显示
         folder_name = os.path.basename(folder_path)
-        self.single_folder_path_label.setText(f"Folder: {folder_name}")
+        self.single_folder_path_label.setText(trans.t('import_folder_display').format(folder_name))
         self.single_folder_path_label.setToolTip(folder_path)
 
         self.update_single_folder_preview()
+
     
     def get_import_mode(self):
         """获取导入模式"""
@@ -650,15 +1148,22 @@ class BatchProcessingDialog(QDialog):
         param_value = self.param_spinbox.value()
         
         if split_method == 0:
-            return "count", param_value
-        return "time_threshold", param_value
+            return 'count', int(param_value)
+        return 'time_threshold', float(param_value)
     
+    def _browse_flat_field(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, trans.t('dust_browse'), '',
+            trans.t('batch_image_filter'))
+        if path:
+            self.flat_field_path.setText(path)
+
     def browse_output_folder(self):
         """浏览输出文件夹"""
         from PyQt6.QtWidgets import QFileDialog
         
         folder_path = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", ""
+            self, trans.t('batch_out_custom'), ""
         )
         
         if folder_path:
@@ -673,46 +1178,221 @@ class BatchProcessingDialog(QDialog):
         else:  # custom folder
             return "custom", self.custom_folder_path.text()
     
+    def _fill_method_combo(self, combo, specs, allow_none=False):
+        combo.clear()
+        if allow_none:
+            combo.addItem(trans.t('check_align_none'), 'none')
+        for spec in specs:
+            combo.addItem(trans.t(spec.label_key), spec.id)
+            if spec.hint_key:
+                combo.setItemData(combo.count() - 1, trans.t(spec.hint_key),
+                                  Qt.ItemDataRole.ToolTipRole)
+
+    def _seed_from_parent(self):
+        window = self.parent_window
+        if window is None:
+            return
+        method = window.current_fusion_method()
+        if method != 'none':
+            get_fusion(method)
+        alignment = window.current_alignment_method()
+        alignment_steps(alignment)
+        self.fusion_combo.setCurrentIndex(self.fusion_combo.findData(method))
+        self.align_combo.setCurrentIndex(self.align_combo.findData(alignment))
+        self.chk_reverse_order.setChecked(bool(getattr(window, 'stack_reverse_order', False)))
+        self.chk_sharpen_output.setChecked(bool(getattr(window, 'sharpen_output', False)))
+        getter = getattr(window, 'brightness_option_for', None)
+        if callable(getter):
+            method = self.fusion_combo.currentData()
+            self.chk_exposure_match.setChecked(bool(getter('exposure_match', method)))
+            self.chk_base_correct.setChecked(bool(getter('base_correct', method)))
+
+    def _apply_fusion_availability(self) -> None:
+        """Keep unavailable methods visible with a dependency explanation."""
+        from core.multi_focus_fusion import is_ai_fusion_available
+        from ui.algorithm_combo import fusion_unavailable_reason
+
+        ai_available = bool(is_ai_fusion_available())
+        for spec in fusion_algorithms():
+            reason = fusion_unavailable_reason(spec, ai_available)
+            if not reason:
+                continue
+            index = self.fusion_combo.findData(spec.id)
+            if index < 0:
+                continue
+            item = self.fusion_combo.model().item(index)
+            if item is not None:
+                item.setEnabled(False)
+            self.fusion_combo.setItemData(
+                index, reason, Qt.ItemDataRole.ToolTipRole)
+
+    def _remember_fusion_parameters(self, values):
+        self._fusion_drafts[self._editing_method] = dict(values)
+
+    def _remember_registration_parameters(self, values):
+        self._registration_drafts[self._editing_alignment] = dict(values)
+
+    def _sync_registration_controls(self):
+        method = self.align_combo.currentData()
+        if method is None:
+            return
+        if method not in self._registration_drafts:
+            getter = getattr(self.parent_window, 'registration_parameters_for', None)
+            self._registration_drafts[method] = (getter(method) if callable(getter)
+                else resolve_registration_parameters(method))
+        self._editing_alignment = method
+        specs = registration_parameter_specs(method)
+        self.registration_parameter_panel.set_parameters(specs, self._registration_drafts[method])
+        self.registration_parameter_panel.setVisible(bool(self.registration_parameter_panel.editors))
+        self._registration_has_specs = bool(self.registration_parameter_panel.editors)
+        self._sync_parameters_heading()
+
+    def _sync_parameters_heading(self) -> None:
+        """One heading covers both panels; hide it only when both are empty."""
+        self.params_rule.setVisible(
+            self._fusion_has_specs or self._registration_has_specs)
+
+    def _grouping_changed(self, enabled):
+        # Only a user action (or a deliberate toggle in a test) changes the
+        # remembered preference; forced off states are set with blocked signals.
+        if self.chk_grouping.isEnabled():
+            self._grouping_pref = bool(enabled)
+        self._sync_option_states()
+
+    def _group_size_changed(self, value):
+        with QSignalBlocker(self.group_overlap_spin):
+            maximum = value - 2
+            self.group_overlap_spin.setMaximum(maximum)
+            self.group_overlap_spin.setValue(min(self._group_overlap_preference, maximum))
+
+    def _remember_save_aligned(self, checked: bool) -> None:
+        """Track the user's own choice, ignoring programmatic forcing."""
+        if self.save_aligned_cb.isEnabled():
+            self._save_aligned_pref = bool(checked)
+        self._sync_option_states()
+
+    def _set_save_aligned_checked(self, checked: bool) -> None:
+        checked = bool(checked)
+        if self.save_aligned_cb.isChecked() == checked:
+            return
+        with QSignalBlocker(self.save_aligned_cb):
+            self.save_aligned_cb.setChecked(checked)
+
+    def _set_grouping_checked(self, checked: bool) -> None:
+        checked = bool(checked)
+        if self.chk_grouping.isChecked() == checked:
+            return
+        with QSignalBlocker(self.chk_grouping):
+            self.chk_grouping.setChecked(checked)
+
+    def _sync_option_states(self) -> None:
+        """Reflect the incompatibilities instead of only failing at Start.
+
+        Grouping needs multi-folder input plus a fusion step and cannot share
+        the run with the aligned-stack copy; alignment-only output has no
+        fusion step, so base correction, sharpening and frame reversal have no
+        consumer. Exposure matching stays live because registration uses it as
+        its brightness reference even without fusion.
+        """
+        method = self.fusion_combo.currentData()
+        fusion_off = method in (None, 'none')
+        spec = None if fusion_off else get_fusion(method)
+
+        if not self.rb_multiple_folders.isChecked():
+            grouping_reason = trans.t('batch_group_split_error')
+        elif fusion_off or self._save_aligned_pref:
+            grouping_reason = trans.t('batch_group_output_error')
+        else:
+            grouping_reason = ''
+
+        if grouping_reason:
+            if self.chk_grouping.isChecked():
+                self._grouping_pref = True
+            self._set_grouping_checked(False)
+        elif (not self._import_busy and self._grouping_pref
+              and not self.chk_grouping.isChecked()):
+            self._set_grouping_checked(True)
+
+        grouping_on = self.chk_grouping.isChecked()
+        self.chk_grouping.setEnabled(not grouping_reason and not self._import_busy)
+        self.group_controls.setVisible(grouping_on)
+        self.group_controls.setEnabled(not self._import_busy)
+        self.chk_grouping.setToolTip(
+            grouping_reason or trans.t('batch_group_hint'))
+        self.group_note.setText(grouping_reason)
+        self.group_note.setVisible(bool(grouping_reason))
+
+        align_only = method == 'none'
+        if align_only:
+            self.save_aligned_cb.setEnabled(False)
+            self._set_save_aligned_checked(True)
+            self.save_aligned_cb.setToolTip(trans.t('batch_save_aligned_forced'))
+            self.save_aligned_note.setVisible(False)
+        elif grouping_on:
+            self.save_aligned_cb.setEnabled(False)
+            self._set_save_aligned_checked(False)
+            self.save_aligned_cb.setToolTip(
+                trans.t('batch_group_output_error'))
+            self.save_aligned_note.setText(
+                trans.t('batch_group_output_error'))
+            self.save_aligned_note.setVisible(True)
+        else:
+            self.save_aligned_cb.setEnabled(True)
+            self._set_save_aligned_checked(self._save_aligned_pref)
+            self.save_aligned_cb.setToolTip(trans.t('batch_save_aligned_hint'))
+            self.save_aligned_note.setVisible(False)
+
+        fusion_only_hint = trans.t('radio_no_fusion_hint')
+        for box, hint_key in (
+                (self.chk_base_correct, 'chk_base_correct_hint'),
+                (self.chk_sharpen_output, 'chk_sharpen_output_hint')):
+            box.setEnabled(not fusion_off)
+            box.setToolTip(fusion_only_hint if fusion_off
+                           else trans.t(hint_key))
+        locked = bool(spec is not None and spec.order_sensitive)
+        self.chk_reverse_order.setEnabled(not fusion_off and not locked)
+        if fusion_off:
+            self.chk_reverse_order.setToolTip(fusion_only_hint)
+        elif locked:
+            self.chk_reverse_order.setToolTip(
+                trans.t('chk_reverse_order_locked_hint'))
+        else:
+            self.chk_reverse_order.setToolTip(
+                trans.t('chk_reverse_order_hint'))
+
+    def _sync_method_controls(self) -> None:
+        method = self.fusion_combo.currentData()
+        self._editing_method = method
+        specs = () if method in (None, 'none') else get_fusion(method).parameters
+        if method not in self._fusion_drafts:
+            getter = getattr(self.parent_window, 'fusion_parameters_for', None)
+            self._fusion_drafts[method] = (getter(method) if callable(getter) and specs
+                else resolve_fusion_parameters(method) if specs else {})
+        self.fusion_parameter_panel.set_parameters(specs, self._fusion_drafts[method])
+        self.fusion_parameter_panel.setVisible(bool(specs))
+        self._fusion_has_specs = bool(specs)
+        self._sync_parameters_heading()
+        self._sync_option_states()
+
     def get_processing_settings(self):
         """获取处理设置"""
         format_str = self.format_combo.currentText().lower()
         
-        # 获取融合方法设置（下拉单选）
-        fusion_method = None
-        fusion_params = {}
+        fusion_method = self.fusion_combo.currentData() or "none"
+        fusion_params = self.fusion_parameter_panel.values()
+        runtime = dict(self._runtime_settings)
+        runtime['base_frame'] = 'last' if self.chk_base_correct.isChecked() else 'none'
+        runtime['exposure_match'] = self.chk_exposure_match.isChecked()
+        runtime['sharpen_output'] = self.chk_sharpen_output.isChecked()
+        runtime['sort_mode'] = 'desc' if self.chk_reverse_order.isChecked() else 'asc'
 
-        if self.parent_window:
-            slider_widget = getattr(self.parent_window, "slider_smooth", None)
+        align_method = self.align_combo.currentData() or "none"
+        reg_methods = list(alignment_steps(align_method))
+        # Registration downscale: a percentage of each stack's own width. 100%
+        # keeps the main window's configured width untouched (the historical
+        # behaviour); anything lower narrows it proportionally.
+        ratio = int(self.downscale_slider.value())
 
-            def _sanitized_kernel_value() -> int:
-                if not slider_widget:
-                    return 7
-                value = max(1, int(slider_widget.value()))
-                if value % 2 == 0:
-                    value = max(1, value - 1)
-                return value
-
-            fusion_method = self.parent_window.current_fusion_method()
-            if fusion_method in ("guided_filter", "dct", "gfgfgf",
-                                 "openfocus_a", "openfocus_b", "openfocus_c"):
-                fusion_params["kernel_size"] = _sanitized_kernel_value()
-            fusion_params["base_frame"] = (
-                "last" if getattr(self.parent_window,
-                                  "base_frame_correct", False) else "none")
-            fusion_params["depth_smoothing"] = getattr(
-                self.parent_window, "ofb_depth_smoothing", None)
-            # 帧序方向（仅 openfocus 族生效）
-            fusion_params["sort_mode"] = (
-                "desc" if getattr(self.parent_window,
-                                  "stack_reverse_order", False) else "asc")
-
-        # 获取配准方法设置（下拉单选：none 时不做配准）
-        reg_methods = []
-        if self.parent_window:
-            am = self.parent_window.current_alignment_method()
-            if am != "none":
-                reg_methods = [am]
-        
         # 获取JPG质量设置
         jpg_quality = 100
         if format_str == "jpg":
@@ -728,6 +1408,13 @@ class BatchProcessingDialog(QDialog):
                 "manual_px_um": manual if manual > 0 else None,
                 "position": getattr(self.parent_window, "scale_bar_position", "bottom-right"),
                 "color": getattr(self.parent_window, "scale_bar_color", "auto"),
+                'font_family': getattr(self.parent_window, 'scale_bar_font_family', ''),
+                'font_size': getattr(self.parent_window, 'scale_bar_font_size', 0),
+                'font_bold': getattr(self.parent_window, 'scale_bar_font_bold', False),
+                'text_align': getattr(self.parent_window, 'scale_bar_text_align', 'auto'),
+                'custom_x': getattr(self.parent_window, 'scale_bar_custom_x', None),
+                'custom_y': getattr(self.parent_window, 'scale_bar_custom_y', None),
+                'target': getattr(self.parent_window, 'scale_bar_target', 'all'),
             }
 
         # 仅对齐批处理：没有融合步骤，必须保存对齐帧（否则整个任务无输出）
@@ -742,11 +1429,19 @@ class BatchProcessingDialog(QDialog):
             "fusion_method": fusion_method,
             "fusion_params": fusion_params,
             "reg_methods": reg_methods,
+            'alignment': align_method,
+            'registration_parameters': self.registration_parameter_panel.values(),
+            "reg_scale_percent": ratio,
+            'group_size': self.group_size_spin.value() if self.chk_grouping.isChecked() else 0,
+            'group_overlap': self.group_overlap_spin.value(),
             "save_aligned": save_aligned,  # 是否保存对齐后的图像栈
             "scale_bar": scale_cfg,
-            # Single-folder mode hands already-decoded frames to the worker.
-            # Preserve their scale so TIFF calibration remains physical.
-            "input_scale_factor": self.single_folder_scale_factor,
+            'flat_field_path': self.flat_field_path.text().strip(),
+            'defect_mask_path': self.sensor_cleanup.path.text().strip(),
+            'sensor_denoise': self.sensor_cleanup.denoise.isChecked(),
+            'load_scale_factor': self.load_scale_factor,
+            'runtime_settings': runtime,
+            'frozen_stacks': [list(stack) for stack in self.single_folder_stacks],
         }
 
     def preload_single_folder(self, folder_path: str, scale_factor: float = 1.0) -> None:
@@ -754,9 +1449,6 @@ class BatchProcessingDialog(QDialog):
         预加载单个文件夹（用于拖入场景）
         自动切换到单文件夹模式、加载文件夹、设置默认划分参数
         """
-        import cv2
-        from core.image_loader import ImageStackLoader
-
         # 1. 切换到单文件夹模式
         self.rb_single_folder.setChecked(True)
         self.on_import_mode_changed()
@@ -767,46 +1459,11 @@ class BatchProcessingDialog(QDialog):
         self.param_unit_label.setText(trans.t('batch_unit_images'))
         self.on_split_method_changed(0)
 
-        # 3. 加载文件夹并应用缩放
-        loader = ImageStackLoader()
-        success, message, images_with_times, filenames = loader.load_images_with_timestamps(folder_path)
-
-        if not success or not images_with_times:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(
-                self,
-                trans.t("msg_load_failed"),
-                trans.t("msg_load_images_failed_text").format(message=message),
-            )
-            return
-
-        # 应用缩放
-        if scale_factor != 1.0 and 0 < scale_factor < 1.0:
-            scaled_images = []
-            for path, img, ts in images_with_times:
-                w = int(img.shape[1] * scale_factor)
-                h = int(img.shape[0] * scale_factor)
-                scaled_img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-                scaled_images.append((path, scaled_img, ts))
-            self.single_folder_images_with_times = scaled_images
-        else:
-            self.single_folder_images_with_times = images_with_times
-
-        try:
-            scale = float(scale_factor)
-        except (TypeError, ValueError):
-            scale = 1.0
-        self.single_folder_scale_factor = scale if 0 < scale <= 1.0 else 1.0
-
-        self.single_folder_folder_path = folder_path
-
-        # 更新路径显示
-        folder_name = os.path.basename(folder_path)
-        self.single_folder_path_label.setText(f"Folder: {folder_name}")
-        self.single_folder_path_label.setToolTip(folder_path)
-
-        # 4. 更新preview
-        self.update_single_folder_preview()
+        # 3. 加载文件夹并应用缩放（后台，结果到达后更新预览）
+        self.load_scale_factor = scale_factor
+        self._start_import(
+            'stack', folder_path=folder_path, scale_factor=scale_factor,
+            on_stack=self._apply_single_folder_import)
 
     def preload_multiple_folders(self, folder_paths: list[str], scale_factor: float = 1.0) -> None:
         """预加载多个文件夹（用于拖入场景）
@@ -815,44 +1472,32 @@ class BatchProcessingDialog(QDialog):
             folder_paths: 文件夹路径列表
             scale_factor: 缩放因子（统一应用到所有文件夹）
         """
-        import cv2
-        from core.image_loader import ImageStackLoader
-
         self.rb_multiple_folders.setChecked(True)
         self.on_import_mode_changed()
-
-        loader = ImageStackLoader()
-        for folder_path in folder_paths:
-            if folder_path in self.folder_paths:
-                continue
-
-            self.folder_paths.append(folder_path)
-
-            success, message, full_res_images, filenames = loader.load_from_folder(
-                folder_path, scale_factor=scale_factor
-            )
-
-            if success and full_res_images:
-                thumbnail = loader.create_thumbnails([full_res_images[0]], thumb_size=60)[0]
-                self.folder_thumbnails.append(thumbnail)
-            else:
-                self.folder_thumbnails.append(None)
-
-            folder_name = os.path.basename(folder_path)
-            item_text = f"{folder_name}\n{folder_path}"
-
-            item = QListWidgetItem(item_text)
-            if self.folder_thumbnails[-1]:
-                item.setIcon(QIcon(self.folder_thumbnails[-1]))
-
-            self.folder_list.addItem(item)
+        self.load_scale_factor = scale_factor
+        self.add_folders_to_list(folder_paths)
 
     def start_batch_processing(self):
         """开始批处理"""
         from PyQt6.QtWidgets import QMessageBox
+        sensor_error = self.sensor_cleanup.validate()
+        if sensor_error:
+            QMessageBox.warning(self, trans.t('msg_error'), sensor_error)
+            return
 
         import_mode = self.get_import_mode()
         split_method, split_param = self.get_split_settings()
+        group_size = self.group_size_spin.value() if self.chk_grouping.isChecked() else 0
+        if group_size:
+            if import_mode == 'single_folder':
+                QMessageBox.warning(self, trans.t('msg_error'), trans.t('batch_group_split_error'))
+                return
+            if group_size < 2 or self.group_overlap_spin.value() > group_size - 2:
+                QMessageBox.warning(self, trans.t('msg_error'), trans.t('batch_group_range_error'))
+                return
+            if self.fusion_combo.currentData() in (None, 'none') or self.save_aligned_cb.isChecked():
+                QMessageBox.warning(self, trans.t('msg_error'), trans.t('batch_group_output_error'))
+                return
 
         if import_mode == "multiple_folders":
             if not self.folder_paths:
@@ -870,6 +1515,20 @@ class BatchProcessingDialog(QDialog):
             return
 
         processing_settings = self.get_processing_settings()
+        if import_mode == 'single_folder':
+            self.update_single_folder_preview()
+            if split_method == 'time_threshold':
+                from core.image_loader import ImageStackLoader
+                missing = ImageStackLoader.missing_timestamps(self.single_folder_images_with_times)
+                if missing:
+                    QMessageBox.warning(self, trans.t('msg_error'),
+                                        trans.t('batch_missing_times').format(n=missing))
+                    return
+            if processing_settings['fusion_method'] != 'none' and any(
+                    len(stack) < 2 for stack in self.single_folder_stacks):
+                QMessageBox.warning(self, trans.t('msg_error'),
+                                    trans.t('depth_need_two_frames').format(n=1))
+                return
 
         self.accept()
 
@@ -889,7 +1548,8 @@ class BatchProcessingDialog(QDialog):
             target = (output_path or "").strip()
             if not target:
                 return trans.t("msg_no_folder_text")
-            # A not-yet-existing folder only needs a writable parent to create
+            if os.path.exists(target) and not os.path.isdir(target):
+                return f"{trans.t('msg_save_failed_info_write')}\n{target}"
             probe = target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target))
             if not _is_writable_dir(probe):
                 return f"{trans.t('msg_save_failed_info_write')}\n{target}"
@@ -898,10 +1558,18 @@ class BatchProcessingDialog(QDialog):
         if output_type == "subfolder" and not (output_path or "").strip():
             return trans.t("msg_no_folder_text")
 
-        # 'same' and 'subfolder' both write inside every source folder
         for folder in self._source_output_folders():
-            if not _is_writable_dir(folder):
+            if not os.path.isdir(folder):
                 return f"{trans.t('msg_save_failed_info_write')}\n{folder}"
+            target = os.path.realpath(os.path.join(folder, output_path)) if output_type == 'subfolder' else folder
+            root = os.path.realpath(folder)
+            if output_type == 'subfolder' and (os.path.isabs(output_path) or
+                    os.path.commonpath((root, target)) != root):
+                return f"{trans.t('msg_save_failed_info_write')}\n{target}"
+            if os.path.exists(target) and not os.path.isdir(target):
+                return f"{trans.t('msg_save_failed_info_write')}\n{target}"
+            if not _is_writable_dir(target if os.path.isdir(target) else folder):
+                return f"{trans.t('msg_save_failed_info_write')}\n{target}"
         return None
 
 
@@ -933,63 +1601,22 @@ class FolderImportDialog(QDialog):
         self.setWindowTitle(trans.t('import_folder_title'))
         self.resize(500, 200)
 
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: "Segoe UI", "Microsoft YaHei";
-            }}
-            QLabel {{
-                color: #ffffff;
-            }}
-            QRadioButton {{
-                spacing: 10px;
-                color: #ffffff;
-            }}
-            QRadioButton::indicator {{
-                width: 18px;
-                height: 18px;
-                border-radius: 9px;
-                border: 2px solid #888;
-                background-color: #333;
-            }}
-            QRadioButton::indicator:checked {{
-                background: qradialgradient(cx:0.5, cy:0.5, radius:0.4, fx:0.5, fy:0.5, stop:0 #fff, stop:0.7 #fff, stop:0.71 #333, stop:1 #333);
-            }}
-            QRadioButton::indicator:hover {{
-                border: 2px solid #aaa;
-            }}
-            QPushButton {{
-                background-color: #444;
-                color: white;
-                border: 1px solid #222;
-                padding: 8px 20px;
-                border-radius: 4px;
-                font-weight: normal;
-            }}
-            QPushButton:hover {{
-                background-color: #555;
-            }}
-            QPushButton:pressed {{
-                background-color: #333;
-            }}
-        """)
 
         layout = QVBoxLayout(self)
 
         folder_name = os.path.basename(folder_path)
         folder_display = QLabel(trans.t('import_folder_display').format(folder_name))
-        folder_display.setStyleSheet("font-size: 14px;")
+        
         layout.addWidget(folder_display)
 
         path_label = QLabel(folder_path)
-        path_label.setStyleSheet("color: #aaa; font-size: 11px;")
+        path_label.setObjectName("mutedLabel")
         layout.addWidget(path_label)
 
         layout.addSpacing(20)
 
         option_label = QLabel(trans.t('import_choice_label'))
-        option_label.setStyleSheet("font-size: 13px;")
+        
         layout.addWidget(option_label)
 
         self.rb_single = QRadioButton(trans.t('import_option_single'))
@@ -1005,6 +1632,7 @@ class FolderImportDialog(QDialog):
         btn_layout.addStretch()
 
         self.ok_button = QPushButton(trans.t('btn_ok'))
+        self.ok_button.setObjectName("primaryButton")
         self.ok_button.setDefault(True)
         self.ok_button.clicked.connect(self.accept)
         btn_layout.addWidget(self.ok_button)

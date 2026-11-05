@@ -2,8 +2,90 @@ import os
 import sys
 from typing import Optional
 
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import QApplication, QMessageBox, QStyle
 from PyQt6.QtGui import QPixmap, QImage
+
+
+def size_dialog_to_content(dialog, scroll, preferred_width=0):
+    """Fit a dialog's scrollable content and fixed controls to its screen.
+
+    Call after populating the scroll area's widget and initializing visibility.
+    Content that does not fit remains reachable through the scroll area.
+    """
+    content = scroll.widget()
+    layout = dialog.layout()
+    content.ensurePolished()
+    dialog.ensurePolished()
+    content.layout().activate()
+    layout.activate()
+    hint = content.sizeHint().expandedTo(content.minimumSizeHint())
+    scroll_hint = scroll.sizeHint()
+    dialog_hint = dialog.sizeHint()
+    extra_width = max(0, dialog_hint.width() - scroll_hint.width())
+    extra_height = max(0, dialog_hint.height() - scroll_hint.height())
+
+    screen = dialog.screen() or QApplication.primaryScreen()
+    if screen is None:
+        dialog.resize(max(preferred_width, hint.width() + extra_width),
+                      hint.height() + extra_height)
+        return
+
+    available = screen.availableGeometry()
+    style = dialog.style()
+    frame = style.pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth, None, dialog)
+    title = style.pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight, None, dialog)
+    max_width = max(1, available.width() - 2 * frame)
+    max_height = max(1, available.height() - title - 2 * frame)
+    width = min(max_width, max(preferred_width, hint.width() + extra_width))
+    content_width = max(1, width - extra_width)
+    content_layout = content.layout()
+    height = hint.height()
+    if content_layout.hasHeightForWidth():
+        height = max(height, content_layout.totalHeightForWidth(content_width))
+    dialog.resize(width, min(max_height, height + extra_height))
+
+
+def make_folder_path_editable(dialog) -> None:
+    """Add a path field without changing QFileDialog's internal controls."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QLineEdit, QSplitter, QVBoxLayout
+    from locales import trans
+
+    class _DirectoryPathEdit(QLineEdit):
+        def keyPressEvent(self, event):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                picker = self.window()
+                raw = self.text().strip().strip('"').strip("'")
+                target = os.path.expandvars(os.path.expanduser(raw))
+                if target and os.path.isdir(target):
+                    picker.setDirectory(target)
+                self.setText(picker.directory().absolutePath())
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
+    path_edit = _DirectoryPathEdit(dialog)
+    # Qt owns the C++ widget; retain its Python subclass for keyPressEvent.
+    dialog._folder_path_edit = path_edit
+    path_edit.setObjectName("folderPathEdit")
+    path_edit.setPlaceholderText(trans.t("batch_pick_path_hint"))
+    path_edit.setClearButtonEnabled(True)
+    path_edit.setText(dialog.directory().absolutePath())
+    dialog.directoryEntered.connect(path_edit.setText)
+
+    layout = dialog.layout()
+    splitter = dialog.findChild(QSplitter, "splitter")
+    index = layout.indexOf(splitter) if splitter is not None else -1
+    if index >= 0:
+        row, column, row_span, column_span = layout.getItemPosition(index)
+        layout.removeWidget(splitter)
+        content = QVBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.addWidget(path_edit)
+        content.addWidget(splitter, 1)
+        layout.addLayout(content, row, column, row_span, column_span)
+    else:
+        layout.addWidget(path_edit, layout.rowCount(), 0, 1, layout.columnCount())
 
 
 def resource_path(*relative_parts: str) -> str:
@@ -82,6 +164,23 @@ def resource_path(*relative_parts: str) -> str:
 
 
 
+
+
+def dialog_theme(parent) -> str:
+    """'light' or 'dark' for a dialog whose parent is the main window."""
+    return "light" if getattr(parent, "ui_theme", "dark") == "light" else "dark"
+
+
+def apply_dialog_theme(dialog, parent, dark_qss: str) -> None:
+    """Apply `dark_qss` only in dark mode.
+
+    Every dialog used to hard-code the dark palette, so in light mode the app
+    showed dark slabs in the middle of a white window (and some of them were
+    barely readable). In light mode the app-level light stylesheet already
+    covers the standard controls, so nothing extra is needed.
+    """
+    if dialog_theme(parent) == "dark":
+        dialog.setStyleSheet(dark_qss)
 
 
 def style_message_box(box):

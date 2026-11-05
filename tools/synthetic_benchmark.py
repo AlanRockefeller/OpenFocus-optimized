@@ -28,8 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-ALL_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
-               "openfocus_a", "openfocus_b", "openfocus_c"]
+from core.algorithms import fusion_algorithms, get_fusion
 
 
 def make_texture(h, w, seed=0):
@@ -45,14 +44,15 @@ def make_texture(h, w, seed=0):
         p1 = (int(rng.integers(0, w)), int(rng.integers(0, h)))
         p2 = (int(rng.integers(0, w)), int(rng.integers(0, h)))
         cv2.line(img, p1, p2, c, int(rng.integers(1, 3)), cv2.LINE_AA)
-    # OpenCV 5 restricts putText to CV_8U. The benchmark scene is quantized
-    # to uint8 on return anyway, so rasterize labels on that final canvas.
-    img = np.clip(img, 0, 255).astype(np.uint8)
+    # OpenCV 5 accepts text only on uint8 images; keep the texture in float
+    # and apply the generated text mask afterward.
+    text_mask = np.zeros((h, w), np.uint8)
     for i in range(12):
-        cv2.putText(img, "OpenFocus %d" % i,
+        cv2.putText(text_mask, "OpenFocus %d" % i,
                     (int(rng.integers(0, w - 200)), int(rng.integers(20, h))),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 1, cv2.LINE_AA)
-    return img.astype(np.float32)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, 255, 1, cv2.LINE_8)
+    img[text_mask != 0] = 20
+    return np.clip(img, 0, 255).astype(np.float32)
 
 
 def make_depth(h, w):
@@ -158,7 +158,7 @@ def run(methods, n_frames=16, size=(768, 1024), noise=0.0, kernel=None,
             rows.append((m, None, None, None, None, str(exc)[:60]))
             continue
         kw = {}
-        if kernel is not None:
+        if kernel is not None and any(p.key == "kernel_size" for p in get_fusion(m).parameters):
             kw["kernel_size"] = kernel
         t0 = time.time()
         try:
@@ -174,7 +174,8 @@ def run(methods, n_frames=16, size=(768, 1024), noise=0.0, kernel=None,
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("-m", "--methods", nargs="+", default=ALL_METHODS)
+    methods = [spec.id for spec in fusion_algorithms()]
+    ap.add_argument("-m", "--methods", nargs="+", default=methods, choices=methods)
     ap.add_argument("--frames", type=int, default=16)
     ap.add_argument("--noise", type=float, default=0.0)
     ap.add_argument("--kernel", type=int, default=None)

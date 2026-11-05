@@ -26,9 +26,11 @@ class TransformManager:
 
         if getattr(window, "base_images", None):
             window.base_images = [cv2.rotate(img, rotation_code) for img in window.base_images]
+        window.source_transforms = list(getattr(window, "source_transforms", [])) + [
+            {"operation": "rotate", "code": int(rotation_code)}]
 
         self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
-        self.reload_image_stack(initial_index=getattr(self.window, "current_img_index", 0))
+        self.reload_image_stack(initial_index=getattr(window, "current_display_index", 0))
 
     def flip_stack(self, flip_code: int) -> None:
         """Flip every image in the current stack."""
@@ -42,6 +44,8 @@ class TransformManager:
 
         if getattr(window, "base_images", None):
             window.base_images = [cv2.flip(img, flip_code) for img in window.base_images]
+        window.source_transforms = list(getattr(window, "source_transforms", [])) + [
+            {"operation": "flip", "code": int(flip_code)}]
 
         self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
         self.reload_image_stack(initial_index=getattr(self.window, "current_img_index", 0))
@@ -51,6 +55,10 @@ class TransformManager:
         window = self.window
         if not window.raw_images:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_no_images_resize"))
+            return
+        if any(img.ndim == 3 and img.shape[2] == 4 for img in window.raw_images):
+            show_warning_box(window, trans.t('msg_warning'),
+                             trans.t('transparent_desktop_unsupported').format(path=''))
             return
 
         # base_images are the sharpest frames the session holds, decoded at
@@ -69,9 +77,10 @@ class TransformManager:
             return
 
         window.push_undo()
+        old_height, old_width = window.raw_images[0].shape[:2]
         try:
             if abs(new_scale - base_scale) < 0.001:
-                window.raw_images = [img.copy() for img in window.base_images]
+                window.raw_images = list(window.base_images)
             else:
                 factor = new_scale / base_scale
                 new_width = max(1, int(window.base_images[0].shape[1] * factor))
@@ -82,6 +91,13 @@ class TransformManager:
                 ]
 
             window.current_scale_factor = new_scale
+            actual_height, actual_width = window.raw_images[0].shape[:2]
+            scale_labels = getattr(getattr(window, "label_manager", None), "scale_stack_labels", None)
+            if callable(scale_labels):
+                scale_labels(actual_width / old_width, actual_height / old_height)
+            metadata_scale = getattr(window, "source_px_um", None)
+            if metadata_scale:
+                window.source_px_um = metadata_scale * old_width / actual_width
 
             self._invalidate_processing_results(clear_output_view=True, preserve_outputs=True)
             self.reload_image_stack(initial_index=getattr(self.window, "current_img_index", 0))
@@ -127,7 +143,19 @@ class TransformManager:
             # pixmaps for every frame costs seconds and hundreds of MB on
             # large stacks, while only one frame is visible at a time.
             window.stack_images = [None] * len(window.raw_images)
-            thumbnails = window.image_loader.create_thumbnails(window.raw_images, thumb_size=40)
+            metadata = getattr(window, "linear_dng_metadata", None)
+            if metadata is None:
+                thumbnails = window.image_loader.create_thumbnails(window.raw_images, thumb_size=40)
+            else:
+                from utils.linear_dng import develop_linear
+                thumbnails = []
+                for image in window.raw_images:
+                    h, w = image.shape[:2]
+                    scale = 40 / max(h, w)
+                    small = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))),
+                                       interpolation=cv2.INTER_AREA)
+                    thumbnails.extend(window.image_loader.create_thumbnails(
+                        [develop_linear(small, metadata)], thumb_size=40))
 
             # Per-frame sharpness for the curve above the navigation slider
             self._update_sharpness_curve(window)
@@ -172,6 +200,9 @@ class TransformManager:
         curve = getattr(window, "sharpness_curve", None)
         if curve is None:
             return
+        if any(img.ndim == 3 and img.shape[2] == 4 for img in window.raw_images):
+            curve.set_data([])
+            return
         try:
             values = []
             for img in window.raw_images:
@@ -198,6 +229,8 @@ class TransformManager:
         window.roi_aligned_images = []
         window.roi_aligned_raw_count = 0
         window.roi_mode_active = False
+        window.roi_source_revision = None
+        window.roi_included_indices = None
 
         result_view = getattr(window, "lbl_result_img", None)
         if result_view is not None:
@@ -222,8 +255,8 @@ class TransformManager:
         """Clear cached processing results and reset related UI elements."""
         window = self.window
 
-        # Exclusions are index-based: any stack mutation invalidates them.
-        window.excluded_frames = set()
+        window.source_revision = getattr(window, "source_revision", 0) + 1
+        window.alignment_request_key = None
 
         window.aligned_images = []
         window.is_images_aligned = False
@@ -233,6 +266,9 @@ class TransformManager:
         self.reset_roi_selection()
 
         window.registration_results = []
+        window.registration_frame_ids = []
+        window.registered_source_indices = []
+        window.registration_filenames = []
         window.current_result_index = -1
 
         window.add_label_action.setEnabled(False)

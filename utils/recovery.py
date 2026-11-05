@@ -8,7 +8,10 @@ closeEvent (crash, kill, power loss) — the user is then offered a
 one-click restore of that snapshot.
 """
 import os
+import tempfile
 from typing import Optional
+
+from utils import app_paths
 
 RECOVERY_DIR_NAME = "recovery"
 SESSION_FILE = "session.ofproj"
@@ -22,9 +25,9 @@ PENDING_RESTORE_FILE = "restore_pending.txt"
 def _base_dir() -> str:
     """Directory holding settings — portable-aware, so recovery data
     travels with a portable install exactly like the settings do."""
-    from utils.settings_store import get_settings, is_portable_mode, portable_data_dir
-    if is_portable_mode():
-        return portable_data_dir()
+    if app_paths.is_portable_mode():
+        return app_paths.portable_data_dir()
+    from utils.settings_store import get_settings
     ini = get_settings().fileName()
     return os.path.dirname(str(ini))
 
@@ -62,9 +65,19 @@ def mark_clean_exit() -> None:
 
 def write_snapshot(window) -> bool:
     """Persist the current session to the recovery slot. Best-effort:
-    never raises into callers (render/load handlers)."""
+    never raises into callers (render/load handlers).
+
+    An empty workspace is a real state: it removes any older snapshot so a
+    restart cannot resurrect a session the user had already cleared, and
+    reports success because there is nothing to save.
+    """
     if not getattr(window, "raw_images", None):
-        return False
+        try:
+            if os.path.isfile(session_path()):
+                os.remove(session_path())
+            return True
+        except OSError:
+            return False
     try:
         from utils.project_file import save_project
         os.makedirs(recovery_dir(), exist_ok=True)
@@ -93,16 +106,27 @@ def load_snapshot_state() -> Optional[dict]:
 def mark_pending_restore(window) -> bool:
     """Snapshot the session and ask the next launch to restore it silently.
 
-    Called just before quitting to install an update. The project path (when
-    the user had a .ofproj open) is stored too, so the relaunched build can
-    reopen the exact project rather than a reconstructed snapshot.
+    Restore the freshly written snapshot; the marker retains only the saved
+    document association. An empty workspace has no project restore target.
     """
     try:
-        write_snapshot(window)
+        if not write_snapshot(window):
+            # A snapshot that did not reach disk must not be promised as a
+            # restore target: the relaunched build would reopen stale state.
+            return False
         os.makedirs(recovery_dir(), exist_ok=True)
-        project = str(getattr(window, "project_path", "") or "")
-        with open(pending_restore_path(), "w", encoding="utf-8") as f:
-            f.write(project)
+        fd, temporary = tempfile.mkstemp(dir=recovery_dir(), suffix=".pending.tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(str(getattr(window, "project_path", "") or "")
+                        if getattr(window, "raw_images", None) else "")
+            os.replace(temporary, pending_restore_path())
+        except BaseException:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+            raise
         return True
     except Exception:
         return False
@@ -145,4 +169,4 @@ def pending_recovery() -> Optional[dict]:
 def snapshot_frame_count(state: Optional[dict]) -> int:
     if not state:
         return 0
-    return len(state.get("resolved_sources") or state.get("sources") or [])
+    return len(state.get("frame_order") or state.get("resolved_sources") or state.get("sources") or [])

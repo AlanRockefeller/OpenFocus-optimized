@@ -1,16 +1,15 @@
 """Depth-map (focus-position index) and pseudo-color colormap tests."""
-import time
 
 import cv2
 import numpy as np
 import pytest
 
 from core.depth_map import (
-    SUPPORTED_METHODS,
     DepthMapCancelled,
     compute_focus_index,
     smooth_index_map,
 )
+from core.algorithms import depth_algorithms
 from utils.colormap import (
     build_lut_from_stops,
     builtin_choices,
@@ -47,6 +46,17 @@ class TestComputeFocusIndex:
         assert idx[:, 110:210].mean() == pytest.approx(0.5, abs=0.1)
         assert idx[:, 220:].mean() == pytest.approx(1.0, abs=0.1)
 
+    @pytest.mark.parametrize("method,parameter", [
+        ("openfocus_b", "depth_smoothing"),
+        ("openfocus_c", "blend_smoothing"),
+    ])
+    def test_openfocus_smoothing_changes_depth_transition(self, method, parameter):
+        frames = _synthetic_thirds(80, 120)
+        sharp = compute_focus_index(frames, method, {parameter: 0})
+        smooth = compute_focus_index(frames, method, {parameter: 8})
+        assert np.any(np.abs(sharp - smooth) > 0.01)
+        assert smooth[:, :30].mean() < smooth[:, 90:].mean()
+
     def test_weighted_average_methods_rejected(self):
         """加权平均类融合没有逐像素决策——不提供深度图（v1.44 设计收敛）。"""
         for method in ("guided_filter", "openfocus_a"):
@@ -62,28 +72,10 @@ class TestComputeFocusIndex:
             compute_focus_index([np.zeros((10, 10, 3), np.uint8)], "dct")
 
     def test_supported_list_complete(self):
-        assert set(SUPPORTED_METHODS) == {
-            "dct", "dtcwt", "gfgfgf", "stackmffv4",
+        assert {spec.id for spec in depth_algorithms()} == {
+            "dct", "dtcwt", "gfgfgf", "stackmffv3", "stackmffv2",
             "openfocus_b", "openfocus_c"}
 
-    def test_openfocus_depth_maps_differ(self):
-        """B/C 的深度侧写照各自的融合管线：B=方差硬 argmax，
-        C=带通能量 argmax（v1.43 前两者共用一张图，是缺陷）。"""
-        rng = np.random.default_rng(11)
-        h, w = 160, 240
-        tex = np.clip(128 + rng.normal(0, 30, (h, w, 3)), 0, 255)
-        # 两帧都有纹理（重叠聚焦）：f0 左 2/3 强，f1 右 2/3 强
-        f0 = tex.copy()
-        f0[:, int(w * 2 / 3):] = cv2.GaussianBlur(tex, (0, 0), 4)[:, int(w * 2 / 3):]
-        f1 = tex.copy()
-        f1[:, :int(w / 3)] = cv2.GaussianBlur(tex, (0, 0), 4)[:, :int(w / 3)]
-        frames = [f0.astype(np.uint8), f1.astype(np.uint8)]
-        b = compute_focus_index(frames, "openfocus_b")
-        c = compute_focus_index(frames, "openfocus_c")
-        # B 是硬拾取：只有 0/1 两个值
-        assert set(np.unique(np.round(b, 3))) <= {0.0, 1.0}
-        # C 的带通能量选择与 B 的方差统计不同（至少不是逐位相同）
-        assert not np.allclose(b, c, atol=1e-6)
 
     def test_cancellation(self):
         def cancel():
@@ -201,103 +193,369 @@ class TestReviewFixes:
         assert rc == 2  # EXIT_USAGE
         assert "--depth-colormap" in capsys.readouterr().err
 
-    def test_close_detaches_running_worker(self, monkeypatch, qapp):
-        import threading
-        import os as _os
-        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt6.QtWidgets import QWidget
-        app = qapp  # noqa: F841
-        import dialogs.depthmap as dm
-        from core import depth_map
 
-        started = threading.Event()
+def test_raw_depth_export_requires_tiff(qapp, monkeypatch, tmp_path):
+    """The raw 16-bit exit must not silently become an 8-bit JPEG."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt6.QtWidgets import QWidget, QFileDialog
+    import dialogs.depthmap as dm
+    from core import depth_map
+    from tests.test_depth_dialog import _ramp, _wait
+    monkeypatch.setattr(depth_map, "compute_focus_index", _ramp)
 
-        def slow_compute(images, method, **kw):
-            started.set()
-            time.sleep(0.8)
-            return np.zeros(images[0].shape[:2], np.float32)
+    class _Stub(QWidget):
+        raw_images = [np.zeros((32, 32, 3), np.uint8) for _ in range(2)]
+        ui_theme = "dark"
+        use_gpu = False
+        fusion_result = None
+        current_fusion_method = lambda self: "dtcwt"
 
-        monkeypatch.setattr(depth_map, "compute_focus_index", slow_compute)
-
-        class _Stub(QWidget):
-            raw_images = [np.zeros((32, 32, 3), np.uint8) for _ in range(2)]
-            ui_theme = "dark"
-            use_gpu = False
-            fusion_result = None
-
-        # dct is a fast method -> construction auto-starts the
-        # (monkeypatched, slow) worker
-        dlg = dm.DepthMapDialog(_Stub())
-        assert started.wait(5), "auto-compute did not start"
-        worker = dlg._worker
-        assert worker is not None and worker.isRunning()
+    dlg = dm.DepthMapDialog(_Stub())
+    try:
+        dlg.compute_btn.click()
+        _wait(qapp, lambda: dlg._worker is None)
+        assert dlg._has_current_map()
+        target = tmp_path / "raw.jpg"
+        monkeypatch.setattr(QFileDialog, "getSaveFileName",
+                            staticmethod(lambda *a, **k: (str(target), "")))
+        written = []
+        monkeypatch.setattr(dm, "imwrite_auto",
+                            lambda path, image, *a, **k: written.append(path) or True)
+        dlg._save(colorized=False)
+        assert written == [], "raw 16-bit data must not be written as JPEG"
+    finally:
         dlg.reject()
-        # the dialog must not keep (and later destroy) a running QThread:
-        # it detaches it, keeps a module-level reference, and lets it
-        # self-clean on finish
-        assert dlg._worker is None
-        assert worker in dm._ORPHAN_WORKERS
-        deadline = time.time() + 5
-        while dm._ORPHAN_WORKERS and time.time() < deadline:
-            app.processEvents()
-            time.sleep(0.02)
-        assert worker not in dm._ORPHAN_WORKERS
 
-    def test_switching_to_fast_method_auto_computes(self, monkeypatch, qapp):
-        """切换到秒级方法时自动重算（与打开即算一致）——v1.44 前切换后
-        只给一条"按计算刷新"提示，秒级方法也要手动点。"""
-        import threading
-        import os as _os
-        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from PyQt6.QtWidgets import QWidget
-        app = qapp  # noqa: F841
-        import dialogs.depthmap as dm
-        from core import depth_map
 
-        calls = []
-        started = threading.Event()
+@pytest.mark.parametrize("first_16bit", [False, True])
+def test_mixed_depth_frames_normalize_individually(first_16bit):
+    frames = _synthetic_thirds(64, 96)
+    baseline = compute_focus_index([f.astype(np.float32) for f in frames], "dct", kernel_size=1)
+    mixed = [frame.astype(np.uint16) * 257 if ((i == 0) == first_16bit)
+             else frame for i, frame in enumerate(frames)]
+    np.testing.assert_array_equal(compute_focus_index(mixed, "dct", kernel_size=1), baseline)
 
-        def counting_compute(images, method, **kw):
-            calls.append(method)
-            started.set()
-            return np.zeros(images[0].shape[:2], np.float32)
 
-        monkeypatch.setattr(depth_map, "compute_focus_index", counting_compute)
+def test_smoothing_preserves_sub_256_plane_precision():
+    index = np.full((24, 24), 257 / 1023, np.float32)
+    original = index.copy()
+    np.testing.assert_allclose(smooth_index_map(index, 1), index, atol=1e-7)
+    np.testing.assert_array_equal(index, original)
 
-        class _Stub(QWidget):
-            raw_images = [np.zeros((32, 32, 3), np.uint8) for _ in range(2)]
-            ui_theme = "dark"
-            use_gpu = False
-            fusion_result = None
-            slider_smooth = type("S", (), {"value": lambda s: 7})()
 
-        dlg = dm.DepthMapDialog(_Stub())
-        assert started.wait(5), "auto-compute did not start on open"
-        # 等首个计算完成（线程退出）：计算进行中切换方法会跳过自动重算
-        # （一次只允许一个 worker），CI 慢机上此处不等待就是时序脆弱点
-        deadline = time.time() + 10
-        while (dlg._worker is not None and dlg._worker.isRunning()
-               and time.time() < deadline):
-            app.processEvents()
-            time.sleep(0.01)
-        app.processEvents()
-        n_on_open = len(calls)
+def test_dct_depth_reconstructs_fusion_at_padded_edges():
+    from fusion_methods.dct import dct_focus_stack_fusion
+    frames = _synthetic_thirds(245, 321)
+    index = compute_focus_index(frames, "dct", kernel_size=1)
+    choice = np.rint(index * (len(frames) - 1)).astype(int)
+    expected = np.zeros_like(frames[0])
+    for i, frame in enumerate(frames):
+        expected[choice == i] = frame[choice == i]
+    np.testing.assert_array_equal(dct_focus_stack_fusion(frames, kernel_size=1), expected)
 
-        # 切换到另一个秒级方法 → 自动重算
-        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("gfgfgf"))
-        deadline = time.time() + 10
-        while len(calls) == n_on_open and time.time() < deadline:
-            app.processEvents()
-            time.sleep(0.02)
-        assert len(calls) > n_on_open, "fast method switch did not auto-compute"
-        assert calls[-1] == "gfgfgf"
 
-        # 切换到慢速方法（dtcwt）→ 不自动算，只提示
-        n_before = len(calls)
-        dlg.method_combo.setCurrentIndex(dlg.method_combo.findData("dtcwt"))
-        deadline = time.time() + 3
-        while len(calls) > n_before and time.time() < deadline:
-            app.processEvents()
-            time.sleep(0.02)
-        assert len(calls) == n_before, "slow method must not auto-compute"
-        dlg.reject()
+def test_empty_effective_depth_stack_never_falls_back_to_registered(qapp):
+    from PyQt6.QtWidgets import QWidget
+    from dialogs.depthmap import DepthMapDialog
+    window = QWidget()
+    window.raw_images = _synthetic_thirds(32, 48)
+    window.registration_results = window.raw_images
+    window.effective_stack = lambda: ([], [], [])
+    window.current_fusion_method = lambda: "dct"
+    dialog = DepthMapDialog(window)
+    try:
+        assert dialog._images() is None
+        assert dialog._worker is None
+        assert not dialog.btn_save_raw.isEnabled()
+    finally:
+        dialog.reject()
+
+
+def test_depth_source_and_texture_bind_selected_output(qapp):
+    from PyQt6.QtWidgets import QWidget, QListWidget, QListWidgetItem
+    from core.render_context import build_render_context
+    from controllers.output_manager import OutputRecord, OUTPUT_RECORD_ROLE, OutputManager
+    from dialogs.depthmap import DepthMapDialog
+    window = QWidget()
+    window.raw_images = _synthetic_thirds(32, 48)
+    window.effective_stack = lambda: (window.raw_images[:2], ["now-a", "now-b"], [0, 1])
+    window.current_fusion_method = lambda: "dtcwt"
+    window.output_list = QListWidget(window)
+    window.output_manager = OutputManager(window)
+    historical = [frame.copy() for frame in window.raw_images]
+    image = np.full((32, 48, 3), 32123, np.uint16)
+    record = OutputRecord.create(image, "historical", context=build_render_context(
+        historical, image, filenames=["A", "B", "C"], source_indices=[0, 2, 5]))
+    item = QListWidgetItem("historical", window.output_list)
+    item.setData(OUTPUT_RECORD_ROLE, record)
+    item.setSelected(True)
+    window.fusion_result = np.zeros_like(image)
+    dialog = DepthMapDialog(window)
+    try:
+        assert dialog._images()[0] is historical[0]
+        assert np.shares_memory(dialog._matching_texture(), image)
+        window.fusion_result = np.ones_like(image)
+        assert np.shares_memory(dialog._matching_texture(), image)
+        dialog.source_combo.setCurrentIndex(0)
+        assert len(dialog._images()) == 2
+        assert dialog._matching_texture() is None
+    finally:
+        dialog.reject()
+
+
+
+
+def test_depth_registration_precedes_reverse_and_never_writes_files(monkeypatch):
+    from dialogs.depthmap import DepthWorker
+    import core.compare_worker as compare_worker
+    import core.depth_map as depth_map
+    frames = [np.full((8, 8, 3), i + 1, np.uint8) for i in range(3)]
+    seen = []
+    def align(images, method, settings, should_cancel):
+        seen.append((method, [int(image[0, 0, 0]) for image in images]))
+        return images
+    def compute(images, method, **kwargs):
+        seen.append((method, [int(image[0, 0, 0]) for image in images]))
+        return np.zeros((8, 8), np.float32)
+    monkeypatch.setattr(compare_worker, "align_frames", align)
+    monkeypatch.setattr(depth_map, "compute_focus_index", compute)
+    worker = DepthWorker(frames, "openfocus_b", False)
+    worker.alignment = "ecc"
+    worker.reverse_order = True
+    worker.run()
+    assert seen == [("ecc", [1, 2, 3]), ("openfocus_b", [3, 2, 1])]
+
+
+def test_physical_roi_export_keeps_outside_as_nan(qapp, monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QWidget, QListWidget, QListWidgetItem, QFileDialog
+    from controllers.output_manager import OutputManager, OutputRecord, OUTPUT_RECORD_ROLE
+    from core.render_context import build_render_context
+    from dialogs.depthmap import DepthMapDialog
+    from PIL import Image
+    from core import depth_map
+    from tests.test_depth_dialog import _wait
+    monkeypatch.setattr(depth_map, "compute_focus_index",
+                        lambda images, method, **kwargs: np.full(images[0].shape[:2], 0.5, np.float32))
+    window = QWidget()
+    frames = [np.full((12, 16, 3), value, np.uint8) for value in (20, 40)]
+    image = frames[0].copy()
+    context = build_render_context(frames, image, algorithm="dtcwt", roi_rect=(3, 2, 6, 5),
+                                   roi_mode="paste", source_indices=[0, 5])
+    window.raw_images = frames
+    window.output_list = QListWidget(window)
+    window.output_manager = OutputManager(window)
+    record = OutputRecord.create(image, "ROI", context=context)
+    item = QListWidgetItem("ROI", window.output_list)
+    item.setData(OUTPUT_RECORD_ROLE, record)
+    item.setSelected(True)
+    dialog = DepthMapDialog(window)
+    target = tmp_path / "物理.tif"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    try:
+        dialog.compute_btn.click()
+        _wait(qapp, lambda: dialog._worker is None)
+        assert dialog._has_current_map()
+        dialog.z_step.setValue(2)
+        dialog.z_mapping.setChecked(True)
+        dialog._save_physical()
+        with Image.open(target) as stored:
+            depth = np.asarray(stored)
+        assert depth.dtype == np.float32
+        assert np.isnan(depth[0, 0])
+        np.testing.assert_array_equal(depth[2:7, 3:9], np.full((5, 6), 5, np.float32))
+    finally:
+        dialog.reject()
+
+
+def test_direct_depth_rejects_insufficient_ram_before_conversion(monkeypatch):
+    from core import resource_policy
+    frames = _synthetic_thirds(32, 48)
+    originals = [frame.copy() for frame in frames]
+    monkeypatch.setattr(resource_policy, 'probe_resources', lambda *args, **kwargs:
+                        resource_policy.ResourceSnapshot(available_ram=1024,
+                                                         total_ram=8 * 1024 ** 3))
+    with pytest.raises(resource_policy.ResourceLimitError):
+        compute_focus_index(frames, 'dct')
+    for frame, original in zip(frames, originals):
+        np.testing.assert_array_equal(frame, original)
+
+
+def test_depth_cancel_during_last_frame_never_publishes_map():
+    cancelled = False
+
+    def progress(done, total):
+        nonlocal cancelled
+        if done == total - 1:
+            cancelled = True
+
+    with pytest.raises(DepthMapCancelled):
+        compute_focus_index(_synthetic_thirds(32, 48), 'openfocus_b',
+                            progress_callback=progress,
+                            should_cancel=lambda: cancelled)
+
+
+def test_odd_size_neural_depth_uses_fusion_probabilities():
+    torch = pytest.importorskip('torch')
+    from core.resource_policy import heavy_job
+    from fusion_methods import stackmffv3 as ai
+    from utils.image_utils import normalize_fuse_input
+    rng = np.random.default_rng(517)
+    frames = [rng.integers(0, 65536, (17, 38, 3), np.uint16)[:, ::2]
+              for _ in range(3)]
+    normalized, _ = normalize_fuse_input(frames)
+    with heavy_job():
+        model, device = ai._get_model_and_device('weights/stackmff_v3_final.pth', False)
+        # Independent baseline: the fusion adapter pads luma exactly once.
+        batch = torch.from_numpy(np.stack([ai._gray01(f) for f in normalized]))[None]
+        batch = torch.nn.functional.pad(batch, (0, 45, 0, 47), mode='replicate')
+        with torch.no_grad():
+            expected_probs = model.forward_probs(batch.to(device), sigma=0.5)
+        expected_probs = expected_probs[0, :, :17, :19].cpu().numpy()
+    actual_probs = ai.model_probabilities(frames, 'weights/stackmff_v3_final.pth',
+                                         False, sigma=0.5, thread_count=1)
+    np.testing.assert_allclose(actual_probs, expected_probs, rtol=1e-5, atol=1e-6)
+    expected = (expected_probs * np.arange(3, dtype=np.float32)[:, None, None]).sum(0) / 2
+    actual = compute_focus_index(frames, 'stackmffv3', thread_count=1)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_neural_depth_cancels_at_final_progress():
+    pytest.importorskip('torch')
+    cancelled = False
+
+    def progress(done, total):
+        nonlocal cancelled
+        cancelled = done == total
+
+    frames = [np.full((17, 19, 3), value, np.uint8) for value in (21, 111)]
+    with pytest.raises(DepthMapCancelled):
+        compute_focus_index(frames, 'stackmffv3', thread_count=1,
+                            progress_callback=progress, should_cancel=lambda: cancelled)
+
+
+def test_dct_depth_block_size_is_a_legacy_input():
+    """``block_size`` selects the DCT depth grid and stays accepted.
+
+    The registry migration replaced the named depth arguments with declared
+    parameters; ``block_size`` has no descriptor of its own, so it must still
+    be translated at the entry point instead of raising "unknown parameter".
+    """
+    frames = _synthetic_thirds()
+    coarse = compute_focus_index(frames, "dct", block_size=4)
+    fine = compute_focus_index(frames, "dct", block_size=16)
+    assert coarse.shape == fine.shape == (240, 320)
+    assert not np.array_equal(coarse, fine), "block_size did not change the grid"
+    # It remains a DCT-only argument: other measures must reject it.
+    with pytest.raises(ValueError):
+        compute_focus_index(frames, "gfgfgf", block_size=4)
+
+
+@pytest.mark.parametrize("smoothing", [0, 5])
+@pytest.mark.parametrize("winner", [500, 999])
+def test_deep_stack_depth_index_is_preserved(monkeypatch, smoothing, winner):
+    from fusion_methods import openfocus_depth
+
+    calls = 0
+
+    def fake_filter(src, radius, cancel, guide=None, low=None):
+        nonlocal calls
+        if guide is not None:
+            return src.astype(np.int64)
+        calls += 1
+        return np.zeros_like(src) if calls % 2 else src
+
+    monkeypatch.setattr(openfocus_depth, "_filter", fake_filter)
+    blank = np.zeros((2, 2), np.uint8)
+    frames = [blank] * 1000
+    frames[winner] = np.full((2, 2), 255, np.uint8)
+    depth = openfocus_depth.depth_map(frames, None, 11, smoothing, None)
+    np.testing.assert_allclose(depth, winner, atol=0.01)
+
+
+def test_depth_guide_expands_range_from_lower_percentile(monkeypatch):
+    from fusion_methods import openfocus_depth
+
+    activity = np.arange(100, dtype=np.int64).reshape(10, 10) * 10 + 1000
+    guides = []
+    calls = 0
+
+    def fake_filter(src, radius, cancel, guide=None, low=None):
+        nonlocal calls
+        if guide is not None:
+            guides.append(guide.copy())
+            return src.astype(np.int64)
+        calls += 1
+        return np.zeros_like(src) if calls % 2 else activity.copy()
+
+    monkeypatch.setattr(openfocus_depth, "_filter", fake_filter)
+    frames = [np.zeros((10, 10), np.uint8)] * 2
+    openfocus_depth.depth_map(frames, None, 11, 5, None)
+    assert guides[0][0, 0] < 100
+    assert guides[0][-1, -1] > 65000
+
+
+def test_estimated_indices_boundaries_and_invalid_pixels():
+    from core.depth_products import estimate_indices
+
+    positions = np.array([[0, .249, .25, .75, 1, np.nan]], np.float32)
+    mask = np.array([[True, True, True, True, False, True]])
+    np.testing.assert_array_equal(estimate_indices(positions, 3, mask),
+                                  [[1, 1, 2, 3, 0, 0]])
+    assert estimate_indices(np.array([[1]], np.float32), 65535)[0, 0] == 65535
+    with pytest.raises(ValueError):
+        estimate_indices(positions, 65536)
+
+
+@pytest.mark.parametrize('dtype', [np.uint8, np.uint16])
+def test_depth_guided_render_copies_exact_source_pixels(dtype):
+    from core.depth_products import estimate_indices, render_indices
+
+    frames = [np.array([[[1, 5, 7], [11, 19, 21], [23, 29, 31]]], dtype=dtype),
+              np.array([[[101, 105, 107], [111, 119, 121], [123, 129, 131]]], dtype=dtype)]
+    if dtype == np.uint16:
+        frames = [frame * 257 for frame in frames]
+    indices = estimate_indices(np.array([[0, 1, 1]], np.float32), 2,
+                               np.array([[True, True, False]]))
+    result = render_indices(indices, frames)
+    assert result.dtype == dtype
+    np.testing.assert_array_equal(result[0, 0], frames[0][0, 0])
+    np.testing.assert_array_equal(result[0, 1], frames[1][0, 1])
+    np.testing.assert_array_equal(result[0, 2], [0, 0, 0])
+
+
+def test_depth_products_cancel_and_reject_incompatible_sources():
+    from core.depth_map import DepthMapCancelled
+    from core.depth_products import estimate_indices, render_indices
+
+    index = np.zeros((2, 2), np.float32)
+    with pytest.raises(DepthMapCancelled):
+        estimate_indices(index, 2, should_cancel=lambda: True)
+    indices = estimate_indices(index, 2)
+    with pytest.raises(DepthMapCancelled):
+        render_indices(indices, [np.zeros((2, 2), np.uint8)] * 2,
+                       should_cancel=lambda: True)
+    with pytest.raises(ValueError):
+        render_indices(indices, [np.zeros((2, 2), np.uint8),
+                                 np.zeros((2, 2), np.float32)])
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_depth_guided_render_promotes_mixed_bit_depth(reverse):
+    from core.depth_products import render_indices
+
+    frames = [np.array([[3, 5]], np.uint8), np.array([[40001, 50003]], np.uint16)]
+    if reverse:
+        frames.reverse()
+    result = render_indices(np.array([[1, 2]], np.uint16), frames)
+    assert result.dtype == np.uint16
+    expected = [[40001, 5 * 257]] if reverse else [[3 * 257, 50003]]
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_depth_guided_render_rejects_out_of_range_index():
+    from core.depth_products import render_indices
+
+    frames = [np.zeros((1, 1), np.uint8)] * 2
+    with pytest.raises(ValueError):
+        render_indices(np.array([[3]], np.uint16), frames)

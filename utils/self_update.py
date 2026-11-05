@@ -16,9 +16,10 @@ process, so staging beside it would fail before the swap could even be
 offered. Elevation is handled by the apply script relaunching its robocopy
 step via PowerShell -Verb RunAs (one UAC prompt).
 
-The release tag arrives from the GitHub API, so it is treated as untrusted
+The release tag arrives from the download mirror, so it is treated as untrusted
 input: it is sanitised before reaching any filesystem path or script text.
 """
+import json
 import os
 import re
 import subprocess
@@ -28,6 +29,9 @@ import zipfile
 from typing import Callable, Optional
 
 PORTABLE_MARKER = "OpenFocus.portable"
+# Present only in the independent CUDA/ROCm/XPU preview builds. They carry a
+# different torch runtime, so the stable-channel updater must not replace them.
+GPU_VARIANT_MARKER = "OpenFocus.gpu-variant"
 
 _SAFE_TAG_RE = re.compile(r"[^A-Za-z0-9._-]")
 STAGING_PREFIX = "OpenFocus_update_"
@@ -43,6 +47,35 @@ def app_install_dir() -> str:
 
 def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
+
+
+def gpu_variant() -> dict:
+    """Return the build-time accelerator record; {} only for a stable build.
+
+    Fail closed: once the marker path exists, a malformed, oversized or
+    unreadable file still means "not a stable build" so the stable updater can
+    never replace a vendor runtime. Only a confirmed absent marker (or a
+    source run, which cannot self-update) opens the normal stable path.
+    """
+    if not is_frozen():
+        return {}
+    try:
+        path = os.path.join(app_install_dir(), GPU_VARIANT_MARKER)
+        os.lstat(path)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        return {"variant": "unknown", "invalid": True}
+    try:
+        if os.path.getsize(path) > 4096:
+            raise ValueError("marker is too large")
+        with open(path, encoding="utf-8") as stream:
+            data = json.load(stream)
+        if isinstance(data, dict) and str(data.get("variant") or ""):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {"variant": "unknown", "invalid": True}
 
 
 def sanitize_tag(tag: str) -> str:
@@ -112,27 +145,93 @@ def find_staged_bundle(staging_root: str) -> str:
     return ""
 
 
+def _valid_macos_bundle(bundle: str) -> bool:
+    """Check the declared executable, its mode, and native Mach-O architecture."""
+    import platform
+    import plistlib
+    import struct
+    try:
+        with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as stream:
+            name = plistlib.load(stream)["CFBundleExecutable"]
+        if not name or os.path.basename(name) != name:
+            return False
+        entry = os.path.join(bundle, "Contents", "MacOS", name)
+        if not os.path.isfile(entry) or not os.access(entry, os.X_OK):
+            return False
+        expected = 0x0100000C if platform.machine().lower() in ("arm64", "aarch64") else 0x01000007
+        with open(entry, "rb") as stream:
+            header = stream.read(8)
+            if len(header) != 8:
+                return False
+            magic = header[:4]
+            if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):
+                return struct.unpack("<I", header[4:])[0] == expected
+            if magic in (b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce"):
+                return struct.unpack(">I", header[4:])[0] == expected
+            if magic in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+                count = struct.unpack(">I", header[4:])[0]
+                size = 32 if magic[-1] == 0xBF else 20
+                if count > 32:
+                    return False
+                for _ in range(count):
+                    record = stream.read(size)
+                    if len(record) != size:
+                        return False
+                    if struct.unpack(">I", record[:4])[0] == expected:
+                        return True
+        return False
+    except (OSError, ValueError, KeyError, TypeError, plistlib.InvalidFileException):
+        return False
+
+
 def verify_staged_app(staging_root: str) -> bool:
     """True when the staged folder contains a runnable app entry."""
-    if sys.platform == "darwin" and find_staged_bundle(staging_root):
-        return True
+    if sys.platform == "darwin":
+        bundle = find_staged_bundle(staging_root)
+        return bool(bundle and _valid_macos_bundle(bundle))
     return bool(find_staged_app_dir(staging_root))
 
 
 def extract_zip(zip_path: str, dest_root: str,
-                on_progress: Optional[Callable[[int, int], None]] = None) -> None:
-    """Extract zip into dest_root with per-entry progress (done, total)."""
+                on_progress: Optional[Callable[[int, int], None]] = None,
+                should_cancel: Optional[Callable[[], bool]] = None) -> None:
+    """Extract at file boundaries, preserving Unix modes and safe bundle links."""
+    import shutil
+    import stat
+    from utils.updater import DownloadCancelled
+
+    def check_cancel():
+        if should_cancel is not None and should_cancel():
+            raise DownloadCancelled("staging cancelled")
+
     os.makedirs(dest_root, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as z:
-        entries = z.infolist()
-        total = len(entries)
+    root = os.path.realpath(dest_root)
+    with zipfile.ZipFile(zip_path) as archive:
+        entries = archive.infolist()
         for i, entry in enumerate(entries):
-            z.extract(entry, dest_root)
+            check_cancel()
+            target = os.path.join(root, entry.filename)
+            if os.path.commonpath((root, os.path.realpath(target))) != root:
+                raise ValueError("Archive entry escapes the staging directory")
+            mode = entry.external_attr >> 16
+            if entry.is_dir():
+                os.makedirs(target, exist_ok=True)
+            elif stat.S_ISLNK(mode):
+                link = archive.read(entry).decode("utf-8")
+                resolved = os.path.realpath(os.path.join(os.path.dirname(target), link))
+                if os.path.isabs(link) or os.path.commonpath((root, resolved)) != root:
+                    raise ValueError("Archive symlink escapes the staging directory")
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                os.symlink(link, target)
+            else:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with archive.open(entry) as source, open(target, "wb") as dest:
+                    shutil.copyfileobj(source, dest)
+                if mode and os.name != "nt":
+                    os.chmod(target, stat.S_IMODE(mode))
             if on_progress is not None:
-                try:
-                    on_progress(i + 1, total)
-                except Exception:
-                    pass
+                on_progress(i + 1, len(entries))
+        check_cancel()
 
 
 def _short_path(path: str) -> str:
@@ -155,16 +254,6 @@ def _short_path(path: str) -> str:
     except Exception:
         pass
     return path
-
-
-def _bat_path(path: str) -> str:
-    """Quote a path for cmd, refusing anything that could escape the quotes."""
-    abspath = _short_path(os.path.abspath(path))
-    if '"' in abspath or "\n" in abspath or "\r" in abspath:
-        raise ValueError("Unsafe path for the update script")
-    if not abspath.isascii():
-        raise ValueError("Path cannot be made ASCII-safe for the update script")
-    return f'"{abspath}"'
 
 
 def portable_zip_path(tag: str) -> str:
@@ -316,6 +405,7 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             # failed, a UAC prompt appeared instead, and the app never came
             # back. 10 tries × 5 s covers a several-second interpreter exit.
             " /E /IS /IT /R:10 /W:5 /NFL /NDL /NJH /NJS /NP"
+            " /XF OpenFocus.portable /XD OpenFocusData"
         )
         content = (
             "@echo off\r\n"
@@ -326,6 +416,7 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             f'if exist {_bp(sentinel)} del /Q {_bp(sentinel)} >nul 2>&1\r\n'
             'if "%~1"=="/elevated" goto elevatedcopy\r\n'
             "call :waitforexit\r\n"
+            "if errorlevel 1 exit /b 1\r\n"
             f"{copy_cmd}\r\n"
             "if errorlevel 8 (\r\n"
             # Re-invoke this script elevated. Keep `%~f0` inside PowerShell
@@ -364,6 +455,7 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             "exit /b\r\n"
             ":elevatedcopy\r\n"
             "call :waitforexit\r\n"
+            "if errorlevel 1 exit /b 1\r\n"
             f"{copy_cmd}\r\n"
             f'if not errorlevel 8 type NUL > {_bp(sentinel)}\r\n'
             "exit /b\r\n"
@@ -389,7 +481,7 @@ def write_apply_script_windows(app_dir: str, staging_app_dir: str, tag: str,
             "if %GONE% GEQ 2 exit /b 0\r\n"
             ":wait_check\r\n"
             "set /a TRIES+=1\r\n"
-            "if %TRIES% GEQ 60 exit /b 0\r\n"
+            "if %TRIES% GEQ 60 exit /b 1\r\n"
             # ping 而不是 timeout：隐藏控制台下 timeout 直接报错退出（不等待）
             "ping -n 2 127.0.0.1 >NUL 2>&1\r\n"
             "goto waitloop\r\n"
@@ -418,49 +510,43 @@ def write_apply_script_macos(app_bundle: str, staged_bundle: str, tag: str,
     staging_root = os.path.abspath(staging_root or os.path.dirname(staged_bundle))
     if not app_bundle.endswith(".app") or not os.path.isdir(app_bundle):
         raise ValueError("Refusing to replace a non-existent .app bundle")
-    if not os.path.isdir(os.path.join(staged_bundle, "Contents", "MacOS")):
-        raise ValueError("Staged bundle is incomplete")
+    if not _valid_macos_bundle(staged_bundle):
+        raise ValueError("Staged bundle is incomplete or incompatible")
     pid = int(wait_pid) if str(wait_pid).lstrip("-").isdigit() else 0
     result_file = result_path(tag)
     script_path = os.path.join(
         os.path.dirname(staging_root), f"apply_update_{sanitize_tag(tag)}.sh")
+    import shlex
+    q = shlex.quote
     content = (
         "#!/bin/bash\n"
         "for _ in $(seq 1 20); do\n"
         f"  [ {pid} -gt 0 ] && kill -0 {pid} 2>/dev/null || break\n"
         "  sleep 1\n"
         "done\n"
-        # Swap guarded step by step: keep the old bundle until the new one
-        # is verified in place, restore it if the second mv fails, and
-        # always relaunch something (old or new) so the app never just
-        # disappears after quitting for an update. Every branch records the
-        # outcome so the next launch can report a failed swap.
-        f'if ditto "{staged_bundle}" "{app_bundle}.new"; then\n'
-        '  rm -rf "' + app_bundle + '.old"\n'
-        f'  if mv "{app_bundle}" "{app_bundle}.old" 2>/dev/null; then\n'
-        f'    if mv "{app_bundle}.new" "{app_bundle}"; then\n'
-        f'      rm -rf "{app_bundle}.old"\n'
-        f'      echo ok > "{result_file}"\n'
-        f'      open "{app_bundle}" --args --restore-session\n'
+        f"if [ {pid} -gt 0 ] && kill -0 {pid} 2>/dev/null; then exit 1; fi\n"
+        "ok=0\n"
+        f"if ditto {q(staged_bundle)} {q(app_bundle + '.new')}; then\n"
+        f"  rm -rf {q(app_bundle + '.old')}\n"
+        f"  if mv {q(app_bundle)} {q(app_bundle + '.old')}; then\n"
+        f"    if mv {q(app_bundle + '.new')} {q(app_bundle)}; then\n"
+        "      ok=1\n"
+        f"      rm -rf {q(app_bundle + '.old')}\n"
         "    else\n"
-        f'      mv "{app_bundle}.old" "{app_bundle}" 2>/dev/null\n'
-        f'      echo failed > "{result_file}"\n'
-        f'      open "{app_bundle}"\n'
+        f"      mv {q(app_bundle + '.old')} {q(app_bundle)}\n"
         "    fi\n"
-        "  else\n"
-        f'    echo failed > "{result_file}"\n'
-        f'    open "{app_bundle}"\n'
         "  fi\n"
-        "else\n"
-        f'  echo failed > "{result_file}"\n'
-        f'  open "{app_bundle}"\n'
         "fi\n"
-        f'rm -rf "{staging_root}"\n'
-        f'rm -f "{zip_path}"\n'
+        'if [ "$ok" = 1 ]; then\n'
+        f"  echo ok > {q(result_file)}\n"
+        f"  rm -rf {q(staging_root)}\n"
+        f"  rm -f {q(zip_path)}\n"
+        "else\n"
+        f"  echo failed > {q(result_file)}\n"
+        "fi\n"
+        f"open {q(app_bundle)} --args --restore-session\n"
         'rm -f "$0"\n'
     )
-    if '"' in app_bundle or '"' in staged_bundle or "\n" in app_bundle:
-        raise ValueError("Unsafe path for the update script")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(content)
     os.chmod(script_path, 0o755)

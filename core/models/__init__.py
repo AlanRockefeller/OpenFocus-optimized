@@ -2,17 +2,15 @@
 Neural network models for OpenFocus.
 
 Modules:
-- stackmffv4_network: StackMFF-V4 multi-focus fusion neural network
+- stackmff_v3: StackMFF-V3 multi-focus fusion network (vendored, MIT)
+- stackmff_v1: original StackMFF 3D stack network (vendored, MIT)
+- stackmff_v2: StackMFF V2 recurrent stack network (vendored, MIT)
 """
 
-from core.models.stackmffv4_network import (
-    StackMFF_V4,
-    LV_UNet,
-    lv_unet,
-)
+from core.models.stackmff_v3.model_io import FINAL_ARGS, build, load_checkpoint
 
 __all__ = [
-    'StackMFF_V4',
-    'LV_UNet',
-    'lv_unet',
+    'FINAL_ARGS',
+    'build',
+    'load_checkpoint',
 ]

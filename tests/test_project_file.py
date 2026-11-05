@@ -31,6 +31,9 @@ class _Slider:
     def value(self):
         return self._value
 
+    def setValue(self, value):
+        self._value = value
+
 
 class _Labels:
     def export_state(self):
@@ -46,6 +49,18 @@ def _window(paths, folder, scale=1.0):
     w.current_alignment_method = lambda: w._alignment
     w.set_fusion_method = lambda code: setattr(w, "_fusion", code)
     w.set_alignment_method = lambda code: setattr(w, "_alignment", code)
+    from core.algorithms import resolve_fusion_parameters, resolve_registration_parameters
+    w._fusion_parameters_by_method = {}
+    w._registration_parameters_by_method = {}
+    w._brightness_by_method = {}
+    w.fusion_parameters_for = lambda method, depth=False: resolve_fusion_parameters(
+        method, w._fusion_parameters_by_method.get(method), depth=depth)
+    w.registration_parameters_for = lambda method: resolve_registration_parameters(
+        method, w._registration_parameters_by_method.get(method))
+    w.set_fusion_parameters = lambda method, values: w._fusion_parameters_by_method.__setitem__(
+        method, resolve_fusion_parameters(method, values))
+    w.set_registration_parameters = lambda method, values: w._registration_parameters_by_method.__setitem__(
+        method, resolve_registration_parameters(method, values))
     w.slider_smooth = _Slider()
     w.chk_quick_preview = None
     w.raw_images = [np.zeros((8, 8, 3), np.uint8) for _ in paths]
@@ -150,3 +165,149 @@ def test_missing_source_reports_which_file(tmp_path):
     assert "gone.png" in err
     assert err.startswith("1 ")
     assert state == {}
+
+
+def test_project_keeps_base_frame_correction(tmp_path):
+    src = str(tmp_path / "src")
+    paths = _make_stack(src)
+    w = _window(paths, src)
+    w.base_frame_correct = True
+
+    proj = str(tmp_path / "session.ofproj")
+    ok, err = project_file.save_project(w, proj)
+    assert ok, err
+    state = json.load(open(proj, encoding="utf-8"))
+    assert state["settings"]["base_frame_correct"] is True
+
+    restored = _window(paths, src)
+    project_file._apply_after_load(restored, state)
+    assert restored.base_frame_correct is True
+
+
+def test_output_sharpening_round_trip(tmp_path):
+    src = str(tmp_path / "src")
+    paths = _make_stack(src)
+    window = _window(paths, src)
+    window.sharpen_output = True
+    path = str(tmp_path / "session.ofproj")
+    ok, error = project_file.save_project(window, path)
+    assert ok, error
+    ok, error, state = project_file.validate_project(path)
+    assert ok, error
+    restored = _window(paths, src)
+    project_file._apply_after_load(restored, state)
+    assert restored.sharpen_output is True
+    state['settings'].pop('sharpen_output')
+    project_file._apply_after_load(restored, state)
+    assert restored.sharpen_output is False
+
+
+def test_excluded_frames_round_trip(tmp_path):
+    """A reopened project must process the same frames that were on screen."""
+    stack_dir = str(tmp_path / "stack")
+    paths = _make_stack(stack_dir, n=3)
+    w = _window(paths, stack_dir)
+    w.excluded_frames = {1}
+    state = project_file._collect_state(w)
+    assert state["settings"]["excluded_frames"] == [1]
+
+    restored = _window(paths, stack_dir)
+    restored.excluded_frames = set()
+    restored.source_manager = type("SM", (), {
+        "decorate_source_items": lambda self: None})()
+    project_file._apply_after_load(restored, state)
+    assert restored.excluded_frames == {1}
+
+
+def test_scale_bar_style_round_trip(tmp_path):
+    stack_dir = str(tmp_path / "stack")
+    paths = _make_stack(stack_dir, n=2)
+    w = _window(paths, stack_dir)
+    w.scale_bar_enabled = True
+    w.scale_um_per_px_manual = 0.5
+    w.scale_bar_target = "source"
+    w.scale_bar_position = "custom"
+    w.scale_bar_font_family = "Arial"
+    w.scale_bar_font_size = 18.0
+    w.scale_bar_font_bold = True
+    w.scale_bar_text_align = "center"
+    w.scale_bar_custom_x = 0.2
+    w.scale_bar_custom_y = 0.7
+    state = project_file._collect_state(w)
+
+    restored = _window(paths, stack_dir)
+    restored.source_manager = type("SM", (), {
+        "decorate_source_items": lambda self: None})()
+    project_file._apply_after_load(restored, state)
+    assert restored.scale_bar_target == "source"
+    assert restored.scale_bar_position == "custom"
+    assert restored.scale_bar_font_family == "Arial"
+    assert restored.scale_bar_font_size == pytest.approx(18.0)
+    assert restored.scale_bar_font_bold is True
+    assert restored.scale_bar_text_align == "center"
+    assert restored.scale_bar_custom_x == pytest.approx(0.2)
+    assert restored.scale_bar_custom_y == pytest.approx(0.7)
+
+
+def test_template_applies_to_current_stack_without_source_paths(tmp_path):
+    old_paths = _make_stack(str(tmp_path / "old"), n=2)
+    new_paths = _make_stack(str(tmp_path / "new"), n=2)
+    source = _window(old_paths, str(tmp_path / "old"))
+    source._fusion = "dct"
+    source._fusion_parameters_by_method["dct"] = {"kernel_size": 9}
+    source.excluded_frames = {0}
+    template = tmp_path / "processing.oftemplate"
+    project_file.save_template(source, str(template))
+    text = template.read_text(encoding="utf-8")
+    assert str(tmp_path / "old") not in text
+    assert "excluded_frames" not in text
+
+    target = _window(new_paths, str(tmp_path / "new"))
+    target.excluded_frames = {1}
+    target.source_transforms = [{"operation": "flip", "code": 1}]
+    project_file.apply_template(target, project_file.load_template(str(template)))
+    assert target.current_fusion_method() == "dct"
+    assert target.fusion_parameters_for("dct")["kernel_size"] == 9
+    assert target.image_source_paths == new_paths
+    assert target.excluded_frames == {1}
+    assert target.source_transforms == [{"operation": "flip", "code": 1}]
+
+
+def test_template_rejects_source_references(tmp_path):
+    path = tmp_path / "bad.oftemplate"
+    path.write_text(json.dumps({"openfocus_template": 1, "settings": {
+        "sources": ["other.png"]}}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        project_file.load_template(str(path))
+
+
+def test_template_restores_registration_defaults_and_automatic_threads(tmp_path):
+    paths = _make_stack(str(tmp_path / 'stack'), n=2)
+    target = _window(paths, str(tmp_path / 'stack'))
+    target.thread_count = 8
+    target.set_registration_parameters('openfocus', {'reference_frame': 2})
+    project_file.apply_template(target, {'alignment_method': 'openfocus',
+                                         'registration_parameters': {'openfocus': {}},
+                                         'thread_count': 0})
+    assert target.registration_parameters_for('openfocus')['reference_frame'] == 1
+    assert target.thread_count == 0
+
+
+def test_project_template_extraction_does_not_require_sources(tmp_path):
+    project = tmp_path / 'missing.ofproj'
+    project.write_text(json.dumps({'openfocus_project': 3, 'sources': [str(tmp_path / 'missing.png')],
+                                   'settings': {'fusion_method': 'dct'}}), encoding='utf-8')
+    assert project_file.load_template(project)['fusion_method'] == 'dct'
+    assert not project_file.validate_project(project)[0]
+
+
+def test_template_write_failure_preserves_destination(tmp_path, monkeypatch):
+    paths = _make_stack(str(tmp_path / 'stack'), n=2)
+    destination = tmp_path / 'saved.oftemplate'
+    destination.write_text('original', encoding='utf-8')
+    def fail(*args):
+        raise OSError('replace failed')
+    monkeypatch.setattr(project_file.os, 'replace', fail)
+    with pytest.raises(OSError, match='replace failed'):
+        project_file.save_template(_window(paths, str(tmp_path / 'stack')), destination)
+    assert destination.read_text(encoding='utf-8') == 'original'

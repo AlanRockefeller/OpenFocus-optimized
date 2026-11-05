@@ -6,25 +6,34 @@ Modules:
 - registration: Image registration algorithms
 - multi_focus_fusion: Multi-focus image fusion orchestrator
 - workers: Background thread workers for rendering
-- models: Neural network models (StackMFF-V4)
+- models: Neural network models (StackMFF-V3)
 """
 
-from core.image_loader import ImageStackLoader
-from core.multi_focus_fusion import MultiFocusFusion, is_stackmffv4_available
+from importlib import import_module
 
-try:  # GUI stack; workers (and app below) need PyQt6, the headless CLI
-    # package installs without it.
-    from core.workers import RenderWorker, ROIAlignmentWorker
-    from core.app import OpenFocusApplication, process_command_line_args
-    _HAS_QT = True
-except ImportError:  # pragma: no cover - headless openfocus package
-    RenderWorker = ROIAlignmentWorker = None
-    OpenFocusApplication = process_command_line_args = None
-    _HAS_QT = False
+_EXPORTS = {
+    'ImageStackLoader': ('core.image_loader', 'ImageStackLoader'),
+    'MultiFocusFusion': ('core.multi_focus_fusion', 'MultiFocusFusion'),
+    'is_ai_fusion_available': ('core.multi_focus_fusion', 'is_ai_fusion_available'),
+    'RenderWorker': ('core.workers', 'RenderWorker'),
+    'ROIAlignmentWorker': ('core.workers', 'ROIAlignmentWorker'),
+    'OpenFocusApplication': ('core.app', 'OpenFocusApplication'),
+    'process_command_line_args': ('core.app', 'process_command_line_args'),
+}
+
+
+def __getattr__(name):
+    try:
+        module, attribute = _EXPORTS[name]
+    except KeyError:
+        raise AttributeError(name) from None
+    value = getattr(import_module(module), attribute)
+    globals()[name] = value
+    return value
 
 __all__ = [
     'ImageStackLoader',
     'MultiFocusFusion',
-    'is_stackmffv4_available',
+    'is_ai_fusion_available',
     'RenderWorker',
 ]
