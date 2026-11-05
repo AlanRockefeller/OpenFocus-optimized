@@ -6,9 +6,15 @@ from typing import Iterable, Optional
 from PyQt6.QtCore import QThread, Qt
 from PyQt6.QtWidgets import QMessageBox, QProgressDialog
 
-from ui.styles import MESSAGE_BOX_STYLE, PROGRESS_DIALOG_STYLE
+from ui import styles as ui_styles
 from core.workers import BatchWorker
 from locales import trans
+
+# Threads still running when the manager is torn down. Never terminate() a
+# worker that may be inside OpenCV/NumPy native code; park the pair instead
+# (the process is exiting or the window is closing).
+_ORPHAN_WORKERS: list = []
+
 
 
 class BatchManager:
@@ -107,12 +113,14 @@ class BatchManager:
             tile_overlap=getattr(self.window, "tile_overlap", None),
             tile_threshold=getattr(self.window, "tile_threshold", None),
             thread_count=getattr(self.window, "thread_count", 4),
-            stackmffv4_batch_size=getattr(self.window, "stackmffv4_batch_size", 2),
+            ai_batch_size=getattr(self.window, "ai_batch_size", 2),
+            ai_mode=getattr(self.window, "ai_mode", "soft"),
             import_mode=import_mode,
             split_method=split_method,
             split_param=split_param,
             single_folder_images_with_times=single_folder_images_with_times,
             use_gpu=getattr(self.window, "use_gpu", True),
+            exposure_match=bool(getattr(self.window, "exposure_match", True)),
         )
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
@@ -129,7 +137,9 @@ class BatchManager:
             trans.t("batch_title"), trans.t("btn_cancel"), 0, total, self.window)
         dialog.setWindowTitle(trans.t("batch_title"))
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setStyleSheet(PROGRESS_DIALOG_STYLE)
+        # Read through the module: the constants are rebound on theme
+        # change, so a from-import here would freeze the dark sheet.
+        dialog.setStyleSheet(ui_styles.PROGRESS_DIALOG_STYLE)
         dialog.canceled.connect(self._cancel_running_batch)
         dialog.show()
         self._progress_dialog = dialog
@@ -151,11 +161,23 @@ class BatchManager:
             self._close_progress_dialog()
 
     def _handle_finished(self, results: dict) -> None:
+        from utils.logging_setup import log_action
+        log_action("batch_finished", **{k: results.get(k) for k in
+                   ("success", "total", "cancelled")})
         try:
             success_count = results.get("success", 0)
             total_count = results.get("total", 0)
             failed_folders = results.get("failed", [])
             was_cancelled = results.get("cancelled", False)
+
+            outputs = results.get("outputs") or []
+            if outputs and getattr(self.window, "output_manager", None) is not None:
+                # Show the files in the output panel so they behave like any
+                # other result (inspect, wipe-compare, retouch, save as).
+                shown = self.window.output_manager.add_batch_outputs(outputs)
+                if shown:
+                    self.window.statusBar().showMessage(
+                        trans.t("batch_added_to_outputs").format(n=shown), 8000)
 
             if not was_cancelled:
                 info_lines = [
@@ -200,7 +222,7 @@ class BatchManager:
                 widget.setEnabled(True)
             except Exception:
                 pass
-        # StackMFF-V4 stays disabled when torch is missing.
+        # StackMFF-V3 stays disabled when torch is missing.
         hook = getattr(self.window, "refresh_method_availability", None)
         if callable(hook):
             hook()
@@ -229,7 +251,7 @@ class BatchManager:
         msg_box.setText(text)
         msg_box.setInformativeText(info)
         msg_box.setIcon(icon)
-        msg_box.setStyleSheet(MESSAGE_BOX_STYLE)
+        msg_box.setStyleSheet(ui_styles.MESSAGE_BOX_STYLE)
         msg_box.exec()
 
     def _cancel_running_batch(self) -> None:
@@ -267,12 +289,18 @@ class BatchManager:
             self._progress_dialog = None
 
     def _teardown_worker(self) -> None:
-        if self._thread:
-            self._thread.quit()
-            # The worker only checks is_cancelled between folders, so a folder
-            # in progress cannot be interrupted — never block the UI forever.
-            if not self._thread.wait(5000):
-                self._thread.terminate()
-                self._thread.wait(1000)
-            self._thread = None
+        thread, worker = self._thread, self._worker
+        self._thread = None
         self._worker = None
+        if worker is not None:
+            try:
+                worker.cancel()
+            except Exception:
+                pass
+        if thread is not None:
+            thread.quit()
+            # The worker only checks is_cancelled between folders, so a folder
+            # in progress cannot be interrupted — never block the UI forever
+            # and never terminate() a thread inside native code.
+            if not thread.wait(5000):
+                _ORPHAN_WORKERS.append((thread, worker))

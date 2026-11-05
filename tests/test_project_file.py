@@ -31,6 +31,9 @@ class _Slider:
     def value(self):
         return self._value
 
+    def setValue(self, value):
+        self._value = value
+
 
 class _Labels:
     def export_state(self):
@@ -150,3 +153,20 @@ def test_missing_source_reports_which_file(tmp_path):
     assert "gone.png" in err
     assert err.startswith("1 ")
     assert state == {}
+
+
+def test_project_keeps_base_frame_correction(tmp_path):
+    src = str(tmp_path / "src")
+    paths = _make_stack(src)
+    w = _window(paths, src)
+    w.base_frame_correct = True
+
+    proj = str(tmp_path / "session.ofproj")
+    ok, err = project_file.save_project(w, proj)
+    assert ok, err
+    state = json.load(open(proj, encoding="utf-8"))
+    assert state["settings"]["base_frame_correct"] is True
+
+    restored = _window(paths, src)
+    project_file._apply_after_load(restored, state)
+    assert restored.base_frame_correct is True

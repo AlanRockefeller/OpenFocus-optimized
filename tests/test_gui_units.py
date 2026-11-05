@@ -50,7 +50,7 @@ def test_settings_round_trip(qapp, clean_settings):
         tile_overlap = 256
         tile_threshold = 2048
         reg_downscale_width = 1024
-        stackmffv4_batch_size = 2
+        ai_batch_size = 2
         use_gpu = True
         recent_files = []
 
@@ -207,11 +207,15 @@ class _StubStatusBar:
 
 
 class _StubOutputManager:
-    def show_fusion_result(self):
-        pass
+    def __init__(self):
+        self.shown = 0
+        self.updated = 0
 
-    def update_output_list_for_fusion(self):
-        pass
+    def show_fusion_result(self):
+        self.shown += 1
+
+    def update_output_list_for_fusion(self, context=None):
+        self.updated += 1
 
     def update_output_count(self):
         pass
@@ -297,7 +301,10 @@ def _render_window(frames):
 
     def effective_stack(self=None):
         idx = included_indices()
-        return w.raw_images, list(w.image_filenames), idx
+        if len(idx) == len(w.raw_images):
+            return w.raw_images, list(w.image_filenames), idx
+        return ([w.raw_images[i] for i in idx],
+                [w.image_filenames[i] for i in idx], idx)
 
     import types
     w.included_indices = types.MethodType(included_indices, w)
@@ -329,7 +336,11 @@ def _render_window(frames):
     w.combo_fusion = QComboBox()
     for code, _key, _hint in FUSION_ITEMS:
         w.combo_fusion.addItem(code, code)
-    w.combo_fusion.setCurrentIndex(0)
+    # These tests exercise the classical/AI-agnostic paths; pin a classical
+    # method instead of relying on whichever entry the product defaults to
+    # (the default is now the neural one, which needs torch).
+    w.combo_fusion.setCurrentIndex(
+        max(0, w.combo_fusion.findData("guided_filter")))
     w.combo_align = QComboBox()
     for code, _key, _hint in ALIGN_ITEMS:
         w.combo_align.addItem(code, code)
@@ -399,7 +410,7 @@ def _patched_render_manager(monkeypatch, window, ai_available=False):
     from utils import align_cache
 
     monkeypatch.setattr(render_module, "RenderWorker", _fake_worker_class())
-    monkeypatch.setattr(render_module, "is_stackmffv4_available", lambda: ai_available)
+    monkeypatch.setattr(render_module, "is_ai_fusion_available", lambda: ai_available)
     for name in ("show_message_box", "show_warning_box"):
         monkeypatch.setattr(render_module, name, lambda *a, **k: None)
 
@@ -492,6 +503,27 @@ def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
     assert saved[0]["filenames"] == w.image_filenames
 
 
+def test_render_with_excluded_frame_is_not_discarded(qapp, monkeypatch):
+    """The staleness guard must compare like with like: the full filename
+    list to its launch-time snapshot, not to the filtered worker filenames."""
+    frames = [np.zeros((30, 40, 3), dtype=np.uint8) + i for i in range(3)]
+    w = _render_window(frames)
+    w.excluded_frames = {1}
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+    from controllers import render_manager as render_module
+    monkeypatch.setattr(render_module.QApplication, "alert", lambda *args: None)
+    rm.start_render()
+
+    handed = rm.worker.args[0]
+    assert [id(frame) for frame in handed] == [id(frames[0]), id(frames[2])]
+    fused = np.full_like(frames[0], 7)
+    rm.on_render_finished(handed, fused, False, 0.0, 1.0, "CPU")
+
+    assert w.fusion_result is fused
+    assert w.output_manager.shown == 1
+    assert w.output_manager.updated == 1
+
+
 def test_alignment_dropped_when_a_frame_is_deleted_mid_render(qapp, monkeypatch):
     frames = [np.zeros((30, 40, 3), dtype=np.uint8) + i for i in range(3)]
     w = _render_window(frames)
@@ -549,10 +581,10 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
 
     rm.start_compare_all()
     assert rm._compare_mode is True
-    # guided_filter runs first; the queue holds the rest (A/B/C included
-    # since v1.39)
+    # The queue follows the dropdown order: AI, OpenFocus A/B/C, then the
+    # classical methods. AI is filtered out here (ai_available=False).
     assert len(rm._compare_queue) == 6
-    assert rm._compare_current == "guided_filter"
+    assert rm._compare_current == "openfocus_a"
     assert not w.btn_render.isEnabled()
     assert not w.combo_align.isEnabled()
 
@@ -919,3 +951,296 @@ def test_new_output_is_the_only_selected_item(qapp):
     mgr.update_output_list_for_fusion()
     assert len(w.output_list.selectedItems()) == 1
     assert w.output_list.currentRow() == 0
+
+
+def test_stack_change_during_compare_unlocks_controls(qapp, monkeypatch):
+    """A discarded compare render used to leave _compare_mode/queue intact:
+    the render button stayed disabled with a stale "-1/0" progress label and
+    no next method was ever chained."""
+    frames = [np.zeros((32, 32, 3), dtype=np.uint8) + i for i in range(2)]
+    w = _render_window(frames)
+    rm, _saved = _patched_render_manager(monkeypatch, w)
+
+    rm._compare_mode = True
+    rm._compare_total = 3
+    rm._compare_queue = ["dct", "dtcwt"]
+    rm._compare_current = "dct"
+    # source_ref differs -> the finished result belongs to another stack
+    rm._render_context = {
+        "source": list(w.raw_images),
+        "source_ref": object(),
+        "alignment_options": (False, False, False),
+        "preview": False,
+        "roi": False,
+        "filenames": list(w.image_filenames),
+        "included": [0, 1],
+    }
+    w.btn_render.setEnabled(False)
+
+    rm.on_render_finished([], None, False, 0.0, 0.0, "CPU")
+
+    assert rm._compare_mode is False
+    assert rm._compare_queue == []
+    assert rm._compare_current is None
+    assert rm.worker is None
+    assert w.btn_render.isEnabled()
+    assert "处理中" not in w.btn_render.text()
+
+
+def test_output_history_is_capped(qapp):
+    from PyQt6.QtWidgets import QLabel, QListWidget
+    from controllers.output_manager import OutputManager
+
+    class W:
+        pass
+
+    w = W()
+    w.output_list = QListWidget()
+    w.output_label = QLabel()
+    w.fusion_results = []
+    w.fusion_result = None
+
+    class E:
+        @staticmethod
+        def generate_default_filename():
+            return "out"
+
+    w.export_manager = E()
+    mgr = OutputManager(w)
+    mgr.MAX_HISTORY = 3
+    for i in range(6):
+        w.fusion_result = np.full((4, 4, 3), i, np.uint8)
+        mgr.update_output_list_for_fusion()
+
+    assert len(w.fusion_results) == 3
+    assert w.output_list.count() == 3
+
+
+def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
+    """Snapshots used to copy every frame twice (raw + base); they now hold
+    references because mutations replace arrays. Resize must undo its scale
+    factor too, or the Resize dialog opens with the wrong percentage."""
+    import main as main_module
+
+    class W:
+        pass
+
+    w = W()
+    img = np.zeros((4, 4, 3), np.uint8)
+    w.raw_images = [img]
+    w.image_filenames = ["a.png"]
+    w.image_source_paths = []
+    w.base_images = [img]
+    w.excluded_frames = {1}
+    w.current_img_index = 0
+    w.current_scale_factor = 0.5
+    w.base_scale_factor = 1.0
+    w.transform_manager = _FakeTransformManager()
+
+    state = main_module.OpenFocus._capture_stack_state(w)
+    assert state["raw"][0] is img, "snapshot must not duplicate pixels"
+
+    w.raw_images = [np.ones((4, 4, 3), np.uint8)]
+    main_module.OpenFocus._restore_stack_state(w, state)
+
+    assert w.raw_images[0] is img
+    assert w.current_scale_factor == 0.5
+    assert w.base_scale_factor == 1.0
+    assert w.excluded_frames == {1}
+
+
+def test_shutdown_worker_never_terminates(monkeypatch):
+    import main as main_module
+
+    class Worker:
+        def __init__(self):
+            self.cancelled = False
+            self.terminated = False
+
+        def cancel(self):
+            self.cancelled = True
+
+        def isRunning(self):
+            return True
+
+        def quit(self):
+            pass
+
+        def wait(self, _ms):
+            return False
+
+        def terminate(self):
+            self.terminated = True
+
+    worker = Worker()
+    orphan = []
+    monkeypatch.setattr(main_module, "_ORPHAN_THREADS", orphan)
+    main_module._shutdown_worker(worker, timeout_ms=0)
+
+    assert worker.cancelled
+    assert worker.terminated is False
+    assert orphan == [worker]
+
+
+def test_finished_worker_is_released_through_deleteLater(qapp):
+    """Dropping the QThread reference destroys a running C++ object.
+
+    RenderWorker emits its result from inside run(), so the slot can fire
+    while the thread has not returned yet; a bare ``self.worker = None`` then
+    let Qt tear the object down underneath it and the process aborted in
+    Qt6Core.dll (0xc0000409) after an ECC + AI render. deleteLater() hands
+    the destruction to the event loop instead.
+    """
+    from controllers.render_manager import RenderManager
+
+    class Worker:
+        def __init__(self):
+            self.deleted = 0
+
+        def deleteLater(self):
+            self.deleted += 1
+
+    class Window:
+        pass
+
+    manager = RenderManager(Window())
+    worker = Worker()
+    manager.worker = worker
+
+    manager._dispose_worker()
+
+    assert worker.deleted == 1
+    assert manager.worker is None
+    # A second call must be a no-op rather than raising on None.
+    manager._dispose_worker()
+    assert worker.deleted == 1
+
+
+class TestCpuAiWarning:
+    """A CPU-only AI render warns once, and the opt-out sticks."""
+
+    def _manager(self, algorithm="stackmffv3", use_gpu=True, dismissed=False,
+                 device="N/A", ai_available=True, answer_accept=True,
+                 check_dont_show=False):
+        from controllers.render_manager import RenderManager
+        from utils.settings_store import AI_CPU_WARNING_DISMISSED_KEY
+
+        class Window:
+            pass
+
+        window = Window()
+        window.use_gpu = use_gpu
+        window.current_fusion_method = lambda: algorithm
+
+        manager = RenderManager(window)
+        shown = {}
+
+        class FakeSettings:
+            def value(self, key, default=None, type=None):
+                assert key == AI_CPU_WARNING_DISMISSED_KEY
+                return dismissed
+
+            def setValue(self, key, value):
+                shown["dismissed"] = (key, value)
+
+            def sync(self):
+                pass
+
+        box = {"accept": answer_accept, "checked": check_dont_show}
+
+        def fake_dialog(*_a, **_k):
+            shown["dialog"] = True
+            return box["accept"]
+
+        # Patch the two Qt pieces the method touches.
+        import PyQt6.QtWidgets as W
+        real_box, real_check = W.QMessageBox, W.QCheckBox
+
+        class StubBox:
+            Icon = real_box.Icon
+            ButtonRole = real_box.ButtonRole
+
+            def __init__(self, *a, **k):
+                self._clicked = None
+
+            def setIcon(self, *_a): pass
+            def setWindowTitle(self, *_a): pass
+            def setText(self, *_a): pass
+            def setCheckBox(self, box_): self._box = box_
+            def addButton(self, text, role):
+                if role == real_box.ButtonRole.AcceptRole:
+                    self._accept = text
+                    return text
+                self._reject = text
+                return text
+            def setDefaultButton(self, *_a): pass
+            def exec(self): pass
+            def clickedButton(self):
+                return self._accept if box["accept"] else self._reject
+
+        class StubCheck(real_check):
+            def __init__(self, *a, **k):
+                super().__init__(*a)
+                self._forced = box["checked"]
+
+            def isChecked(self):
+                return self._forced
+
+        import controllers.render_manager as rm
+        old_box = rm.QMessageBox if hasattr(rm, "QMessageBox") else None
+        try:
+            monkeypatch_targets = []
+            W.QMessageBox = StubBox
+            W.QCheckBox = StubCheck
+            import sys as _sys
+            mod = _sys.modules["controllers.render_manager"]
+            # settings lookup happens inside the method
+            import utils.settings_store as ss
+            old_get = ss.get_settings
+            ss.get_settings = lambda: FakeSettings()
+            try:
+                result = manager._confirm_cpu_ai_render()
+            finally:
+                ss.get_settings = old_get
+        finally:
+            W.QMessageBox = real_box
+            W.QCheckBox = real_check
+        return result, shown
+
+    def test_warns_when_no_accelerator(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(answer_accept=True)
+        assert shown.get("dialog") is not True  # dialog lives inside the stub
+        assert result is True
+
+    def test_stays_silent_with_an_accelerator(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "CUDA")
+        result, shown = self._manager()
+        assert result is True
+        assert "dismissed" not in shown
+
+    def test_stays_silent_for_classical_methods(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(algorithm="guided_filter")
+        assert result is True
+        assert "dismissed" not in shown
+
+    def test_opt_out_is_remembered(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, shown = self._manager(dismissed=True)
+        assert result is True
+        assert "dismissed" not in shown  # never asked, never re-saved
+
+    def test_cancel_stops_the_render(self, qapp, monkeypatch):
+        import core.multi_focus_fusion as mff
+        monkeypatch.setattr(mff, "is_ai_fusion_available", lambda: True)
+        monkeypatch.setattr(mff, "torch_device_kind", lambda: "N/A")
+        result, _shown = self._manager(answer_accept=False)
+        assert result is False

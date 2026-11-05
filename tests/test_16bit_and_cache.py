@@ -335,14 +335,107 @@ class TestPILFallback:
         if image_loader.HEIF_AVAILABLE:  # only then is .heic a "supported" file
             assert "failed: 1" in msg
 
-    def test_pil_fallback_keeps_16bit_depth(self, tmp_path):
-        from core.image_loader import _read_via_pil
+    def test_compressed_16bit_tiff_decodes_without_crashing(self, tmp_path):
+        """A compressed 16-bit TIFF must load, not abort the process.
+
+        Pillow's TIFF decoder aborts natively (0xC0000409) on LZW/PackBits
+        TIFFs, which `cv2.imwrite` writes by default — an uncatchable crash
+        that took the whole app down. The loader must therefore decode TIFF
+        through OpenCV only. This test calls the real entry point so it fails
+        if the Pillow path is ever reachable again for TIFF.
+        """
+        from core.image_loader import decode_image
 
         gray16 = (np.arange(120).reshape(10, 12) * 500).astype(np.uint16)
         p = str(tmp_path / "g16.tiff")
-        assert cv2.imwrite(p, gray16)
+        # default cv2 TIFF compression is LZW: exactly the crashing case
+        assert cv2.imwrite(p, gray16, [cv2.IMWRITE_TIFF_COMPRESSION, 5])
 
-        img = _read_via_pil(p)
+        img = decode_image(p)
 
+        assert img is not None, "compressed 16-bit TIFF failed to decode"
         assert img.dtype == np.uint16 and img.shape == (10, 12, 3)
         assert img[5, 7].tolist() == [int(gray16[5, 7])] * 3
+
+    def test_tiff_never_routes_through_pillow(self, tmp_path):
+        """Guard the crash at its source: the fallback must refuse TIFF."""
+        from core.image_loader import _read_via_pil
+
+        gray16 = (np.arange(60).reshape(6, 10) * 300).astype(np.uint16)
+        p = str(tmp_path / "guard.tiff")
+        assert cv2.imwrite(p, gray16)
+
+        assert _read_via_pil(p) is None, (
+            "TIFF reached the Pillow fallback; on compressed files that "
+            "aborts the process instead of raising")
+
+
+class TestMixedBitDepthStack:
+    """One 16-bit frame in an 8-bit folder must scale every frame, not just
+    the first one (the uint16 frame used to stay 0-65535 and blow the whole
+    result out to white; the reverse order crushed the 8-bit frame to black).
+    """
+
+    def test_normalization_is_per_frame(self):
+        from utils.image_utils import normalize_fuse_input
+
+        a8 = np.full((8, 8, 3), 200, np.uint8)
+        b16 = np.full((8, 8, 3), 40000, np.uint16)
+
+        norm, is16 = normalize_fuse_input([a8, b16])
+        assert is16
+        assert all(f.dtype == np.float32 for f in norm)
+        assert np.allclose(norm[0], 200.0)
+        assert abs(float(norm[1].mean()) - 40000 * 255 / 65535) < 0.01
+
+        norm_rev, is16_rev = normalize_fuse_input([b16, a8])
+        assert is16_rev
+        assert np.allclose(norm_rev[1], 200.0)
+
+
+class TestAlignCacheUnicodePath:
+    def test_round_trip_in_non_ascii_folder(self, tmp_path):
+        """cv2.imwrite/imread cannot handle non-ASCII paths on Windows, so a
+        stack under 中文目录 silently never cached."""
+        from utils import align_cache
+
+        folder = tmp_path / "中文目录"
+        folder.mkdir()
+        for i in range(2):
+            cv2.imwrite(str(folder / f"f{i}.png"),
+                        np.full((16, 16, 3), 100 + i, np.uint8))
+
+        names = ["f0.png", "f1.png"]
+        frames = [np.full((16, 16, 3), 7, np.uint8) for _ in range(2)]
+        align_cache.save_aligned(str(folder), names, frames, (True, False),
+                                 1024, 1.0, (16, 16))
+
+        loaded = align_cache.load_aligned(str(folder), names, (True, False),
+                                          1024, 1.0, (16, 16))
+        assert loaded is not None
+        assert all(np.array_equal(a, b) for a, b in zip(loaded, frames))
+
+
+class TestLoaderFormatsAndOrder:
+    def test_folder_order_is_natural(self, tmp_path):
+        from core.image_loader import ImageStackLoader
+
+        for i in (1, 2, 10, 11, 3):
+            cv2.imwrite(str(tmp_path / f"img{i}.png"),
+                        np.full((8, 8, 3), i * 10, np.uint8))
+
+        ok, _msg, _imgs, names = ImageStackLoader().load_from_folder(str(tmp_path))
+        assert ok
+        assert names == ["img1.png", "img2.png", "img3.png",
+                         "img10.png", "img11.png"]
+
+    def test_webp_frames_load(self, tmp_path):
+        from utils.image_utils import imwrite_auto
+        from core.image_loader import ImageStackLoader
+
+        for i in range(2):
+            assert imwrite_auto(str(tmp_path / f"w{i}.webp"),
+                                np.full((16, 16, 3), 50 + i, np.uint8))
+        ok, _msg, imgs, names = ImageStackLoader().load_from_folder(str(tmp_path))
+        assert ok and len(imgs) == 2
+        assert names == ["w0.webp", "w1.webp"]

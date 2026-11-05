@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSlider,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -33,6 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 from locales import trans
+from widgets.stepper import StepperSpinBox
 from utils import colormap as cmap
 from utils.image_utils import imwrite_auto
 from utils.settings_store import get_last_dialog_dir, get_settings, set_last_dialog_dir
@@ -40,17 +42,17 @@ from utils.settings_store import get_last_dialog_dir, get_settings, set_last_dia
 # 仅收录"按索引决策"的融合方法（与融合下拉同序；加权平均类无逐像素
 # 决策，不提供深度图——guided_filter / openfocus_a 不在此列）
 _METHOD_KEYS = (
+    ("stackmffv3", "radio_stackmff"),
+    ("openfocus_b", "radio_openfocus_b"),
+    ("openfocus_c", "radio_openfocus_c"),
     ("dct", "radio_dct"),
     ("dtcwt", "radio_dtcwt"),
     ("gfgfgf", "radio_gfg"),
-    ("stackmffv4", "radio_stackmff"),
-    ("openfocus_b", "radio_openfocus_b"),
-    ("openfocus_c", "radio_openfocus_c"),
 )
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
 
-# 打开对话框时自动计算的方法（秒级）；dtcwt/stackmffv4 分钟级，不自动跑
+# 打开对话框时自动计算的方法（秒级）；dtcwt/stackmffv3 分钟级，不自动跑
 _FAST_AUTO_METHODS = {"dct", "gfgfgf", "openfocus_b", "openfocus_c"}
 
 # 对话框关闭时仍在跑的 worker 放这里保活：QThread 对象被销毁而线程仍在
@@ -78,7 +80,7 @@ class DepthWorker(QThread):
         from core.depth_map import DepthMapCancelled, compute_focus_index
         try:
             model_path = None
-            if self._method == "stackmffv4":
+            if self._method == "stackmffv3":
                 from core.cli import _find_model_path
                 model_path = _find_model_path()
             m = compute_focus_index(
@@ -106,16 +108,23 @@ class _GradientBar(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._lut = None
+        self._right = "N-1"
         self.setMinimumHeight(26)
         self.setText("")
 
-    def set_lut(self, lut):
+    def set_lut(self, lut, right_label="N-1"):
         self._lut = lut
+        self._right = right_label
+        self.setToolTip("")
         self.update()
 
     def paintEvent(self, event):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor("#1a1a1a"))
+        # Follow the active theme: a hard-coded near-black strip looked like a
+        # hole in the light dialog.
+        from ui.styles import CURRENT_THEME
+        from utils.design_tokens import palette
+        p.fillRect(self.rect(), QColor(palette(CURRENT_THEME)["surfaceSunken"]))
         if self._lut is None:
             return
         m = 12  # side margin for labels
@@ -126,12 +135,13 @@ class _GradientBar(QLabel):
             c = self._lut[int(i / n * 255)]
             p.setPen(QColor(c[2], c[1], c[0]))
             p.drawLine(m + i, y, m + i, y + bar)
-        p.setPen(QColor("#b0b0b0"))
+        p.setPen(QColor(palette(CURRENT_THEME)["textMuted"]))
         f = p.font()
         f.setPointSize(8)
         p.setFont(f)
         p.drawText(2, y + bar, "0")
-        p.drawText(self.width() - 24, y + bar, "N-1")
+        w_label = p.fontMetrics().horizontalAdvance(self._right)
+        p.drawText(self.width() - 8 - w_label, y + bar, self._right)
 
 
 class _CustomSchemeDialog(QDialog):
@@ -171,6 +181,7 @@ class _CustomSchemeDialog(QDialog):
         close_row = QHBoxLayout()
         close_row.addStretch()
         ok_btn = QPushButton(trans.t("btn_ok"))
+        ok_btn.setObjectName("primaryButton")
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton(trans.t("btn_cancel"))
@@ -270,9 +281,58 @@ class DepthMapDialog(QDialog):
         self.preview_lbl = QLabel(trans.t("depth_no_map_yet"))
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_lbl.setMinimumSize(420, 320)
+        # Preview placeholder follows the palette instead of a fixed near-black.
+        from ui.styles import CURRENT_THEME
+        from utils.design_tokens import palette
+        _p = palette(CURRENT_THEME)
         self.preview_lbl.setStyleSheet(
-            "background: #161616; border: 1px solid #444; color: #888;")
-        pvlay.addWidget(self.preview_lbl, 1)
+            f"background: {_p['surfaceSunken']};"
+            f" border: 1px solid {_p['border']};"
+            f" color: {_p['textMuted']};")
+        # The 3D surface lives on its own tab: it answers a different question
+        # ("what does this relief look like?") than the colourised map, and it
+        # used to require exporting an OBJ and opening another program.
+        from PyQt6.QtWidgets import QTabWidget
+        from widgets.depth_surface import DepthSurface
+        self.tabs = QTabWidget()
+        map_page = QWidget()
+        map_lay = QVBoxLayout(map_page)
+        map_lay.setContentsMargins(0, 0, 0, 0)
+        map_lay.addWidget(self.preview_lbl, 1)
+        self.tabs.addTab(map_page, trans.t("depth_tab_map"))
+
+        surf_page = QWidget()
+        surf_lay = QVBoxLayout(surf_page)
+        surf_lay.setContentsMargins(0, 0, 0, 0)
+        self.surface = DepthSurface()
+        surf_lay.addWidget(self.surface, 1)
+        # Detail slider: the surface is sampled at a working resolution to
+        # stay interactive; this exposes that trade-off instead of hiding it.
+        detail_row = QHBoxLayout()
+        detail_row.setContentsMargins(0, 0, 0, 0)
+        self.detail_slider = QSlider(Qt.Orientation.Horizontal)
+        self.detail_slider.setRange(20, 100)
+        self.detail_slider.setSingleStep(5)
+        self.detail_slider.setPageStep(10)
+        self.detail_slider.setValue(60)
+        self.detail_slider.setToolTip(trans.t("depth_3d_detail_hint"))
+        self.detail_value = QLabel("0.60x")
+        self.detail_value.setMinimumWidth(34)
+        self.detail_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.detail_slider.valueChanged.connect(
+            lambda v: (self.detail_value.setText(f"{v / 100.0:.2f}x"),
+                       self.surface.set_detail(v)))
+        detail_row.addWidget(QLabel(trans.t("depth_3d_detail")))
+        detail_row.addWidget(self.detail_slider, 1)
+        detail_row.addWidget(self.detail_value)
+        surf_lay.addLayout(detail_row)
+        self.btn_surface_reset = QPushButton(trans.t("depth_3d_reset"))
+        self.btn_surface_reset.clicked.connect(self.surface.reset_view)
+        surf_lay.addWidget(self.btn_surface_reset)
+        self.tabs.addTab(surf_page, trans.t("depth_tab_3d"))
+        pvlay.addWidget(self.tabs, 1)
+
         self.legend = _GradientBar()
         pvlay.addWidget(self.legend)
         splitter.addWidget(pv)
@@ -292,7 +352,12 @@ class DepthMapDialog(QDialog):
 
         # kernel 含义随方法不同（与主面板滑块同源语义）——只读说明行
         self.lbl_kernel_info = QLabel("")
-        self.lbl_kernel_info.setStyleSheet("color: #999;")
+        # Muted but readable: #999 on white is ~2.8:1, below the 4.5:1 needed
+        # Muted but readable: uses the palette's secondary text colour.
+        from ui.styles import CURRENT_THEME
+        from utils.design_tokens import palette
+        self.lbl_kernel_info.setStyleSheet(
+            f"color: {palette(CURRENT_THEME)['textMuted']};")
         form.addRow("", self.lbl_kernel_info)
         self._update_kernel_info()
 
@@ -308,28 +373,31 @@ class DepthMapDialog(QDialog):
         row.addWidget(self.invert_chk)
         form.addRow("", row)
 
-        self.gamma_spin = QDoubleSpinBox()
+        self.gamma_spin = StepperSpinBox(minimum=0.4, maximum=2.5, decimals=2, step=0.05, value=1.0)
         self.gamma_spin.setDecimals(2)
         self.gamma_spin.setRange(0.4, 2.5)
         self.gamma_spin.setSingleStep(0.05)
         self.gamma_spin.setValue(1.0)
         form.addRow(trans.t("depth_gamma"), self.gamma_spin)
 
-        self.smooth_spin = QSpinBox()
+        self.smooth_spin = StepperSpinBox(minimum=0, maximum=5, decimals=0, step=1)
         self.smooth_spin.setRange(0, 5)
         self.smooth_spin.setToolTip(trans.t("depth_smooth_hint"))
         form.addRow(trans.t("depth_smooth"), self.smooth_spin)
 
-        self.relief_spin = QSpinBox()
+        self.relief_spin = StepperSpinBox(minimum=1, maximum=100, decimals=0, step=1, value=15)
         self.relief_spin.setRange(1, 100)
         self.relief_spin.setSuffix(" %")
         self.relief_spin.setValue(15)
         self.relief_spin.setToolTip(trans.t("depth_relief_hint"))
+        self.relief_spin.valueChanged.connect(
+            lambda v: self.surface.set_relief(v / 100.0)
+            if hasattr(self, "surface") else None)
         form.addRow(trans.t("depth_relief"), self.relief_spin)
 
         self.overlay_chk = QCheckBox(trans.t("depth_overlay"))
         self.overlay_chk.setToolTip(trans.t("depth_overlay_hint"))
-        self.opacity_spin = QDoubleSpinBox()
+        self.opacity_spin = StepperSpinBox(minimum=0.05, maximum=1.0, decimals=2, step=0.05, value=0.55)
         self.opacity_spin.setDecimals(2)
         self.opacity_spin.setRange(0.05, 1.0)
         self.opacity_spin.setSingleStep(0.05)
@@ -391,14 +459,8 @@ class DepthMapDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _apply_style(self):
-        parent = self.parent()
-        theme = getattr(parent, "ui_theme", "dark") if parent else "dark"
-        if theme == "light":
-            self.setStyleSheet("QDialog { background-color: #ffffff; } QLabel { color: #1f2328; }")
-        else:
-            from ui.styles import DIALOG_CONTROL_DARK_QSS
-            self.setStyleSheet("QDialog { background-color: #2b2b2b; border: 1px solid #444; }"
-                               "QLabel { color: #d0d0d0; }" + DIALOG_CONTROL_DARK_QSS)
+        """Styling comes from the generated application stylesheet."""
+        self.setStyleSheet("")
 
     def _current_window_method(self):
         w = self.window_main
@@ -491,7 +553,16 @@ class DepthMapDialog(QDialog):
 
     def _update_kernel_info(self):
         """kernel 在不同方法里含义不同（与主面板滑块同源）——只读展示。"""
-        key = self._KERNEL_INFO_KEYS.get(self.method_combo.currentData())
+        method = self.method_combo.currentData()
+        if method == "stackmffv3":
+            # No kernel to show. State what the map actually is: the network
+            # picks a source frame per pixel (a classifier is confident at
+            # almost every pixel), so the values are still frame positions.
+            self.lbl_kernel_info.setText(trans.t("depth_ai_note"))
+            self.lbl_kernel_info.setToolTip(trans.t("depth_ai_note_hint"))
+            return
+        self.lbl_kernel_info.setToolTip("")
+        key = self._KERNEL_INFO_KEYS.get(method)
         if not key:
             self.lbl_kernel_info.setText("")
             return
@@ -527,8 +598,26 @@ class DepthMapDialog(QDialog):
         self._resize_timer.start()
 
     def _images(self):
-        imgs = getattr(self.window_main, "raw_images", None) or []
-        return list(imgs) if len(imgs) >= 2 else None
+        """Frames the depth map must be computed from.
+
+        Must match the fusion input: the aligned, filter-included stack in
+        the frame order the OpenFocus family used. Computing from raw_images
+        (the old behaviour) ignored per-frame exclusions, ran on unaligned
+        frames and ignored "reverse stack order", so the exported map's
+        index labels disagreed with the fused result.
+        """
+        win = self.window_main
+        frames = list(getattr(win, "registration_results", None) or [])
+        if not frames:
+            effective = getattr(win, "effective_stack", None)
+            if callable(effective):
+                try:
+                    frames = list(effective()[0])
+                except Exception:
+                    frames = []
+            if not frames:
+                frames = list(getattr(win, "raw_images", None) or [])
+        return frames if len(frames) >= 2 else None
 
     def _compute(self):
         # One worker at a time: a second _compute would overwrite the reference
@@ -541,6 +630,9 @@ class DepthMapDialog(QDialog):
             self.status_lbl.setText(trans.t("depth_need_stack"))
             return
         method = self.method_combo.currentData()
+        if (method in ("openfocus_b", "openfocus_c")
+                and getattr(self.window_main, "stack_reverse_order", False)):
+            imgs = list(reversed(imgs))
         use_gpu = bool(getattr(self.window_main, "use_gpu", False))
         # The depth map uses the kernel the user set for that method (DCT's
         # median window / GFG-FGF's blur / variance window), never another
@@ -548,13 +640,23 @@ class DepthMapDialog(QDialog):
         kernel_size = self._kernel_for(method)
         self._worker = DepthWorker(imgs, method, use_gpu, kernel_size, self)
         self._worker_method = method
-        self._worker.progress.connect(lambda i, n: self.status_lbl.setText(
-            trans.t("depth_computing").format(i=i, n=n)))
+        # The neural method classifies all frames in one pass, so "frame i/n"
+        # is meaningless there; it gets a plain working label instead.
+        if method == "stackmffv3":
+            self._worker.progress.connect(lambda i, n: self.status_lbl.setText(
+                trans.t("depth_computing_ai")))
+        else:
+            self._worker.progress.connect(lambda i, n: self.status_lbl.setText(
+                trans.t("depth_computing").format(i=i, n=n)))
         self._worker.ok.connect(self._computed)
         self._worker.failed.connect(self._failed)
         self.compute_btn.setVisible(False)
         self.cancel_btn.setVisible(True)
-        self.status_lbl.setText(trans.t("depth_computing").format(i=0, n=len(imgs)))
+        if method == "stackmffv3":
+            self.status_lbl.setText(trans.t("depth_computing_ai"))
+        else:
+            self.status_lbl.setText(
+                trans.t("depth_computing").format(i=0, n=len(imgs)))
         self._worker.start()
 
     def _cancel(self):
@@ -575,23 +677,6 @@ class DepthMapDialog(QDialog):
         self.compute_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
         self.status_lbl.setText("" if msg == "cancelled" else msg)
-
-    def _detach_worker(self):
-        """Release the finished worker safely (never while it is running)."""
-        worker = self._worker
-        self._worker = None
-        if worker is None:
-            return
-        if worker.isRunning():
-            worker.cancel()
-            try:
-                from dialogs.depthmap import _ORPHAN_WORKERS
-            except Exception:
-                _ORPHAN_WORKERS = None
-            if _ORPHAN_WORKERS is not None:
-                _ORPHAN_WORKERS.add(worker)
-                worker.finished.connect(lambda w=worker: _ORPHAN_WORKERS.discard(w))
-        worker.deleteLater()
 
     # ------------------------------------------------------------------
     def _colorized_full(self):
@@ -621,10 +706,16 @@ class DepthMapDialog(QDialog):
             lut = cmap.get_lut(*self._selected_colormap())
         except Exception:
             lut = cmap.get_lut(_DEFAULT_METHOD_COLORMAP)
-        self.legend.set_lut(lut)
+        # Both the classical measures and the neural one report a frame
+        # index, so the legend keeps the frame count at its right end.
+        frames = self._images() or []
+        self.legend.set_lut(lut, f"{max(0, len(frames) - 1)}")
         if self._index01 is None:
             self.legend.update()
             return
+        # Keep the 3D tab in step with the same parameters the map uses, so
+        # dragging relief/smoothing/gamma shows the surface immediately.
+        self._refresh_surface()
         img = self._colorized_full()
         h, w = img.shape[:2]
         target = self.preview_lbl.size()
@@ -638,6 +729,36 @@ class DepthMapDialog(QDialog):
         qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0],
                       3 * rgb.shape[1], QImage.Format.Format_RGB888)
         self.preview_lbl.setPixmap(QPixmap.fromImage(qimg))
+
+    def _refresh_surface(self) -> None:
+        """Rebuild the height field for the 3D tab from the live parameters."""
+        if self._index01 is None or not hasattr(self, "surface"):
+            return
+        try:
+            from core.depth_map import smooth_index_map
+            from utils.mesh_export import build_height_field
+            index = smooth_index_map(self._index01, self.smooth_spin.value())
+            hf = build_height_field(index, max_side=220, smooth=1)
+            if self.invert_chk.isChecked():
+                hf = 1.0 - hf
+            # Texture with the fused image when there is one, otherwise with
+            # a source frame. Without a fallback the 3D view rendered as a
+            # dot cloud: every pixel was the flat accent colour, which read
+            # as "there is no texture at all".
+            tex = getattr(self.window_main, "fusion_result", None)
+            if tex is None or tex.shape[:2] != self._index01.shape[:2]:
+                imgs = self._images() or []
+                tex = (imgs[0] if imgs
+                       and imgs[0].shape[:2] == self._index01.shape[:2]
+                       else None)
+            if tex is not None:
+                tex = cv2.resize(tex, (hf.shape[1], hf.shape[0]),
+                                 interpolation=cv2.INTER_AREA)
+            self.surface.set_relief(self.relief_spin.value() / 100.0)
+            self.surface.set_surface(hf, tex)
+        except Exception:
+            # A preview must never break the dialog; the map tab still works.
+            pass
 
     def _save(self, colorized=True):
         if self._index01 is None:
@@ -657,11 +778,16 @@ class DepthMapDialog(QDialog):
         set_last_dialog_dir(path)
         try:
             if colorized:
-                imwrite_auto(path, self._colorized_full())
+                ok = imwrite_auto(path, self._colorized_full())
             else:
                 u16 = np.clip(self._index01 * 65535.0, 0, 65535).round().astype(np.uint16)
-                imwrite_auto(path, u16)
-            self.status_lbl.setText(trans.t("depth_saved").format(path=path))
+                ok = imwrite_auto(path, u16)
+            # imwrite_auto returns False (it does not raise) when the target
+            # is unwritable — claiming success there was actively misleading.
+            if ok:
+                self.status_lbl.setText(trans.t("depth_saved").format(path=path))
+            else:
+                self.status_lbl.setText(trans.t("msg_save_failed_text"))
         except Exception as exc:
             self.status_lbl.setText(f"{exc}")
 
@@ -728,7 +854,10 @@ class DepthMapDialog(QDialog):
         自行跑完/退出并自我清理；信号在接收者销毁后由 Qt 自动断开。"""
         w = self._worker
         self._worker = None
-        if w is None or not w.isRunning():
+        if w is None:
+            return
+        if not w.isRunning():
+            w.deleteLater()
             return
         w.cancel()
         w.setParent(None)

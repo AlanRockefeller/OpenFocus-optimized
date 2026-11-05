@@ -6,10 +6,13 @@ import numpy as np
 from typing import Union, List, Tuple, Optional
 from fusion_methods.dct import dct_focus_stack_fusion
 from fusion_methods.gff import gff_impl
-from fusion_methods.stackmffv4 import _stackmffv4_impl, _stackmffv4_batch_impl
+from fusion_methods.stackmffv3 import (_stackmffv3_impl, _stackmffv3_batch_impl,
+                                      normalize_mode)
 from fusion_methods.dtcwt import _dtcwt_impl
-from utils import resource_path
-from utils.image_utils import normalize_fuse_input
+from utils import memory, resource_path
+from utils.image_utils import (apply_exposure_gain, exposure_gains,
+                               normalize_fuse_input)
+from utils.sorting import natural_sort_key
 
 
 # Tile 参数已改为 MultiFocusFusion 实例属性，见类构造函数中的默认值和访问器方法。
@@ -19,7 +22,7 @@ _DEFAULT_TILE_ENABLED = True
 _DEFAULT_TILE_BLOCK_SIZE = 1024
 _DEFAULT_TILE_OVERLAP = 256
 _DEFAULT_TILE_THRESHOLD = 2048
-_DEFAULT_STACKMFFV4_BATCH_SIZE = 2
+_DEFAULT_AI_BATCH_SIZE = 2
 
 
 def set_tile_mode(enabled: bool):
@@ -64,8 +67,8 @@ _TORCH_PROBE_LOCK = threading.Lock()
 _TORCH_DEVICE_KIND = None  # 'CUDA' | 'MPS' | 'N/A'，探测后缓存
 
 
-def is_stackmffv4_available() -> bool:
-    """Return True when PyTorch is importable for the StackMFF-V4 fusion.
+def is_ai_fusion_available() -> bool:
+    """Return True when PyTorch is importable for the StackMFF-V3 fusion.
 
     The result is cached: importing torch costs seconds on Windows, so the
     startup probe must never pay it twice. The probe is serialized: two
@@ -80,37 +83,130 @@ def is_stackmffv4_available() -> bool:
     with _TORCH_PROBE_LOCK:
         if _STACKMFF_AVAILABLE_CACHE is not None:
             return _STACKMFF_AVAILABLE_CACHE
-        if not importlib.util.find_spec("torch"):
+        # Availability is decided WITHOUT importing torch. Importing it costs
+        # ~2.1 s and pins ~193 MB of RSS; on a machine where the user never
+        # renders with the neural method that was pure waste, and it happened
+        # on every launch just to enable a combo-box entry. find_spec answers
+        # the same question from the import machinery alone.
+        try:
+            found = importlib.util.find_spec("torch") is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
             _TORCH_DEVICE_KIND = "N/A"
             _STACKMFF_AVAILABLE_CACHE = False
             return False
+        # torch is installed; the device kind is resolved lazily by
+        # ensure_torch_device_kind() the first time something actually needs a
+        # GPU decision.
+        _TORCH_DEVICE_KIND = None
+        _STACKMFF_AVAILABLE_CACHE = True
+        return True
+
+
+def ensure_torch_device_kind():
+    """Import torch (once) and cache 'CUDA' | 'MPS' | 'N/A'.
+
+    Call this only where the accelerator genuinely matters — the render path
+    and the status bar — never at startup. Returns the cached value when a
+    previous call already resolved it.
+    """
+    global _TORCH_DEVICE_KIND
+    if _TORCH_DEVICE_KIND is not None:
+        return _TORCH_DEVICE_KIND
+    if not is_ai_fusion_available():
+        _TORCH_DEVICE_KIND = "N/A"
+        return _TORCH_DEVICE_KIND
+    with _TORCH_PROBE_LOCK:
+        if _TORCH_DEVICE_KIND is not None:
+            return _TORCH_DEVICE_KIND
         try:
             torch = importlib.import_module("torch")
-            # The network module itself imports `from torchvision import models`
-            # — torch without torchvision used to pass the probe and then crash
-            # at fusion time. Probe what the code path actually needs.
-            importlib.import_module("torchvision")
-        except Exception:  # ImportError, or a broken/mismatched install
-            _TORCH_DEVICE_KIND = "N/A"
-            _STACKMFF_AVAILABLE_CACHE = False
-            return False
-        try:
             if torch.cuda.is_available():
                 _TORCH_DEVICE_KIND = "CUDA"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 _TORCH_DEVICE_KIND = "MPS"
             else:
                 _TORCH_DEVICE_KIND = "N/A"
-        except Exception:
+        except Exception:  # broken/mismatched install
             _TORCH_DEVICE_KIND = "N/A"
-        _STACKMFF_AVAILABLE_CACHE = True
-        return True
+        return _TORCH_DEVICE_KIND
 
 
 def torch_device_kind():
     """Cached accelerator kind from the availability probe, or None while the
     probe has not run yet (never imports torch itself — safe on the UI thread)."""
     return _TORCH_DEVICE_KIND
+
+# Measured peak working set per algorithm, as a multiple of the input stack
+# bytes (1600x2400, 10 frames, 110 MB stack, tiled at 1024/256, 8 workers).
+# Measured with utils.memory on Windows; see docs/PERFORMANCE.md.
+ALGORITHM_PEAK_FACTOR = {
+    "guided_filter": 31.0,
+    "openfocus_b": 13.0,
+    "openfocus_a": 13.0,
+    "openfocus_c": 13.0,
+    "dtcwt": 8.0,
+    "gfgfgf": 8.0,
+    "dct": 3.2,
+    "stackmffv3": 6.0,      # bounded separately by AI_IMAGE_BUDGET
+}
+
+# Fraction of the currently-free physical memory a fusion may plan to use.
+# 45% leaves the other half to the UI, Qt's image buffers and whatever else
+# the user has open; the reserve below is a floor on top of that.
+MEMORY_BUDGET_RATIO = 0.45
+# Never plan to leave the machine with less than this for the UI and the OS.
+MEMORY_RESERVE_MB = 512.0
+
+
+def estimate_peak_bytes(algorithm: str, frames, block_size: int = None,
+                        workers: int = 1) -> int:
+    """Rough peak working set for fusing `frames` with `algorithm`.
+
+    Two terms:
+      * the input stack itself (it is alive for the whole call), plus
+      * per-algorithm temporaries, measured as a multiple of the stack.
+
+    When tiled, only `workers` tiles exist at once, so the temporary term is
+    scaled by how much of the frame those tiles cover. This is deliberately
+    conservative: over-estimating costs a smaller tile, under-estimating costs
+    the user's session.
+    """
+    if not frames:
+        return 0
+    first = frames[0]
+    if getattr(first, "ndim", 0) < 2:
+        return 0
+    frame_bytes = first.itemsize * int(np.prod(first.shape))
+    stack_bytes = len(frames) * frame_bytes
+    factor = ALGORITHM_PEAK_FACTOR.get(algorithm, 8.0)
+
+    # The measured factor already includes a whole-frame tile set at 8
+    # workers; scale it by the share of the frame actually resident.
+    if block_size:
+        h, w = first.shape[:2]
+        area_ratio = min(1.0, (block_size * block_size * max(1, workers))
+                         / float(max(1, h * w)))
+        # Tiles overlap, and each worker keeps the full stack for its tile.
+        factor = 1.0 + (factor - 1.0) * max(area_ratio, 1.0 / max(1, workers))
+    return int(stack_bytes * factor)
+
+
+def memory_budget_bytes() -> int:
+    """Bytes a fusion may use right now without making the machine swap."""
+    avail = memory.available_memory_bytes()
+    if avail <= 0:
+        return int(2048 * 1024 ** 2)
+    return int(min(avail * MEMORY_BUDGET_RATIO,
+                   max(0, avail - MEMORY_RESERVE_MB * 1024 ** 2)))
+
+
+# Bound OpenCV's internal parallelism as soon as this module is imported:
+# every fusion goes through it, and the default (thread per core + OpenCL)
+# multiplied the peak working set by ~8x. See utils.memory.
+memory.configure_opencv_memory()
+
 
 def _stack_footprint_exceeds(frames, tile_threshold: int) -> bool:
     """True when total stack bytes exceed a single threshold-sized frame.
@@ -127,13 +223,31 @@ def _stack_footprint_exceeds(frames, tile_threshold: int) -> bool:
     return total_bytes > (tile_threshold ** 2) * 3
 
 
-# 每次 StackMFF-V4 模型调用可承受的激活内存预算，单位为 1024x1024 帧。
+# DTCWT keeps one float32 activity map per frame and level (a geometric
+# series summing to ~4/3 * H*W per frame). Splitting the image into tiles
+# changes each tile's transform boundary, which leaves a visible seam at the
+# block grid; tile only when the whole-image activity set would be large.
+DTCWT_ACTIVITY_BUDGET = 1200 * 1024 * 1024
+
+
+def _dtcwt_activity_bytes(frames) -> int:
+    if not frames:
+        return 0
+    first = frames[0]
+    if getattr(first, "ndim", 0) < 2:
+        return 0
+    h, w = first.shape[:2]
+    per_frame = h * w * (4.0 / 3.0) * np.dtype(np.float32).itemsize
+    return int(len(frames) * per_frame)
+
+
+# 每次 StackMFF-V3 模型调用可承受的激活内存预算，单位为 1024x1024 帧。
 # 实测（soak，CPU）：2 瓦片 x 40 帧 ≈ 80 单位时峰值 ~6GB 可跑完；
 # 2 x 120 ≈ 240 单位时卷积要 16GB，DefaultCPUAllocator 直接 OOM。
-STACKMFFV4_IMAGE_BUDGET = 80
+AI_IMAGE_BUDGET = 80
 
 
-def _stackmffv4_effective_tiling(n_frames, block_size, h, w, overlap, batch_pref):
+def _ai_effective_tiling(n_frames, block_size, h, w, overlap, batch_pref):
     """为 AI 分块融合挑选瓦片尺寸/批量，使单次模型调用不超内存预算。
 
     模型输出的是逐像素选帧索引，帧轴不能拆分（拆了选择集就变了），
@@ -143,7 +257,7 @@ def _stackmffv4_effective_tiling(n_frames, block_size, h, w, overlap, batch_pref
     n_frames = max(1, int(n_frames))
     block_size = max(1, min(int(block_size), int(h), int(w)))
     eff_block = block_size
-    budget_px = STACKMFFV4_IMAGE_BUDGET * 1024 * 1024
+    budget_px = AI_IMAGE_BUDGET * 1024 * 1024
     if n_frames * eff_block * eff_block > budget_px:
         safe = int((budget_px / n_frames) ** 0.5)
         # 128 对齐：网络下采样链路合计÷128，832 这类 32 倍数会让输出缩水
@@ -176,26 +290,32 @@ class MultiFocusFusion:
     - 'guided_filter': 引导滤波融合
     - 'dct': 基于DCT方差的一致性融合
     - 'dtcwt': 双树复小波融合
-    - 'stackmffv4': StackMFF-V4 神经网络融合
+    - 'stackmffv3': StackMFF-V3 神经网络融合（软/硬融合）
     """
     
     SUPPORTED_ALGORITHMS = ['guided_filter', 'dct', 'dtcwt', 'gfgfgf',
-                            'stackmffv4', 'openfocus_a', 'openfocus_b',
+                            'stackmffv3', 'openfocus_a', 'openfocus_b',
                             'openfocus_c']
 
     def __init__(self, algorithm: str = 'guided_filter', use_gpu: bool = False,
                  tile_enabled: bool = True, tile_block_size: int = 1024,
                  tile_overlap: int = 256, tile_threshold: int = 2048,
-                 stackmffv4_batch_size: int = 2,
+                 ai_batch_size: int = 2,
+                 ai_mode: str = "soft",
                  base_frame: str = "none",
-                 sort_mode: str = "asc"):
+                 sort_mode: str = "asc",
+                 exposure_match: bool = True):
         """
         初始化融合器
         
         Args:
-            algorithm (str): 融合算法名称,可选 'guided_filter', 'dct', 'dtcwt', 'stackmffv4'
+            algorithm (str): 融合算法名称,可选 'guided_filter', 'dct', 'dtcwt', 'stackmffv3'
             use_gpu (bool): 是否使用GPU加速(CUDA/MPS),默认为False
-            stackmffv4_batch_size (int): StackMFF V4 批量处理大小，默认为2
+            ai_batch_size (int): StackMFF V3 批量处理大小，默认为2
+            ai_mode (str): StackMFF V3 输出模式，'soft'（概率加权混合，
+                默认）或 'hard'（逐像素取最可能帧）
+            exposure_match (bool): 融合前把每帧均值标定到末帧。整栈计算、
+                分块前应用；对所有算法生效。默认 True。
         """
         self._ensure_supported_algorithm(algorithm)
         self.algorithm = algorithm
@@ -206,18 +326,23 @@ class MultiFocusFusion:
         self.tile_block_size = int(tile_block_size)
         self.tile_overlap = int(tile_overlap)
         self.tile_threshold = int(tile_threshold)
-        # StackMFF V4 批量处理大小
-        self.stackmffv4_batch_size = max(1, int(stackmffv4_batch_size))
+        # StackMFF V3 批量处理大小
+        self.ai_batch_size = max(1, int(ai_batch_size))
+        # StackMFF V3 输出模式：soft = 概率加权混合（论文默认）；
+        # hard = 逐像素 argmax 取帧（无帧间插值，边缘更硬）
+        self.ai_mode = normalize_mode(ai_mode)
         # 基底校正（消除亮度漂移）：'none' | 'last' | 'first'。
-        # 逆向验证：Helicon 全系方法的输出都是"细节层来自融合决策 +
-        # 基底低频来自参考帧"——out += LP(I_base) − LP(out)，σ≈32，
+        # 细节层来自融合决策，基底低频来自参考帧——
+        # out += LP(I_base) − LP(out)，σ≈32，
         # 消除帧间曝光/亮度漂移（延时与手持栈刚需）。
         self.base_frame = base_frame if base_frame in ("none", "last", "first") else "none"
         # 帧序方向：'asc'（默认，保持文件序）| 'desc'（倒序栈翻转）| 'off'，
         # 仅对 openfocus 族生效（其余算法对帧序不敏感）。
-        # 没有内容式自动检测——内容是反转变换协变的，方向只能显式给出
-        # （实验证据：tools/helicon_repro/validate_autosort.py）。
+        # 没有内容式自动检测——内容是反转变换协变的，方向只能显式给出。
         self.sort_mode = sort_mode if sort_mode in ("asc", "desc", "off") else "asc"
+        # 融合前曝光匹配：把整栈每帧均值标定到末帧，再交给任何后端。
+        # 必须在分块之前按整栈计算，否则每个 tile 各自归一化会出现亮度接缝。
+        self.exposure_match = bool(exposure_match)
         self._validate_environment()
     
     def _ensure_supported_algorithm(self, algorithm: str) -> None:
@@ -236,7 +361,7 @@ class MultiFocusFusion:
             self._validate_dct_environment()
         elif self.algorithm == 'guided_filter':
             self._validate_spatial_environment()
-        elif self.algorithm == 'stackmffv4':
+        elif self.algorithm == 'stackmffv3':
             self._validate_ai_environment()
         elif self.algorithm == 'gfgfgf':
             pass  # pure NumPy implementation, no extra dependencies
@@ -272,25 +397,26 @@ class MultiFocusFusion:
     def _fuse_openfocus_a(self,
                           input_source: Union[str, List[np.ndarray]],
                           img_resize: Optional[Tuple[int, int]] = None,
-                          kernel_size: int = 7,
+                          kernel_size: int = 11,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - A：方差加权平均（末帧先验），Helicon Method A 复现。"""
+        """OpenFocus - A：方差加权平均（末帧先验）。"""
         from fusion_methods.openfocus_ab import openfocus_a_impl
-        kernel_size = max(1, int(kernel_size or 7))
+        kernel_size = max(1, int(kernel_size or 11))
         if kernel_size % 2 == 0:
             kernel_size = max(1, kernel_size - 1)
         return openfocus_a_impl(input_source, img_resize,
                                 kernel_size=kernel_size,
-                                thread_count=kwargs.get('thread_count', None))
+                                thread_count=kwargs.get('thread_count', None),
+                                blend_smoothing=kwargs.get('blend_smoothing', None))
 
     def _fuse_openfocus_b(self,
                           input_source: Union[str, List[np.ndarray]],
                           img_resize: Optional[Tuple[int, int]] = None,
-                          kernel_size: int = 7,
+                          kernel_size: int = 11,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - B：方差深度图选择，Helicon Method B 复现。"""
+        """OpenFocus - B：方差深度图选择。"""
         from fusion_methods.openfocus_ab import openfocus_b_impl
-        kernel_size = max(1, int(kernel_size or 7))
+        kernel_size = max(1, int(kernel_size or 11))
         if kernel_size % 2 == 0:
             kernel_size = max(1, kernel_size - 1)
         return openfocus_b_impl(input_source, img_resize,
@@ -301,36 +427,52 @@ class MultiFocusFusion:
     def _fuse_openfocus_c(self,
                           input_source: Union[str, List[np.ndarray]],
                           img_resize: Optional[Tuple[int, int]] = None,
-                          kernel_size: int = 7,
+                          kernel_size: int = 11,
                           **kwargs) -> np.ndarray:
-        """OpenFocus - C：拉普拉斯金字塔融合，Helicon Method C 复现。"""
+        """OpenFocus - C：拉普拉斯金字塔融合。
+
+        C has no radius: its only user parameter is the blending Smoothing
+        (`blend_smoothing`), matching Helicon's Method C. `kernel_size` is
+        accepted for signature parity with A/B and ignored.
+        """
         from fusion_methods.openfocus_ab import openfocus_c_impl
-        kernel_size = max(1, int(kernel_size or 7))
-        if kernel_size % 2 == 0:
-            kernel_size = max(1, kernel_size - 1)
         return openfocus_c_impl(input_source, img_resize,
-                                kernel_size=kernel_size,
-                                thread_count=kwargs.get('thread_count', None))
+                                thread_count=kwargs.get('thread_count', None),
+                                blend_smoothing=kwargs.get('blend_smoothing', None))
 
     # ------------------------------------------------------------------
     # 基底校正（消除亮度漂移）
     # ------------------------------------------------------------------
     BASE_CORRECTION_SIGMA = 32.0
 
-    def _base_frame_image(self, input_source) -> Optional[np.ndarray]:
+    def _base_frame_image(self, input_source,
+                          which: Optional[str] = None,
+                          exposure_gains=None) -> Optional[np.ndarray]:
         """取基底参考帧（末帧/首帧），统一到 float32 0-255 域。"""
+        which = which if which in ("last", "first") else self.base_frame
         frame = None
+        gain = None
         if isinstance(input_source, (list, tuple)):
             if not input_source:
                 return None
-            frame = input_source[-1] if self.base_frame == "last" else input_source[0]
+            if which == "last":
+                frame = input_source[-1]
+                gain = exposure_gains[-1] if exposure_gains else None
+            else:
+                frame = input_source[0]
+                gain = exposure_gains[0] if exposure_gains else None
         elif isinstance(input_source, str) and os.path.isdir(input_source):
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(input_source))
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(input_source), key=natural_sort_key)
                      if f.lower().endswith(exts)]
             if not files:
                 return None
-            name = files[-1] if self.base_frame == "last" else files[0]
+            if which == "last":
+                name = files[-1]
+                gain = exposure_gains[-1] if exposure_gains else None
+            else:
+                name = files[0]
+                gain = exposure_gains[0] if exposure_gains else None
             import cv2
             data = np.fromfile(os.path.join(input_source, name), dtype=np.uint8)
             frame = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
@@ -339,8 +481,14 @@ class MultiFocusFusion:
         if frame is None:
             return None
         if frame.dtype == np.uint16:
-            return (frame.astype(np.float32) * (255.0 / 65535.0))
-        return frame.astype(np.float32)
+            out = frame.astype(np.float32) * (255.0 / 65535.0)
+        else:
+            out = frame.astype(np.float32)
+        # List input has already been exposure-matched by fuse(); only a
+        # directory base frame still needs the gain (tiled directory path).
+        if gain is not None and isinstance(input_source, str):
+            out = apply_exposure_gain(out, gain)
+        return out
 
     # ------------------------------------------------------------------
     # 帧序规范化（Sort automatically，仅 openfocus 族生效）
@@ -368,15 +516,69 @@ class MultiFocusFusion:
                   "anchor to the other end).")
         return frames
 
-    def _apply_base_correction(self, fused, input_source):
+    def _exposure_gains_for_source(self, input_source):
+        """Gains for a whole stack, streaming directory input one frame at a
+        time (an exposure pass must not defeat the lazy tiled loader)."""
+        if isinstance(input_source, (list, tuple)):
+            frames = [f for f in input_source if f is not None]
+            return exposure_gains(frames)
+        if isinstance(input_source, str) and os.path.isdir(input_source):
+            import cv2
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp',
+                    '.tif', '.tiff', '.bmp')
+            names = [f for f in sorted(os.listdir(input_source),
+                                       key=natural_sort_key)
+                     if f.lower().endswith(exts)]
+            means = []
+            for name in names:
+                data = np.fromfile(os.path.join(input_source, name),
+                                   dtype=np.uint8)
+                img = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH |
+                                   cv2.IMREAD_COLOR)
+                if img is None:
+                    raise RuntimeError(f"Unable to read image: {name}")
+                color = (img[:, :, :3] if img.ndim == 3 and img.shape[2] > 3
+                         else img)
+                means.append(float(color.astype(np.float32).mean()))
+            if not means:
+                return None
+            target = means[-1]
+            if target <= 1e-6:
+                return [1.0] * len(means)
+            return [1.0 if m <= 1e-6 else target / m for m in means]
+        return None
+
+    def _materialize_exposure(self, input_source, gains):
+        """Load a directory stack with the per-frame gains already applied."""
+        if not isinstance(input_source, str) or not os.path.isdir(input_source):
+            return input_source
+        import cv2
+        exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp',
+                '.tif', '.tiff', '.bmp')
+        names = [f for f in sorted(os.listdir(input_source),
+                                   key=natural_sort_key)
+                 if f.lower().endswith(exts)]
+        frames = []
+        for name, gain in zip(names, gains):
+            data = np.fromfile(os.path.join(input_source, name),
+                               dtype=np.uint8)
+            img = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+            if img is None:
+                raise RuntimeError(f"Unable to read image: {name}")
+            frames.append(apply_exposure_gain(img, gain))
+        return frames
+
+    def _apply_base_correction(self, fused, input_source, exposure_gains=None):
         """out += LP(I_base) − LP(out)：细节层不动，基底低频对齐参考帧。
 
-        Helicon 全系方法的公共结构（逆向实证）：消除帧间曝光/亮度漂移。
-        self.base_frame == 'none'（默认）时原样返回。
+        这是用户显式选择 base_frame='last'/'first' 时的可选后处理，
+        默认 'none' 不做事。参考帧本身要套用与融合输入相同的曝光增益，
+        否则开启 exposure_match 后这一步会把旧的曝光又拉回来。
         """
         if fused is None or self.base_frame == "none":
             return fused
-        base = self._base_frame_image(input_source)
+        which = self.base_frame
+        base = self._base_frame_image(input_source, which, exposure_gains)
         if base is None or base.shape[:2] != fused.shape[:2]:
             return fused
         import cv2
@@ -437,16 +639,16 @@ class MultiFocusFusion:
 
     def _validate_ai_environment(self) -> None:
         """验证AI融合依赖"""
-        if not is_stackmffv4_available():
+        if not is_ai_fusion_available():
             raise RuntimeError(
-                "StackMFF-V4 fusion requires PyTorch. Install it with: pip install torch torchvision"
+                "StackMFF-V3 fusion requires PyTorch. Install it with: pip install torch"
             )
 
         import torch
 
         if self.use_gpu:
             if not torch.cuda.is_available() and not torch.backends.mps.is_available():
-                print("Warning: No GPU acceleration available (CUDA/MPS). Running StackMFF-V4 on CPU (slower).")
+                print("Warning: No GPU acceleration available (CUDA/MPS). Running StackMFF-V3 on CPU (slower).")
                 self.use_gpu = False
     
     def fuse(self, 
@@ -475,8 +677,8 @@ class MultiFocusFusion:
                 dtcwt算法参数:
                     - N (int): DTCWT分解层数,默认4
                 
-                stackmffv4算法参数:
-                    - model_path (str): 模型权重文件路径,默认'./weights/stackmffv4.pth'
+                stackmffv3算法参数:
+                    - model_path (str): 模型权重文件路径,默认'./weights/stackmff_v3_final.pth'
         
         Returns:
             numpy.ndarray: 融合后的图像 (uint8格式)
@@ -485,6 +687,14 @@ class MultiFocusFusion:
         # 深度图标签的确定性方向。必须在任何分派/分块之前完成，让整条
         # 下游（含基底校正）都看到排序后的栈。
         input_source = self._maybe_sort_input(input_source)
+        # 融合前曝光匹配：按整栈（不是按 tile）算出每帧增益。放在分派和
+        # 分块之前，以保证 tiled 与整图结果一致、块间无亮度接缝。
+        exposure_gains_ = None
+        if self.exposure_match:
+            exposure_gains_ = self._exposure_gains_for_source(input_source)
+            if exposure_gains_ is not None and isinstance(input_source, (list, tuple)):
+                input_source = [apply_exposure_gain(f, g)
+                                for f, g in zip(input_source, exposure_gains_)]
         # 如果传入的是已加载的图像列表且单张图像尺寸过大，则使用分块融合
         try:
             is_list_of_arrays = (
@@ -494,6 +704,16 @@ class MultiFocusFusion:
             )
         except Exception:
             is_list_of_arrays = False
+
+        # The AI output mode lives on the instance (the GUI's hard/soft
+        # radio), so an explicit per-call override wins but the instance value
+        # is the default. This must happen BEFORE the tiled dispatch below:
+        # the tiled path returns early, so setting it further down left every
+        # large stack fused with the default 'soft' no matter what the user
+        # picked (a 999x750 demo stack hits the tile branch and produced
+        # byte-identical soft and hard output).
+        if self.algorithm == 'stackmffv3':
+            kwargs.setdefault('mode', self.ai_mode)
 
         # 情况1: 已加载的图像列表
         if is_list_of_arrays:
@@ -507,12 +727,65 @@ class MultiFocusFusion:
             # the same rule just tiles (and slows down) stacks that were
             # previously fused whole-image with byte-identical output.
             footprint_tiles = (
-                self.algorithm == 'stackmffv4'
+                self.algorithm == 'stackmffv3'
                 and _stack_footprint_exceeds(input_source, self.tile_threshold))
-            if self.tile_enabled and (max(h, w) > self.tile_threshold
-                                      or footprint_tiles):
+            dtcwt_tiles = (
+                self.algorithm == 'dtcwt'
+                and _dtcwt_activity_bytes(input_source) > DTCWT_ACTIVITY_BUDGET)
+            if self.algorithm == 'dtcwt':
+                # size alone is not a reason to break the global transform
+                needs_tiles = dtcwt_tiles
+            else:
+                needs_tiles = max(h, w) > self.tile_threshold
+            # Memory guard, in order of preference:
+            #   1. fewer concurrent tiles  - bit-identical output, always safe
+            #   2. a smaller tile          - changes the result by <= 2/255
+            #      (measured), so it is a last resort and is announced.
+            # A 1024 px tile peaks at ~4.2 GB on a 1600x2400x8 stack while a
+            # 512 px tile peaks at ~1.3 GB, so the tile size is by far the
+            # biggest lever. It is only touched when the safer lever is not
+            # enough to fit the budget.
+            budget_mb = memory.mb(memory_budget_bytes())
+            safe_block = self.tile_block_size
+            safe_overlap = self.tile_overlap
+            if self.algorithm != 'stackmffv3' and is_list_of_arrays:
+                est_mb = memory.mb(estimate_peak_bytes(
+                    self.algorithm, input_source, safe_block,
+                    self._calculate_optimal_thread_count(
+                        h, w, input_source[0].shape[2]
+                        if input_source[0].ndim == 3 else 1,
+                        len(input_source), safe_block, 8)))
+                # Step down one size at a time; each halving cuts the peak by
+                # roughly 3x (measured: 1024 -> 4.2 GB, 512 -> 1.3 GB,
+                # 256 -> ~0.5 GB on 1600x2400x8).
+                if est_mb > budget_mb:
+                    chosen = safe_block
+                    for candidate in (512, 256):
+                        if chosen <= candidate:
+                            break
+                        candidate_mb = memory.mb(estimate_peak_bytes(
+                            self.algorithm, input_source, candidate,
+                            self._calculate_optimal_thread_count(
+                                h, w,
+                                input_source[0].shape[2]
+                                if input_source[0].ndim == 3 else 1,
+                                len(input_source), candidate, 8)))
+                        chosen = candidate
+                        if candidate_mb <= budget_mb:
+                            break
+                    if chosen < safe_block:
+                        safe_block = chosen
+                        safe_overlap = min(self.tile_overlap,
+                                           max(8, safe_block // 4))
+                        print(
+                            f"Info: Memory guard: estimated {est_mb:.0f} MB "
+                            f"> budget {budget_mb:.0f} MB; using a "
+                            f"{safe_block} px tile (overlap {safe_overlap}). "
+                            "A reduced tile can differ from the full-size "
+                            "tiling by a few levels per pixel.")
+            if self.tile_enabled and (needs_tiles or footprint_tiles):
                 # 使用分块融合，块大小和重叠均由实例属性控制
-                print(f"Info: Large stack detected ({len(input_source)}x{w}x{h}). Using tiled fusion mode (block={self.tile_block_size}, overlap={self.tile_overlap}).")
+                print(f"Info: Large stack detected ({len(input_source)}x{w}x{h}). Using tiled fusion mode (block={safe_block}, overlap={safe_overlap}).")
                 kws = dict(kwargs)
                 # 防止外部 kwargs 中含有会与内部指定值冲突的同名参数
                 kws.pop('block_size', None)
@@ -521,12 +794,13 @@ class MultiFocusFusion:
                     input_source,
                     algorithm=self.algorithm,
                     img_resize=img_resize,
-                    block_size=self.tile_block_size,
-                    overlap=self.tile_overlap,
+                    block_size=safe_block,
+                    overlap=safe_overlap,
                     should_cancel=should_cancel,
                     progress_callback=progress_callback,
+                    exposure_gains=exposure_gains_,
                     **kws,
-                ), input_source)
+                ), input_source, exposure_gains_)
 
         # 情况2: 传入的是目录路径，进行懒加载判断（只读取第一张图片以判断尺寸）
         if isinstance(input_source, str) and os.path.isdir(input_source):
@@ -536,8 +810,8 @@ class MultiFocusFusion:
                 raise RuntimeError("OpenCV is required to read image files for tiled fusion. Install with: pip install opencv-python") from exc
 
             # 列出常见图片扩展
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(input_source)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(input_source), key=natural_sort_key) if f.lower().endswith(exts)]
             if len(files) > 0:
                 first_path = os.path.join(input_source, files[0])
                 first_img = cv2.imread(first_path, cv2.IMREAD_UNCHANGED)
@@ -546,11 +820,18 @@ class MultiFocusFusion:
                 fh, fw = first_img.shape[:2]
                 # same rule as list input: the footprint bound is neural-only
                 footprint_tiles = (
-                    self.algorithm == 'stackmffv4'
+                    self.algorithm == 'stackmffv3'
                     and _stack_footprint_exceeds(
                         [first_img] * len(files), self.tile_threshold))
-                if self.tile_enabled and (max(fh, fw) > self.tile_threshold
-                                          or footprint_tiles):
+                dtcwt_tiles = (
+                    self.algorithm == 'dtcwt'
+                    and _dtcwt_activity_bytes(
+                        [first_img] * len(files)) > DTCWT_ACTIVITY_BUDGET)
+                if self.algorithm == 'dtcwt':
+                    needs_tiles = dtcwt_tiles
+                else:
+                    needs_tiles = max(fh, fw) > self.tile_threshold
+                if self.tile_enabled and (needs_tiles or footprint_tiles):
                     # 目录输入按文件懒加载方式分块融合（仅当实例 tile_enabled 开启时）
                     kws = dict(kwargs)
                     kws.pop('block_size', None)
@@ -563,9 +844,13 @@ class MultiFocusFusion:
                         overlap=self.tile_overlap,
                         should_cancel=should_cancel,
                         progress_callback=progress_callback,
+                        exposure_gains=exposure_gains_,
                         **kws,
-                    ), input_source)
+                    ), input_source, exposure_gains_)
 
+        if exposure_gains_ is not None and isinstance(input_source, str):
+            input_source = self._materialize_exposure(input_source,
+                                                      exposure_gains_)
         if self.algorithm == 'guided_filter':
             result = self._fuse_guided_filter(input_source, img_resize, **kwargs)
         elif self.algorithm == 'dct':
@@ -574,8 +859,10 @@ class MultiFocusFusion:
             result = self._fuse_dtcwt(input_source, img_resize, **kwargs)
         elif self.algorithm == 'gfgfgf':
             result = self._fuse_gfgfgf(input_source, img_resize, **kwargs)
-        elif self.algorithm == 'stackmffv4':
-            result = self._fuse_stackmffv4(input_source, img_resize, **kwargs)
+        elif self.algorithm == 'stackmffv3':
+            result = self._fuse_stackmffv3(
+                input_source, img_resize, should_cancel=should_cancel,
+                progress_callback=progress_callback, **kwargs)
         elif self.algorithm == 'openfocus_a':
             result = self._fuse_openfocus_a(input_source, img_resize, **kwargs)
         elif self.algorithm == 'openfocus_b':
@@ -590,7 +877,8 @@ class MultiFocusFusion:
         if should_cancel is not None and should_cancel():
             from core.registration import RegistrationCancelled
             raise RegistrationCancelled()
-        return self._apply_base_correction(result, input_source)
+        return self._apply_base_correction(result, input_source,
+                                           exposure_gains_)
     
     def _fuse_guided_filter(self, 
                             input_source: Union[str, List[np.ndarray]], 
@@ -683,32 +971,39 @@ class MultiFocusFusion:
             thread_count=kwargs.get('thread_count'),
         )
     
-    def _fuse_stackmffv4(self,
+    def _fuse_stackmffv3(self,
                          input_source: Union[str, List[np.ndarray]],
                          img_resize: Optional[Tuple[int, int]] = None,
-                         model_path: Optional[str] = 'weights/stackmffv4.pth',
+                         model_path: Optional[str] = 'weights/stackmff_v3_final.pth',
+                         mode: str = 'soft',
+                         should_cancel=None,
+                         progress_callback=None,
                          **kwargs) -> np.ndarray:
         """
-        StackMFF-V4 融合
+        StackMFF-V3 融合
         
         Args:
             input_source: 图像源
             img_resize: 目标尺寸
             model_path: 模型权重文件路径
+            mode: 'soft'（概率加权混合）| 'hard'（逐像素取最可能帧）
         
         Returns:
             融合后的图像
         """
         if not model_path:
-            model_path = 'weights/stackmffv4.pth'
+            model_path = 'weights/stackmff_v3_final.pth'
         if not os.path.isabs(model_path):
             model_path = resource_path(model_path)
 
-        return _stackmffv4_impl(
+        return _stackmffv3_impl(
             input_source,
             img_resize,
             model_path,
-            self.use_gpu
+            self.use_gpu,
+            mode=mode,
+            should_cancel=should_cancel,
+            progress_callback=progress_callback,
         )
 
     
@@ -717,7 +1012,7 @@ class MultiFocusFusion:
         切换融合算法
         
         Args:
-            algorithm (str): 新的算法名称 ('guided_filter', 'dct', 'dtcwt', 'stackmffv4')
+            algorithm (str): 新的算法名称 ('guided_filter', 'dct', 'dtcwt', 'stackmffv3')
         """
         self._ensure_supported_algorithm(algorithm)
         self.algorithm = algorithm
@@ -770,20 +1065,42 @@ class MultiFocusFusion:
         - fused_tile: block_size * block_size * channels * 4 bytes
         - weight2d: block_size * block_size * 4 bytes
         """
-        try:
-            import psutil
-            avail_memory_mb = psutil.virtual_memory().available // (1024**2)
-        except Exception:
-            avail_memory_mb = 4096
+        # Real available memory. This used to `import psutil`, which is not a
+        # dependency of the project: the import failed on every install and
+        # the guard silently used a hard-coded 4096 MB, so on a busy machine
+        # it allowed far more concurrent tiles than memory existed for.
+        avail_memory_mb = memory.mb(memory.available_memory_bytes())
+        if avail_memory_mb <= 0:
+            avail_memory_mb = 2048.0
 
-        tile_memory = (num_images + 2) * (block_size ** 2) * channels * 4 / (1024**2)
+        # Per-tile working set, CALIBRATED against measurements on
+        # 1600x2400x10 with 1024 px tiles (guided filter, the heaviest
+        # classical method):
+        #     1 worker  -> +1007 MB, 2 -> +1856, 4 -> +3501, 8 -> +5644
+        # i.e. ~850 MB per worker there, against a naive uint8+float32
+        # estimate of 150 MB: the filter keeps several float32 temporaries of
+        # the crop (guide, mean, variance, coefficients) for every frame at
+        # once. The factor below reproduces those numbers within 5%.
+        # Factor from measurement: 850 MB measured / 150 MB naive at
+        # 1024px x 10 frames = 5.6x.
+        per_tile_bytes = (num_images * (block_size ** 2) * channels
+                          * (1 + 4) * 5.6)
+        tile_memory_mb = max(1.0, per_tile_bytes / (1024 ** 2))
 
-        reserved_memory_mb = 2048
-        usable_memory_mb = max(tile_memory * 2, avail_memory_mb - reserved_memory_mb)
+        # Budget: a fixed share of the memory that is free RIGHT NOW, minus a
+        # reserve so the desktop and Qt's own buffers stay responsive.
+        budget_mb = memory.mb(memory_budget_bytes())
+        max_by_memory = max(1, int(budget_mb // tile_memory_mb))
 
-        max_by_memory = max(1, int(usable_memory_mb / tile_memory))
-
-        max_workers = min(max_by_memory, user_thread_count or 8, os.cpu_count() or 4)
+        # Cap at PHYSICAL cores (SMT siblings counted once), Helicon-style:
+        # tile fusion is memory-bandwidth-bound, so hyper-threads raise the
+        # peak working set without adding throughput.
+        from utils.platform_utils import physical_core_count
+        max_workers = min(max_by_memory, user_thread_count or 8,
+                          physical_core_count())
+        if max_workers < (user_thread_count or 8):
+            print(f"Info: Memory guard: {max_workers} tile worker(s) "
+                  f"({tile_memory_mb:.0f} MB each, budget {budget_mb:.0f} MB)")
 
         return max(1, max_workers)
 
@@ -852,6 +1169,7 @@ class MultiFocusFusion:
                     thread_count: int = None,
                     should_cancel=None,
                     progress_callback=None,
+                    exposure_gains=None,
                     **kwargs) -> np.ndarray:
         """
         分块（滑动窗口）融合：当单张图像尺寸过大时调用。
@@ -859,7 +1177,7 @@ class MultiFocusFusion:
         - 将图像切成若干 `block_size` 大小的块，块间以 `overlap` 重叠。
         - 对每个块调用对应算法的融合函数，最后对重叠区域简单平均融合以消除边界伪影。
         - 支持多线程并行处理 tile，线程数根据系统内存自动计算（保守策略）。
-        - StackMFF V4 使用批量处理以利用 GPU 并行能力。
+        - StackMFF V3 使用批量处理以利用 GPU 并行能力。
         """
 
         imgs = None
@@ -882,8 +1200,8 @@ class MultiFocusFusion:
             except Exception as exc:
                 raise RuntimeError("OpenCV is required to read image files for tiled fusion. Install with: pip install opencv-python") from exc
 
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(img_dir), key=natural_sort_key) if f.lower().endswith(exts)]
             if len(files) == 0:
                 raise ValueError(f"No image files found in directory: {img_dir}")
             first_img = cv2.imread(os.path.join(img_dir, files[0]), cv2.IMREAD_UNCHANGED)
@@ -925,14 +1243,15 @@ class MultiFocusFusion:
                 x1 = x0 + block_size
                 tile_coords.append((x0, y0, x1, y1))
 
-        # StackMFF V4 使用批量处理
-        if algorithm == 'stackmffv4':
-            return self._fuse_tiled_stackmffv4_batched(
+        # StackMFF V3 使用批量处理
+        if algorithm == 'stackmffv3':
+            return self._fuse_tiled_ai_batched(
                 imgs, img_dir, tile_coords, h, w, channels,
                 block_size, overlap, **kwargs,
                 should_cancel=should_cancel,
                 progress_callback=progress_callback,
                 out_dtype=out_dtype,
+                exposure_gains=exposure_gains,
             )
 
         # 其他算法使用原有的多线程处理
@@ -979,12 +1298,16 @@ class MultiFocusFusion:
                 crops = [img[y0:y1, x0:x1].copy() for img in imgs]
             else:
                 crops = []
-                for fname in files:
+                for idx, fname in enumerate(files):
                     fp = os.path.join(img_dir, fname)
                     full = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
                     if full is None:
                         raise RuntimeError(f"Unable to read image: {fp}")
-                    crops.append(full[y0:y1, x0:x1].copy())
+                    crop = full[y0:y1, x0:x1].copy()
+                    if exposure_gains is not None:
+                        crop = apply_exposure_gain(
+                            crop, exposure_gains[idx])
+                    crops.append(crop)
                 # 目录里的 16-bit 文件同样要落到 0-255 float，否则各算法的
                 # /255 预处理会得到 0-257 的错值。
                 crops = normalize_fuse_input(crops)[0]
@@ -1068,7 +1391,7 @@ class MultiFocusFusion:
             return fused[:, :, 0]
         return fused
 
-    def _fuse_tiled_stackmffv4_batched(self,
+    def _fuse_tiled_ai_batched(self,
                                         imgs: Optional[List[np.ndarray]],
                                         img_dir: Optional[str],
                                         tile_coords: List[Tuple[int, int, int, int]],
@@ -1077,9 +1400,10 @@ class MultiFocusFusion:
                                         should_cancel=None,
                                         progress_callback=None,
                                         out_dtype=np.uint8,
+                                        exposure_gains=None,
                                         **kwargs):
         """
-        使用批量处理的 StackMFF V4 分块融合。
+        使用批量处理的 StackMFF V3 分块融合。
         
         通过将多个 tile 打包成一个 batch 进行 GPU 推理，提高效率。
         """
@@ -1088,30 +1412,44 @@ class MultiFocusFusion:
         # 获取文件列表（如果是目录输入）——先于分批决策，帧数决定瓦片/批量
         files = None
         if img_dir is not None:
-            exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-            files = [f for f in sorted(os.listdir(img_dir)) if f.lower().endswith(exts)]
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            files = [f for f in sorted(os.listdir(img_dir), key=natural_sort_key) if f.lower().endswith(exts)]
 
         n_frames = len(imgs) if imgs is not None else len(files)
-        eff_block, batch_size, tile_coords = _stackmffv4_effective_tiling(
-            n_frames, block_size, h, w, overlap, self.stackmffv4_batch_size)
+        eff_block, batch_size, tile_coords = _ai_effective_tiling(
+            n_frames, block_size, h, w, overlap, self.ai_batch_size)
         total_tiles = len(tile_coords)
-        if eff_block < block_size or batch_size < self.stackmffv4_batch_size:
+        if eff_block < block_size or batch_size < self.ai_batch_size:
             print(f"Info: deep stack ({n_frames} frames) - AI tiles auto-shrunk to "
                   f"{eff_block}px, batch_size={batch_size} to bound model memory")
 
-        print(f"StackMFF V4 batched tiled fusion: {total_tiles} tiles, batch_size={batch_size}")
+        print(f"StackMFF V3 batched tiled fusion: {total_tiles} tiles, batch_size={batch_size}")
 
         # 获取模型路径
-        model_path = kwargs.get('model_path', 'weights/stackmffv4.pth')
+        model_path = kwargs.get('model_path', 'weights/stackmff_v3_final.pth')
         if not model_path:
-            model_path = 'weights/stackmffv4.pth'
+            model_path = 'weights/stackmff_v3_final.pth'
         if not os.path.isabs(model_path):
             model_path = resource_path(model_path)
+        # The tile path must honour the same output mode as the whole-frame
+        # path, or a large stack would silently fall back to soft blending.
+        mode = normalize_mode(kwargs.get('mode', 'soft'))
+
+        # Load the checkpoint before the loop so the "First tile" wait is not
+        # invisible: a 21 s run spent 1.6 s here, and the bar sat at 0% with
+        # no explanation. The model is cached, so this is a no-op afterwards.
+        from fusion_methods.stackmffv3 import _get_model_and_device
+        _get_model_and_device(model_path, self.use_gpu)
+        if progress_callback is not None:
+            # done=0 keeps the bar at 0 % but tells the UI the real tile
+            # count, so it leaves indeterminate mode before the first tile
+            # (the model load above is 1-2 s and otherwise invisible).
+            progress_callback(0, total_tiles)
 
         acc = np.zeros((h, w, channels), dtype=np.float32)
         weight = np.zeros((h, w, 1), dtype=np.float32)
         
-        # 分批处理
+        # 分批处理（每个瓦片单独前向；batch_size 只决定进度粒度）
         from core.registration import RegistrationCancelled
         for batch_start in range(0, total_tiles, batch_size):
             if should_cancel is not None and should_cancel():
@@ -1120,9 +1458,7 @@ class MultiFocusFusion:
             batch_coords = tile_coords[batch_start:batch_end]
             current_batch_size = len(batch_coords)
             
-            print(f"  Processing batch {batch_start // batch_size + 1}/{(total_tiles + batch_size - 1) // batch_size} ({current_batch_size} tiles)")
-            if progress_callback is not None:
-                progress_callback(batch_start + current_batch_size, total_tiles)
+            print(f"  Processing tiles {batch_start + 1}-{batch_end}/{total_tiles}")
             
             # 准备这个 batch 的所有 tile 数据
             tiles_list = []
@@ -1131,17 +1467,36 @@ class MultiFocusFusion:
                     crops = [img[y0:y1, x0:x1].copy() for img in imgs]
                 else:
                     crops = []
-                    for fname in files:
+                    for idx, fname in enumerate(files):
                         fp = os.path.join(img_dir, fname)
                         full = cv2.imread(fp, cv2.IMREAD_UNCHANGED)
                         if full is None:
                             raise RuntimeError(f"Unable to read image: {fp}")
-                        crops.append(full[y0:y1, x0:x1].copy())
+                        crop = full[y0:y1, x0:x1].copy()
+                        if exposure_gains is not None:
+                            crop = apply_exposure_gain(
+                                crop, exposure_gains[idx])
+                        crops.append(crop)
                     crops = normalize_fuse_input(crops)[0]
                 tiles_list.append(crops)
             
-            # 批量处理
-            fused_tiles = _stackmffv4_batch_impl(tiles_list, model_path, self.use_gpu)
+            # One model call per tile, not per batch.
+            #
+            # Batching looked cheaper but is not: a batch pads every tile up
+            # to the largest one and runs one big attention pass, which
+            # measured 19.3 s for two 1024x1021 tiles against 16.9 s for two
+            # separate calls. Per-tile calls also make progress real - a
+            # 2-tile stack used to be a single 20 s step that reported
+            # "done=total" BEFORE it started, so the bar froze at 100%.
+            fused_tiles = []
+            for tile_i, crops in enumerate(tiles_list):
+                if should_cancel is not None and should_cancel():
+                    raise RegistrationCancelled()
+                fused_tiles.append(
+                    _stackmffv3_batch_impl([crops], model_path,
+                                           self.use_gpu, mode)[0])
+                if progress_callback is not None:
+                    progress_callback(batch_start + tile_i + 1, total_tiles)
             
             # 将结果合并到累加器
             for idx, (x0, y0, x1, y1) in enumerate(batch_coords):
@@ -1197,11 +1552,14 @@ class MultiFocusFusion:
                 device_name = 'CPU'
         else:
             device_name = 'CPU'
-        return {
+        info = {
             'algorithm': self.algorithm,
             'use_gpu': self.use_gpu,
             'device': device_name
         }
+        if self.algorithm == 'stackmffv3':
+            info['mode'] = self.ai_mode
+        return info
     
     def __repr__(self) -> str:
         """字符串表示"""
@@ -1218,17 +1576,19 @@ def fuse_images(input_source: Union[str, List[np.ndarray]],
                 tile_block_size: Optional[int] = None,
                 tile_overlap: Optional[int] = None,
                 tile_threshold: Optional[int] = None,
-                stackmffv4_batch_size: Optional[int] = None,
+                ai_batch_size: Optional[int] = None,
+                mode: str = "soft",
                 **kwargs) -> np.ndarray:
     """
     便捷函数:一次性完成图像融合
     
     Args:
         input_source: 图像源(目录路径或图像列表)
-            algorithm: 融合算法 ('guided_filter', 'dct', 'dtcwt', 'stackmffv4')
+            algorithm: 融合算法 ('guided_filter', 'dct', 'dtcwt', 'stackmffv3')
         use_gpu: 是否使用GPU（当前版本将自动切换到CPU）
         img_resize: 目标尺寸
-        stackmffv4_batch_size: StackMFF V4 批量处理大小（默认2）
+        ai_batch_size: StackMFF V3 批量处理大小（默认2）
+        mode: StackMFF V3 输出模式，'soft'（概率加权，默认）或 'hard'（argmax）
         **kwargs: 算法特定参数
     
     Returns:
@@ -1241,16 +1601,17 @@ def fuse_images(input_source: Union[str, List[np.ndarray]],
         # 使用DTCWT算法
         result = fuse_images('./images', algorithm='dtcwt', use_gpu=False, N=4)
         
-        # 使用StackMFF-V4算法
-        result = fuse_images(image_list, algorithm='stackmffv4', use_gpu=False,
-                           model_path='./weights/stackmffv4.pth')
+        # 使用StackMFF-V3算法（mode='hard' 逐像素取最可能帧）
+        result = fuse_images(image_list, algorithm='stackmffv3', use_gpu=False,
+                           model_path='./weights/stackmff_v3_final.pth',
+                           mode='soft')
     """
     # Resolve tile parameters: explicit args take precedence, then module defaults
     te = _DEFAULT_TILE_ENABLED if tile_enabled is None else bool(tile_enabled)
     tbs = _DEFAULT_TILE_BLOCK_SIZE if tile_block_size is None else int(tile_block_size)
     to = _DEFAULT_TILE_OVERLAP if tile_overlap is None else int(tile_overlap)
     tt = _DEFAULT_TILE_THRESHOLD if tile_threshold is None else int(tile_threshold)
-    sbs = _DEFAULT_STACKMFFV4_BATCH_SIZE if stackmffv4_batch_size is None else int(stackmffv4_batch_size)
+    sbs = _DEFAULT_AI_BATCH_SIZE if ai_batch_size is None else int(ai_batch_size)
 
     fusion = MultiFocusFusion(
         algorithm=algorithm,
@@ -1259,7 +1620,8 @@ def fuse_images(input_source: Union[str, List[np.ndarray]],
         tile_block_size=tbs,
         tile_overlap=to,
         tile_threshold=tt,
-        stackmffv4_batch_size=sbs,
+        ai_batch_size=sbs,
+        ai_mode=mode,
     )
 
     return fusion.fuse(input_source, img_resize=img_resize, **kwargs)

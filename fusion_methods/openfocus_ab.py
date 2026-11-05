@@ -1,20 +1,14 @@
-"""OpenFocus A/B —— 基于 Helicon Focus 逆向复现验证的两条融合管线。
+"""OpenFocus A/B/C —— 三条互补的融合管线。
 
-来源与验证（详见 docs/HELICON_REPRODUCTION_REPORT.md）：
-- 清晰度度量 = 窗口局部方差（与 Helicon 深度图逐像素重合 99.5%，
-  复现管线真实数据 11 栈输出 MAE 0.9%–1.8% 值域，配准后口径 §7.4；
-  移植版集成实测 1.2%–3.5%，tests/test_helicon_regression.py 锁定）。
+- 清晰度度量 = 窗口局部方差（blur(x²) − blur(x)²）。
 - Method B（深度图选择）：argmax(var) → 深度图平滑 → 按图硬拾取；
-  硬拾取优于软混合（实验证明），平局取首帧。
+  硬拾取优于软混合，平局取首帧。
 - Method A（加权平均）：w = gauss(var)，分母带 +1 的末帧先验
-  （平坦区权重全零时精确退化为末帧——复现实验误差 0.00）。
+  （平坦区权重全零时精确退化为末帧）。
 - Method C（金字塔）：7 层拉普拉斯金字塔逐带 max-pick 硬拾取
-  （|带|高斯 σ3 权重取 argmax；实测 max-pick 明显优于软归一混合），
-  bicubic ×2 + σ0.6 展开，最粗带（基带）整带取末帧——逆向实证的
-  Helicon 行为（"低频来自参考帧 + 高频按频段独立决策"，输出高频能量
-  ~1.24×输入）。对 Helicon 原输出基准（配准后）：stackA 0.50% /
-  stackB 4.99% / stackC 3.39%（tools/helicon_repro/ 可复跑；旧值
-  6.5% 是 naive 居中裁切对 Helicon 非对称裁边的惩罚，§7.4）。
+  （|带|高斯 σ3 权重取 argmax；max-pick 优于软归一混合），
+  bicubic ×2 + σ0.6 展开，最粗带（基带）整带取末帧
+  （低频来自参考帧 + 高频按频段独立决策）。
 
 约定：输入为 0-255 域的 BGR 帧列表（uint8 或 float32），
 输出经 fuse_output_dtype 归一（与 gff/dct 相同的位深契约）。
@@ -26,6 +20,7 @@ import cv2
 import numpy as np
 
 from utils.image_utils import fuse_output_dtype
+from utils.sorting import natural_sort_key
 
 
 def _collect_images(input_source) -> List[np.ndarray]:
@@ -34,11 +29,15 @@ def _collect_images(input_source) -> List[np.ndarray]:
         frames = [f for f in input_source if f is not None]
         if len(frames) < 2:
             raise ValueError("OpenFocus A/B fusion needs at least 2 frames")
-        return frames
+        # Same 0-255 domain as the directory loader: a uint16 list used to
+        # stay in 0-65535 and saturate on the final np.clip(..., 0, 255).
+        return [f.astype(np.float32) * (255.0 / 65535.0)
+                if f.dtype == np.uint16 else f for f in frames]
 
     if isinstance(input_source, str) and os.path.isdir(input_source):
-        exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
-        files = [f for f in sorted(os.listdir(input_source))
+        exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+        files = [f for f in sorted(os.listdir(input_source),
+                                    key=natural_sort_key)
                  if f.lower().endswith(exts)]
         if len(files) < 2:
             raise ValueError(
@@ -93,12 +92,16 @@ def _variance_stack(frames_f: List[np.ndarray], radius: int) -> np.ndarray:
 
 
 def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 11,
-                     thread_count: int = None):
+                     thread_count: int = None, blend_smoothing: float = 2.0):
     """OpenFocus - A（方差加权平均，末帧先验）。
 
-    w_i = gauss(var_i, σ=2) ；out = (Σ w_i·I_i + I_last) / (Σ w_i + 1)。
+    w_i = gauss(var_i, σ=blend_smoothing) ；
+    out = (Σ w_i·I_i + I_last) / (Σ w_i + 1)。
     +1 的末帧先验保证平坦区（权重全零）精确退化为末帧——这正是
-    逆向实验中 Method A 平局行为（输出恒等于末帧）的成因。
+    Method A 平局行为（输出恒等于末帧）的成因。
+
+    `blend_smoothing` 是 Helicon 的 "Smoothing"：权重图的平滑尺度，
+    决定清晰区之间的过渡宽度（大 = 更柔、细节更软）。
     """
     frames = _collect_images(input_source)
     if img_resize is not None:
@@ -109,9 +112,12 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 11,
 
     radius = max(1, int(kernel_size) // 2) if kernel_size else 3
     var = _variance_stack(frames_f, radius)
-    # Smoothing：对权重图做轻度高斯（对应 Helicon 的 Smoothing 参数）
+    # Smoothing：对权重图做轻度高斯（深度过渡平滑参数）
+    sigma = max(0.0, float(2.0 if blend_smoothing is None
+                          else blend_smoothing))
     weights = np.stack([
-        cv2.GaussianBlur(v, (0, 0), sigmaX=2.0) for v in var
+        cv2.GaussianBlur(v, (0, 0), sigmaX=sigma) if sigma > 1e-3 else v
+        for v in var
     ], axis=0)
 
     h, w = frames_f[0].shape[:2]
@@ -134,7 +140,7 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 11,
     return np.clip(fused, 0, 255).astype(fuse_output_dtype(frames))
 
 
-DEPTH_SMOOTHING_DEFAULT = 1.2  # σ of the depth-map transition (Helicon-matched)
+DEPTH_SMOOTHING_DEFAULT = 1.2  # σ of the depth-map transition (default)
 
 
 def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
@@ -143,7 +149,7 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
     """OpenFocus - B（方差深度图选择）。
 
     两遍结构：argmax(var) → 深度图平滑（边界 ±3 帧线性过渡）→ 硬拾取。
-    np.argmax 天然平局取首帧（逆向实验确认的行为）。
+    np.argmax 天然平局取首帧。
     """
     frames = _collect_images(input_source)
     if img_resize is not None:
@@ -158,12 +164,12 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
 
     depth = np.argmax(var, axis=0).astype(np.float32)
     # 深度图平滑：先中值去噪点，再高斯做边界过渡（约 ±3 帧），
-    # 最后取整——硬拾取（软混合经实验证明反而偏离 Helicon 输出）。
+    # 最后取整——硬拾取（软混合会降低局部对比度）。
     # 注意用 float32 做中值：转 uint8 会在帧数 >256 时截断深度索引
     # （显微深栈可达数百帧）；对整数输入两者结果逐位一致。
     depth = cv2.medianBlur(np.ascontiguousarray(depth, np.float32), 3)
-    # depth_smoothing = 过渡带高斯 σ（Helicon 的 Smoothing/Feathering 旋钮对应
-    # 物，报告 §0.2：过渡宽度随其近线性增宽）。默认 1.2 与 Helicon 输出对齐；
+    # depth_smoothing = 过渡带高斯 σ（过渡宽度随其近线性增宽）。
+    # 默认 1.2；
     # 0 = 只做中值去噪点（细节最锐，真值基准上 +0.5 dB），调大可压制
     # 噪声栈在深度跳变处的斑点/光晕。
     sigma = max(0.0, float(depth_smoothing if depth_smoothing is not None
@@ -183,7 +189,7 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
 
 
 # ------------------------------------------------------------------
-# OpenFocus - C（Method C：拉普拉斯金字塔，移植自逆向复现管线）
+# OpenFocus - C（拉普拉斯金字塔融合）
 # ------------------------------------------------------------------
 
 def _pyramid_gauss(img: np.ndarray, levels: int) -> List[np.ndarray]:
@@ -209,14 +215,19 @@ def _pyramid_expand(band: np.ndarray, shape) -> np.ndarray:
 
 
 def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
-                     thread_count: int = None, levels: int = 7):
-    """OpenFocus - C：拉普拉斯金字塔融合（复现 Helicon Method C）。
+                     thread_count: int = None, levels: int = 7,
+                     blend_smoothing: float = 3.0):
+    """OpenFocus - C：拉普拉斯金字塔融合。
 
-    每个带通层的权重 = |亮度带| 的高斯平滑（wsigma=3），逐像素取
-    argmax 硬拾取（max-pick）——逆向差分实验实测 max-pick 明显优于
-    软归一混合（stackA 上 0.51% vs 1.35% MAE）；最粗的基带整带取
-    末帧（亮度基准）。
+    每个带通层的权重 = |亮度带| 的高斯平滑（σ=blend_smoothing），逐像素
+    取 argmax 硬拾取（max-pick）——实测 max-pick 明显优于软归一混合
+    （stackA 上 0.51% vs 1.35% MAE）；最粗的基带整带取末帧（亮度基准）。
     层数自适应：min(levels, log2(min(H,W))-1)，小图不产生退化带。
+
+    `blend_smoothing` 是 Helicon 的 "Smoothing"（Method C 唯一的可调
+    参数）：决定各帧带通在多宽的尺度上被比较/过渡。σ 越大过渡越柔、
+    细节越软；σ→0 等价于逐像素裸 argmax（最锐、最易斑点）。`kernel_size`
+    仅为兼容 A/B 的签名保留，C 不使用空间窗口。
     """
     frames = _collect_images(input_source)
     if img_resize is not None:
@@ -243,11 +254,11 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
         band = np.stack(bands, axis=0).astype(np.float32)
 
         if k == usable - 1:
-            # 基带：整带取末帧（Helicon 实证行为：低频来自参考帧）
+            # 基带：整带取末帧（低频来自参考帧）
             out_bands.append(band[-1].copy())
             continue
 
-        # 权重：亮度域带通幅值，σ=3 平滑（对应 Helicon 的 opacity filter）。
+        # 权重：亮度域带通幅值，σ=3 平滑（opacity 平滑）。
         # 注意：cv2.GaussianBlur 会把 (N,h,w) 当成多通道图跨 N 轴混合，
         # 必须逐帧模糊。
         if band.ndim == 4:
@@ -255,8 +266,10 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
                                    np.float32)).sum(axis=3)
         else:
             lum = band
-        W = np.stack([cv2.GaussianBlur(np.abs(w), (0, 0), 3.0)
-                      for w in lum], axis=0)
+        sigma = max(0.0, float(3.0 if blend_smoothing is None
+                              else blend_smoothing))
+        W = np.stack([cv2.GaussianBlur(np.abs(w), (0, 0), sigma)
+                      if sigma > 1e-3 else np.abs(w) for w in lum], axis=0)
         # max-pick 硬拾取：逐像素选能量最大帧（无除法，平坦带贡献≈0，
         # 无需除零回退）
         idx = W.argmax(axis=0)
@@ -276,13 +289,13 @@ def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
 
 
 # ------------------------------------------------------------------
-# 帧序检测（Sort automatically，逆向实证 Helicon 的行为）
+# 帧序检测（排序行为）
 # ------------------------------------------------------------------
 def frame_sharpness_curve(frames, radius: int = 3, max_dim: int = 256):
     """逐帧标量清晰度：降采样 luma 上的窗口方差均值（诊断用）。
 
-    用与 A/B/C 融合一致的窗口方差度量（逆向验证：与 Helicon 深度图
-    99.5% 一致），在 ≤256px 的小图上计算，单帧毫秒级。
+    用与 A/B/C 融合一致的窗口方差度量，在 ≤256px 的小图上计算，
+    单帧毫秒级。
     注意：该曲线与帧序**方向**无关（见上方实验结论），仅用于诊断与
     validate_autosort.py 的证据复跑，不参与产品路径的方向决策。
     """
@@ -330,14 +343,11 @@ def detect_stack_flip(curve, min_frames: int = 5, threshold: float = -0.7,
 # ------------------------------------------------------------------
 # 帧序方向（Sort）
 # ------------------------------------------------------------------
-# 实验结论（tools/helicon_repro/validate_autosort.py，2026-10-13；
-# 极性修正见 docs/HELICON_REPRODUCTION_REPORT.md §6.2/§7.6——早前
-# "Helicon 自动反转帧序"的说法是对深度图极性的双重取反误读，已撤回）：
 # 全局清晰度曲线与帧序方向无关——11 个真实栈的 Spearman rho 散布在
 # -0.98…+1.00，"单调递减检测"只对 1/11 正确。根本原因：内容是
 # 反转变换协变的（反转后的栈同样是合法焦点栈），任何内容信号都
-# 无法判定方向；Helicon 实际保持文件序。因此方向控制是显式的：
-# asc（默认，与 Helicon 一致）/ desc（倒序栈由用户翻转）。
+# 无法判定方向。因此方向控制是显式的：
+# asc（默认，保持文件序）/ desc（倒序栈由用户翻转）。
 
 def sort_frames_for_openfocus(frames, mode: str = "asc"):
     """按 mode 规范帧序，返回 (排序后帧列表, 是否翻转)。

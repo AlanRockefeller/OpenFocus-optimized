@@ -42,6 +42,15 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Verify the shipped AI model is present
+        shell: pwsh
+        run: |
+          $w = "weights/stackmff_v3_final.pth"
+          if (-not (Test-Path $w)) { throw "Missing $w - the release would ship without the AI model." }
+          $len = (Get-Item $w).Length
+          if ($len -lt 600000) { throw "$w is only $len bytes (expected ~658587)." }
+          Write-Output ("AI model present: {0:N0} bytes" -f $len)
+
       - name: Build with PyInstaller
         shell: pwsh
         run: |
@@ -52,14 +61,51 @@ jobs:
             --add-data "weights;weights" `
             --add-data "ui;ui" `
             --add-data "docs;docs" `
-            --collect-all PyQt6 `
+            --collect-submodules PyQt6 `
+            --hidden-import PyQt6.QtCore `
+            --hidden-import PyQt6.QtGui `
+            --hidden-import PyQt6.QtWidgets `
+            --hidden-import PyQt6.QtNetwork `
             --collect-all scipy `
             --copy-metadata imageio `
             --collect-data dtcwt `
             --collect-all rawpy `
             --collect-all torch `
-            --collect-all torchvision `
+            --exclude-module torchvision `
+            --exclude-module torch.test `
+            --exclude-module torch.utils.tensorboard `
+            --exclude-module torch.distributed `
+            --exclude-module matplotlib `
+            --exclude-module tkinter `
+            --exclude-module IPython `
+            --exclude-module pytest `
+            --exclude-module PyQt6.QtWebEngineCore `
+            --exclude-module PyQt6.Qt3DCore `
+            --exclude-module PyQt6.QtMultimedia `
+            --exclude-module PyQt6.QtBluetooth `
+            --exclude-module PyQt6.QtDesigner `
+            --exclude-module PyQt6.QtQuick `
             main.py
+
+      - name: Prune build-only files from the bundle
+        shell: pwsh
+        run: |
+          # torch ships headers, .lib import libraries and CMake files that are
+          # only used when compiling against it. They are ~80 MB of the bundle
+          # and nothing reads them at runtime. Qt's WebEngine/3D/Multimedia
+          # plugins are likewise unused by this app.
+          $root = "dist/OpenFocus"
+          $patterns = @("*.lib", "*.pdb", "*.exp")
+          foreach ($pat in $patterns) {
+            Get-ChildItem -Path $root -Recurse -Filter $pat -ErrorAction SilentlyContinue |
+              Remove-Item -Force -ErrorAction SilentlyContinue
+          }
+          foreach ($dir in @("torch/include", "torch/share", "torch/test")) {
+            $p = Join-Path $root "_internal/$dir"
+            if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force }
+          }
+          $before = (Get-ChildItem $root -Recurse -File | Measure-Object Length -Sum).Sum
+          Write-Output ("bundle after prune: {0:N0} MB" -f ($before/1MB))
 
       - name: Package zip (portable)
         shell: pwsh
@@ -126,6 +172,13 @@ jobs:
           sips -z 1024 1024 assets/OpenFocus.png --out icon.iconset/icon_512x512@2x.png
           iconutil -c icns icon.iconset -o OpenFocus.icns
 
+      - name: Verify the shipped AI model is present
+        run: |
+          test -f weights/stackmff_v3_final.pth || { echo "Missing weights/stackmff_v3_final.pth - the release would ship without the AI model."; exit 1; }
+          size=$(wc -c < weights/stackmff_v3_final.pth)
+          if [ "$size" -lt 600000 ]; then echo "weights file is only $size bytes"; exit 1; fi
+          echo "AI model present: $size bytes"
+
       - name: Build with PyInstaller
         run: |
           pyinstaller --clean --noconfirm --windowed \
@@ -135,14 +188,41 @@ jobs:
             --add-data "weights:weights" \
             --add-data "ui:ui" \
             --add-data "docs:docs" \
-            --collect-all PyQt6 \
+            --hidden-import PyQt6.QtCore \
+            --hidden-import PyQt6.QtGui \
+            --hidden-import PyQt6.QtWidgets \
+            --hidden-import PyQt6.QtNetwork \
             --collect-all scipy \
             --copy-metadata imageio \
             --collect-data dtcwt \
             --collect-all rawpy \
             --collect-all torch \
-            --collect-all torchvision \
+            --exclude-module torchvision \
+            --exclude-module torch.test \
+            --exclude-module torch.utils.tensorboard \
+            --exclude-module torch.distributed \
+            --exclude-module matplotlib \
+            --exclude-module tkinter \
+            --exclude-module IPython \
+            --exclude-module pytest \
+            --exclude-module PyQt6.QtWebEngineCore \
+            --exclude-module PyQt6.Qt3DCore \
+            --exclude-module PyQt6.QtMultimedia \
+            --exclude-module PyQt6.QtBluetooth \
+            --exclude-module PyQt6.QtDesigner \
+            --exclude-module PyQt6.QtQuick \
             main.py
+
+      - name: Prune build-only files from the bundle
+        run: |
+          # Headers, import libraries and CMake files are compile-time only;
+          # they are a large share of the bundle and nothing reads them.
+          APP=dist/OpenFocus.app
+          find "$APP" -name '*.lib' -delete 2>/dev/null || true
+          find "$APP" -name '*.pdb' -delete 2>/dev/null || true
+          rm -rf "$APP"/Contents/Frameworks/torch/include 2>/dev/null || true
+          rm -rf "$APP"/Contents/Resources/torch/include 2>/dev/null || true
+          du -sh dist/OpenFocus.app || true
 
       - name: Ad-hoc codesign
         run: codesign --force --deep -s - dist/OpenFocus.app

@@ -11,8 +11,21 @@ import re
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.settings_store import (
+    brightness_memory_from_json, brightness_memory_to_json)
+
 PROJECT_SUFFIX = ".ofproj"
 FORMAT_VERSION = 1
+
+
+def _brightness(window, option: str) -> bool:
+    """The brightness option the current fusion method renders with."""
+    getter = getattr(window, "brightness_option_for", None)
+    if callable(getter):
+        return bool(getter(option))
+    if option == "exposure_match":
+        return bool(getattr(window, "exposure_match", True))
+    return bool(getattr(window, "base_frame_correct", False))
 
 
 def _collect_state(window) -> Dict[str, Any]:
@@ -23,13 +36,18 @@ def _collect_state(window) -> Dict[str, Any]:
         "alignment_method": window.current_alignment_method(),
         "kernel_size": window.slider_smooth.value(),
         "stack_reverse_order": bool(getattr(window, "stack_reverse_order", False)),
+        "base_frame_correct": _brightness(window, "base_correct"),
+        "exposure_match": _brightness(window, "exposure_match"),
+        "brightness_by_method": json.loads(brightness_memory_to_json(
+            getattr(window, "_brightness_by_method", {}))),
         "thread_count": getattr(window, "thread_count", 4),
         "tile_enabled": getattr(window, "tile_enabled", True),
         "tile_block_size": getattr(window, "tile_block_size", 1024),
         "tile_overlap": getattr(window, "tile_overlap", 256),
         "tile_threshold": getattr(window, "tile_threshold", 2048),
         "reg_downscale_width": getattr(window, "reg_downscale_width", None),
-        "stackmffv4_batch_size": getattr(window, "stackmffv4_batch_size", 2),
+        "ai_batch_size": getattr(window, "ai_batch_size", 2),
+        "ai_mode": getattr(window, "ai_mode", "soft"),
         "quick_preview": getattr(window, "chk_quick_preview", None) is not None
         and window.chk_quick_preview.isChecked(),
         "current_index": getattr(window, "current_display_index", -1),
@@ -187,7 +205,9 @@ def validate_project(path: str) -> Tuple[bool, str, Dict[str, Any]]:
     _num("tile_overlap", int, 256)
     _num("tile_threshold", int, 2048)
     _num("reg_downscale_width", int, 1024)
-    _num("stackmffv4_batch_size", int, 2)
+    _num("ai_batch_size", int, 2)
+    if settings.get("ai_mode") not in ("soft", "hard"):
+        settings["ai_mode"] = "soft"
     _num("current_index", int, -1)
     try:
         state["scale_factor"] = float(state.get("scale_factor", 1.0))
@@ -199,7 +219,6 @@ def validate_project(path: str) -> Tuple[bool, str, Dict[str, Any]]:
 def apply_project(window, state: Dict[str, Any]) -> None:
     """Load the project's sources and restore settings/labels/index."""
     sources: List[str] = state.get("resolved_sources") or state["sources"]
-    settings = state.get("settings", {})
 
     # The stack may span folders; the registration cache and the "save project"
     # suggestion both key off the folder of the first frame.
@@ -243,6 +262,32 @@ def _apply_after_load(window, state: Dict[str, Any]) -> None:
     if chk is not None:
         chk.setChecked(reverse)
 
+    base_correct = bool(settings.get("base_frame_correct", False))
+    window.base_frame_correct = base_correct
+    exposure_match = bool(settings.get("exposure_match", True))
+    window.exposure_match = exposure_match
+    # The two options are remembered per fusion method. A project saved
+    # before that has only the two flags: they are what its method rendered
+    # with, so they become that method's values.
+    if "brightness_by_method" in settings:
+        memory = brightness_memory_from_json(settings["brightness_by_method"])
+    else:
+        memory = dict(getattr(window, "_brightness_by_method", {}) or {})
+        if method:
+            memory[("exposure_match", method)] = exposure_match
+            memory[("base_correct", method)] = base_correct
+    window._brightness_by_method = memory
+    sync = getattr(window, "_sync_brightness_checkboxes", None)
+    if callable(sync):
+        sync()
+    else:
+        base_chk = getattr(window, "chk_base_correct", None)
+        if base_chk is not None:
+            base_chk.setChecked(base_correct)
+        exp_chk = getattr(window, "chk_exposure_match", None)
+        if exp_chk is not None:
+            exp_chk.setChecked(exposure_match)
+
     if settings.get("thread_count"):
         window.thread_count = int(settings["thread_count"])
     window.tile_enabled = bool(settings.get("tile_enabled", True))
@@ -251,8 +296,15 @@ def _apply_after_load(window, state: Dict[str, Any]) -> None:
     window.tile_threshold = int(settings.get("tile_threshold", 2048))
     if settings.get("reg_downscale_width"):
         window.reg_downscale_width = int(settings["reg_downscale_width"])
-    if settings.get("stackmffv4_batch_size"):
-        window.stackmffv4_batch_size = int(settings["stackmffv4_batch_size"])
+    if settings.get("ai_batch_size"):
+        window.ai_batch_size = int(settings["ai_batch_size"])
+    if settings.get("ai_mode") in ("soft", "hard"):
+        window.ai_mode = settings["ai_mode"]
+        radios = (getattr(window, "radio_ai_soft", None),
+                  getattr(window, "radio_ai_hard", None))
+        target = radios[0] if window.ai_mode == "soft" else radios[1]
+        if target is not None:
+            target.setChecked(True)
     qp = window.chk_quick_preview if hasattr(window, "chk_quick_preview") else None
     if qp is not None:
         qp.setChecked(bool(settings.get("quick_preview", False)))

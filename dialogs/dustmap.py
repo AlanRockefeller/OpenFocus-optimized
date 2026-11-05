@@ -16,12 +16,13 @@ import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QPushButton, QRadioButton, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QLabel, QPushButton, QRadioButton, QVBoxLayout,
 )
 
 from locales import trans
-from utils.dust_map import compute_flat_field, apply_flat_field
+from widgets.stepper import StepperSpinBox
+from utils.dust_map import DEFAULT_SIGMA, compute_flat_field, apply_flat_field
 
 
 def _to_pixmap(img, width=340):
@@ -56,14 +57,13 @@ class DustMapDialog(QDialog):
         intro.setWordWrap(True)
         lay.addWidget(intro)
 
-        src_row = QHBoxLayout()
+        # 两个来源单选各占一行：并排时第二个按钮的文字在 760px 宽的
+        # 对话框里会被挤到第一个按钮上（实测文字互相重叠）。
         self.rb_file = QRadioButton(trans.t("dust_from_file"))
         self.rb_stack = QRadioButton(trans.t("dust_from_stack"))
         self.rb_file.setChecked(True)
-        src_row.addWidget(self.rb_file)
-        src_row.addWidget(self.rb_stack)
-        src_row.addStretch()
-        lay.addLayout(src_row)
+        lay.addWidget(self.rb_file)
+        lay.addWidget(self.rb_stack)
 
         pick_row = QHBoxLayout()
         self.btn_browse = QPushButton(trans.t("dust_browse"))
@@ -80,6 +80,27 @@ class DustMapDialog(QDialog):
         stack_row.addWidget(self.combo_stack, 1)
         lay.addLayout(stack_row)
 
+        # 尘点尺度：增益场的提取半径。太小会把白场噪声当成尘点，太大
+        # 会把尘点一起抹平（σ=32 时只能去掉约 9% 的尘点对比度）。
+        size_row = QHBoxLayout()
+        self.lbl_size = QLabel(trans.t("dust_size"))
+        self.lbl_size.setToolTip(trans.t("dust_size_hint"))
+        size_row.addWidget(self.lbl_size)
+        self.spin_sigma = StepperSpinBox(minimum=1.0, maximum=40.0,
+                                       decimals=1, step=1.0, value=DEFAULT_SIGMA)
+        self.spin_sigma.setRange(1.0, 40.0)
+        self.spin_sigma.setSingleStep(1.0)
+        self.spin_sigma.setDecimals(1)
+        self.spin_sigma.setValue(DEFAULT_SIGMA)
+        # 80 px was narrower than the widget needs with its arrows and QSS
+        # padding (112 px), so "4.0" lost its last digit.
+        self.spin_sigma.setMinimumWidth(112)
+        self.spin_sigma.setToolTip(trans.t("dust_size_hint"))
+        self.spin_sigma.valueChanged.connect(self._sigma_changed)
+        size_row.addStretch()
+        size_row.addWidget(self.spin_sigma)
+        lay.addLayout(size_row)
+
         self.chk_remove = QCheckBox(trans.t("dust_remove_hint"))
         lay.addWidget(self.chk_remove)
 
@@ -91,7 +112,15 @@ class DustMapDialog(QDialog):
         self.lbl_gain = QLabel(trans.t("dust_no_preview"))
         self.lbl_gain.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_gain.setMinimumSize(340, 220)
-        self.lbl_gain.setStyleSheet("background:#161616;border:1px solid #444;color:#888;")
+        # Preview placeholders follow the theme: a hard-coded near-black
+        # card sat inside the white dialog as three black blocks.
+        from ui.styles import CURRENT_THEME
+        from utils.design_tokens import palette
+        _p = palette(CURRENT_THEME)
+        _pv_bg, _pv_border, _pv_fg = (_p["surfaceSunken"], _p["border"],
+                                      _p["textMuted"])
+        self.lbl_gain.setStyleSheet(
+            f"background:{_pv_bg};border:1px solid {_pv_border};color:{_pv_fg};")
         grid.addWidget(self.lbl_gain)
         before_after = QVBoxLayout()
         self.lbl_before = QLabel(trans.t("dust_before"))
@@ -99,7 +128,8 @@ class DustMapDialog(QDialog):
         for lbl in (self.lbl_before, self.lbl_after):
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl.setMinimumSize(340, 104)
-            lbl.setStyleSheet("background:#161616;border:1px solid #444;color:#888;")
+            lbl.setStyleSheet(
+                f"background:{_pv_bg};border:1px solid {_pv_border};color:{_pv_fg};")
         before_after.addWidget(self.lbl_before)
         before_after.addWidget(self.lbl_after)
         grid.addLayout(before_after)
@@ -125,14 +155,8 @@ class DustMapDialog(QDialog):
         self._fill_stack_combo()
 
     def _apply_style(self):
-        try:
-            if self.window_main and getattr(self.window_main, "current_theme", "dark") != "light":
-                from ui.styles import DIALOG_CONTROL_DARK_QSS
-                self.setStyleSheet(
-                    "QDialog { background: #2b2b2b; border: 1px solid #444; }"
-                    "QLabel { color: #d0d0d0; }" + DIALOG_CONTROL_DARK_QSS)
-        except Exception:
-            pass
+        """Styling comes from the generated application stylesheet."""
+        self.setStyleSheet("")
 
     # ------------------------------------------------------------ logic
     def _fill_stack_combo(self):
@@ -148,6 +172,11 @@ class DustMapDialog(QDialog):
         self.btn_browse.setEnabled(from_file)
         self.lbl_path.setEnabled(from_file)
         self.combo_stack.setEnabled(not from_file)
+
+    def _sigma_changed(self, _value=None):
+        """Recompute the field for the new scale (only if a white field exists)."""
+        if self._white is not None:
+            self._compute()
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -193,7 +222,8 @@ class DustMapDialog(QDialog):
             return
         self.lbl_status.setText("")
         try:
-            self._gain = compute_flat_field(white)
+            self._gain = compute_flat_field(
+                white, sigma=float(self.spin_sigma.value()))
         except ValueError as exc:
             # The library raises English diagnostics; the user sees a
             # localized one and the detail goes to the log.

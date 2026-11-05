@@ -2,7 +2,7 @@
 
 Lets batch users and CI pipelines run registration + fusion without the GUI:
 
-    python main.py --input ./stack_folder --output ./out --method guided_filter
+    python main.py --input ./stack_folder --output ./out --method stackmffv3
     python main.py --input ./stackA ./stackB --output-dir ./results   (batch)
 
 Exit codes: 0 success, 1 processing error, 2 usage error.
@@ -12,10 +12,19 @@ import os
 import sys
 import time
 
+# Must precede the numpy/torch import below: two OpenMP runtimes (MKL through
+# numpy, torch's libiomp5md.dll) otherwise abort the process with
+# "OMP: Error #15 ... already initialized" as soon as ECC and the AI model run
+# in the same process. Same guard as main.py — the `openfocus` console script
+# enters here and never imports main.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import numpy as np
 from typing import List, Optional, Tuple
 
-VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv4",
+from utils.sorting import natural_sort_key
+
+VALID_METHODS = ["guided_filter", "dct", "dtcwt", "gfgfgf", "stackmffv3",
                  "openfocus_a", "openfocus_b", "openfocus_c"]
 VALID_ALIGN = ["none", "homography", "ecc", "both", "openfocus"]
 VALID_FORMATS = [".png", ".jpg", ".webp", ".bmp", ".tif", ".tiff"]
@@ -34,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  python main.py --input ./stack --output ./result/fused.png\n"
             "  python main.py --input ./stack --output ./result/fused.png --method dtcwt --align ecc --threads 8\n"
-            "  python main.py --input ./stackA ./stackB --output-dir ./results -m guided_filter\n"
+            "  python main.py --input ./stackA ./stackB --output-dir ./results -m stackmffv3\n"
             "  python main.py --input img1.jpg img2.jpg img3.jpg --output fused.png --method gfgfgf\n"
         ),
     )
@@ -44,23 +53,29 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Output file for a single stack (default: fused.png)")
     parser.add_argument("--output-dir", "-d", default=None,
                         help="Batch mode: fuse every input folder, writing <folder>.<ext> here")
-    parser.add_argument("--method", "-m", default="guided_filter", choices=VALID_METHODS,
-                        help="Fusion method (default: guided_filter); openfocus_a/b/c are reverse-engineered "
-                             "from Helicon Focus (A = variance-weighted average, B = variance depth-map pick, "
+    parser.add_argument("--method", "-m", default="stackmffv3", choices=VALID_METHODS,
+                        help="Fusion method (default: stackmffv3); openfocus_a/b/c select the "
+                             "OpenFocus family (A = variance-weighted average, B = variance depth-map pick, "
                              "C = Laplacian pyramid)")
     parser.add_argument("--align", "-a", default="none", choices=VALID_ALIGN,
                         help="Registration applied before fusion (default: none); openfocus = fast bounded "
-                             "phase correlation with brightness equalization")
+                             "similarity alignment (rotation + scale + NCC translation) with brightness "
+                             "equalization")
     parser.add_argument("--align-shift-limit", type=float, default=None, metavar="RATIO",
                         help="openfocus alignment only: maximum accepted frame shift as a fraction of the "
-                             "frame size (default 0.08, the limit Helicon gives up at; frames above it are "
+                             "frame size (default 0.08; frames above it are "
                              "left unaligned rather than half-corrected)")
     parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
-                        help="Base correction after fusion: match the output's low frequencies to the "
-                             "last/first frame (removes brightness/exposure drift, default: none)")
+                        help="Optional post-fusion base correction: match the output's low "
+                             "frequencies to the last/first frame (default: none).")
+    parser.add_argument("--exposure-match", dest="exposure_match",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="Match every frame's exposure to the last frame before fusion "
+                             "(default: on; --no-exposure-match disables it). Computed on the "
+                             "whole stack before tiling, for every fusion method.")
     parser.add_argument("--sort", default="asc", choices=["asc", "desc", "off"],
                         help="Stack order for the openfocus_a/b/c methods: 'asc' keeps the file order "
-                             "(default, matches Helicon), 'desc' reverses a far-to-near sweep so the "
+                             "(default), 'desc' reverses a far-to-near sweep so the "
                              "base/last-frame semantics anchor to the intended end, 'off' is an explicit no-op")
     parser.add_argument("--dust-map", default=None, metavar="WHITE",
                         help="Flat-field (dust map) correction: path to a defocused shot of a blank/white "
@@ -71,11 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
                              "source of the variance-window radius")
     parser.add_argument("--depth-smoothing", type=float, default=None, metavar="SIGMA",
                         help="openfocus_b only: depth-map transition smoothing (Gaussian sigma, "
-                             "default 1.2 = Helicon-matched; 0 = sharpest, larger = calmer on noisy stacks)")
+                             "default 1.2; 0 = sharpest, larger = calmer on noisy stacks)")
+    parser.add_argument("--blend-smoothing", type=float, default=None, metavar="SIGMA",
+                        help="openfocus_a / openfocus_c only: blend smoothing (Gaussian sigma "
+                             "of the per-frame weight map; defaults 2.0 for A and 3.0 for C; "
+                             "0 = crispest per-pixel choice, larger = softer transitions)")
     parser.add_argument("--threads", "-t", type=int, default=4,
                         help="Worker thread count (default: 4)")
     parser.add_argument("--batch-size", type=int, default=2,
-                        help="StackMFF-V4 tile batch size (default: 2)")
+                        help="StackMFF-V3 tile batch size (default: 2)")
+    parser.add_argument("--ai-mode", default="soft", choices=["soft", "hard"],
+                        metavar="{soft,hard}",
+                        help="StackMFF-V3 output: 'soft' blends the frames by "
+                             "their predicted probabilities (default); 'hard' "
+                             "takes the most probable frame per pixel")
     parser.add_argument("--cpu", action="store_true",
                         help="Force CPU even if CUDA/MPS is available")
     parser.add_argument("--downscale", type=int, default=None,
@@ -107,8 +131,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _list_folder_images(folder: str, loader) -> List[str]:
     return sorted(
-        os.path.join(folder, f) for f in os.listdir(folder)
-        if f.lower().endswith(tuple(loader.SUPPORTED_FORMATS))
+        (os.path.join(folder, f) for f in os.listdir(folder)
+         if f.lower().endswith(tuple(loader.SUPPORTED_FORMATS))),
+        key=natural_sort_key,
     )
 
 
@@ -179,8 +204,9 @@ def _normalize_kernel(kernel: Optional[int], default: int) -> int:
 def _depth_frames_for(images, method: str, sort_mode: str):
     """Return frames in the same order used by an index-deciding fusion."""
     frames = list(images)
-    if method in ("openfocus_b", "openfocus_c") and sort_mode == "desc":
-        frames.reverse()
+    if method in ("openfocus_a", "openfocus_b", "openfocus_c"):
+        from fusion_methods.openfocus_ab import sort_frames_for_openfocus
+        frames, _flipped = sort_frames_for_openfocus(frames, sort_mode)
     return frames
 
 
@@ -213,19 +239,32 @@ def _fuse_stack(images, args):
         t0 = time.time()
         # max_shift_ratio is only read by the openfocus method; the others
         # ignore it, so one call site stays simple.
-        reg = ImageRegistration(method=args.align, downscale_width=args.downscale,
-                                max_shift_ratio=getattr(args, "align_shift_limit",
-                                                        None))
+        reg = ImageRegistration(
+            method=args.align, downscale_width=args.downscale,
+            max_shift_ratio=getattr(args, "align_shift_limit", None),
+            brightness_reference=("last" if getattr(args, "exposure_match", True)
+                                  else "first"))
         images = reg.process(images, output_path=None, thread_count=args.threads)
         print(f"Registration ({args.align}) done in {time.time() - t0:.1f}s")
 
+    # The default method is the neural one. On a machine without torch the
+    # CLI must still do something useful instead of dying in the model load:
+    # fall back to the first classical method and say so.
+    from core.multi_focus_fusion import is_ai_fusion_available
+    if args.method == "stackmffv3" and not is_ai_fusion_available():
+        print("AI fusion is unavailable (PyTorch missing); "
+              "falling back to guided_filter.")
+        args.method = "guided_filter"
+
     fusion_kwargs = dict(algorithm=args.method, use_gpu=not args.cpu,
                          base_frame=getattr(args, "base_frame", "none"),
-                         sort_mode=getattr(args, "sort", "asc"))
+                         sort_mode=getattr(args, "sort", "asc"),
+                         exposure_match=getattr(args, "exposure_match", True))
     if args.tile_size:
         fusion_kwargs["tile_block_size"] = args.tile_size
-    if args.method == "stackmffv4":
-        fusion_kwargs["stackmffv4_batch_size"] = args.batch_size
+    if args.method == "stackmffv3":
+        fusion_kwargs["ai_batch_size"] = args.batch_size
+        fusion_kwargs["ai_mode"] = args.ai_mode
     fusion = MultiFocusFusion(**fusion_kwargs)
     info = fusion.get_info()
 
@@ -240,14 +279,20 @@ def _fuse_stack(images, args):
         fuse_kwargs["kernel_size"] = _normalize_kernel(args.kernel, 11)
         if args.method == "openfocus_b" and args.depth_smoothing is not None:
             fuse_kwargs["depth_smoothing"] = max(0.0, float(args.depth_smoothing))
-    elif args.method == "stackmffv4":
+        if (args.method in ("openfocus_a", "openfocus_c")
+                and args.blend_smoothing is not None):
+            fuse_kwargs["blend_smoothing"] = max(0.0, float(args.blend_smoothing))
+    elif args.method == "stackmffv3":
         fuse_kwargs["model_path"] = _find_model_path()
+        print(f"AI output mode: {args.ai_mode}")
 
     fused = fusion.fuse(**fuse_kwargs)
     if fused is None:
         raise RuntimeError("Fusion returned no result")
     fused = quantize_fuse_output(fused, is_16bit)
-    # 注册/归一化后的帧留给 --depth-map 用（与融合同一输入）
+    # 注册/归一化后的帧留给 --depth-map 用（与融合同一输入）。帧序必须与
+    # 融合内部一致：--sort desc 会在 fuse() 内反转帧序，深度图若仍按原序
+    # 计算，0/N-1 标签就指向相反的一端。
     args._depth_frames = _depth_frames_for(
         images, args.method, getattr(args, "sort", "asc"))
     print(f"Fusion ({args.method}, device={info['device']}) done in {time.time() - t0:.1f}s")
@@ -282,12 +327,15 @@ def _save_depth(args, fused_out: str) -> None:
             + ", ".join(_DEPTH_METHODS) + "). Weighted-average fusions "
             "(guided_filter, openfocus_a) have no per-pixel decision.")
     kernel = None
-    if args.method in ("dct", "gfgfgf", "openfocus_b", "openfocus_c"):
-        default_kernel = 11 if args.method in ("openfocus_b", "openfocus_c") else 7
-        kernel = _normalize_kernel(args.kernel, default_kernel)
+    if args.method in ("dct", "gfgfgf"):
+        kernel = _normalize_kernel(args.kernel, 7)
+    elif args.method in ("openfocus_b", "openfocus_c"):
+        # same default variance window the fusion used (11), otherwise the
+        # map is computed with a different measure than the fused result
+        kernel = _normalize_kernel(args.kernel, 11)
     idx = compute_focus_index(
         frames, args.method, kernel_size=kernel,
-        model_path=_find_model_path() if args.method == "stackmffv4" else None,
+        model_path=_find_model_path() if args.method == "stackmffv3" else None,
         use_gpu=not args.cpu)
     if not imwrite_auto(path, colorize(idx, args.depth_colormap)):
         raise RuntimeError(f"Failed to write depth map: {path}")
@@ -511,6 +559,15 @@ def run_cli(argv: List[str]) -> int:
         if not args.output:
             print("error: one of --output / --output-dir is required", file=sys.stderr)
             return EXIT_USAGE
+        # A single output means "one stack". Several folders used to be
+        # silently concatenated into one unrelated stack; batch users must
+        # opt into --output-dir.
+        dir_inputs = [p for p in args.input if os.path.isdir(os.path.abspath(p))]
+        if len(dir_inputs) > 1:
+            print("error: multiple input folders require --output-dir "
+                  "(--output fuses every input into a single stack)",
+                  file=sys.stderr)
+            return EXIT_USAGE
         ext = os.path.splitext(args.output)[1].lower()
         if not ext or ext not in VALID_FORMATS:
             print(f"error: unsupported output extension '{ext or '(none)'}'; "
@@ -529,7 +586,7 @@ def run_cli(argv: List[str]) -> int:
         # Video inputs are unpacked to a temp dir that is always cleaned up
         with tempfile.TemporaryDirectory(prefix="openfocus_video_") as video_temp:
             _src, paths = _resolve_stack(args, video_temp)
-            print(f"Loaded {len(paths)} images from {args.input[0]}")
+            print(f"Loaded {len(paths)} image(s) from {_src}")
 
             if args.dry_run:
                 print(f"[dry-run] method={args.method} align={args.align} "
@@ -575,16 +632,16 @@ def run_cli(argv: List[str]) -> int:
 
 
 def _find_model_path() -> str:
-    """Locate stackmffv4.pth: repo checkout first, then the installed
+    """Locate stackmff_v3_final.pth: repo checkout first, then the installed
     weights package (pip-installed openfocus ships it as package data)."""
     repo = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "weights", "stackmffv4.pth")
+        "weights", "stackmff_v3_final.pth")
     if os.path.isfile(repo):
         return repo
     try:
         import weights
-        shipped = os.path.join(os.path.dirname(weights.__file__), "stackmffv4.pth")
+        shipped = os.path.join(os.path.dirname(weights.__file__), "stackmff_v3_final.pth")
         if os.path.isfile(shipped):
             return shipped
     except ImportError:
