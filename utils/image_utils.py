@@ -31,6 +31,21 @@ def pixmap_to_cv2(pixmap) -> Optional[np.ndarray]:
         return None
 
 
+def composite_transparent_for_display(image: np.ndarray) -> np.ndarray:
+    """Composite straight-alpha pixels on a checkerboard for display only."""
+    image = to_display_uint8(image)
+    if image.ndim != 3 or image.shape[2] != 4:
+        return image
+    h, w = image.shape[:2]
+    checker = (((np.arange(h)[:, None] // 12 + np.arange(w)[None, :] // 12) % 2) * 48 + 160).astype(np.uint16)
+    alpha = image[:, :, 3].astype(np.uint16)
+    out = np.empty((h, w, 3), dtype=np.uint8)
+    for channel in range(3):
+        out[:, :, channel] = ((image[:, :, channel].astype(np.uint16) * alpha
+                               + checker * (255 - alpha) + 127) // 255).astype(np.uint8)
+    return out
+
+
 def cv2_to_pixmap(cv2_img: np.ndarray) -> QPixmap:
     """BGR ndarray -> QPixmap, with no channel-conversion copy.
 
@@ -40,6 +55,8 @@ def cv2_to_pixmap(cv2_img: np.ndarray) -> QPixmap:
     try:
         if cv2_img.dtype != np.uint8:
             cv2_img = to_display_uint8(cv2_img)
+        if cv2_img.ndim == 3 and cv2_img.shape[2] == 4:
+            cv2_img = composite_transparent_for_display(cv2_img)
 
         if cv2_img.ndim == 3 and cv2_img.shape[2] == 3:
             bgr = np.ascontiguousarray(cv2_img)
@@ -97,6 +114,8 @@ def thumbnail_bgr(img: np.ndarray, size: int) -> np.ndarray:
     """
     if img is None or getattr(img, "size", 0) == 0:
         return np.zeros((1, 1, 3), np.uint8)
+    if img.ndim == 3 and img.shape[2] == 4:
+        img = composite_transparent_for_display(img)
     h, w = img.shape[:2]
     target = max(1, int(size))
     scale = min(target / float(max(1, w)), target / float(max(1, h)), 1.0)
@@ -143,6 +162,9 @@ def imwrite_multi_tiff(path: str, images) -> bool:
     """
     if not images:
         return False
+    from core.image_loader import _has_transparency
+    if any(_has_transparency(i) for i in images):
+        return False
     import tempfile
     # cv2.imwritemulti silently fails on non-encodable filenames, so always
     # write to an ASCII temp path and rename onto the (possibly unicode)
@@ -150,9 +172,9 @@ def imwrite_multi_tiff(path: str, images) -> bool:
     dest_dir = os.path.dirname(os.path.abspath(path)) or "."
     try:
         fd, part = tempfile.mkstemp(suffix=".tif", dir=dest_dir)
+        os.close(fd)
     except OSError:
-        fd, part = tempfile.mkstemp(suffix=".tif")  # 目标目录不可写时退回
-    os.close(fd)
+        return False
     try:
         try:
             ok = cv2.imwritemulti(part, [np.asarray(i) for i in images])
@@ -172,12 +194,43 @@ def imwrite_multi_tiff(path: str, images) -> bool:
             return False
         os.replace(part, path)
         return True
+    except (OSError, cv2.error):
+        return False
     finally:
         try:
             if os.path.exists(part):
                 os.remove(part)
         except OSError:
             pass
+
+
+def imwrite_float_tiff(path: str, image: np.ndarray, metadata: dict) -> bool:
+    """Write physical depth as float32 TIFF, preserving NaN and unit metadata."""
+    import json
+    import tempfile
+    from PIL import Image, TiffImagePlugin
+
+    values = np.asarray(image, dtype=np.float32)
+    if values.ndim != 2 or not values.size:
+        return False
+    part = None
+    try:
+        fd, part = tempfile.mkstemp(
+            suffix=".tif", dir=os.path.dirname(os.path.abspath(path)))
+        os.close(fd)
+        tags = TiffImagePlugin.ImageFileDirectory_v2()
+        tags[270] = json.dumps(metadata, ensure_ascii=True, allow_nan=False)
+        Image.fromarray(values).save(part, format="TIFF", tiffinfo=tags)
+        os.replace(part, path)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    finally:
+        if part and os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
 
 
 # Raw EXIF of the loaded source stack; set by the loaders, embedded into
@@ -292,7 +345,36 @@ def _png_insert_exif(png: bytes, tiff_exif: bytes) -> bytes:
     return png[:ihdr_end] + chunk + png[ihdr_end:]
 
 
-def _encode_tiff_with_exif(image: np.ndarray, exif) -> bytes:
+def _png_insert_icc(png: bytes, profile: bytes) -> bytes:
+    """Add a PNG iCCP chunk without changing the encoded pixels."""
+    import struct
+    import zlib
+    ihdr_end = 8 + 8 + 13 + 4
+    if png[12:16] != b"IHDR":
+        raise ValueError("not a PNG produced by cv2")
+    data = b"ICC\x00\x00" + zlib.compress(profile)
+    chunk = (struct.pack(">I", len(data)) + b"iCCP" + data
+             + struct.pack(">I", zlib.crc32(b"iCCP" + data)))
+    return png[:ihdr_end] + chunk + png[ihdr_end:]
+
+
+def _jpeg_insert_icc(jpeg: bytes, profile: bytes) -> bytes:
+    """Add the standard APP2 ICC segments without recompressing JPEG pixels."""
+    import struct
+    if jpeg[:2] != b"\xff\xd8":
+        raise ValueError("not a JPEG produced by cv2")
+    size = 65519
+    count = (len(profile) + size - 1) // size
+    if count > 255:
+        raise ValueError("ICC profile is too large for JPEG")
+    segments = []
+    for index in range(count):
+        data = b"ICC_PROFILE\x00" + bytes((index + 1, count)) + profile[index * size:(index + 1) * size]
+        segments.append(b"\xff\xe2" + struct.pack(">H", len(data) + 2) + data)
+    return jpeg[:2] + b"".join(segments) + jpeg[2:]
+
+
+def _encode_tiff_with_exif(image: np.ndarray, exif, icc_profile: bytes = b"") -> bytes:
     """Uncompressed TIFF (uint8/uint16, gray or BGR) with an EXIF sub-IFD.
 
     Pillow cannot hold 16-bit RGB, so the file is assembled directly: an
@@ -303,6 +385,9 @@ def _encode_tiff_with_exif(image: np.ndarray, exif) -> bytes:
     if image.ndim == 3 and image.shape[2] == 3:
         pixels = np.ascontiguousarray(image[:, :, ::-1])  # BGR -> RGB
         samples, photometric = 3, 2
+    elif image.ndim == 3 and image.shape[2] == 4:
+        pixels = np.ascontiguousarray(image[:, :, [2, 1, 0, 3]])
+        samples, photometric = 4, 2
     elif image.ndim == 2:
         pixels = np.ascontiguousarray(image)
         samples, photometric = 1, 1
@@ -320,8 +405,10 @@ def _encode_tiff_with_exif(image: np.ndarray, exif) -> bytes:
 
     head = b"II*\x00" + (8).to_bytes(4, "little")
     ifd = TiffImagePlugin.ImageFileDirectory_v2(ifh=head)
-    for tag, value in exif.items():
+    for tag, value in (exif or {}).items():
         ifd[tag] = value  # sub-IFDs are plain dicts (see export_exif)
+    if icc_profile:
+        ifd[34675] = icc_profile
     ifd[256] = width
     ifd[257] = height
     ifd[258] = (bits,) * samples
@@ -329,6 +416,8 @@ def _encode_tiff_with_exif(image: np.ndarray, exif) -> bytes:
     ifd[262] = photometric
     ifd[277] = samples
     ifd[278] = rows_per_strip
+    if samples == 4:
+        ifd[338] = (2,)  # unassociated alpha
     ifd[284] = 1  # chunky
     # Strip offsets/counts are LONG regardless of magnitude; Pillow's writer
     # rebases StripOffsets onto the end of the IFD, where the strips go.
@@ -339,76 +428,90 @@ def _encode_tiff_with_exif(image: np.ndarray, exif) -> bytes:
 
 
 def imwrite_auto(path: str, image: np.ndarray, params: Optional[list] = None,
-                 exif: Optional[bytes] = None) -> bool:
-    """cv2.imwrite that accepts 16-bit images and can embed EXIF metadata.
+                 exif: Optional[bytes] = None, icc_profile: bytes = b"",
+                 linear_dng_metadata=None, should_cancel=None,
+                 linear_dng_px_size_um=None) -> bool:
+    """Atomically write pixels, optionally embedding their RGB color profile."""
+    import tempfile
 
-    PNG/TIFF store uint16 natively; formats that cannot (JPG/BMP) are
-    converted to uint8 automatically instead of failing. EXIF (raw bytes
-    from the source file) is embedded into PNG/TIFF/WebP exports when
-    provided; the pixel data itself is never re-encoded.
-    """
+    path = os.fspath(path)
     ext = os.path.splitext(path)[1].lower()
+    if ext == '.dng':
+        if linear_dng_metadata is None:
+            raise ValueError("Linear DNG export requires camera metadata")
+        from utils.linear_dng import _write_linear_dng_atomic
+        try:
+            _write_linear_dng_atomic(path, image, linear_dng_metadata,
+                                     should_cancel=should_cancel,
+                                     px_size_um=linear_dng_px_size_um)
+            return True
+        except OSError:
+            return False
+    if ext != '.png' and image.ndim == 3 and image.shape[2] == 4:
+        from core.image_loader import _has_transparency
+        if _has_transparency(image):
+            return False
     if image.dtype == np.uint16 and ext not in (".png", ".tif", ".tiff"):
         image = to_display_uint8(image)
-
     embed = SOURCE_EXIF if exif is None else exif
     # PNG/TIFF get EXIF spliced in at the byte level, so 16-bit exports keep
     # their depth (a Pillow round-trip would cut them to 8-bit).
     meta = export_exif(embed) if ext in (".png", ".tif", ".tiff") else None
-    if meta is not None:
-        try:
-            if ext == ".png":
-                ok, buf = cv2.imencode(ext, image, params if params else [])
-                if not ok:
-                    return False
-                data = _png_insert_exif(buf.tobytes(), meta.tobytes()[6:])
-            else:
-                data = _encode_tiff_with_exif(image, meta)
-            with open(path, "wb") as fh:
-                fh.write(data)
-            return True
-        except (cv2.error, ValueError, OSError) as exc:
-            print(f"EXIF embed skipped for {path}: {exc}")
-
-    # cv2.imwrite encodes paths as UTF-8 regardless of the ANSI codepage,
-    # silently creating mojibake filenames (中文.png -> 娓枃...) on Windows.
-    # imencode + ndarray.tofile handles unicode paths correctly, mirroring
-    # the np.fromfile workaround the loaders already use for reading.
+    profile = icc_profile if (icc_profile and image.ndim == 3
+                              and image.shape[2] in (3, 4)) else b""
+    part = None
     try:
-        path.encode("ascii")
-        try:
-            ok = cv2.imwrite(path, image, params if params else [])
-        except cv2.error:
-            # unknown extension / encoder unavailable: the documented
-            # contract is a bool, not an exception from a Qt slot.
-            ok = False
-    except UnicodeEncodeError:
-        ok = False
-        try:
-            ok, buf = cv2.imencode(ext, image, params if params else [])
-            if ok:
-                buf.tofile(path)
-        except cv2.error:
-            ok = False
-    # Pillow re-save fallback: 8-bit only, since re-opening a 16-bit file with
-    # Pillow would downgrade it. Covers WebP and unparsable PNG/TIFF EXIF.
-    if ok and embed and meta is None and image.dtype == np.uint8 \
-            and ext in (".png", ".tif", ".tiff", ".webp"):
-        try:
+        encoded = None
+        if meta is not None or (profile and ext in (".tif", ".tiff")):
+            try:
+                if ext == ".png":
+                    ok, buf = cv2.imencode(ext, image, params or [])
+                    if not ok:
+                        return False
+                    encoded = _png_insert_exif(buf.tobytes(), meta.tobytes()[6:])
+                else:
+                    encoded = _encode_tiff_with_exif(image, meta, profile)
+            except ValueError as exc:
+                print(f"EXIF embed skipped for {path}: {exc}")
+                meta = None
+        if encoded is None:
+            ok, encoded = cv2.imencode(ext, image, params or [])
+            if not ok:
+                return False
+        if profile and ext == ".png":
+            encoded = _png_insert_icc(bytes(encoded), profile)
+        elif profile and ext in (".jpg", ".jpeg", ".jpe", ".jfif"):
+            encoded = _jpeg_insert_icc(bytes(encoded), profile)
+        fd, part = tempfile.mkstemp(
+            suffix=ext, dir=os.path.dirname(os.path.abspath(path)))
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+        # Pillow re-save fallback: 8-bit only, since re-opening a 16-bit file
+        # with Pillow would downgrade it. Covers WebP and unparsable EXIF.
+        if image.dtype == np.uint8 and (
+                (embed and meta is None and ext in (".png", ".tif", ".tiff", ".webp"))
+                or (profile and ext == ".webp")):
             from PIL import Image
-            # The pixels written here are already upright (the loaders apply
-            # EXIF orientation), so the copied tag must be neutralized or
-            # every EXIF-aware viewer rotates the export a second time.
-            embed = _upright_exif(embed)
-            with Image.open(path) as pil_img:
-                # webp 默认有损：嵌入 EXIF 的重存必须保持无损
-                save_kw = {"exif": embed}
+            with Image.open(part) as source:
+                source.load()
+                metadata = {}
+                if embed and meta is None:
+                    metadata["exif"] = _upright_exif(embed)
+                if profile:
+                    metadata["icc_profile"] = profile
                 if ext == ".webp":
-                    save_kw["lossless"] = True
-                pil_img.save(path, **save_kw)
-        except Exception as exc:
-            print(f"EXIF embed skipped for {path}: {exc}")
-    return ok
+                    metadata["lossless"] = True
+                source.save(part, **metadata)
+        os.replace(part, path)
+        return True
+    except (OSError, ValueError, cv2.error):
+        return False
+    finally:
+        if part and os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
 
 
 def _upright_exif(exif_bytes: bytes) -> bytes:
@@ -473,7 +576,12 @@ def quantize_fuse_output(result, is_16bit: bool):
         return None
     if is_16bit:
         return (np.clip(result, 0.0, 255.0) * (65535.0 / 255.0)).round().astype(np.uint16)
-    return result
+    if result.dtype == np.uint8:
+        return result
+    clipped = np.clip(result, 0.0, 255.0)
+    if clipped.dtype.kind == "f":
+        np.rint(clipped, out=clipped)
+    return clipped.astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------

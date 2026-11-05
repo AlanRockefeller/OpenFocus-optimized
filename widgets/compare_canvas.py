@@ -60,6 +60,7 @@ class SourceCanvas(_Canvas):
         self._pan = QPointF()
         self._fit_pending = False
         self._drag_region = False
+        self._region_enabled = True
         self._pan_from = None
         self.setMinimumSize(180, 130)
         self.setMouseTracking(True)
@@ -67,6 +68,21 @@ class SourceCanvas(_Canvas):
 
     def has_image(self) -> bool:
         return self._pixmap is not None and not self._pixmap.isNull()
+
+    def set_region_enabled(self, enabled: bool) -> None:
+        """Show and accept the inspection square when enabled."""
+        enabled = bool(enabled)
+        if enabled == self._region_enabled:
+            return
+        self._region_enabled = enabled
+        if not enabled:
+            self._drag_region = False
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled
+                       else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def region_enabled(self) -> bool:
+        return self._region_enabled
 
     def set_pixmap(self, pixmap, reset=False):
         old_size = self._pixmap.size() if self.has_image() else None
@@ -157,7 +173,8 @@ class SourceCanvas(_Canvas):
     def mousePressEvent(self, event):  # noqa: N802
         if not self.has_image():
             return super().mousePressEvent(event)
-        if event.button() == Qt.MouseButton.LeftButton:
+        if (event.button() == Qt.MouseButton.LeftButton
+                and self._region_enabled):
             self._drag_region = True
             self.set_region_centre(self.widget_to_image(event.position()))
             event.accept()
@@ -170,7 +187,7 @@ class SourceCanvas(_Canvas):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
-        if self._drag_region and self.has_image():
+        if self._drag_region and self._region_enabled and self.has_image():
             self.set_region_centre(self.widget_to_image(event.position()))
             event.accept()
         elif self._pan_from is not None:
@@ -182,7 +199,8 @@ class SourceCanvas(_Canvas):
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_region:
+        if (event.button() == Qt.MouseButton.LeftButton and self._drag_region
+                and self._region_enabled):
             self.set_region_centre(self.widget_to_image(event.position()))
             self._drag_region = False
             event.accept()
@@ -200,6 +218,11 @@ class SourceCanvas(_Canvas):
     def wheelEvent(self, event):  # noqa: N802
         delta = event.angleDelta().y()
         if not self.has_image() or not delta:
+            event.ignore()
+            return
+        if (not self._region_enabled
+                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            # Magnification only resizes the inspection square.
             event.ignore()
             return
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -222,7 +245,7 @@ class SourceCanvas(_Canvas):
             transform = self._image_transform()
             source = QRectF(0, 0, self._pixmap.width(), self._pixmap.height())
             painter.drawPixmap(transform.mapRect(source), self._pixmap, source)
-            if self._region is not None:
+            if self._region is not None and self._region_enabled:
                 painter.setPen(QPen(QColor(255, 255, 255), 2))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(transform.mapRect(QRectF(*self._region)))
@@ -241,7 +264,44 @@ class DetailCanvas(_Canvas):
         self._bounds = None
         self._region = None
         self._status = ""
+        # "detail" crops to the inspection rectangle; "full" shows the whole
+        # computed result. Computing a full frame and only ever displaying a
+        # crop read as "the full frame was not really rendered".
+        self._view_mode = "detail"
+        self._selected = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(trans.t("compare_candidate_hint"))
         self.setFixedSize(DEFAULT_DETAIL_SIZE, DEFAULT_DETAIL_SIZE)
+
+    def set_selected(self, selected: bool) -> None:
+        self._selected = bool(selected)
+        self.update()
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def set_view_mode(self, mode: str) -> None:
+        self._view_mode = "full" if mode == "full" else "detail"
+        self.update()
+
+    def view_mode(self) -> str:
+        return self._view_mode
+
+    def can_show_full(self) -> bool:
+        """True when the stored pixmap IS the whole computed frame.
+
+        ROI results carry only a crop, so offering the overview for them would
+        present a zoomed crop as the complete image.
+        """
+        if self._pixmap is None or self._pixmap.isNull():
+            return False
+        if self._bounds is None:
+            return False
+        x, y, width, height = self._bounds
+        return (x == 0 and y == 0
+                and width == self._pixmap.width()
+                and height == self._pixmap.height())
 
     def set_result(self, pixmap, bounds):
         """Store pixels and their (x, y, width, height) image-space bounds."""
@@ -271,7 +331,19 @@ class DetailCanvas(_Canvas):
     def paintEvent(self, event):  # noqa: N802
         painter = QPainter(self)
         theme = self._background(painter)
-        if self.has_region():
+        if self._view_mode == "full" and self.can_show_full():
+            # Whole computed result, letterboxed to keep its aspect ratio.
+            source = QRectF(0, 0, self._pixmap.width(), self._pixmap.height())
+            area = QRectF(self.rect())
+            scale = min(area.width() / max(1.0, source.width()),
+                        area.height() / max(1.0, source.height()))
+            width = source.width() * scale
+            height = source.height() * scale
+            target = QRectF(area.center().x() - width / 2.0,
+                            area.center().y() - height / 2.0, width, height)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawPixmap(target, self._pixmap, source)
+        elif self.has_region():
             x, y, width, height = self._region
             bx, by, _, _ = self._bounds
             source = QRectF(x - bx, y - by, width, height)
@@ -279,5 +351,15 @@ class DetailCanvas(_Canvas):
             painter.drawPixmap(QRectF(self.rect()), self._pixmap, source)
         else:
             self._empty(painter, theme, self._status)
+        if self._selected:
+            # A visible border is the only selection cue; the title bar alone
+            # is easy to miss among several equally sized cards.
+            painter.setPen(QPen(QColor(theme["accent"]), 3))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+        if self.hasFocus():
+            painter.setPen(QPen(QColor(theme["accent"]), 2, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.rect().adjusted(5, 5, -6, -6))
         self._label(painter, theme)
         painter.end()

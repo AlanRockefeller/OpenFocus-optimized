@@ -1,3 +1,5 @@
+import cv2
+
 from PyQt6.QtGui import QAction, QActionGroup
 from PyQt6.QtWidgets import QMainWindow
 from locales import trans
@@ -21,6 +23,11 @@ def setup_menus(window: QMainWindow) -> None:
     file_menu.addAction(open_action)
     window.ui_objs['action_open_folder'] = open_action
 
+    linear_raw_action = QAction(trans.t('linear_raw_open'), window)
+    linear_raw_action.triggered.connect(window.source_manager.prompt_and_load_linear_raw)
+    file_menu.addAction(linear_raw_action)
+    window.ui_objs['linear_raw_open'] = linear_raw_action
+
     open_video_action = QAction(trans.t('action_open_video'), window)
     open_video_action.setShortcut("Ctrl+Shift+O")
     open_video_action.triggered.connect(window.open_video_dialog)
@@ -43,6 +50,16 @@ def setup_menus(window: QMainWindow) -> None:
     save_project_as_action.triggered.connect(lambda: window.save_project_dialog(save_as=True))
     file_menu.addAction(save_project_as_action)
     window.ui_objs['menu_save_project_as'] = save_project_as_action
+
+    open_template_action = QAction(trans.t('menu_open_template'), window)
+    open_template_action.triggered.connect(window.open_template_dialog)
+    file_menu.addAction(open_template_action)
+    window.ui_objs['menu_open_template'] = open_template_action
+
+    save_template_action = QAction(trans.t('menu_save_template'), window)
+    save_template_action.triggered.connect(window.save_template_dialog)
+    file_menu.addAction(save_template_action)
+    window.ui_objs['menu_save_template'] = save_template_action
 
     file_menu.addSeparator()
 
@@ -147,23 +164,29 @@ def setup_menus(window: QMainWindow) -> None:
     edit_menu.addAction(redo_action)
     window.ui_objs['action_redo'] = redo_action
 
+    reset_stack_action = QAction(trans.t('menu_reset_stack'), window)
+    reset_stack_action.setProperty('trans_key', 'menu_reset_stack')
+    reset_stack_action.triggered.connect(window.source_manager.reset_current_stack)
+    edit_menu.addAction(reset_stack_action)
+    window.ui_objs['action_reset_stack'] = reset_stack_action
+
     edit_menu.addSeparator()
 
     rotate_menu = edit_menu.addMenu(trans.t('menu_rotate'))
     window.ui_objs['menu_rotate'] = rotate_menu
 
     rotate_90_cw_action = QAction(trans.t('action_rotate_90_cw'), window)
-    rotate_90_cw_action.triggered.connect(lambda: window.rotate_stack(1))
+    rotate_90_cw_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_90_CLOCKWISE))
     rotate_menu.addAction(rotate_90_cw_action)
     window.ui_objs['action_rotate_90_cw'] = rotate_90_cw_action
 
     rotate_90_ccw_action = QAction(trans.t('action_rotate_90_ccw'), window)
-    rotate_90_ccw_action.triggered.connect(lambda: window.rotate_stack(2))
+    rotate_90_ccw_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_90_COUNTERCLOCKWISE))
     rotate_menu.addAction(rotate_90_ccw_action)
     window.ui_objs['action_rotate_90_ccw'] = rotate_90_ccw_action
 
     rotate_180_action = QAction(trans.t('action_rotate_180'), window)
-    rotate_180_action.triggered.connect(lambda: window.rotate_stack(0))
+    rotate_180_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_180))
     rotate_menu.addAction(rotate_180_action)
     window.ui_objs['action_rotate_180'] = rotate_180_action
 
@@ -194,6 +217,12 @@ def setup_menus(window: QMainWindow) -> None:
     edit_menu.addAction(retouch_action)
     window.ui_objs['action_retouch'] = retouch_action
     retouch_action.setProperty("trans_key", 'action_retouch')
+
+    standalone_retouch = QAction(trans.t('standalone_retouch_action'), window)
+    standalone_retouch.setProperty('trans_key', 'standalone_retouch_action')
+    standalone_retouch.triggered.connect(window.show_standalone_retouch)
+    edit_menu.addAction(standalone_retouch)
+    window.ui_objs['standalone_retouch_action'] = standalone_retouch
 
     # Labels live under Tools: adding and removing are two halves of one
     # feature, so they share one submenu instead of a loose action here and a
@@ -269,21 +298,31 @@ def setup_menus(window: QMainWindow) -> None:
         window.label_manager.show_add_label_dialog)
     window.add_label_action.setEnabled(False)
     label_menu.addAction(window.add_label_action)
+    window.ui_objs['action_add_label'] = window.add_label_action
 
-    # "Remove" is a submenu at the same level as "Add", holding the two
-    # targets (source stack / registered stack) as its own two entries.
+    # Each target can be cleared independently, including disabled labels.
     remove_menu = label_menu.addMenu(trans.t('menu_remove_labels'))
     remove_menu.setProperty("trans_key", 'menu_remove_labels')
     window.ui_objs['menu_remove_labels'] = remove_menu
 
-    window.del_reg_label_action = QAction(trans.t('action_del_reg_label'), window)
+    window.del_reg_label_action = QAction(trans.t('label_target_registered'), window)
+    window.del_reg_label_action.setProperty("trans_key", 'label_target_registered')
     window.del_reg_label_action.triggered.connect(
         window.label_manager.delete_registered_labels)
     window.del_reg_label_action.setEnabled(False)
     remove_menu.addAction(window.del_reg_label_action)
     window.ui_objs['action_del_reg_label'] = window.del_reg_label_action
 
-    window.del_input_label_action = QAction(trans.t('action_del_input_label'), window)
+    window.del_output_label_action = QAction(trans.t('label_target_output'), window)
+    window.del_output_label_action.setProperty("trans_key", 'label_target_output')
+    window.del_output_label_action.triggered.connect(
+        window.label_manager.delete_output_labels)
+    window.del_output_label_action.setEnabled(False)
+    remove_menu.addAction(window.del_output_label_action)
+    window.ui_objs['action_del_output_label'] = window.del_output_label_action
+
+    window.del_input_label_action = QAction(trans.t('label_target_input'), window)
+    window.del_input_label_action.setProperty("trans_key", 'label_target_input')
     window.del_input_label_action.triggered.connect(
         window.label_manager.delete_input_labels)
     window.del_input_label_action.setEnabled(False)
@@ -291,6 +330,7 @@ def setup_menus(window: QMainWindow) -> None:
     window.ui_objs['action_del_input_label'] = window.del_input_label_action
 
     window.del_all_labels_action = QAction(trans.t('action_del_all_labels'), window)
+    window.del_all_labels_action.setProperty("trans_key", 'action_del_all_labels')
     window.del_all_labels_action.triggered.connect(
         window.label_manager.delete_all_labels)
     window.del_all_labels_action.setEnabled(False)
@@ -308,21 +348,34 @@ def setup_menus(window: QMainWindow) -> None:
     advanced_action.setToolTip(trans.t("advanced_settings_hint"))
     advanced_action.triggered.connect(window.show_advanced_settings_dialog)
     settings_menu.addAction(advanced_action)
+    # update_ui_text() falls back to the ui_objs key when no trans_key is set,
+    # so without this the menu item rendered as "action_advanced_settings"
+    # after any language switch.
+    advanced_action.setProperty("trans_key", 'advanced_settings_title')
     window.ui_objs['action_advanced_settings'] = advanced_action
 
     # GPU stays reachable here as a quick toggle; it is the one switch users
     # flip often enough to deserve a click instead of two.
     gpu_action = QAction(trans.t('action_gpu_accel'), window)
     gpu_action.setCheckable(True)
-    from utils.platform_utils import has_compute_gpu
-    _gpu_present = has_compute_gpu()
-    gpu_action.setChecked(_gpu_present and getattr(window, 'use_gpu', True))
-    gpu_action.setEnabled(_gpu_present)
-    gpu_action.setToolTip(trans.t('msg_gpu_accel_hint') if _gpu_present
+    from core import torch_backend
+    from core.multi_focus_fusion import is_ai_fusion_available, torch_device_kind
+    _gpu_kind = torch_device_kind()
+    _torch_installed = is_ai_fusion_available() if _gpu_kind is None else False
+    _gpu_enabled, _gpu_checked = torch_backend.gpu_toggle_state(
+        _gpu_kind, getattr(window, 'use_gpu', True), _torch_installed)
+    gpu_action.setChecked(_gpu_checked)
+    gpu_action.setEnabled(_gpu_enabled)
+    gpu_action.setToolTip(trans.t('msg_gpu_accel_hint') if _gpu_enabled
                           else trans.t('msg_gpu_accel_unavailable'))
     gpu_action.triggered.connect(window.set_use_gpu)
     settings_menu.addAction(gpu_action)
     window.ui_objs['action_gpu_accel'] = gpu_action
+    # Resolve the backend in the background when the user opens Settings.
+    # Device probing must never delay menu construction.
+    if _gpu_kind is None and _torch_installed and hasattr(
+            window, '_probe_device_kind_async'):
+        settings_menu.aboutToShow.connect(window._probe_device_kind_async)
 
     settings_menu.addSeparator()
 

@@ -39,10 +39,11 @@ class DepthSurface(QWidget):
         self._cache = None
 
     # ---------------------------------------------------------------- data
-    def set_surface(self, height, texture=None) -> None:
+    def set_surface(self, height, texture=None, extent=None) -> None:
         """`height` is (h, w) in [0, 1]; `texture` is optional BGR uint8."""
         self._height = None if height is None else np.asarray(height, np.float32)
         self._texture = texture
+        self._extent = extent
         self._cache = None
         self.update()
 
@@ -99,8 +100,9 @@ class DepthSurface(QWidget):
         p.fillRect(self.rect(), QColor(t["surfaceSunken"]))
         if self._height is None:
             p.setPen(QColor(t["textMuted"]))
+            from locales import trans
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "No depth map yet")
+                       trans.t("depth_no_map_yet"))
             p.end()
             return
 
@@ -111,13 +113,7 @@ class DepthSurface(QWidget):
 
     # ------------------------------------------------------------ rendering
     def set_detail(self, percent: int) -> None:
-        """Working resolution as a percentage of the source (20-100).
-
-        Above 100% the extra samples land beyond the source resolution, so
-        the picture was IDENTICAL for every higher step — that is why the
-        slider looked dead. The value is stored as-is; _rasterise() divides
-        by 100 for the ratio.
-        """
+        """Sampling resolution as a percentage of the preview source (20-100)."""
         self._mesh_step = max(20, min(100, int(percent)))
         self._cache = None
         self.update()
@@ -127,7 +123,8 @@ class DepthSurface(QWidget):
         # geometry for every pixel of mouse movement.
         return (round(self._yaw, 1), round(self._pitch, 1),
                 round(self._zoom, 3), self.width(), self.height(),
-                round(self._relief, 4), bool(self._invert), id(self._texture))
+                round(self._relief, 4), bool(self._invert), id(self._texture),
+                self._mesh_step, self._dragging)
 
     def _render_cached(self):
         """Rasterise the surface, reusing the last frame when nothing changed.
@@ -142,19 +139,17 @@ class DepthSurface(QWidget):
         if cached is not None and cached[0] == key:
             return cached[1]
 
-        # While the camera moves the mesh is coarsened (fewer, larger quads);
-        # on release it is rebuilt at full density.
-        # While the camera moves the mesh is coarsened (fewer, larger quads);
-        # on release it is rebuilt at full density.
-        divisor = 4 if self._dragging else 1
-        image = self._rasterise(mesh_step=max(24, self._mesh_step // divisor))
+        # Keep the selected resolution at rest; use fewer samples while the
+        # camera moves, then restore that same selection on release.
+        step = max(20, self._mesh_step // 2) if self._dragging else self._mesh_step
+        image = self._rasterise(mesh_step=step)
         # Remember only settled frames; a drag would otherwise evict the cache
         # constantly with throwaway images.
         if not self._dragging:
             self._cache = (key, image)
         return image
 
-    def _rasterise(self, mesh_step: int = 96):
+    def _rasterise(self, mesh_step: int = None):
         """Forward-map every texture pixel onto the canvas, per pixel.
 
         A quad mesh can only carry one colour per cell, so the picture came out
@@ -168,26 +163,20 @@ class DepthSurface(QWidget):
         import cv2
 
         hh, ww = self._height.shape[:2]
-        w, h = max(1, self.width()), max(1, self.height())
+        w = max(1, self.width())
+        h = max(1, self.height())
 
-        # Working resolution = canvas x (detail / 96), capped by the source.
-        # 96 (the default) is the 2x supersample that fills the forward-map
-        # pinholes; the detail slider scales this so higher values resolve
-        # more of the source and lower values trade detail for speed. This is
-        # what makes the slider visibly change the model.
-        # The detail slider is a fraction OF THE SOURCE resolution. It used to
-        # be "canvas x N" with the source as the cap, so for a 1344x1021 map
-        # every setting above 96 hit that cap and rendered EXACTLY the same
-        # image — the slider did nothing. A fraction of the source always
-        # changes the working set.
-        ratio = max(0.2, min(1.0, self._mesh_step / 100.0))
-        target_h = max(64, int(hh * ratio))
-        target_w = max(64, int(ww * ratio))
-        if target_h < 8 or target_w < 8:
-            return None
+        # Sample the source at the selected percentage. Camera motion may
+        # request a coarser percentage without changing the user's setting.
+        step = self._mesh_step if mesh_step is None else int(mesh_step)
+        ratio = max(0.2, min(1.0, step / 100.0))
+        target_h = max(2, min(hh, int(hh * ratio)))
+        target_w = max(2, min(ww, int(ww * ratio)))
 
         z = cv2.resize(self._height, (target_w, target_h),
                        interpolation=cv2.INTER_AREA)
+        valid = np.isfinite(z)
+        z = np.where(valid, z, 0)
         if self._invert:
             z = 1.0 - z
 
@@ -196,6 +185,12 @@ class DepthSurface(QWidget):
                              interpolation=cv2.INTER_AREA)
             if tex.ndim == 2:
                 tex = cv2.cvtColor(tex, cv2.COLOR_GRAY2BGR)
+            if tex.dtype != np.uint8:
+                # Direct astype(uint8) wraps 16-bit values (40000 -> 64),
+                # which made the 3D preview far darker than the same texture
+                # exported to PNG. Convert through the shared display rule.
+                from utils.image_utils import to_display_uint8
+                tex = to_display_uint8(tex)
             colours = tex.reshape(-1, 3)[:, ::-1].astype(np.uint8)  # BGR->RGB
         else:
             from ui.styles import CURRENT_THEME, tokens
@@ -203,7 +198,8 @@ class DepthSurface(QWidget):
             colours = np.tile(np.array([base.red(), base.green(), base.blue()],
                                        np.uint8), (target_h * target_w, 1))
 
-        aspect = (ww / float(hh)) if hh else 1.0
+        eh, ew = getattr(self, "_extent", None) or (max(1, hh - 1), max(1, ww - 1))
+        aspect = ew / float(max(1, eh))
         half_w = 1.0 if aspect >= 1.0 else aspect
         half_h = 1.0 / aspect if aspect >= 1.0 else 1.0
         xs = np.linspace(-half_w, half_w, target_w, dtype=np.float32)
@@ -224,7 +220,7 @@ class DepthSurface(QWidget):
         py = np.rint(h * 0.5 - v[:, 1] * scale).astype(np.int32)
         depth = v[:, 2]
 
-        inside = (px >= 0) & (px < w) & (py >= 0) & (py < h)
+        inside = valid.ravel() & (px >= 0) & (px < w) & (py >= 0) & (py < h)
         if not inside.any():
             return None
         px, py = px[inside], py[inside]
@@ -274,18 +270,39 @@ class DepthSurface(QWidget):
         written = np.zeros((h, w), bool)
         written[py, px] = True
 
-        # The forward map leaves pinholes where the surface is stretched. Fill
-        # ONLY those pixels from a closed copy, so the picture itself keeps its
-        # detail instead of being blurred to hide the seams. (The earlier
-        # version tested all three channels against a single component and
-        # therefore never matched, which is why the streaks stayed.)
-        if not written.all():
-            filled = cv2.morphologyEx(canvas, cv2.MORPH_CLOSE,
-                                      np.ones((3, 3), np.uint8))
-            holes = ~written
-            canvas[holes] = filled[holes]
+        # The forward map writes one pixel per surface sample, so a stretched
+        # surface leaves gaps much wider than a 3x3 morphological close can
+        # bridge (the picture read as a dot cloud). Fill every unwritten pixel
+        # from its NEAREST written sample: a distance transform gives that
+        # mapping in C, keeps the real colours, and invents no gradient.
+        if valid.all() and not written.all():
+            # Only bridge gaps INSIDE the silhouette, and only short ones:
+            # an unbounded nearest-sample fill also painted the canvas
+            # background, turning the surface into a stretched sheet.
+            hull = cv2.convexHull(
+                np.stack([px, py], axis=1).astype(np.int32))
+            inside_surface = np.zeros((h, w), np.uint8)
+            cv2.fillConvexPoly(inside_surface, hull, 1)
+            holes = (~written) & (inside_surface.astype(bool))
+            if holes.any():
+                dist, labels = cv2.distanceTransformWithLabels(
+                    holes.astype(np.uint8), cv2.DIST_L2, 3,
+                    labelType=cv2.DIST_LABEL_PIXEL)
+                written_y, written_x = np.nonzero(written)
+                label_of_sample = labels[written_y, written_x]
+                lut_x = np.zeros(int(labels.max()) + 1, np.int32)
+                lut_y = np.zeros(int(labels.max()) + 1, np.int32)
+                lut_x[label_of_sample] = written_x
+                lut_y[label_of_sample] = written_y
+                # Pinhole-scale bridging only; wider gaps stay background so
+                # the silhouette reads as a surface, not a smear.
+                reach = max(2.0, 6.0 / max(0.2, ratio))
+                near = holes & (dist <= reach)
+                if near.any():
+                    near_labels = labels[near]
+                    canvas[near] = canvas[lut_y[near_labels],
+                                          lut_x[near_labels]]
 
-        rgb = cv2.resize(canvas, (w, h), interpolation=cv2.INTER_AREA)
-        rgb = np.ascontiguousarray(rgb)
+        rgb = np.ascontiguousarray(canvas)
         return QImage(rgb.data, w, h, 3 * w,
                       QImage.Format.Format_RGB888).copy()

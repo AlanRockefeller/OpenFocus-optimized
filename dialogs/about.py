@@ -2,7 +2,8 @@
 """About and contact information dialogs."""
 
 import sys
-from PyQt6.QtCore import Qt
+import threading
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
@@ -14,6 +15,20 @@ from PyQt6.QtWidgets import (
 from locales import trans
 from utils import get_monospace_font_family
 from ui.styles import PRIMARY_BLUE
+
+
+class _EnvironmentProbe(threading.Thread):
+    def __init__(self):
+        super().__init__(name="environment-probe", daemon=True)
+        self.finished = threading.Event()
+
+    def run(self):
+        try:
+            self.text = EnvironmentInfoDialog.environment_report()
+        except Exception as exc:
+            self.text = trans.t("msg_error") + "\n" + str(exc)
+        finally:
+            self.finished.set()
 
 
 class EnvironmentInfoDialog(QDialog):
@@ -40,18 +55,49 @@ class EnvironmentInfoDialog(QDialog):
         self.text_edit.setReadOnly(True)
         self.text_edit.setFont(QFont("Consolas", 10))
         layout.addWidget(self.text_edit)
+        self.copy_button = QPushButton(trans.t("env_copy"))
+        self.copy_button.setEnabled(False)
+        self.copy_button.clicked.connect(self._copy)
+        layout.addWidget(self.copy_button)
 
         # 关闭按钮
         close_btn = QPushButton(trans.t('btn_close'))
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
-        # 检测环境
-        self.check_environment()
+        self._probe = _EnvironmentProbe()
+        self.text_edit.setPlainText(trans.t("msg_gif_processing_title"))
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setInterval(100)
+        self._probe_timer.timeout.connect(self._poll_probe)
+        self._probe.start()
+        self._probe_timer.start()
 
-    def check_environment(self):
-        """检测环境依赖"""
+    def _poll_probe(self):
+        if self._probe.finished.is_set():
+            self._probe_timer.stop()
+            self._probe_finished()
+
+    def _probe_finished(self):
+        self.text_edit.setPlainText(self._probe.text)
+        self.copy_button.setEnabled(True)
+
+    def _copy(self):
+        from PyQt6.QtWidgets import QApplication
+        QApplication.clipboard().setText(self.text_edit.toPlainText())
+        self.copy_button.setText(trans.t("msg_success"))
+
+    def done(self, result):
+        self._probe_timer.stop()
+        super().done(result)
+        self.deleteLater()
+
+
+    @staticmethod
+    def environment_report():
+        """Collect optional dependencies without touching GUI objects."""
         info_lines = []
+        available = {}
         info_lines.append("=" * 60)
         from constants import APP_VERSION
         info_lines.append(f"OpenFocus v{APP_VERSION}")
@@ -68,9 +114,10 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import cv2 as cv_check  # noqa: F401
 
+            available["cv2"] = True
             info_lines.append(f"  ✓ {trans.t('env_installed').format(cv_check.__version__)}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        except Exception as exc:
+            info_lines.append(f"  {trans.t('env_not_installed')}: {exc}")
         info_lines.append("")
 
         # 检测 NumPy
@@ -79,9 +126,10 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import numpy as np_check  # noqa: F401
 
+            available["numpy"] = True
             info_lines.append(f"  ✓ {trans.t('env_installed').format(np_check.__version__)}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        except Exception as exc:
+            info_lines.append(f"  {trans.t('env_not_installed')}: {exc}")
         info_lines.append("")
 
         # 检测 PyQt6
@@ -91,29 +139,44 @@ class EnvironmentInfoDialog(QDialog):
             from PyQt6.QtCore import PYQT_VERSION_STR  # noqa: F401
 
             info_lines.append(f"  ✓ {trans.t('env_installed').format(PYQT_VERSION_STR)}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        except Exception as exc:
+            info_lines.append(f"  {trans.t('env_not_installed')}: {exc}")
         info_lines.append("")
 
         # 检测 PyTorch (StackMFF-V3)
         info_lines.append("-" * 60)
-        info_lines.append("PyTorch (Required for StackMFF-V3)")
+        info_lines.append("PyTorch / StackMFF-V3")
         try:
             import torch
+            from core import torch_backend
+            from core.multi_focus_fusion import ensure_torch_device_kind
+            available["torch"] = True
+            kind = ensure_torch_device_kind()
+            available["device"] = (torch_backend.display_name(kind)
+                                   if torch_backend.is_accelerator(kind)
+                                   else "CPU")
 
             info_lines.append(f"  ✓ {trans.t('env_installed').format(torch.__version__)}")
-            if torch.cuda.is_available():
-                info_lines.append(f"  ✓ {trans.t('env_cuda_avail').format(torch.cuda.get_device_name(0))}")
+            if torch.version.cuda:
                 info_lines.append(f"  ✓ {trans.t('env_cuda_ver').format(torch.version.cuda)}")
+            if getattr(torch.version, 'hip', None):
+                info_lines.append(f"  ✓ ROCm {torch.version.hip}")
+            if kind == torch_backend.KIND_CUDA:
+                info_lines.append(f"  ✓ {trans.t('env_cuda_avail').format(torch.cuda.get_device_name(0))}")
                 info_lines.append(f"  ✓ {trans.t('env_gpu_accel')}")
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            elif kind in (torch_backend.KIND_ROCM, torch_backend.KIND_XPU):
+                info_lines.append(
+                    f"  ✓ {torch_backend.device_label(torch, kind)} ({torch_backend.display_name(kind)})")
+                info_lines.append(f"  ✓ {trans.t('env_gpu_accel')}")
+            elif kind == torch_backend.KIND_MPS:
                 info_lines.append(f"  ✓ {trans.t('env_mps_avail')}")
                 info_lines.append(f"  ✓ {trans.t('env_gpu_accel')}")
             else:
                 info_lines.append(f"  ⚠ {trans.t('env_no_gpu')}")
                 info_lines.append(f"  ✓ {trans.t('env_cpu_mode')}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        except Exception as exc:
+            available["torch"] = False
+            info_lines.append(f"  {trans.t('env_not_installed')}: {exc}")
             info_lines.append(f"  ✗ {trans.t('env_stackmff_unavailable')}")
         info_lines.append("")
 
@@ -123,20 +186,22 @@ class EnvironmentInfoDialog(QDialog):
         try:
             import dtcwt  # noqa: F401
 
+            available["dtcwt"] = True
             info_lines.append(f"  ✓ {trans.t('env_installed').format(dtcwt.__version__)}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_dtcwt_unavailable')}")
+        except Exception as exc:
+            info_lines.append(f"  {trans.t('env_dtcwt_unavailable')}: {exc}")
         info_lines.append("")
 
         # 检测 SciPy（DCT 的一致性中值滤波 + 深度图 DCT 度量所需）
         info_lines.append("-" * 60)
-        info_lines.append("SciPy (required by DCT)")
+        info_lines.append("SciPy / DCT")
         try:
             import scipy  # noqa: F401
+            available["scipy"] = True
 
             info_lines.append(f"  ✓ {trans.t('env_installed').format(scipy.__version__)}")
-        except ImportError:
-            info_lines.append(f"  ✗ {trans.t('env_not_installed')}")
+        except Exception as exc:
+            info_lines.append(f"  {trans.t('env_not_installed')}: {exc}")
         info_lines.append("")
 
         # 总结
@@ -153,8 +218,17 @@ class EnvironmentInfoDialog(QDialog):
         info_lines.append(f"  {trans.t('env_fusion_desc')}")
         info_lines.append("")
 
-        # 显示信息
-        self.text_edit.setPlainText("\n".join(info_lines))
+        core = available.get("cv2", False) and available.get("numpy", False)
+        methods = [
+            ("Guided Filter / GFG-FGF / OpenFocus A/B/C", core, "CPU"),
+            ("DCT", core and available.get("scipy", False), "CPU"),
+            ("DTCWT", core and available.get("dtcwt", False), "CPU"),
+            ("StackMFF-V3", core and available.get("torch", False), available.get("device", "CPU")),
+        ]
+        summary = [trans.t("env_fusion_alg")]
+        for name, ready, device in methods:
+            summary.append(f"{name}: {device if ready else trans.t('env_not_installed')}")
+        return "\n".join(summary + [""] + info_lines)
 
 
 class ContactInfoDialog(QDialog):

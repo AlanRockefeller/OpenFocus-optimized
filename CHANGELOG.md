@@ -5,6 +5,809 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.75.4] - 2026-11-05
+
+### Added
+- Add an optional camera-linear RAW workflow with developed previews and
+  16-bit Linear DNG output for compatible RAW editors.
+- Add a confirmed reset for restoring the imported stack and clearing its
+  outputs and annotations without deleting files on disk.
+- Recognize additional LibRaw camera formats including Leica RWL, Hasselblad
+  FFF, Mamiya MEF and Kodak DCR.
+- Add experimental ROCm and Intel XPU inference backends with separate Windows
+  preview builds; NVIDIA, AMD and Intel GPU runs still require hardware validation.
+
+### Fixed
+- Isolate Windows Intel GPU detection so a failing driver cannot crash startup.
+- Fall back to CPU if the isolated Intel GPU capability probe hangs, including
+  PyTorch builds without XPU version metadata, and probe the app's environment.
+- Keep GPU menus, control commands and feedback diagnostics responsive; disable
+  acceleration when no backend is usable and keep probe results consistent.
+- Let the environment window close while device detection is still running.
+- Cancel delayed splitter setup when the window closes immediately.
+- Reject release files at GitHub's size limit before upload.
+- Use a newer Intel XPU runtime to avoid a packaged CPU inference exit crash.
+- Avoid intermittent crashes after picking a source or batch folder while
+  retaining typed and pasted directory navigation.
+- Preserve physical µm/px calibration from native Linear DNG microscopy
+  metadata when every frame agrees, and carry it through DNG export/re-import.
+- Allow a single large operation to use available RAM above a capped desktop
+  reserve, while retaining conservative GPU workspace estimates.
+- Prevent concurrent stack loading and rendering from overcommitting memory;
+  a load waiting for another job remains cancellable.
+- Account for full-resolution guidance buffers when sizing custom StackMFF V3
+  models, preventing oversized inference from passing the memory check.
+- Bundle CUDA-enabled PyTorch in Windows release builds, with CPU fallback.
+- Reduce ECC memory overestimation and avoid whole-stack V3 preprocessing copies
+  for tiled JPEG and 16-bit RAW inputs.
+- Preserve single-frame pixel selection in overlapping V3 hard-mode tiles.
+- Show per-file image loading progress and avoid a full-size RAW color-channel
+  copy when loading at reduced resolution.
+- Avoid reading an entire RAF file merely to check for TIFF-style EXIF metadata.
+- Apply the correct clockwise and 180-degree rotations and retain the selected
+  source frame after rotation.
+- Keep Wipe comparisons tied to each output's source images and preserve image
+  proportions when comparing differently sized results.
+- Show downsampling percentages in both themes and select the current value
+  on focus so it can be replaced by typing; match the empty result hint color
+  to the source panel.
+- Clear old labels and scale bars when clearing a stack, and let users type or
+  paste a folder path into the stack picker.
+- Keep frame numbers visible in label and scale-bar previews with styled Qt
+  controls, and preserve existing files when recovery from split downloads fails.
+
+### Changed
+- Publish oversized Windows archives in verified GitHub parts and reconstruct
+  the complete downloads on the website mirror.
+- Move the code signing policy to a dedicated document and keep links from the
+  README, website and release notes.
+- Shorten the README feature and installation sections, with details in the
+  user manuals.
+- Move third-party notices into `docs/` and retain them in desktop and wheel
+  distributions.
+- Remove unused private helpers and mark historical design specifications as
+  snapshots.
+
+## [1.75.3] - 2026-11-04
+
+### Fixed
+- Keep release notes available on slower networks by using the same mirror
+  response as the update check instead of making a second request.
+
+## [1.75.2] - 2026-11-04
+
+### Fixed
+- Keep automatic update checks quiet when the network is unavailable or the
+  installed version is current. Manual checks continue to show their result.
+
+### Changed
+- Check for updates and download verified, version-specific builds through the
+  OpenFocus website mirror instead of requiring a direct GitHub connection.
+
+## [1.75.1] - 2026-11-04
+
+### Fixed
+- Fix a Windows installed or portable build failing to start with
+  `I/O operation on closed file` when launched without a console.
+- Verify the installed Windows application opens its first-run welcome dialog
+  and main window without inherited console handles before publishing.
+
+## [1.75.0] - 2026-11-03
+
+### Added
+- **Grouped fusion** processes long stacks in overlapping groups using
+  disk-backed intermediates. The result approximates whole-stack fusion;
+  grouped input and export limitations are described in the user manual.
+- **Reusable workflows** include desktop processing templates and CLI recipes
+  for applying saved settings to another stack.
+- **Transparent PNG stacks** can be fused and saved with their matching
+  rectangular, constant-opacity masks when the documented constraints are met.
+- **Output sharpening** can be enabled for the final fused result, including
+  grouped processing.
+- **Alignment diagnostics** expose per-frame outcomes, including localized
+  fallback reasons, reference frames, method-specific scores, match counts and
+  transforms when available.
+  Single-stack CLI renders can write an atomic JSON report; reporting uses fresh
+  alignment rather than guessing outcomes from an older cache. Homography and
+  ECC also offer an opt-in policy to stop when alignment failure is detected.
+- **Sensor cleanup** optionally corrects pixels marked in a reviewed sensor
+  defect mask before registration and offers conservative denoising while
+  retaining 8-bit or 16-bit precision. Both options default to off.
+  Cleanup is memory-admitted and rejects previously transformed source frames
+  or pre-aligned ROI frames. Defect masks also reject oriented or ambiguous
+  source files where their sensor coordinates cannot be established.
+  The desktop reports these source restrictions in the selected language.
+- **Depth products** export an estimated frame-index TIFF or an alternative image
+  assembled from the selected depth input frames. The index records estimated
+  focus positions, not the true provenance of pixels in a fused result.
+- **Similar-frame review** suggests nearly identical adjacent sources for
+  inspection in the source list or CLI. It never changes selections or files;
+  small localized differences are protected from whole-frame averaging.
+- **Export layered TIFF** saves the current retouch result and source frames
+  with their geometry and validity masks. Export checks context and memory use;
+  8-bit and 16-bit layer import was verified with GIMP 3.2.6 on Windows.
+- **Retouch checkpoint replay** runs headlessly with an explicit base and ordered
+  processed source images. Replay verifies the recorded context and preserves
+  8- or 16-bit output in PNG or TIFF without overwriting its inputs.
+  Replay checks its memory budget before allocating image and history buffers;
+  a refused operation leaves the current edits and existing checkpoint intact.
+- **RGB color profiles** are retained in single-image PNG, TIFF, JPEG and WebP
+  when all source frames have the same ICC profile. Historical outputs and
+  batch folders retain their own profiles; mixed or untagged stacks are not
+  assigned a potentially incorrect profile. PNG/TIFF keep their 16-bit pixels.
+
+### Changed
+- **Render settings** collect preview, frame order, brightness and sharpening
+  options in a compact dialog with explanations; rejected-frame handling is in
+  Advanced Settings. Fusion and alignment help describe all registered methods.
+- **Method comparison** defaults to full-image fusion and keeps the source
+  inspection square interactive without repeating full-image calculations.
+  Method hints and parameter cards reflect each algorithm's settings.
+- **Scale-bar calibration** defaults to manual input when the selected target
+  has no usable metadata. Existing explicit manual calibration is preserved.
+- Scale-bar, label, batch, comparison and flat-field dialogs adapt to the
+  available screen. Comparison results can be selected with the keyboard.
+- **Retouch** shows the current zoom beside the result canvas and adjusts brush
+  diameter with Ctrl+wheel while the wheel alone continues to zoom.
+- **Guided filter** skips frames that cannot contribute, while preserving the
+  original behavior for nonfinite or out-of-range floating-point inputs.
+  Based on a contribution by @AlanRockefeller (PR #11).
+- **Desktop controls** show grouped-batch, tile, ROI base-frame and
+  depth-calibration settings only when their parent option is enabled.
+  Alignment diagnostic collection is configured in Advanced Settings, and
+  numeric controls share a compact style.
+- **Label and retouch controls** keep the editor usable in narrower windows;
+  long retouch toolbar captions wrap rather than being clipped, and full label
+  summaries remain available as tooltips.
+- **Method selectors** explain when the optional DTCWT backend or neural
+  dependency is unavailable across the main, batch, comparison and depth views.
+- **Agent tooling** can isolate application data and discovery files for GUI
+  automation. `openfocus describe` lists current CLI options and subcommands,
+  and the control guide explains how the headless wheel connects to the GUI.
+- **Website and installers** include a maintained deployment runbook, safer
+  installation rollback, range-aware mirrored downloads, and latest-release
+  links that work without JavaScript. Mobile command blocks stay within the
+  screen width, and built shell installers use Unix line endings on every OS.
+- **Manual checks** validate numbered chapters, code-fence balance and local
+  file links without requiring translated examples to have identical layouts.
+- **License notices** distinguish the bundled MIT-licensed StackMFF V3 snapshot
+  and older upstream releases from the upstream project's current license.
+- **Continuous integration** runs the regression suite on macOS as well as
+  Windows and Linux.
+
+### Fixed
+- **Exposure matching** estimates matched copies using their actual pixel
+  types and frame sizes, avoiding unnecessary memory refusals. Based on a
+  contribution by @AlanRockefeller (PR #12).
+- Agent dialog acceptance now validates batch settings and waits for sensor
+  mask inspection; a superseded render cannot report another render's result
+  as its own success.
+- Import-scale preferences retain the last confirmed value, and Advanced
+  Settings no longer clamps an existing thread limit when opened.
+- **Memory status** now uses the same cross-platform physical-memory probe as
+  the resource planner, so it can report available readings on macOS and Linux.
+- **OpenFocus alignment** samples translation more densely at the coarsest
+  search level to reduce false matches on repeated textures, while retaining
+  the configured motion limits.
+- **StackMFF V1 on macOS 26 MPS** uses equivalent depth-sliced spatial
+  operations to avoid a PyTorch 3D convolution compiler error. Its memory
+  admission accounts for the additional MPS convolution workspace.
+- Layered export records the exact saved output while keeping omitted live
+  labels and scale bars marked as unsaved.
+
+## [1.74.0] - 2026-11-02
+
+### Changed
+- **Local agent control starts with the desktop app.** Agents can use
+  `openfocus ctl` immediately against the running window through the
+  authenticated per-user local channel.
+- **Agent skill location.** The control skill now lives at
+  `skills/openfocus-control/SKILL.md`, with documentation links updated.
+- **OpenFocus A/B/C and fast alignment use updated focus-stack models.** A
+  selects pixels using a multiscale focus response; B blends neighboring
+  frames using a smoothed depth map; C reconstructs a depth-guided pyramid.
+  The depth-map dialog uses the same B/C depth estimation and smoothing as
+  fusion. Fast alignment uses a bounded similarity search and sampled
+  difference score for translation, rotation and scale. B/C can take
+  substantially longer than the previous implementations on large frames.
+  See `docs/FUSION_METHODS.md` for method descriptions and observations.
+- **One locale package instead of eleven root modules.** `locales.py`,
+  `locales_extra.py` and the eight `locales_<code>.py` packs became the
+  `locales/` package (`__init__.py`, `en.py`, `zh.py`, `_extra.py`, one
+  `<code>.py` per community language). `from locales import trans` and the
+  drop-in discovery contract are unchanged; a new language is still one file.
+- **Translated READMEs moved to `docs/readme/`**, so the repository root only
+  carries `README.md`. Every language switcher, image and manual link was
+  rewritten to the new relative paths.
+
+### Removed
+- `locales_help_texts.py` (never imported; its ja/es help bodies were exact
+  duplicates of entries already present in the translation tables) and the
+  dead `_JA_HELP`/`_ES_HELP` copies at the end of `locales_extra.py`.
+- `_chk.py`, a leftover window-luminance probe script.
+
+### Fixed
+- **OpenFocus B/C depth and tiled fusion.** Depth estimation now preserves
+  frame indices across long stacks, and all tiles share the same full-image
+  depth map. Method C reconstructs its blended pyramid from coarse to fine.
+  Resized B/C renders use the whole-frame path so depth coordinates match.
+- **OpenFocus A pixel fidelity and extreme image shapes.** Identical 8-bit
+  frames retain their original pixel values, and pyramid expansion stays
+  bounded for very long, narrow images.
+- **Fast alignment input handling.** Underdetermined one-dimensional gradients
+  no longer produce arbitrary shifts; EXIF orientation is respected for
+  folder inputs and brightness adjustment preserves alpha channels.
+- **Packaged CLI output.** Windows and macOS desktop builds recover inherited
+  output streams for CLI commands. Release builds exercise CLI-driven 16-bit
+  loading, rendering and export before publication.
+
+- **Fast alignment geometry and input depth.** Residual translation is now
+  applied after rotation/scale, and the common crop uses the same forward
+  transforms as the warp. Grayscale and 16-bit folder inputs retain their
+  channels and depth. Cached alignment results are invalidated so older
+  geometry is not reused; previous cache entries still count toward the disk
+  quota and can be evicted.
+- The synthetic benchmark draws text through an 8-bit mask, restoring
+  compatibility with OpenCV 5.
+- **Control-channel follow-ups from the PR review (issue #8).** Loads and
+  renders now carry a generation (`load_id`/`render_id`) that every entry
+  point advances, so `--wait` can no longer accept a previous stack or a
+  cancelled render; load errors are reported, and `render.state` distinguishes
+  `cancelled` and `discarded` from `done`. `render.start` reports the CPU-AI
+  and ROI decisions as `confirm_required` instead of blocking on a modal.
+  Frame inclusion, option changes, dialog reuse, output deletion and
+  alignment-only export follow the GUI paths; item views scroll, and
+  right-clicks deliver a real context menu event. The transport bounds request
+  and reply buffers, matches response ids, resets after a timeout, resolves
+  relative paths in the caller, creates the token file with owner-only access
+  from the start, and rejects remote Windows pipe clients. The smoke/sweep
+  tools require the requested operation to finish.
+- **Discovery-token permission report.** The control discovery file is created
+  with owner-only access from the start. Reported by
+  [@ranas-mukminov](https://github.com/ranas-mukminov) in
+  [PR #9](https://github.com/Xinzhe99/OpenFocus/pull/9).
+- Packaged builds and the PyPI wheel now explicitly include every language
+  pack: the release workflows pass `--collect-submodules locales`, the wheel
+  lists the `locales` package, and `OpenFocus.spec` collects the submodules.
+  Previously the dynamic pack imports were invisible to both builders, so a
+  frozen build could ship fewer languages than the source tree.
+
+## [1.73.0] - 2026-10-28
+
+### Fixed
+- **Control-channel hardening from the PR review.** `ui.type` no longer
+  aborts the GUI on non-Latin-1 text (CJK and emoji are delivered as real
+  key events); `project.open` refuses to discard unsaved changes without
+  `force:true` and both project commands now track `project_path` and the
+  dirty marker exactly like the GUI flow; `dialog.accept` applies pending
+  edits and routes through the dialog's own OK/Apply action instead of raw
+  `accept()` (refusing while busy or the commit action is disabled);
+  `render.start preview:false` actually clears the quick-preview flag;
+  a scheduled `ui.click --async` is cancelled when its target closes;
+  a custom `--control-socket` can no longer make the server delete a
+  non-socket file; the smoke/sweep tools run against isolated instances by
+  default (`--allow-existing` required to touch a live session); and the
+  headless wheel reports a clear error instead of a traceback when PyQt6
+  or the desktop app is missing.
+- **Acceptance tools survive any UI language.** The smoke and sweep match
+  dialog titles and buttons against every loaded translation instead of
+  English literals, honor the new `project.open force` semantics, and
+  `agent_action_sweep.py` gained `--quit` so isolated runs leave no window
+  behind.
+
+### Added
+- **Local GUI control channel for agents.** `openfocus gui --control` opens a
+  token-authenticated local socket; `openfocus ctl` drives the live window:
+  stacks, methods, options, render/cancel, outputs and export, projects,
+  dialogs, batch state, and a generic UI layer that lists menu actions and
+  every widget, clicks, sets values, triggers actions and captures screenshots.
+- **Agent-oriented CLI contract.** `openfocus version` and `openfocus describe`
+  report the build, capabilities, registry and control commands as JSON. With
+  `--json-progress`, stdout carries only NDJSON: engine and progress prose is
+  redirected to stderr, batch folder events are JSON-encoded, and start/done
+  events delimit a run.
+- **Human-input layer for the control channel.** Agents can now send real Qt
+  mouse clicks, drags and wheel events, key presses and text; list and trigger
+  context menus; answer file and color pickers; and inspect every visible
+  top-level window (message boxes, input dialogs, popups) rather than only the
+  dialogs opened through the typed API. `ui.context` reports the current level,
+  active window, focused widget and view state, and duplicate widget paths are
+  disambiguated (`panelRoot[0]` / `panelRoot[1]`). `ui.click --async` prevents
+  a modal-opening button from blocking the command response.
+- **Agent skill and closed-loop smoke test.** `skills/openfocus-control/SKILL.md`
+  documents the level model, command recipes, dialog/file-picker
+  handling, gestures and safety rules. `tools/agent_gui_smoke.py` drives a live
+  window through load, render, export, depth, comparison, retouch apply, wipe,
+  labels/color, project round-trip, batch and a menu action with a file picker.
+- **Dialog and import hardening found by the sweep.** Batch folder pickers and
+  file/color dialogs are completed by path/index; the control catalog now
+  includes the Add Label action; recovery/startup prompts are visible to the
+  agent; and control mode opts into non-native Qt file/color dialogs so their
+  widgets are scriptable. An opt-in watchdog
+  (`OPENFOCUS_CONTROL_WATCHDOG=1`) dumps the GUI stack if the thread stalls.
+
+## [v1.72.0] — 2026-10-27
+
+### Added
+- **StackMFF and StackMFF V2 as first-class fusion methods.** The original
+  3D stack network runs the whole stack in one pass (order-independent, no
+  parameters); V2 adds a recurrent cross-layer model, keeps the stack in its
+  original focus order, and provides depth maps. Both appear in the main
+  window, comparison, batch, depth (V2), settings, projects and the CLI
+  without new flags. (Weights and network code are MIT, see
+  `docs/THIRD_PARTY_NOTICES.md`.)
+- **A selection hint and a family grouping for every method.** The right
+  panel, batch and depth dropdowns now show non-selectable AI / spatial-domain
+  / transform-domain headers, and every fusion and registration method
+  explains itself in the hint tooltip. An order-sensitive method disables the
+  reverse control with an explanation instead of ignoring it silently.
+
+### Changed
+- **Neural methods declare their checkpoint, family and stack-order contract.**
+  The registry gained `weights`, `category` and `order_sensitive`; the CLI,
+  tiled inference and depth planner no longer hard-code the V3 checkpoint, and
+  the tiled neural loop is shared by V1/V2/V3.
+- **The StackMFF family is named consistently.** `AI (StackMFF-V3)` became
+  `StackMFF V3`, next to `StackMFF V2` and `StackMFF`.
+- **The AI-on-CPU warning names the selected model** instead of always saying
+  StackMFF V3.
+
+### Verification
+- Complete Windows CPU suite: **1200 passed, 12 skipped**, two Pillow TIFF
+  metadata warnings. Both CI platforms (Linux, Windows) pass on the release
+  commit.
+- V2's hard output, layer index and depth map match the upstream reference
+  network exactly; V1's fused luma is within one level of its reference.
+  uint16 survives both backends, V1 tiling deviates by less than one level on
+  average, and V2 refuses to tile so its global depth normalisation stays
+  consistent.
+- A native session exercised the grouped main/batch/depth dropdowns, both new
+  methods, the depth dialog, comparison, batch export and a settings restart
+  with no unhandled Qt exceptions.
+- Verified limits: V2 runs whole-frame only (admission rejects oversized
+  requests); CUDA/MPS and the macOS installer were not exercised here.
+
+## [v1.71.1] — 2026-10-27
+
+### Added
+- **Source EXIF survives 16-bit exports, and camera RAWs provide it.** 16-bit
+  PNG and TIFF exports keep camera, lens, exposure, date and GPS tags; the file
+  is assembled so pixels stay byte-identical to the previous writer instead of
+  round-tripping through an 8-bit Pillow save. TIFF-based RAWs (ORF, NEF, CR2,
+  ARW, DNG, RW2) are read for EXIF, and MakerNotes plus source pixel-layout tags
+  are dropped so the export cannot inherit stale dimensions or offsets.
+  (Contributed by @AlanRockefeller in #6.)
+- **Stacked TIFF frames contribute their EXIF too.** Pillow exposes TIFF EXIF
+  through `getexif()` rather than `info`, so a TIFF stack previously exported
+  with no metadata even though every frame carried it. The loader now returns
+  the same export-safe subset used for RAWs.
+
+## [v1.71.0] — 2026-10-27
+
+### Added
+- **One explicit registry for fusion and registration algorithms.** Immutable
+  descriptors declare lazy runners, typed numeric/enum parameters, optional depth
+  measures and execution capabilities. New methods appear in rendering, batch,
+  comparison, depth selection and the CLI from their descriptor. Generic
+  `--param KEY=JSON_VALUE` and `--align-param KEY=JSON_VALUE` options execute new
+  parameters without adding dedicated command-line flags.
+- **An algorithm contributor guide and implementation spec.** `CONTRIBUTING.md`
+  includes a working fusion/depth example and the registration, resource,
+  cancellation, translation and verification contracts. PyInstaller discovers
+  registered lazy modules through `hooks/hook-core.algorithms.py`.
+- **Shared GUI/CLI diagnostics.** Per-process rotating logs prevent competing
+  launches from renaming the same file. Task IDs connect parameters, frame
+  metadata, elapsed time and completion/cancellation/failure, including partial
+  batch/comparison failures. Full main-thread, Python-thread and unraisable
+  tracebacks plus native crash reports and dependency versions enter feedback
+  exports. `OPENFOCUS_LOG_LEVEL` and `OPENFOCUS_LOG_DIR` support local debugging.
+- **Headless application paths and lazy utility exports.** Diagnostics can start
+  before Qt/numerical imports; `python main.py` dispatches CLI arguments before
+  loading the GUI. Portable/profile settings and recovery locations are preserved.
+
+### Fixed
+- **DCT depth maps accept their block size again.** `compute_focus_index`'s
+  public `block_size` argument was rejected as an unknown depth parameter after
+  the registry migration; it is now translated at the entry point and forwarded
+  to the DCT measure, and still rejected for measures that do not use it.
+- **`ImageRegistration` keeps its historical shift-limit argument.** Passing
+  `max_shift_ratio` with a method that does not declare it (ECC, homography)
+  raised "unknown parameter"; it is ignored there again, exactly as before,
+  while an explicit registry value still wins for the OpenFocus aligner.
+- **AI depth maps offer the same soft/hard output choice as AI fusion.** The
+  measure dialog shows Soft blend (the default) or Hard pick beside the AI
+  explanation. Soft reports the probability-weighted continuous frame position;
+  Hard reports the most probable frame per pixel. The choice is local to the
+  depth dialog and does not change the main window's AI output mode. On the
+  six-frame demo stack the soft map had 727,729 distinct values against 6 for
+  the hard pick (one per frame), confirming both modes reach the measurement.
+- **DTCWT depth maps initialize from the source's decomposition depth.** The
+  shared parameter editor exposes levels as a local draft; editing the depth
+  calculation leaves the main window and recorded output parameters unchanged.
+- **Keyboard navigation in the output list updates the result view.** Moving
+  with Up/Down changes the current output row and now displays that output, as
+  a mouse click already did, including its recorded source and annotations.
+- **3D preview detail applies while stationary as well as during rotation.**
+  Settled frames use the selected sampling percentage instead of forcing
+  100%. Camera motion temporarily uses a coarser sample and restores the
+  selected quality on release; the cache distinguishes those states.
+  The depth map, exported mesh dimensions and texture are unchanged by this
+  display control. Image-based regressions cover the visible detail change,
+  drag/release restoration and export-data invariants.
+- **Depth maps require Compute for every measure.** Opening the dialog, changing
+  sources or registration, switching measures and editing parameters no longer
+  starts or queues a calculation. Per-source, per-method parameter drafts sit
+  directly below the measure selector, use the declared kernel, window, levels or
+  output mode, and leave the main window's persisted parameters unchanged.
+  Changes cancel active work cooperatively, label the previous 2D map as stale,
+  clear its 3D surface and block every export until a current computation succeeds.
+  Compute remains visible, with calculation, cancellation and export sharing
+  consistent busy states and protection against late worker signals.
+  Closing now connects idempotent worker retirement before checking for exit,
+  so a thread finishing during detach cannot leave an orphan reference behind.
+- **3D depth textures default to true image colors.** Automatic selection uses
+  the associated output only when its identity and image domain/ROI match the
+  completed map, otherwise the first participating frame in the completed
+  calculation's actual order and registration domain. The resolved image is named in the UI
+  and shared by the 3D preview and OBJ texture PNG. Depth pseudocolor remains an
+  explicit choice; the independent 2D palette and Gamma do not recolor photos.
+  The depth controls and workflow documentation are updated in all twelve languages.
+- **Per-method parameters survive a restart.** The brightness options
+  (exposure match / base correction), the OpenFocus A/B/C smoothing sigma and
+  the per-mode kernel size are remembered in QSettings
+  (`fusion/brightness_by_method`, `fusion/smoothing_by_method`,
+  `fusion/kernel_by_mode`). Before, only the global scalars were saved, so a
+  deliberately disabled exposure match or a tuned sigma silently reverted on
+  the next launch. Values are validated on load (JSON booleans only, finite
+  sigma in 0–8, odd kernel inside its mode's range); a malformed entry is
+  dropped without discarding its neighbours, and a stored empty object means
+  "reset" rather than "fall back to the old scalar".
+- **Projects layer over the user's own preferences.** A project only sets the
+  methods it records; other methods keep the saved values. A structured
+  `method_parameters` kernel beats the legacy top-level scalar, an old
+  project's two brightness flags apply to its own method only, and
+  contradictory kernels for the A/B/C family are rejected instead of being
+  resolved by JSON key order.
+- **Compare adoption, parameter undo and Reset are one persisted step.**
+  Restores run inside a scope that suspends QSettings writes, so a failure
+  cannot leave half a state on disk. Reset now clears all three memories
+  (it used to keep the smoothing and brightness overrides).
+
+### Changed
+- **Every algorithm-selecting surface exposes declared parameters.** The main
+  window, batch, comparison and depth dialogs use `core.algorithms` and the same
+  integer, float and enum editor. Depth schemas are declared independently from
+  fusion schemas; OpenFocus C's unused fusion kernel is absent. Settings and
+  format-3 projects persist parameter dictionaries and migrate old values only
+  while reading. Render workers receive explicit method ids; registration steps
+  and parameters remain intact in cache and provenance identities. Unknown or
+  unavailable selections fail explicitly, and local comparison falls back to a
+  full-frame computation when an algorithm declares no proven halo/grid.
+- **DTCWT colour reconstruction runs in a bounded, ordered pool.** The three
+  channels still run in order and each channel's frames are consumed in frame
+  order, so every float32 addition happens in the same sequence as before;
+  only the independent forward transforms overlap. The window never exceeds
+  the admitted plan, a later failure stops replenishment, and one channel is
+  inverted before the next starts. The whole-image path plans from an explicit
+  DTCWT working-set estimate; a tiled render hands each tile a serial child
+  plan so the two parallel layers never stack.
+- **Loading decodes plain frames in a bounded pool.** JPEG/PNG/BMP/WebP decode
+  concurrently (at most four, capped by the resource plan); TIFF containers,
+  RAW and HEIF stay serial. Results are consumed in input order, so names,
+  real paths, TIFF page identities, the first usable EXIF block and the first
+  µm/px calibration still follow the input sequence. A failed file is reported
+  in place, so it cannot shift later frames.
+- **The batch dialog no longer decodes folders on the GUI thread.** Folder
+  thumbnails, the split preview and drag-and-drop preloads run on a new
+  `BatchImportWorker`; QPixmap/QIcon are created in the dialog's slot. A late
+  result from a superseded request is discarded, and closing or cancelling
+  stops the import.
+- **Batch stack folders can be dragged straight into the dialog.** Dropping
+  one or more folders queues each as a stack, switches the dialog to
+  multi-folder mode, and fills thumbnails as they decode. Loose image files
+  are not accepted there: the list stays a queue of stacks. Registration is
+  synchronous (26 folders in ~8 ms) and the first drop no longer pays a
+  0.6 s module import, which is warmed when the dialog opens.
+
+### Verification
+- After the algorithm-registry migration and the diagnostics work, the complete
+  Windows CPU suite passed: **1179 passed, 12 skipped**, with two Pillow TIFF
+  metadata warnings. A native Windows session exercised loading, OpenFocus
+  registration and rendering, uint16 TIFF export through the real file dialog,
+  comparison adoption with undo/redo, manual depth, batch, settings reopen,
+  project reload and a recovery snapshot; a deliberately raised Qt-slot
+  exception produced a full traceback in both the log and the crash report.
+  No unexpected Qt errors were recorded.
+- A minimal Windows program built with PyInstaller 6.22.3 loaded an additional
+  registered backend from inside its bundle and produced the requested results
+  for two parameter values. This verifies lazy-module collection with the actual
+  hook; the full Windows/macOS installers were not rebuilt.
+- Diagnostics were verified end to end: per-process logs stayed separate under
+  concurrent writers, retained rotations were read in order, an unwritable log
+  folder never replaced a processing error, and main-thread, thread and
+  unraisable failures all reached both the log and the crash report with full
+  tracebacks. The feedback ZIP exported the current session log, the crash
+  report, RAM/GPU facts and bundled dependency versions.
+- The eight algorithms produced byte-identical output before and after the
+  treatment of the worker and CLI wiring: 24 cases (each method through the
+  render worker and through the CLI) matched the previous commit exactly at
+  uint16, and a launcher-level smoke proved the CLI runs with Qt, `ui`,
+  `controllers` and `dialogs` blocked from import.
+- The same frozen program exercised the new lazy utility boundary: `resource`
+  helpers, QPixmap conversion and the feedback export loaded from inside the
+  bundle, with numpy/Qt versions resolved without importing optional packages.
+- The contributor guide's backend and descriptor were executed verbatim:
+  temperature changed pixels, hard selection kept source pixels, soft depth
+  matched fusion weights, uint16 low bits survived the shared boundaries, and
+  both fusion and depth responded to cancellation.
+- New `tests/test_parameter_memory.py` (14 cases), `tests/test_dtcwt_parallel.py`
+  (9), `tests/test_loader_parallel.py` (13) and `tests/test_batch_drag_drop.py`
+  (5) cover the codecs, restart and project precedence, bit-identical DTCWT
+  output at 1/2/4 workers, the tiled serial child plan, cancellation and
+  worker joins, input order with a slow first file, TIFF page identity, 16-bit
+  depth, the strict/lenient error split, and multi-folder drops into the batch
+  dialog (order, mode switch, duplicate suppression, files rejected).
+- Diagnostic coverage is new in `tests/test_logging_setup.py` (10 cases),
+  `tests/test_diagnostics.py` (7), `tests/test_worker_diagnostics.py` (7) and
+  `tests/test_app_paths.py` (7): session isolation across processes, rotation
+  order and retention, unwritable folders, caught/escaped/cancelled outcomes,
+  cancellation and `SystemExit` classification, executable hook chaining and
+  restoration, GUI-free startup, all three unhandled-exception kinds, worker
+  failure/cancellation/partial-batch outcomes, stale loader counters and the
+  portable/user path matrix.
+- Measured on the six-frame 999×750 demo stack, whole-image DTCWT, seven
+  interleaved pairs after one warm-up: serial median 4.56 s, four workers
+  3.13 s (1.46×), identical SHA-256 output.
+- Measured on twelve 2000×1400 JPEG frames: folder load serial median 73 ms,
+  four workers 32 ms (2.27×), identical order and pixels.
+
+## [v1.70.0] — 2026-10-25
+
+### Fixed
+- **Resource admission covers the complete job.** Render, ROI, compare, depth,
+  CLI and each batch stack share a cancellable lease from preparation through
+  publication. Cancellation retains ownership until native work finishes.
+  RAM checks include normalization, exposure, registration and output buffers;
+  unknown or insufficient physical memory rejects the minimum working set.
+- **Scheduling preserves image geometry.** Resource pressure limits concurrency
+  or reports insufficient memory; it no longer silently selects smaller tiles.
+  Registration uses bounded ordered work and releases consumed futures.
+- **Alignment caches commit atomically.** OpenFocus cache reads and writes use
+  the same identity, including decoded pixels and processing parameters. Hits
+  are not rewritten, failed/cancelled commits retain the previous generation,
+  and cache-write failure leaves a valid fusion result available. Preview
+  resizing and cache I/O run on workers.
+- **Neural fusion preserves 16-bit low-order information.** Raw uint16 and
+  normalized float input stay in the float32 0–255 work domain until the caller
+  restores source depth. Fusion and depth share single-padding preparation,
+  cancellation checks and architecture-based RAM/VRAM admission.
+
+### Changed
+- **Automatic threads for new settings and CLI.** `0` selects automatic;
+  saved positive values remain upper bounds. CLI adds
+  `--resource-preference balanced|responsive|maximum`. All twelve languages
+  explain the automatic value.
+- **Registration keeps the CPU baseline across application entrypoints.** The
+  general GPU preference applies to neural fusion. Explicit low-level CuPy
+  registration is separately identified and fails if that backend is unavailable.
+- **Neural inference uses one tile per call on every device.** True GPU batching
+  is not enabled without target-hardware numerical and performance evidence.
+
+### Verification
+- Full Windows CPU suite: 1021 passed, 12 skipped. Eight fusion algorithms
+  matched baseline `4659b7b` exactly on the six-frame 999×750 demo stack and
+  97×130 uint16 crops with nonzero low bits (16 comparisons). CLI 8/16-bit
+  export and cancellation after the final tile also passed.
+- Real GUI load/render and persisted automatic-thread/resource-mode settings
+  passed, with native widget screenshots inspected.
+- Earlier timing tables describe the pre-review branch; they are not new
+  measurements of these corrections. CUDA/MPS hardware remains unverified.
+
+## [v1.69.0] — 2026-10-25
+
+### Added
+- **`tools/launch_film.py` — a launch film generated entirely in code.** No
+  editor, no stock footage: typography, easing, glow, vignette and film grain
+  are drawn with PIL/NumPy, the soundtrack is synthesised from oscillators and
+  filtered noise, and ffmpeg muxes the result. Real product imagery is
+  composited in — the nine source frames of a macro stack, a genuine
+  detail-selection fusion of that stack computed by the script itself, and the
+  feature captures. `--preview N` renders stills for inspection.
+
+### Performance
+- **One execution plan for every heavy stage.** `core/resource_policy.py` turns
+  a resource snapshot and a workload into one immutable plan: outer workers,
+  native threads, in-flight results and RAM/VRAM budget. The fusion
+  orchestrator, the tile loop and the alignment passes all read it, so they
+  can no longer disagree about how much of the machine a render may use.
+  Exactly one parallel layer runs (many single-threaded tile workers, or one
+  worker with the whole thread budget), which is what the old
+  `thread_count=1` per-tile call was approximating by hand.
+- **Physical cores are detected, not guessed.** `physical_core_count()` read
+  `logical // 2`, which reports 10 cores for this 12-core i7-12700 (mixed P/E
+  laptops have no SMT on their efficiency cores). It now walks
+  `GetLogicalProcessorInformationEx` on Windows, `/proc/cpuinfo` on Linux and
+  `hw.physicalcpu` on macOS, falling back to the halved count only when the
+  platform cannot answer.
+- **OpenFocus A/B/C stream their intermediate buffers.** A held an
+  `(N, H, W)` variance stack plus an equally large weight stack and converted
+  the whole stack to float32 before using it; B held the variance stack and
+  then built an `(N, H, W, C)` float stack just to gather one pixel per
+  position; C held every frame's pyramid, band stack and weight stack. All
+  three now keep only the running accumulator (or winner) and one frame's
+  temporaries. Verified bit-identical on 8-bit, derived-16-bit, greyscale and
+  flat-tie inputs.
+- **GFF computes its saliency decision online.** The per-frame saliency maps
+  were stacked into an `(N, H, W)` float32 array only to call `np.argmax`
+  once; the base/detail layers are now released as each frame is accumulated.
+  Verified bit-identical at every thread count.
+- **DCT reuses one float frame buffer** instead of allocating `gray ** 2` and
+  the padding copy twice per frame.
+- **DTCWT streams its activity decision and honours `thread_count`.** The
+  activity pass kept one map per frame and level; it now keeps the running
+  maximum and its frame index per level, and the majority vote is consumed one
+  frame at a time. `thread_count` used to be accepted and ignored, so every
+  tile opened two activity workers inside an already-parallel tile loop. The
+  pass now also polls `should_cancel`.
+- **Tiled fusion runs a bounded window.** Every tile used to be submitted at
+  once and reduced in completion order: memory held up to `total_tiles`
+  finished results, and float32 addition made the output depend on thread
+  scheduling. At most `workers` tiles are in flight and results are reduced in
+  tile order, so the output is reproducible across worker counts.
+- **The neural tile path no longer allocates two unused full-image
+  accumulators**, builds its padded staging tensor once (instead of allocating
+  at frame size and padding into a second tensor), and uses
+  `torch.inference_mode()`. A CPU batched forward measured slower
+  (19.3 s vs 16.9 s for two 1024x1021 tiles). There was no target-GPU
+  measurement; the review above disables true batching on every device.
+  Progress advances after the call producing each tile returns.
+- **The depth-map estimator no longer pads twice.** It allocated at
+  `(h+ph, w+pw)` and then called `F.pad` again, adding a second border — the
+  padded pixels the network saw differed from the fusion path's.
+- **OpenFocus alignment prepares frames in parallel** while keeping the
+  acceptance state machine strictly serial and in frame order, so the
+  confidence gate, the chained fallback, the shift/rotation/scale limits and
+  the dead zone all behave exactly as before.
+- **The registration disk cache is read and written by the worker.** A cache
+  hit used to decode every cached PNG on the GUI thread before the render
+  started, and a finished render re-encoded the whole stack there. The GUI now
+  only describes the request; preview and ROI runs are excluded by
+  construction and the cache signature carries a format version.
+
+### Changed
+- **`--cpu` and the GPU toggle now really disable GPU alignment.** The ECC
+  path imported CuPy and switched to a GPU warp whenever the package was
+  installed, regardless of the flag — and that warp used bilinear
+  interpolation where the CPU path uses Lanczos4, so it was never an
+  equivalent backend. `ImageRegistration(use_gpu=...)` is explicit and
+  defaults to off; the CLI, the render worker, the batch worker and the
+  compare worker pass it through.
+- **New Resource mode setting** (Settings → Advanced Settings → Performance):
+  Balanced, Responsive or Maximum. It scales the core budget and the
+  in-flight window and never changes the fused image. `thread_count` is now an
+  upper bound rather than a fixed count.
+- **README feature wall** in all twelve languages: each capability is a
+  two-column row with copy on the left and a real screenshot on the right,
+  followed by an "also in the box" list. Screenshots are captured from the
+  light theme on a 9-frame macro stack, and `assets/ui.png` — the hero image
+  used by every README — is now that same light-theme window.
+- **StackMFF V3 leads the feature wall.** The standalone "AI fusion" section
+  is gone; the neural method is now the first row, illustrated with the
+  Guided-Filter comparison, and the eight-method inventory moved to the
+  algorithms section where it belongs. Scale bars and labels gained their own
+  rows with light-theme captures of the real dialogs.
+- **Every feature row now plays a real clip.** AI fusion sweeps the source
+  stack beside the fixed StackMFF V3 result; method comparison (recorded by
+  the maintainer) pans a shared crop across all eight methods; the 3D surface
+  rotates; the retouch workspace walks its source frames; batch cycles its
+  fusion method; the label preview advances frames at 1:1; the scale-bar
+  preview re-renders as the calibration changes. Each row is a `<picture>`
+  with an animated GIF, a JPEG poster and the MP4 one click away, so the
+  fallback stays a real screenshot.
+
+## [v1.68.1] — 2026-10-24
+
+### Changed
+- **README hero is centred and scannable** in all twelve languages: logo,
+  name, one-line promise, a short summary, badges, a download/docs/CLI row and
+  the language switcher, then one screenshot. The download table, feature
+  list and quick start follow unchanged.
+- **macOS DMG creation retries from a staged copy.** `hdiutil create` failed
+  with "Resource busy" on the tag build because the freshly signed bundle was
+  still held; the release job then skipped every platform's assets.
+
+## [v1.68.0] — 2026-10-24
+
+### Changed (UI/UX specification pass, docs/ux-specs)
+- **Labels are a managed list, not two overwritten slots.** Add/select/edit/
+  delete a caption by identity; explicit source / registered / output targets;
+  strict frame ranges (`3-5,x` is refused instead of silently meaning "all");
+  a real-font renderer that falls back visibly when the chosen family cannot
+  draw the text; preview and every export share one target and frame number,
+  so a result is `{value}` 1 in Save, Save As, drag-out and Export All.
+  Labels can be undone, mark the project dirty, and are written with the full
+  scale-bar style.
+- **Scale bar calibration is explicit and draft-only.** Metadata or manual
+  mode (manual wins), manual values are per original pixel and converted by
+  the working scale, Cancel no longer leaks a preview value into the main
+  window, and the drawn bar length always matches its printed length (an
+  image that cannot fit a legible bar now says so instead of drawing a
+  shorter bar with the old label). 16-bit drawing keeps every style argument.
+- **Export paths follow the chosen file-type filter**, never overwrite an
+  existing file in a directory export, report per-file failures, and mark a
+  result "changed since export" when its pixels were replaced afterwards.
+  Project saves now state their real scope (configuration, not result pixels)
+  and include excluded frames plus the complete scale-bar state.
+- **Method comparison uses the participating frames**, separates "compute
+  range" from "view" (detail crop vs whole result), shows queued/running/
+  stopping/done states, and can adopt parameters or a verified full-frame
+  result as a new protected output. The real render now passes DTCWT levels.
+- **Depth map and 3D** keep a request revision (a late result cannot become
+  current), block export of a stale map, record the source summary, convert
+  16-bit textures with the display rule, use the requested sampling for drag
+  frames, and fill surface gaps by nearest sample inside the silhouette
+  instead of a dot cloud.
+- **Updates** protect running tasks, unexported pixels, unsaved project state
+  and a fresh snapshot before any hand-off; the newest snapshot is restored
+  first and success is only reported after the frames load; staged builds
+  must be newer than the running version; hiding a version survives READY.
+- **Retouch** `[` / `]` now update the document brush, the restore tool has
+  correct help text, preview refuses publication, publication evicts history
+  only after success, and closing no longer blocks on the detail-map worker.
+- **Batch** split mode exports aligned frames when no fusion method is
+  selected, keeps OpenFocus alignment, no longer mutates the shared parameter
+  dict, reports success/partial/failed/cancelled/not-started per task,
+  preserves natural order and accepts the stepper's float count.
+- **Main workflow** shows "participating N of M" in the source header, names
+  the ROI base frame with its output size, and distinguishes "Render All
+  Methods…" from "Method Comparison…".
+- **Settings / tools**: the auto-download checkbox calls the real setter,
+  the advanced-settings description states that AI mode and registration
+  width affect results, flat-field correction commits atomically, and
+  standard dialog buttons are localized.
+
+### Fixed (workflow verification)
+- **Align-only exports are stack folders.** Standard rendering keeps the stack
+  in memory until saved; batch produces one collision-safe folder per task,
+  retains original filename stems, and uses the selected encoding extension.
+  Save, Export All and drag-out handle each stack once, without duplicate
+  registration caches or per-frame history entries.
+- **Batch output layout follows the chosen mode.** Align-only writes one
+  `<stack>_aligned` folder under the selected destination and lists that folder
+  in the output panel; fusion writes `<stack>.<ext>` there and lists only the
+  fused result (its aligned folder stays on disk); fusion without alignment
+  writes the fused image alone. Panel entries carry the real directory name.
+- **Leftover aligned copies are not stack frames.** Older builds wrote
+  `*_registered*` files beside the sources; reloading such a folder treated
+  each copy as a frame (9 frames became 36 and every later batch fused
+  duplicates). Files whose original stem is present in the same folder are
+  skipped, and the load message reports how many.
+- **Label drafts commit before closing** and retain independent edits, disabled
+  labels, stable source ranges and explicit output bindings. Native 16-bit and
+  grayscale drawing preserves unaffected pixels; fallback-font messages show
+  the requested and actual families. Navigation has one editable frame index.
+- **Scale-bar preview uses the original image geometry**, with Fit/100% and
+  panning. Empty or too-small targets cannot be applied; per-output calibration,
+  style and zero-valued custom positions survive undo and project restoration.
+  Historical output bars can be removed after the source bar is disabled;
+  removal is undoable and an unchanged scope creates no undo entry.
+- **Export state includes annotations.** Changing an applicable label or scale
+  bar marks the output changed; undoing to the exported state clears that mark.
+  Saving freezes the selected output, pixels and annotations. Atomic image,
+  TIFF and GIF writes preserve an existing destination on failure or cancel.
+- **Source and project identity survive edits.** Exclusions, TIFF page order,
+  rotations/flips and per-method settings round-trip. Missing sources require
+  confirmation of a complete path mapping. Failed loads keep the previous stack;
+  update recovery never substitutes an older saved project for a failed snapshot.
+- **Depth and mesh export retain their source snapshot.** Physical Z uses the
+  confirmed capture indices, including excluded-frame gaps; float32 TIFF stores
+  micrometres and NaN. Physical OBJ requires XY calibration; its OBJ/MTL/PNG/JSON
+  group is staged together with cancellation and replacement rollback.
+- **Comparison and retouch reject stale or incomplete work.** Comparison supports
+  per-method retry and full validation before adopting a result, and parameter
+  adoption is undoable. Retouch shows unavailable source regions and retains
+  worker ownership while cancellation completes.
+
 ## [v1.67.0] — 2026-10-23
 
 ### Added (retouch workspace)
@@ -343,7 +1146,7 @@ output.
   The choice persists in settings and project files, reaches the tiled path,
   the batch worker and the depth-map estimator, and is available on the CLI as
   `--ai-mode {soft,hard}`.
-- `THIRD_PARTY_NOTICES.md` records the vendored StackMFF V3 code and weights
+- `docs/THIRD_PARTY_NOTICES.md` records the vendored StackMFF V3 code and weights
   (MIT, Copyright (c) 2026 Xinzhe Xie) and the modifications made here.
 - The release workflow now fails early when `weights/stackmff_v3_final.pth` is
   missing or truncated. The checkpoint is force-added past the repository's
@@ -564,7 +1367,7 @@ Zoom, batch-dialog theming, brightness options and dust-map correctness.
 
 ## [v1.59] — 2026-10-20
 
-Startup visibility, OpenFocus parameter parity and a UI pass.
+Startup visibility, OpenFocus parameter controls and a UI pass.
 
 ### Added
 - **A startup update banner.** The daily check was deliberately silent, so a
@@ -576,20 +1379,16 @@ Startup visibility, OpenFocus parameter parity and a UI pass.
   it. Four languages.
 - **Smoothing for OpenFocus A and C** (`Blend smoothing (σ)`, CLI
   `--blend-smoothing`). Both methods had a hard-coded sigma — A at 2.0, C at
-  3.0 — with no way to change it, while Helicon exposes Smoothing as the
-  primary control for its methods A and C. Each method now remembers its own
-  value.
+  3.0 — with no way to change it. Each method now remembers its own value.
 - **Rotation and magnification tolerance** for OpenFocus alignment
   (`_OF_MAX_ROTATION_DEG`, `_OF_MAX_SCALE_DELTA`). Shift had a limit but
   rotation and scale did not, so a mis-estimated 5° rotation (the coarse
   search bound) was applied instead of refused.
-- `docs/ALGORITHM_PARITY.md` — a behavioural comparison with Helicon Focus,
-  including the gaps that are still open.
+- `docs/FUSION_METHODS.md` — descriptions of the fusion methods and alignment.
 
 ### Fixed
 - **OpenFocus C showed a radius slider that did nothing.** C has no spatial
-  window (Helicon's Method C has no Radius), and the wrapper passed the value
-  to an implementation that ignored it.
+  window, and the wrapper passed the value to an implementation that ignored it.
 - **The AI method showed "Kernel: 11"** and a slider whose value had no
   effect. The kernel row now appears only for methods that use it.
 - **Fusion and registration dropdowns were truncated** to "OpenFocus -" at the
@@ -642,7 +1441,7 @@ frames with different focus — the defining case for focus stacking.
 
 ## [v1.57] — 2026-10-20
 
-A parity and exposure-handling release for the OpenFocus fusion family.
+An exposure-handling release for the OpenFocus fusion family.
 
 ### Added
 - **Exposure matching before fusion** (`Match exposure before fusion`,
@@ -651,11 +1450,9 @@ A parity and exposure-handling release for the OpenFocus fusion family.
   every fusion method. Gains are computed on the whole stack before tiling,
   so tiled output stays seamless, and the OpenFocus aligner now uses the
   same last-frame brightness reference when this option is on.
-- **A/B/C parity work**: the OpenFocus A/B/C methods were brought
-  substantially in line with the A/B/C methods in Helicon Focus — per-frame
-  exposure calibration, `base_frame` as an independent optional post-step,
-  method-specific depth-map kernel defaults, and natural frame ordering for
-  directory input. Behavioral parity only; no code or binaries from that product are included.
+- **A/B/C improvements**: per-frame exposure calibration, `base_frame` as an
+  independent optional post-step, method-specific depth-map kernel defaults,
+  and natural frame ordering for directory input.
 
 ### Changed
 - **One OpenFocus kernel default (11)** across the fusion wrappers, the

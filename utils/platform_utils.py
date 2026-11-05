@@ -3,8 +3,8 @@
 """
 
 import os
-import sys
 import platform
+import struct
 
 
 def get_os_type() -> str:
@@ -111,42 +111,136 @@ __all__ = [
 
 _GPU_PRESENT_CACHE = None
 
+_DISPLAY_ADAPTER_CLASS = (
+    r"SYSTEM\CurrentControlSet\Control\Class"
+    r"\{4d36e968-e325-11ce-bfc1-08002be10318}"
+)
+
+
+def _torch_accelerator_present():
+    """Return a completed backend result, or None before it is known."""
+    from core import torch_backend
+    kind = torch_backend.cached_kind()
+    return None if kind is None else torch_backend.is_accelerator(kind)
+
+
+def cached_compute_gpu():
+    """Return a known GPU status, or None while no probe has completed."""
+    try:
+        present = _torch_accelerator_present()
+    except Exception:
+        present = None
+    return _GPU_PRESENT_CACHE if present is None else present
+
+
+def _windows_display_adapters() -> tuple:
+    """Driver descriptions from the display-adapter class, without a process."""
+    try:
+        import winreg
+    except ImportError:
+        return ()
+    names = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            _DISPLAY_ADAPTER_CLASS) as root:
+            for index in range(64):
+                try:
+                    subkey = winreg.EnumKey(root, index)
+                except OSError:
+                    break
+                if not subkey.isdigit():
+                    continue
+                try:
+                    with winreg.OpenKey(root, subkey) as adapter:
+                        name = winreg.QueryValueEx(adapter, "DriverDesc")[0]
+                except OSError:
+                    continue
+                if isinstance(name, str):
+                    names.append(name.lower())
+    except OSError:
+        return ()
+    return tuple(names)
+
+
+def _linux_gpu_vendors() -> frozenset:
+    """PCI vendor ids of DRM cards: 0x1002 AMD, 0x8086 Intel, 0x10de NVIDIA."""
+    import glob
+    vendors = set()
+    for path in glob.glob("/sys/class/drm/card[0-9]*/device/vendor"):
+        try:
+            with open(path, encoding="ascii") as handle:
+                vendors.add(handle.read().strip().lower())
+        except OSError:
+            continue
+    return frozenset(vendors)
+
+
+def _vendor_tool_present(*names) -> bool:
+    import shutil
+    return any(shutil.which(name) for name in names)
+
+
+def _nvidia_smi_reports_gpu() -> bool:
+    import shutil
+    import subprocess
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return False
+    try:
+        out = subprocess.run(
+            [exe, "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=2.0,
+            creationflags=(0x08000000 if is_windows() else 0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and bool(out.stdout.strip())
+
 
 def has_compute_gpu() -> bool:
-    """True when this machine has a usable GPU for the neural path.
+    """True when this machine exposes a neural-path accelerator.
 
-    Asked from the menu, so it must be cheap: importing torch costs ~2.1 s and
-    pins ~193 MB (see core.multi_focus_fusion.is_ai_fusion_available). This
-    probes the operating system instead, taking a few milliseconds, and caches
-    the answer.
+    This does not import torch, but an OS probe may take up to two seconds.
+    UI paths should use cached_compute_gpu() to avoid waiting for the driver.
 
-    A "GPU" here means CUDA or Apple-silicon MPS - the two back-ends the
-    fusion actually uses. Merely having a display adapter is not enough, which
-    is why the check shells out to nvidia-smi rather than enumerating devices.
+    The detected back-ends are NVIDIA CUDA, AMD ROCm (through ``torch.cuda``),
+    Intel XPU and Apple-silicon MPS. OS probes only report hardware/runtime
+    presence; the backend probe remains authoritative for whether PyTorch can
+    actually use it, so a present adapter may still fall back to CPU.
     """
     global _GPU_PRESENT_CACHE
-    if _GPU_PRESENT_CACHE is not None:
-        return _GPU_PRESENT_CACHE
+    present = cached_compute_gpu()
+    if present is not None:
+        return present
 
     found = False
     try:
         if is_macos():
             # Every Apple-silicon Mac has a usable MPS device.
             found = platform.machine().lower() in ("arm64", "aarch64")
-        elif is_windows() or is_linux():
-            import shutil
-            import subprocess
-            exe = shutil.which("nvidia-smi")
-            if exe:
-                try:
-                    out = subprocess.run(
-                        [exe, "--query-gpu=name", "--format=csv,noheader"],
-                        capture_output=True, text=True, timeout=2.0,
-                        creationflags=(0x08000000 if is_windows() else 0),
-                    )
-                    found = out.returncode == 0 and bool(out.stdout.strip())
-                except (OSError, subprocess.SubprocessError):
-                    found = False
+        elif is_windows():
+            found = _nvidia_smi_reports_gpu()
+            if not found:
+                adapters = _windows_display_adapters()
+                found = any(
+                    "nvidia" in name or "amd" in name or "radeon" in name
+                    or ("intel" in name and ("arc" in name
+                                             or "data center gpu" in name))
+                    for name in adapters)
+        elif is_linux():
+            found = _nvidia_smi_reports_gpu()
+            # /dev/kfd exists only with the ROCm-capable amdgpu stack.
+            if not found and os.path.exists("/dev/kfd"):
+                found = True
+            if not found:
+                vendors = _linux_gpu_vendors()
+                # Intel PyTorch wheels do not install xpu-smi/sycl-ls, so a
+                # vendor-id check is the only cheap way to keep an actual
+                # XPU reachable; the backend probe remains authoritative.
+                found = ("0x10de" in vendors or "0x1002" in vendors
+                         or "0x8086" in vendors)
+                if not found:
+                    found = _vendor_tool_present("rocm-smi", "rocminfo")
     except Exception:
         found = False
 
@@ -155,26 +249,263 @@ def has_compute_gpu() -> bool:
 
 
 def reset_gpu_probe_cache() -> None:
-    """Forget the cached answer (tests, or a driver installed mid-session)."""
+    """Forget the cached operating-system hardware hint."""
     global _GPU_PRESENT_CACHE
     _GPU_PRESENT_CACHE = None
 
 
-_PHYSICAL_CORES = None
+def _windows_physical_cores() -> int:
+    """Count RelationProcessorCore records via GetLogicalProcessorInformationEx.
+
+    Each record starts with ``DWORD Relationship; DWORD Size`` followed by the
+    relationship-specific union; walking by the record's own Size avoids
+    hard-coding that union layout. (Reading the header as two WORDs — the
+    mistake behind the older SYSTEM_LOGICAL_PROCESSOR_INFORMATION attempt —
+    yields Size 0 and misreads the strides on x64, reporting 10 cores for a
+    12-core machine.)
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    func = kernel32.GetLogicalProcessorInformationEx
+    func.argtypes = [wintypes.DWORD, ctypes.c_void_p,
+                     ctypes.POINTER(wintypes.DWORD)]
+    func.restype = wintypes.BOOL
+    RELATION_PROCESSOR_CORE = 0
+    length = wintypes.DWORD(0)
+    # First call sizes the buffer; ERROR_INSUFFICIENT_BUFFER is expected.
+    func(RELATION_PROCESSOR_CORE, None, ctypes.byref(length))
+    if length.value <= 0:
+        return 0
+    buffer = ctypes.create_string_buffer(length.value)
+    if not func(RELATION_PROCESSOR_CORE, ctypes.byref(buffer),
+                ctypes.byref(length)):
+        return 0
+    return _windows_core_records(bytes(buffer[:length.value]), *_windows_affinity())
+
+
+def _windows_core_records(raw, affinity_mask=0, affinity_group=0):
+    """Decode processor-core records, intersecting the process affinity mask."""
+    cores = 0
+    offset = 0
+    while offset + 8 <= len(raw):
+        relationship, size = struct.unpack_from("<II", raw, offset)
+        if size < 8 or offset + size > len(raw):
+            return 0
+        if relationship == 0:
+            if not affinity_mask:
+                cores += 1
+            elif size >= 32:
+                groups = struct.unpack_from("<H", raw, offset + 30)[0]
+                pointer_size = struct.calcsize("P")
+                stride = pointer_size + 8
+                for index in range(groups):
+                    start = offset + 32 + index * stride
+                    if start + stride > offset + size:
+                        return 0
+                    mask = int.from_bytes(raw[start:start + pointer_size], "little")
+                    group = struct.unpack_from("<H", raw, start + pointer_size)[0]
+                    if group == affinity_group and mask & affinity_mask:
+                        cores += 1
+                        break
+        offset += size
+    return cores
+
+
+def _linux_physical_cores() -> int:
+    """Count physical/core pairs only for processors in this process's affinity."""
+    try:
+        affinity = set(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        affinity = None
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="ignore") as fh:
+            records = fh.read().strip().split("\n\n")
+        pairs = set()
+        for record in records:
+            fields = dict(line.split(":", 1) for line in record.splitlines()
+                          if ":" in line)
+            fields = {key.strip(): value.strip() for key, value in fields.items()}
+            processor = int(fields.get("processor", "-1"))
+            if affinity is not None and processor not in affinity:
+                continue
+            if "physical id" not in fields or "core id" not in fields:
+                return 0
+            pairs.add((fields["physical id"], fields["core id"]))
+        return len(pairs)
+    except (OSError, ValueError):
+        return 0
+
+
+def _macos_physical_cores() -> int:
+    """sysctl hw.physicalcpu (Apple silicon reports P+E cores)."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None)
+        size = ctypes.c_size_t(0)
+        if libc.sysctlbyname(b"hw.physicalcpu", None,
+                             ctypes.byref(size), None, 0) != 0:
+            return 0
+        value = ctypes.c_uint32(0)
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if libc.sysctlbyname(b"hw.physicalcpu", ctypes.byref(value),
+                             ctypes.byref(size), None, 0) != 0:
+            return 0
+        return int(value.value)
+    except (AttributeError, OSError):
+        return 0
+
+
+def _linux_cgroup_paths(controller):
+    """Yield this cgroup and its ancestors on matching v1/v2 mounts."""
+    from pathlib import PurePosixPath
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as fh:
+            memberships = [line.strip().split(":", 2) for line in fh]
+        with open("/proc/self/mountinfo", encoding="utf-8") as fh:
+            mounts = fh.readlines()
+    except OSError:
+        return
+    seen = set()
+    for line in mounts:
+        before, separator, after = line.partition(" - ")
+        left, right = before.split(), after.split()
+        if not separator or len(left) < 5 or len(right) < 3:
+            continue
+        version = right[0]
+        if version not in ("cgroup", "cgroup2"):
+            continue
+        if version == "cgroup" and controller not in right[2].split(","):
+            continue
+        # mountinfo encodes whitespace and backslashes as octal escapes.
+        def unescape(value):
+            for encoded, decoded in (("\\040", " "), ("\\011", "\t"),
+                                     ("\\012", "\n"), ("\\134", "\\")):
+                value = value.replace(encoded, decoded)
+            return value
+        root = PurePosixPath(unescape(left[3]))
+        mount = PurePosixPath(unescape(left[4]))
+        for membership in memberships:
+            if len(membership) != 3:
+                continue
+            _, controllers, location = membership
+            if (version == "cgroup2" and controllers or
+                    version == "cgroup" and controller not in controllers.split(",")):
+                continue
+            location = PurePosixPath(location)
+            try:
+                relative = location.relative_to(root)
+            except ValueError:
+                # A cgroup namespace may expose its mount root as '/'.
+                if location != PurePosixPath("/"):
+                    continue
+                relative = PurePosixPath(".")
+            current = mount / relative
+            if ".." in current.parts:
+                continue
+            while True:
+                key = (str(current), version)
+                if key not in seen:
+                    seen.add(key)
+                    yield key
+                if current == mount:
+                    break
+                current = current.parent
+
+
+def _linux_cpu_quota():
+    """Tightest inherited CPU quota in cores, or zero when unrestricted/unknown."""
+    limits = []
+    for path, version in _linux_cgroup_paths("cpu"):
+        try:
+            if version == "cgroup2":
+                with open(path + "/cpu.max", encoding="ascii") as fh:
+                    quota, period = fh.read().split()
+                if quota == "max":
+                    continue
+            else:
+                with open(path + "/cpu.cfs_quota_us", encoding="ascii") as fh:
+                    quota = fh.read().strip()
+                with open(path + "/cpu.cfs_period_us", encoding="ascii") as fh:
+                    period = fh.read().strip()
+            quota, period = int(quota), int(period)
+            if quota > 0 and period > 0:
+                limits.append(quota / period)
+        except (OSError, ValueError):
+            continue
+    return min(limits) if limits else 0
+
+
+def _windows_affinity():
+    import ctypes
+    from ctypes import wintypes
+
+    class GroupAffinity(ctypes.Structure):
+        _fields_ = [("mask", ctypes.c_size_t), ("group", wintypes.WORD),
+                    ("reserved", wintypes.WORD * 3)]
+
+    try:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetCurrentThread.restype = wintypes.HANDLE
+        kernel.GetProcessAffinityMask.argtypes = [wintypes.HANDLE,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+        kernel.GetProcessAffinityMask.restype = wintypes.BOOL
+        kernel.GetThreadGroupAffinity.argtypes = [wintypes.HANDLE,
+                                                   ctypes.POINTER(GroupAffinity)]
+        kernel.GetThreadGroupAffinity.restype = wintypes.BOOL
+        process_mask, system_mask = ctypes.c_size_t(), ctypes.c_size_t()
+        group = GroupAffinity()
+        if (kernel.GetProcessAffinityMask(kernel.GetCurrentProcess(),
+                ctypes.byref(process_mask), ctypes.byref(system_mask)) and
+                kernel.GetThreadGroupAffinity(kernel.GetCurrentThread(),
+                                               ctypes.byref(group))):
+            return int(process_mask.value), int(group.group)
+    except (OSError, AttributeError):
+        pass
+    return 0, 0
+
+
+def _affinity_cpu_count():
+    try:
+        return len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        pass
+    if is_windows():
+        return _windows_affinity()[0].bit_count()
+    return 0
+
+
+def cpu_limits():
+    """Return physical capacity, allowed logical CPUs, quota and topology validity.
+
+    Probe per job: affinity and cgroup limits can change during a session.
+    Unknown topology uses one core, never presents logical//2 as measured.
+    """
+    logical = max(1, os.cpu_count() or 1)
+    affinity = _affinity_cpu_count()
+    if affinity > 0:
+        logical = min(logical, affinity)
+    detected = 0
+    quota = 0
+    try:
+        if is_windows():
+            detected = _windows_physical_cores()
+        elif is_linux():
+            detected = _linux_physical_cores()
+            quota = _linux_cpu_quota()
+        elif is_macos():
+            detected = _macos_physical_cores()
+    except (OSError, AttributeError, ValueError):
+        detected = 0
+    known = detected > 0
+    cores = min(logical, detected) if known else 1
+    if quota > 0:
+        cores = min(cores, max(1, int(quota)))
+    return cores, logical, quota, known
 
 
 def physical_core_count() -> int:
-    """Physical cores (SMT siblings counted once).
-
-    Tile fusion is memory-bandwidth-bound: hyper-threads add peak memory
-    without adding throughput, which is why Helicon-style engines size their
-    worker pool from physical cores. Modern multi-core desktops are all SMT,
-    so the logical count halved is the reliable estimate (win32 structure
-    walking was tried and misread stride sizes on x64); floor 1.
-    """
-    global _PHYSICAL_CORES
-    if _PHYSICAL_CORES is not None:
-        return _PHYSICAL_CORES
-    logical = os.cpu_count() or 4
-    _PHYSICAL_CORES = max(1, logical // 2)
-    return _PHYSICAL_CORES
+    """Usable physical-core capacity; one conservative core if topology is unknown."""
+    return cpu_limits()[0]

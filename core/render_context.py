@@ -21,6 +21,7 @@ from typing import Iterable, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from core.algorithms import alignment_steps
 
 
 def new_context_id() -> str:
@@ -109,7 +110,7 @@ class RenderContext:
 
     context_id: str
     algorithm: str
-    alignment: str
+    alignment_steps: Tuple[str, ...]
     width: int
     height: int
     dtype: np.dtype
@@ -118,6 +119,21 @@ class RenderContext:
     roi_mode: Optional[str] = None
     parent_output_id: Optional[str] = None
     created_at: float = field(default_factory=time.time)
+    pixel_size_um: Optional[float] = None
+    source_px_um: Optional[float] = None
+    source_scale_factor: float = 1.0
+    source_indices: Tuple[int, ...] = ()
+    source_revision: int = 0
+    parameters: dict = field(default_factory=dict)
+    icc_profile: bytes = b""
+    linear_dng_metadata: object = None
+    source_paths: Tuple[str, ...] = ()
+
+    @property
+    def alignment(self) -> str:
+        if self.alignment_steps:
+            return "+".join(self.alignment_steps)
+        return "cached" if any(frame.aligned for frame in self.frames) else "none"
 
     @property
     def source_count(self) -> int:
@@ -130,20 +146,6 @@ class RenderContext:
         return iter(self.frames)
 
 
-def _alignment_name(options: Optional[Sequence[bool]], aligned: bool) -> str:
-    if not options:
-        return "cached" if aligned else "none"
-    homo, ecc, openfocus = (list(options) + [False, False, False])[:3]
-    parts = []
-    if openfocus:
-        parts.append("openfocus")
-    if homo:
-        parts.append("homography")
-    if ecc:
-        parts.append("ecc")
-    if parts:
-        return "+".join(parts)
-    return "cached" if aligned else "none"
 
 
 def _clamp_roi(roi_rect, shape: Tuple[int, int]) -> Optional[Tuple[int, int, int, int]]:
@@ -173,11 +175,21 @@ def build_render_context(
     *,
     filenames: Optional[Sequence[str]] = None,
     algorithm: str = "unknown",
-    alignment_options: Optional[Sequence[bool]] = None,
+    alignment_options: Optional[Sequence[str]] = None,
     aligned: bool = False,
     roi_rect=None,
     roi_mode: Optional[str] = None,
     parent_output_id: Optional[str] = None,
+    pixel_size_um: Optional[float] = None,
+    source_px_um: Optional[float] = None,
+    source_scale_factor: float = 1.0,
+    source_indices: Optional[Sequence[int]] = None,
+    source_revision: int = 0,
+    parameters: Optional[dict] = None,
+    frame_ids: Optional[Sequence[str]] = None,
+    icc_profile: bytes = b"",
+    linear_dng_metadata=None,
+    source_paths: Optional[Sequence[str]] = None,
 ) -> Optional[RenderContext]:
     """Build the provenance context for one completed fusion.
 
@@ -226,7 +238,9 @@ def build_render_context(
         if source.size == 0:
             return None
         frames.append(SourceFrame(
-            frame_id=f"{index}:{_frame_name(names, index)}",
+            frame_id=(str(frame_ids[index]) if frame_ids is not None
+                      and index < len(frame_ids)
+                      else f"{index}:{_frame_name(names, index)}"),
             name=_frame_name(names, index),
             image=source,
             offset_x=ox,
@@ -237,7 +251,7 @@ def build_render_context(
     return RenderContext(
         context_id=new_context_id(),
         algorithm=str(algorithm or "unknown"),
-        alignment=_alignment_name(alignment_options, aligned),
+        alignment_steps=alignment_steps(alignment_options or ()),
         width=int(result_w),
         height=int(result_h),
         dtype=np.dtype(result.dtype),
@@ -245,4 +259,13 @@ def build_render_context(
         roi_rect=roi,
         roi_mode=roi_mode,
         parent_output_id=parent_output_id,
+        pixel_size_um=pixel_size_um,
+        source_px_um=source_px_um,
+        source_scale_factor=source_scale_factor,
+        source_indices=tuple(source_indices or range(len(frames))),
+        source_revision=source_revision,
+        parameters=dict(parameters or {}),
+        icc_profile=icc_profile,
+        linear_dng_metadata=linear_dng_metadata,
+        source_paths=tuple(source_paths or ()),
     )

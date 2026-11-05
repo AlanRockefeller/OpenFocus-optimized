@@ -3,7 +3,7 @@ from typing import Any
 
 import cv2
 import os
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QObject, QPoint, QThread, Qt
 from PyQt6.QtGui import QAction, QIcon, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox, QDialog
 
@@ -14,6 +14,29 @@ from ui import styles as ui_styles
 from locales import trans
 
 
+class StackReviewWorker(QThread):
+    """Analyze a snapshot without touching widgets from the worker thread."""
+
+    def __init__(self, frames):
+        super().__init__()
+        self.frames = tuple(frames)
+        self.results = None
+        self.error = None
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            from core.stack_review import analyze_frames
+            self.results = analyze_frames(self.frames, cancel=lambda: self._cancelled)
+        except InterruptedError:
+            self._cancelled = True
+        except Exception as exc:  # report failures on the UI thread
+            self.error = str(exc)
+
+
 @dataclass
 class LoadOptions:
     scale_factor: float
@@ -22,18 +45,212 @@ class LoadOptions:
     working_images: list[Any]
 
 
-class SourceManager:
+class SourceManager(QObject):
     """Handles source list interactions and bookkeeping for the main window."""
 
     def __init__(self, window: Any):
+        super().__init__()
         self.window = window
+        self._review_worker = None
+        self._review_frames = ()
+        self._review_results = []
+        self._review_status_key = None
+        self._stack_baseline = None
+        window.linear_dng_metadata = None
+        self._review_error = ""
+
+    def _clear_history(self):
+        window = self.window
+        for name in ("_undo_stack", "_redo_stack"):
+            history = getattr(window, name, None)
+            if history is not None:
+                history.clear()
+        refresh = getattr(window, "_refresh_undo_actions", None)
+        if callable(refresh):
+            refresh()
+
+    def _reset_busy(self):
+        window = self.window
+        render = getattr(window, "render_manager", None)
+        batch = getattr(window, "batch_manager", None)
+        return (getattr(self, "_load_worker", None) is not None
+                or getattr(render, "worker", None) is not None
+                or bool(getattr(render, "_compare_mode", False))
+                or getattr(window, "roi_alignment_worker", None) is not None
+                or getattr(batch, "_worker", None) is not None
+                or getattr(batch, "_thread", None) is not None)
+
+    def reset_current_stack(self):
+        window = self.window
+        baseline = self._stack_baseline
+        if not baseline or not getattr(window, "raw_images", None):
+            show_warning_box(window, trans.t("reset_stack_title"), trans.t("reset_stack_empty"))
+            return
+        if self._reset_busy():
+            show_warning_box(window, trans.t("reset_stack_title"), trans.t("reset_stack_busy"))
+            return
+        box = QMessageBox(window)
+        from utils.ui_utils import style_message_box
+        style_message_box(box)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(trans.t("reset_stack_title"))
+        box.setText(trans.t("reset_stack_warning"))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText(trans.t("btn_continue"))
+        box.button(QMessageBox.StandardButton.Cancel).setText(trans.t("btn_cancel_generic"))
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        # A nested event loop in the confirmation can start a new operation.
+        if self._reset_busy() or self._stack_baseline is not baseline:
+            show_warning_box(window, trans.t("reset_stack_title"), trans.t("reset_stack_busy"))
+            return
+        self._load_generation = getattr(self, "_load_generation", 0) + 1
+        if self._review_worker is not None:
+            self._review_worker.cancel()
+        self._review_frames = ()
+        self._review_results = []
+        self._review_status_key = None
+        window.raw_images = list(baseline["images"])
+        window.base_images = list(baseline["images"])
+        window.image_filenames = list(baseline["filenames"])
+        window.image_source_paths = list(baseline["paths"])
+        window.image_icc_profiles = list(baseline["profiles"])
+        window.current_folder_path = baseline["folder"]
+        window.current_scale_factor = baseline["scale"]
+        window.base_scale_factor = baseline["scale"]
+        window.source_px_um = baseline["source_px_um"]
+        window.linear_dng_metadata = baseline.get("linear_dng_metadata")
+        window.excluded_frames = set()
+        window.source_transforms = []
+        window.unrecoverable_source_changes = []
+        window.scale_bar_enabled = False
+        if getattr(window, "wipe_active", False):
+            window.btn_wipe.setChecked(False)
+        if hasattr(window, "_wipe_source_cache"):
+            window._wipe_source_cache = None
+        if hasattr(window, "_wipe_preview_record"):
+            window._wipe_preview_record = None
+        window.transform_manager.invalidate_processing_results(clear_output_view=True)
+        window.label_manager.reset_labels()
+        self._clear_history()
+        invalidate = getattr(window, "invalidate_annotation_caches", None)
+        if callable(invalidate):
+            invalidate()
+        window.transform_manager.reload_image_stack(initial_index=0)
+        mark = getattr(window, "_mark_project_dirty", None)
+        if callable(mark):
+            mark()
+        persist = getattr(window, "persist_settings", None)
+        if callable(persist):
+            persist()
+        from utils import recovery
+        recovery.write_snapshot(window)
+        window._show_status_message(trans.t("reset_stack_done"), 5000)
+
+    def _review_matches_stack(self, frames):
+        current = self.window.raw_images
+        return len(frames) == len(current) and all(
+            before is after for before, after in zip(frames, current))
+
+    def toggle_stack_review(self):
+        if self._review_worker is not None:
+            self._review_worker.cancel()
+            self._review_status_key = "stack_review_cancelling"
+            self.refresh_review_text()
+            return
+        frames = tuple(self.window.raw_images)
+        if len(frames) < 2:
+            return
+        self._review_frames = frames
+        self._review_results = []
+        self._review_error = ""
+        self._review_status_key = "stack_review_working"
+        worker = StackReviewWorker(frames)
+        self._review_worker = worker
+        worker.finished.connect(self._finish_stack_review)
+        self.decorate_source_items()
+        worker.start()
+
+    def _finish_stack_review(self):
+        worker = self._review_worker
+        if worker is None:
+            return
+        self._review_worker = None
+        if not self._review_matches_stack(worker.frames):
+            self._review_status_key = "stack_review_stale"
+        elif worker._cancelled:
+            self._review_status_key = "stack_review_cancelled"
+        elif worker.error is not None:
+            self._review_error = worker.error
+            self._review_status_key = "stack_review_error"
+        else:
+            self._review_frames = worker.frames
+            self._review_results = worker.results or []
+            self._review_status_key = ("stack_review_found" if self._review_results
+                                       else "stack_review_none")
+        if self._review_status_key not in ("stack_review_found", "stack_review_none"):
+            self._review_frames = ()
+            self._review_results = []
+        worker.deleteLater()
+        self.decorate_source_items()
+
+    def _visible_review_results(self):
+        excluded = getattr(self.window, "excluded_frames", set())
+        return [entry for entry in self._review_results
+                if entry["index"] not in excluded
+                and entry["reference_index"] not in excluded]
+
+    def refresh_review_text(self):
+        panel = getattr(self.window, "right_panel_components", None)
+        if panel is None:
+            return
+        busy = self._review_worker is not None
+        panel.btn_review_stack.setText(trans.t(
+            "stack_review_cancel" if busy else "stack_review_button"))
+        panel.btn_review_stack.setToolTip(trans.t("stack_review_hint"))
+        panel.btn_review_stack.setEnabled(busy or len(self.window.raw_images) >= 2)
+        status_key = self._review_status_key
+        visible = self._visible_review_results()
+        if status_key in ("stack_review_found", "stack_review_none"):
+            status_key = "stack_review_found" if visible else "stack_review_none"
+        status = trans.t(status_key) if status_key else ""
+        panel.review_status.setText(status.format(count=len(visible),
+                                                  error=self._review_error))
+
+    def _invalidate_stale_review(self):
+        if self._review_frames and not self._review_matches_stack(self._review_frames):
+            if self._review_worker is not None:
+                self._review_worker.cancel()
+            self._review_frames = ()
+            self._review_results = []
+            self._review_status_key = "stack_review_stale"
 
     # ------------------------------------------------------------------
     # UI helpers
     # ------------------------------------------------------------------
     def update_source_images_count(self) -> None:
         count = self.window.file_list.count()
-        self.window.source_images_label.setText(trans.t("label_source_images").format(count))
+        self._refresh_source_count()
+
+    def _source_count_text(self, total: int = None) -> str:
+        """Header text: plain count, or "11 of 13 participating"."""
+        window = self.window
+        if total is None:
+            total = len(getattr(window, "raw_images", None) or [])
+        try:
+            included = len(window.included_indices())
+        except Exception:
+            included = total
+        if included == total:
+            return trans.t("label_source_images").format(total)
+        return trans.t("label_source_images_included").format(
+            included=included, total=total)
+
+    def _refresh_source_count(self) -> None:
+        label = getattr(self.window, "source_images_label", None)
+        if label is not None:
+            label.setText(self._source_count_text())
 
     def _confirm_mixed_sizes(self, images) -> bool:
         """Frames of different sizes in one dropped file set: ask whether to
@@ -60,18 +277,43 @@ class SourceManager:
 
     def _start_load_worker(self, folder=None, video=None, filepaths=None,
                            scale=1.0, append=False, on_success=None,
-                           accept_event=None) -> None:
+                           accept_event=None, prepare_options=None, on_error=None,
+                           linear_raw=False) -> None:
         """Run the loader on a background thread and apply results on the
         UI thread when it finishes."""
         window = self.window
         worker = getattr(self, "_load_worker", None)
-        if worker is not None and worker.isRunning():
+        if worker is not None:
             show_warning_box(window, trans.t("msg_warning"), trans.t("msg_load_in_progress"))
+            if on_error is not None:
+                on_error(trans.t("msg_load_in_progress"))
             return
+        current_metadata = getattr(window, "linear_dng_metadata", None)
+        if append and getattr(window, "raw_images", None):
+            if current_metadata is not None:
+                linear_raw = True
+            elif linear_raw:
+                message = trans.t("linear_raw_mismatch")
+                if on_error is not None:
+                    on_error(message)
+                else:
+                    show_warning_box(window, trans.t("msg_load_failed"), message)
+                return
+        working_scale = scale
+        if append and getattr(window, "raw_images", None):
+            working_scale = float(getattr(window, "current_scale_factor", 1.0) or 1.0)
+            baseline = self._stack_baseline
+            scale = baseline["scale"] if baseline else working_scale
 
         self._load_worker = StackLoadWorker(
             window.image_loader, folder=folder, video=video,
             filepaths=filepaths, scale=scale,
+            thread_count=getattr(window, "thread_count", 0),
+            exclude_paths=([window.defect_mask_path] if prepare_options is None
+                           and getattr(window, 'defect_mask_path', '') else []),
+            resource_preference=getattr(window, "resource_preference", "balanced"),
+            linear_raw=linear_raw,
+            expected_metadata=current_metadata if append and window.raw_images else None,
         )
         self._load_accept_event = accept_event
         # Remembered so the frames just decoded can be traced back to the files
@@ -88,16 +330,51 @@ class SourceManager:
                 if generation != getattr(self, "_load_generation", -1):
                     return  # superseded by a newer load request
                 if not ok:
-                    if accept_event is None:
+                    if on_error is not None:
+                        on_error(message)
+                    elif not message.startswith("CANCELLED") and accept_event is None:
                         show_warning_box(window, trans.t("msg_load_failed"),
                                          trans.t("msg_load_stack_failed_text"), message)
                     return
-                if not self._confirm_mixed_sizes(images):
-                    return
-                if append and not self._confirm_append_dimensions(images):
-                    return
                 load_options = self._build_load_options(images, filenames, scale)
-                self._apply_load_options(load_options, append=append)
+                if append and window.raw_images and working_scale != scale:
+                    from core.image_loader import UnsupportedTransparency, _has_transparency
+                    if any(_has_transparency(image) for image in images):
+                        raise UnsupportedTransparency("Transparent images cannot be downsampled during loading")
+                    factor = working_scale / scale
+                    load_options.working_images = [
+                        cv2.resize(image, (max(1, int(image.shape[1] * factor)),
+                                           max(1, int(image.shape[0] * factor))),
+                                   interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_LINEAR)
+                        for image in images]
+                if not self._confirm_mixed_sizes(load_options.working_images):
+                    if on_error is not None:
+                        on_error("CANCELLED")
+                    return
+                if append and not self._confirm_append_dimensions(load_options.working_images):
+                    if on_error is not None:
+                        on_error("CANCELLED")
+                    return
+                if prepare_options is not None:
+                    load_options = prepare_options(load_options)
+                load_folder = folder or (os.path.dirname(video) if video else
+                                        os.path.dirname(filepaths[0]) if filepaths else "")
+                if not append or not window.raw_images:
+                    window.current_folder_path = load_folder
+                metadata = getattr(window.image_loader, "px_size_um", None) if not video else None
+                if not append or not window.raw_images:
+                    window.source_px_um = metadata / scale if metadata else None
+                else:
+                    incoming_px = metadata / working_scale if metadata else None
+                    if getattr(window, "source_px_um", None) != incoming_px:
+                        window.source_px_um = None
+                    baseline = self._stack_baseline
+                    if baseline and baseline["source_px_um"] != (metadata / scale if metadata else None):
+                        self._stack_baseline = {**baseline, "source_px_um": None}
+                if not append or not window.raw_images:
+                    window.linear_dng_metadata = worker.linear_dng_metadata
+                self._apply_load_options(load_options, append=append,
+                                         profile_map=getattr(worker, "source_icc_profiles", {}))
                 if on_success is not None:
                     on_success()
                 # Remember for the optional "restore last stack on startup"
@@ -107,13 +384,13 @@ class SourceManager:
                 from utils.image_utils import set_source_exif
                 set_source_exif(getattr(window.image_loader, "source_exif", b""))
 
-                # Scale-bar calibration detected in TIFF metadata
-                window.source_px_um = getattr(window.image_loader, "px_size_um", None)
-
                 # Crash auto-recovery: refresh the session snapshot
                 from utils import recovery
                 recovery.write_snapshot(window)
             except Exception as exc:  # pylint: disable=broad-except
+                if on_error is not None:
+                    on_error(str(exc))
+                    return
                 show_message_box(
                     window,
                     trans.t("msg_load_error"),
@@ -121,12 +398,72 @@ class SourceManager:
                     f"Error: {str(exc)}",
                     QMessageBox.Icon.Critical,
                 )
-            finally:
-                self._load_worker = None
 
-        self._load_worker.finished_load.connect(on_done)
-        self._load_worker.start()
-        window.statusBar().showMessage(trans.t("msg_loading_stack"), 5000)
+        worker = self._load_worker
+        worker.progress.connect(self._on_load_progress)
+        worker.finished_load.connect(on_done)
+        worker.finished.connect(lambda: self._finish_load_worker(worker))
+        self._show_load_status()
+        worker.start()
+
+    def _finish_load_worker(self, worker) -> None:
+        if self._load_worker is worker:
+            self._load_worker = None
+            self.window.statusBar().clearMessage()
+            for name in ("_load_cancel_button", "_load_status_label", "_load_progress_bar"):
+                widget = getattr(self, name, None)
+                if widget is not None:
+                    widget.hide()
+        worker.deleteLater()
+
+    def _show_load_status(self) -> None:
+        from PyQt6.QtWidgets import QPushButton, QLabel, QProgressBar
+        window = self.window
+        button = getattr(self, "_load_cancel_button", None)
+        if button is None:
+            self._load_status_label = QLabel()
+            self._load_progress_bar = QProgressBar()
+            self._load_progress_bar.setMaximumWidth(140)
+            self._load_progress_bar.setFormat("%p%")
+            self._load_progress_bar.setRange(0, 0)
+            window.statusBar().addPermanentWidget(self._load_status_label)
+            window.statusBar().addPermanentWidget(self._load_progress_bar)
+            button = QPushButton(trans.t("btn_cancel_generic"))
+            button.clicked.connect(self.cancel_load)
+            window.statusBar().addPermanentWidget(button)
+            self._load_cancel_button = button
+        self._load_progress_bar.setRange(0, 0)
+        self._load_progress_bar.setValue(0)
+        button.setEnabled(True)
+        button.show()
+        self._load_status_label.setText(trans.t("msg_loading_stack"))
+        self._load_status_label.show()
+        self._load_progress_bar.show()
+        window.statusBar().showMessage(trans.t("msg_loading_stack"))
+
+    def _on_load_progress(self, done: int, total: int) -> None:
+        worker = self.sender()
+        if (worker is None or worker is not getattr(self, "_load_worker", None)
+                or worker.is_cancelled or worker.video):
+            return
+        text = trans.t("msg_loading_stack")
+        if total > 0:
+            self._load_progress_bar.setRange(0, total)
+            self._load_progress_bar.setValue(done)
+            text = f"{text} ({done}/{total})"
+        else:
+            self._load_progress_bar.setRange(0, 0)
+            text = f"{text} ({done})"
+        self._load_status_label.setText(text)
+        self.window.statusBar().showMessage(text)
+
+    def cancel_load(self) -> None:
+        worker = getattr(self, "_load_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.request_cancel()
+            self._load_cancel_button.setEnabled(False)
+            self._load_status_label.setText(trans.t("depth_cancelling"))
+            self.window.statusBar().showMessage(trans.t("depth_cancelling"))
 
     def restore_last_stack(self) -> None:
         """Re-load the most recently opened stack (skip the downsample dialog,
@@ -135,7 +472,6 @@ class SourceManager:
         folder = str(get_settings().value(LAST_STACK_FOLDER_KEY, "") or "")
         if folder and os.path.isdir(folder):
             window = self.window
-            window.current_folder_path = folder
             self._start_load_worker(
                 folder=folder,
                 scale=getattr(window, "current_scale_factor", 1.0),
@@ -157,15 +493,13 @@ class SourceManager:
         if not dlg.exec():
             return None
         scale = dlg.get_scale_factor()
+        window.load_scale_default = scale
         dont_ask = getattr(dlg, "dont_ask_again", None)
         if callable(dont_ask) and dont_ask():
             window.ask_load_scale = False
-            window.load_scale_default = scale
-            # No menu action to mirror any more: the flag lives in the
-            # Advanced settings page and is read from the window attribute.
-            persist = getattr(window, "persist_settings", None)
-            if callable(persist):
-                persist()
+        persist = getattr(window, "persist_settings", None)
+        if callable(persist):
+            persist()
         return scale
 
     def load_image_stack(self, folder_path: str, append: bool = False) -> None:
@@ -175,20 +509,20 @@ class SourceManager:
 
         # 同一文件夹再次导入按"重新加载"处理：追加只会得到帧数翻倍的
         # 重复栈（恢复会话后再导入、拖同一文件夹两次都触发过）
-        if append and os.path.normcase(os.path.abspath(folder_path)) == os.path.normcase(
-                os.path.abspath(getattr(window, "current_folder_path", "") or "")):
+        same_folder = (os.path.normcase(os.path.abspath(folder_path)) == os.path.normcase(
+            os.path.abspath(getattr(window, "current_folder_path", "") or "")))
+        linear_reload = same_folder and getattr(window, "linear_dng_metadata", None) is not None
+        if append and same_folder:
             append = False
 
         scale_factor = self._ask_load_scale()
         if scale_factor is None:
             return
 
-        window.current_folder_path = folder_path
-
         # Decode on a background thread so the window stays responsive on
         # large stacks; the continuation runs on the UI thread via the signal.
         self._start_load_worker(
-            folder=folder_path, scale=scale_factor, append=append,
+            folder=folder_path, scale=scale_factor, append=append, linear_raw=linear_reload,
             on_success=lambda: window.add_recent_file(folder_path) if hasattr(window, "add_recent_file") else None,
         )
 
@@ -200,27 +534,41 @@ class SourceManager:
         if scale_factor is None:
             return
 
-        window.current_folder_path = os.path.dirname(video_path)
-
         self._start_load_worker(
             video=video_path, scale=scale_factor, append=append,
             on_success=lambda: window.add_recent_file(video_path) if hasattr(window, "add_recent_file") else None,
         )
 
+    def prompt_and_load_linear_raw(self) -> None:
+        from core.image_loader import RAW_FORMATS
+        from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+
+        patterns = " ".join(f"*{ext}" for ext in sorted(RAW_FORMATS))
+        paths, _ = QFileDialog.getOpenFileNames(
+            self.window, trans.t("linear_raw_caption"), get_last_dialog_dir(),
+            f"RAW ({patterns});;All Files (*)")
+        if not paths:
+            return
+        set_last_dialog_dir(paths[0])
+        scale = self._ask_load_scale()
+        if scale is not None:
+            self._start_load_worker(filepaths=paths, scale=scale, linear_raw=True)
+
     def prompt_and_load_stack(self) -> None:
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+        from utils.ui_utils import make_folder_path_editable
         window = self.window
 
-        folder_path = QFileDialog.getExistingDirectory(
-            window,
-            trans.t("action_open_folder"),
-            get_last_dialog_dir(),
-            QFileDialog.Option.ShowDirsOnly,
-        )
-
-        if folder_path:
-            set_last_dialog_dir(folder_path)
-            self.load_image_stack(folder_path)
+        dialog = QFileDialog(window, trans.t("action_open_folder"), get_last_dialog_dir())
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        make_folder_path_editable(dialog)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = dialog.selectedFiles()
+            if selected:
+                set_last_dialog_dir(selected[0])
+                self.load_image_stack(selected[0])
 
     def prompt_and_load_video(self) -> None:
         """Open a file dialog to select a video file and load it as image stack."""
@@ -311,6 +659,13 @@ class SourceManager:
 
         # Filter by supported image extensions (use ImageStackLoader.SUPPORTED_FORMATS)
         from core.image_loader import ImageStackLoader
+        if getattr(self.window, "linear_dng_metadata", None) is not None:
+            from core.image_loader import RAW_FORMATS
+            if len(filepaths) != len(paths) or any(
+                    os.path.splitext(path)[1].lower() not in RAW_FORMATS for path in paths):
+                show_warning_box(self.window, trans.t("msg_load_failed"), trans.t("linear_raw_invalid"))
+                event.ignore()
+                return
 
         valid_paths = []
         for p in filepaths:
@@ -369,24 +724,44 @@ class SourceManager:
         Empty when the origin cannot be mapped back to files (video stacks
         decode to synthetic frame names that have no file on disk).
         """
+        recorded = list(getattr(getattr(self.window, "image_loader", None), "image_paths", []) or [])
+        if len(recorded) == len(filenames):
+            return recorded
         folder, video, filepaths = getattr(self, "_load_source", (None, None, None))
         if video:
-            return []
+            return [video] * len(filenames)
         if folder:
-            return [os.path.join(folder, name) for name in filenames]
+            from utils.project_file import _multipage_container_for
+            return [_multipage_container_for(name, folder) or os.path.join(folder, name)
+                    for name in filenames]
         if filepaths and len(filepaths) == len(filenames):
             return list(filepaths)
         return []
 
-    def _apply_load_options(self, options: LoadOptions, append: bool = False) -> None:
+    def _apply_load_options(self, options: LoadOptions, append: bool = False,
+                            profile_map=None) -> None:
         window = self.window
         paths = self._source_paths_for(options.filenames)
         previous_paths = list(getattr(window, "image_source_paths", None) or [])
         previous_count = len(window.image_filenames or [])
+        if profile_map is None:
+            profile_map = getattr(getattr(window, "image_loader", None), "source_icc_profiles", {})
+        profiles = [profile_map.get(path, b"") for path in paths]
+        if len(profiles) != len(options.working_images):
+            profiles = [b""] * len(options.working_images)
+        previous_profiles = list(getattr(window, "image_icc_profiles", ()) or ())
+        if len(previous_profiles) != len(window.raw_images or []):
+            previous_profiles = [b""] * len(window.raw_images or [])
 
         if append and window.raw_images:
-            window.base_images = (window.base_images or []) + options.base_images
+            if getattr(window, "source_transforms", None):
+                window.unrecoverable_source_changes = list(dict.fromkeys(
+                    list(getattr(window, "unrecoverable_source_changes", [])) + [
+                        "Frames appended after source transformations"]))
+            window.base_images = list(window.raw_images) + list(options.working_images)
+            window.base_scale_factor = window.current_scale_factor
             window.raw_images = (window.raw_images or []) + options.working_images
+            window.image_icc_profiles = previous_profiles + profiles
             window.image_filenames = (window.image_filenames or []) + options.filenames
             # Keep the paths aligned with the names; anything else is better
             # dropped than left pointing at the wrong frame.
@@ -396,6 +771,17 @@ class SourceManager:
                 else []
             )
             initial_index = window.current_display_index if window.current_display_index >= 0 else 0
+            baseline = self._stack_baseline
+            if baseline is not None:
+                self._stack_baseline = {
+                    **baseline,
+                    "images": baseline["images"] + list(getattr(options, "reset_images", options.base_images)),
+                    "filenames": baseline["filenames"] + list(options.filenames),
+                    "profiles": baseline["profiles"] + profiles,
+                    "paths": (baseline["paths"] + paths
+                              if len(baseline["paths"]) == len(baseline["images"])
+                              and len(paths) == len(options.filenames) else []),
+                }
         else:
             window.base_images = options.base_images
             window.current_scale_factor = options.scale_factor
@@ -405,9 +791,23 @@ class SourceManager:
             window.raw_images = options.working_images
             window.image_filenames = options.filenames
             window.image_source_paths = paths
+            window.image_icc_profiles = profiles
+            window.excluded_frames = set()
+            window.source_transforms = []
+            window.unrecoverable_source_changes = []
+            window.label_manager.reset_labels()
+            self._stack_baseline = {
+                "images": list(getattr(options, "reset_images", options.working_images)),
+                "filenames": list(options.filenames),
+                "paths": list(getattr(options, "reset_paths", paths)),
+                "profiles": list(profiles),
+                "folder": window.current_folder_path,
+                "scale": options.scale_factor,
+                "source_px_um": getattr(window, "source_px_um", None),
+                "linear_dng_metadata": getattr(window, "linear_dng_metadata", None),
+            }
             initial_index = 0
 
-        window.label_manager.reset_labels()
         window.transform_manager.invalidate_processing_results(
             clear_output_view=True,
             preserve_outputs=True,
@@ -445,6 +845,11 @@ class SourceManager:
 
     def clear_image_stack(self) -> None:
         window = self.window
+        self._stack_baseline = None
+        if hasattr(window, "_wipe_source_cache"):
+            window._wipe_source_cache = None
+        if hasattr(window, "_wipe_preview_record"):
+            window._wipe_preview_record = None
 
         # Also drops the ROI stack, rect and tool button (see reset_roi_selection)
         window.transform_manager.invalidate_processing_results(clear_output_view=True)
@@ -454,8 +859,19 @@ class SourceManager:
         window.stack_images = []
         window.image_filenames = []
         window.image_source_paths = []
+        window.linear_dng_metadata = None
+        window.image_icc_profiles = []
+        window.excluded_frames = set()
+        window.source_transforms = []
+        window.unrecoverable_source_changes = []
+        window.source_px_um = None
+        self._load_generation = getattr(self, "_load_generation", 0) + 1
         window.base_scale_factor = 1.0
         window.current_display_index = -1
+
+        if getattr(window, "scale_bar_enabled", False):
+            window.scale_bar_enabled = False
+            window.persist_settings()
 
         window.label_manager.reset_labels()
 
@@ -538,6 +954,8 @@ class SourceManager:
         self._pop_sequence(window.raw_images, row)
         self._pop_sequence(getattr(window, "base_images", None), row)
         self._pop_sequence(getattr(window, "image_source_paths", None), row)
+        self._pop_sequence(getattr(window, "image_icc_profiles", None), row)
+        self._remap_exclusions_after_delete([row])
 
         if window.raw_images:
             new_index = min(row, len(window.raw_images) - 1)
@@ -581,12 +999,20 @@ class SourceManager:
             self._pop_sequence(window.raw_images, row)
             self._pop_sequence(getattr(window, "base_images", None), row)
             self._pop_sequence(getattr(window, "image_source_paths", None), row)
+            self._pop_sequence(getattr(window, "image_icc_profiles", None), row)
+        self._remap_exclusions_after_delete(rows)
 
         if window.raw_images:
             target_index = min(min(rows), len(window.raw_images) - 1)
             window.transform_manager.reload_image_stack(initial_index=target_index)
         else:
             self.clear_image_stack()
+
+    def _remap_exclusions_after_delete(self, rows) -> None:
+        removed = set(rows)
+        self.window.excluded_frames = {
+            i - sum(r < i for r in removed)
+            for i in getattr(self.window, "excluded_frames", set()) if i not in removed}
 
     def _pop_sequence(self, sequence: list[Any] | None, index: int) -> None:
         if sequence is not None and 0 <= index < len(sequence):
@@ -599,7 +1025,10 @@ class SourceManager:
         """Give every list row its checkable "included" state and its original
         position tag (UserRole), so a drag-drop can be mapped back to data."""
         window = self.window
+        self._invalidate_stale_review()
+        findings = {entry["index"]: entry for entry in self._visible_review_results()}
         excluded = getattr(window, "excluded_frames", set())
+        blocked = window.file_list.blockSignals(True)
         for row in range(window.file_list.count()):
             item = window.file_list.item(row)
             if item is None:
@@ -609,10 +1038,27 @@ class SourceManager:
             item.setCheckState(
                 Qt.CheckState.Unchecked if row in excluded
                 else Qt.CheckState.Checked)
+            font = item.font()
+            font.setStrikeOut(row in excluded)
+            item.setFont(font)
+            names = getattr(window, "image_filenames", ())
+            if row < len(names):
+                name = names[row]
+                finding = findings.get(row)
+                if finding is not None:
+                    label = trans.t("stack_review_row").format(
+                        reference=finding["reference_index"] + 1,
+                        difference=finding["difference"])
+                    item.setText(f"{name} — {label}")
+                    item.setToolTip(label)
+                else:
+                    item.setText(name)
+                    item.setToolTip("")
+        window.file_list.blockSignals(blocked)
+        self.refresh_review_text()
 
     def on_item_changed(self, item: QListWidgetItem) -> None:
-        """A checkbox was toggled: update the excluded set (indices shift when
-        frames are deleted, so exclusions reset on any stack mutation)."""
+        """Update participation independently of the highlighted frame."""
         window = self.window
         row = window.file_list.row(item)
         if row < 0 or row >= len(window.raw_images):
@@ -621,21 +1067,35 @@ class SourceManager:
         if excluded is None:
             excluded = set()
             window.excluded_frames = excluded
+        should_exclude = item.checkState() != Qt.CheckState.Checked
+        if (row in excluded) == should_exclude:
+            return
+        window.push_undo()
         was_blocked = window.file_list.blockSignals(True)
         try:
             if item.checkState() == Qt.CheckState.Checked:
                 excluded.discard(row)
             else:
-                # at least two frames must stay included
-                if len(window.raw_images) - len(excluded) <= 1:
-                    item.setCheckState(Qt.CheckState.Checked)
-                    return
                 excluded.add(row)
             font = item.font()
             font.setStrikeOut(item.checkState() == Qt.CheckState.Unchecked)
             item.setFont(font)
         finally:
             window.file_list.blockSignals(was_blocked)
+        self.processing_selection_changed()
+
+    def processing_selection_changed(self) -> None:
+        window = self.window
+        window.source_revision = getattr(window, "source_revision", 0) + 1
+        window.aligned_images = []
+        window.is_images_aligned = False
+        window.last_alignment_options = None
+        window.alignment_request_key = None
+        window.transform_manager.reset_roi_selection()
+        self._refresh_source_count()
+        self.decorate_source_items()
+        if hasattr(window, "_mark_project_dirty"):
+            window._mark_project_dirty()
 
     def apply_list_order(self) -> None:
         """Reorder the underlying stacks to match a drag-drop in the list.
@@ -654,6 +1114,8 @@ class SourceManager:
             if not isinstance(old, int) or not (0 <= old < n):
                 return  # unmappable: leave the data alone
             new_order.append(old)
+        if len(set(new_order)) != n:
+            return
         if new_order == list(range(n)):
             return
 
@@ -668,20 +1130,18 @@ class SourceManager:
             window.base_images = _reorder(window.base_images)
         if getattr(window, "image_source_paths", None):
             window.image_source_paths = _reorder(window.image_source_paths)
+        if len(getattr(window, "image_icc_profiles", ()) or ()) == n:
+            window.image_icc_profiles = _reorder(window.image_icc_profiles)
         excluded = getattr(window, "excluded_frames", None)
         if excluded:
             # old index i ends up at position new_order.index(i)
             window.excluded_frames = {
                 new_order.index(i) for i in excluded if i in new_order}
 
-        # _invalidate_processing_results clears the exclusion set; remap first
-        # (above), then invalidate, then restore the remapped set.
+        # The remapped exclusion set survives cache invalidation.
         window.transform_manager.invalidate_processing_results(
             clear_output_view=False, preserve_outputs=True)
-        if excluded:
-            window.excluded_frames = {
-                new_order.index(i) for i in excluded if i in new_order}
-        kept = getattr(window, "current_img_index", 0)
+        kept = getattr(window, "current_display_index", 0)
         kept = kept if isinstance(kept, int) and 0 <= kept < n else 0
         new_pos = new_order.index(kept) if kept in new_order else 0
         window.transform_manager.reload_image_stack(initial_index=new_pos)

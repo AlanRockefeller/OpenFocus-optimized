@@ -7,14 +7,16 @@ allowed to finish when cancelled; their output is never published afterwards.
 """
 
 from copy import deepcopy
-from math import ceil, log2
 from threading import Event
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
+from core.resource_policy import heavy_job, require_memory
+from core.registration import RegistrationCancelled
+from utils.logging_setup import frame_details, log_operation
 
 
-_KERNEL_METHODS = {"guided_filter", "dct", "gfgfgf", "openfocus_a", "openfocus_b"}
+from core.algorithms import get_fusion, resolve_fusion_parameters, resolve_runner
 
 
 class _CancellableWorker(QThread):
@@ -32,6 +34,28 @@ class _CancellableWorker(QThread):
         return self._cancelled.is_set() or self.isInterruptionRequested()
 
 
+def align_frames(images, alignment, shared, should_cancel):
+    """Register a captured stack without writing files or reading live UI state."""
+    from core.registration import ImageRegistration
+    frames = list(images)
+    if not frames:
+        raise ValueError("The image stack is empty.")
+    if should_cancel():
+        return None
+    if alignment != "none":
+        settings = {"method": alignment, "brightness_reference": shared.get(
+            "brightness_reference", "last" if shared.get("exposure_match", False) else "first"),
+            "use_gpu": False, "parameters": shared.get('registration_parameters')}
+        if shared.get('reg_downscale_width') is not None:
+            settings['downscale_width'] = shared['reg_downscale_width']
+        registration = ImageRegistration(**settings)
+        frames = registration.process(frames, output_path=None,
+            thread_count=max(0, int(shared.get("thread_count", 0))),
+            resource_preference=shared.get("resource_preference", "balanced"),
+            should_cancel=should_cancel)
+    return None if should_cancel() else frames
+
+
 class AlignmentWorker(_CancellableWorker):
     """Register once; ready carries a list of aligned arrays without conversion."""
 
@@ -45,39 +69,26 @@ class AlignmentWorker(_CancellableWorker):
         self.shared = deepcopy(shared)
 
     def run(self):
-        if self._should_cancel():
-            return
-        try:
-            from core.registration import ImageRegistration
-
-            images = list(self.images)
-            if not images:
-                raise ValueError("The image stack is empty.")
-            if self.alignment != "none":
-                settings = {
-                    "method": self.alignment,
-                    "brightness_reference": self.shared.get(
-                        "brightness_reference",
-                        "last" if self.shared.get("exposure_match", False) else "first"),
-                }
-                width = self.shared.get("reg_downscale_width")
-                if width is not None:
-                    settings["downscale_width"] = width
-                shift = self.shared.get("max_shift_ratio")
-                if shift is not None:
-                    settings["max_shift_ratio"] = shift
-                registration = ImageRegistration(**settings)
-                if self._should_cancel():
-                    return
-                images = registration.process(
-                    images, output_path=None,
-                    thread_count=max(1, int(self.shared.get("thread_count", 4))),
-                    should_cancel=self._should_cancel)
-            if not self._should_cancel():
-                self.ready.emit(images)
-        except Exception as exc:
-            if not self._should_cancel():
-                self.failed.emit(str(exc) or type(exc).__name__)
+        with log_operation("comparison_alignment", registration=self.alignment,
+                           registration_parameters=self.shared.get('registration_parameters'),
+                           parameters=self.shared, **frame_details(self.images)) as operation:
+            if self._should_cancel():
+                operation.cancel()
+                return
+            try:
+                with heavy_job(self._should_cancel):
+                    images = align_frames(self.images, self.alignment, self.shared, self._should_cancel)
+                if images is not None and not self._should_cancel():
+                    self.ready.emit(images)
+                else:
+                    operation.cancel()
+            except Exception as exc:
+                if self._should_cancel() or isinstance(exc, RegistrationCancelled):
+                    operation.cancel()
+                else:
+                    operation.fail()
+                if not self._should_cancel():
+                    self.failed.emit(str(exc) or type(exc).__name__)
 
 
 class PreviewWorker(_CancellableWorker):
@@ -103,50 +114,24 @@ class PreviewWorker(_CancellableWorker):
         self.roi_only = bool(roi_only)
 
     def _settings(self, method):
-        from utils.validators import normalize_kernel_size
-
         own = self.per_method.get(method, {})
         shared = self.shared
-        mode = own.get("mode", shared.get("ai_mode", "soft"))
+        options = shared.get('method_options', {}).get(method, shared)
         constructor = {
-            "algorithm": method,
-            "use_gpu": bool(shared.get("use_gpu", False)),
-            "tile_enabled": bool(shared.get("tile_enabled", True)),
-            "ai_batch_size": int(shared.get("ai_batch_size", 2)),
-            "ai_mode": mode,
-            "base_frame": own.get("base_frame", shared.get("base_frame", "none")),
-            "sort_mode": shared.get("sort_mode", "asc"),
-            "exposure_match": bool(own.get(
-                "exposure_match", shared.get("exposure_match", False))),
+            'algorithm': method,
+            'fusion_parameters': resolve_fusion_parameters(method, own),
+            'use_gpu': bool(shared.get('use_gpu', False)),
+            'resource_preference': shared.get('resource_preference', 'balanced'),
+            'tile_enabled': bool(shared.get('tile_enabled', True)),
+            'ai_batch_size': int(shared.get('ai_batch_size', 2)),
+            'base_frame': options.get('base_frame', 'none'),
+            'sort_mode': shared.get('sort_mode', 'asc'),
+            'exposure_match': bool(options.get('exposure_match', False)),
         }
-        for key in ("tile_block_size", "tile_overlap", "tile_threshold"):
+        for key in ('tile_block_size', 'tile_overlap', 'tile_threshold'):
             if shared.get(key) is not None:
                 constructor[key] = shared[key]
-        params = {
-            "thread_count": max(1, int(shared.get("thread_count", 4))),
-        }
-        if method in _KERNEL_METHODS:
-            params["kernel_size"] = normalize_kernel_size(
-                own.get("kernel_size", shared.get("kernel_size", 11)))
-        if method == "dct":
-            params["block_size"] = 8
-        elif method == "dtcwt":
-            params["N"] = int(own.get("N", shared.get("N", 4)))
-            if params["N"] < 1:
-                raise ValueError("DTCWT decomposition depth must be positive.")
-        elif method in ("openfocus_a", "openfocus_c"):
-            default = 2.0 if method == "openfocus_a" else 3.0
-            params["blend_smoothing"] = own.get(
-                "blend_smoothing", shared.get("blend_smoothing", default))
-        elif method == "openfocus_b":
-            params["depth_smoothing"] = own.get(
-                "depth_smoothing", shared.get("depth_smoothing", 1.2))
-        elif method == "stackmffv3":
-            from utils import resource_path
-
-            params["model_path"] = resource_path("weights", "stackmff_v3_final.pth")
-            params["mode"] = mode
-        return constructor, params
+        return constructor, {'thread_count': max(0, int(shared.get('thread_count', 0)))}
 
     def _input_bounds(self, method, params, width, height):
         if not self.roi_only:
@@ -159,41 +144,16 @@ class PreviewWorker(_CancellableWorker):
         if x < 0 or y < 0 or w < 1 or h < 1 or x + w > width or y + h > height:
             raise ValueError("The comparison region lies outside the aligned image.")
 
-        # Keep each selection intact, even on a very wide or tall image. The
-        # halo grows per method; only its unavailable part is clipped at edges.
-        kernel = params.get("kernel_size", 11)
-        halo, grid = 96, 1
-        if method == "guided_filter":
-            # Two radius-45 guided boxes after sigma-5 saliency, plus base blur.
-            halo = max(halo, 2 * 45 + 4 * 5 + 1 + kernel // 2)
-        elif method == "dct":
-            grid = 8
-            # The block decision map is median-filtered twice.
-            halo = max(halo, grid * (kernel + 1))
-        elif method == "dtcwt":
-            grid = 2 ** params["N"]
-            halo = max(halo, 16 * grid)
-        elif method == "gfgfgf":
-            grid = 4  # The fallback fast guided filter subsamples by four.
-            halo = max(halo, kernel // 2 + 48)
-        elif method == "openfocus_c":
-            levels = max(2, min(7, int(log2(max(2, min(width, height)))) - 1))
-            grid = 2 ** (levels - 1)
-            sigma = params["blend_smoothing"]
-            sigma = 3.0 if sigma is None else max(0.0, float(sigma))
-            halo = max(halo, ceil((8 + 4 * sigma) * grid))
-        elif method in ("openfocus_a", "openfocus_b"):
-            key = "blend_smoothing" if method == "openfocus_a" else "depth_smoothing"
-            default = 2.0 if method == "openfocus_a" else 1.2
-            sigma = params[key]
-            sigma = default if sigma is None else max(0.0, float(sigma))
-            halo = max(halo, kernel // 2 + ceil(4 * sigma) + 2)
-        elif method == "stackmffv3":
-            grid, halo = 128, 256
-        base_frame = self.per_method.get(method, {}).get(
-            "base_frame", self.shared.get("base_frame", "none"))
+        spec = get_fusion(method)
+        if spec.roi is None:
+            return (0, 0, width, height), (x, y, w, h)
+        parameters = resolve_fusion_parameters(method, self.per_method.get(method))
+        halo, grid = resolve_runner(spec.roi)(parameters, width, height)
+        base_frame = self.shared.get('method_options', {}).get(method, self.shared).get('base_frame', 'none')
         if base_frame in ("first", "last"):
             halo += 4 * 32  # Low-pass base correction follows fusion.
+        if self.shared.get('sharpen_output', False):
+            halo += 4
 
         x0 = max(0, ((x - halo) // grid) * grid)
         y0 = max(0, ((y - halo) // grid) * grid)
@@ -219,15 +179,10 @@ class PreviewWorker(_CancellableWorker):
             inputs = [frame[y0:y0 + ch, x0:x0 + cw] for frame in self.images]
         # Normalize only the context; uint8 slices remain views until a backend
         # needs contiguous storage, and uint16 never passes through uint8.
+        if any(image.dtype == np.uint16 for image in inputs):
+            require_memory(sum(image.size * 4 for image in inputs if image.dtype != np.float32)
+                           + max(image.size * 4 for image in inputs if image.dtype == np.uint16))
         inputs, is_16bit = normalize_fuse_input(inputs)
-        # DCT needs at least one 8x8 block, including for one-pixel-wide stacks.
-        # Its normal edge extension is otherwise handled by the backend.
-        input_h, input_w = ch, cw
-        if method == "dct" and (ch < 8 or cw < 8):
-            input_h, input_w = max(8, ch), max(8, cw)
-            inputs = [np.pad(frame, ((0, input_h - ch), (0, input_w - cw))
-                             + ((0, 0),) * (frame.ndim - 2), mode="edge")
-                      for frame in inputs]
         fusion = MultiFocusFusion(**constructor)
         if self._should_cancel():
             return None
@@ -235,33 +190,61 @@ class PreviewWorker(_CancellableWorker):
                              should_cancel=self._should_cancel, **params)
         if self._should_cancel():
             return None
-        if not isinstance(result, np.ndarray) or result.shape[:2] != (input_h, input_w):
+        if not isinstance(result, np.ndarray) or result.shape[:2] != (ch, cw):
             raise ValueError("Fusion returned an invalid comparison image size.")
+        if self.shared.get('sharpen_output', False):
+            from utils.output_sharpen import sharpen_output
+            result = sharpen_output(result, self._should_cancel)
         x, y, w, h = bounds
-        if context != bounds or (input_h, input_w) != (ch, cw):
+        if context != bounds:
             result = result[y - y0:y - y0 + h, x - x0:x - x0 + w]
             if not is_16bit:
                 result = result.copy()
         return quantize_fuse_output(result, is_16bit), bounds
 
     def run(self):
+        with log_operation("comparison_preview", methods=self.methods, parameters=self.per_method,
+                           shared_parameters=self.shared, region=self.region, roi_only=self.roi_only,
+                           **frame_details(self.images)) as operation:
+            try:
+                with heavy_job(self._should_cancel):
+                    failed = self._run_admitted()
+                if failed:
+                    operation.fail()
+                if self._should_cancel():
+                    operation.cancel()
+            except RegistrationCancelled:
+                operation.cancel()
+                return
+
+    def _run_admitted(self):
         total = len(self.methods)
+        failed = False
         for index, method in enumerate(self.methods):
             if self._should_cancel():
-                return
+                return failed
             self.progress.emit(index, total, method)
             if self._should_cancel():
-                return
-            try:
-                rendered = self._fuse(method)
-                if self._should_cancel():
-                    return
-                if rendered is not None:
-                    result, bounds = rendered
-                    self.result_ready.emit(method, result, bounds)
-            except Exception as exc:
-                if self._should_cancel():
-                    return
-                self.method_failed.emit(method, str(exc) or type(exc).__name__)
+                return failed
+            with log_operation("comparison_method", method=method,
+                               parameters=self.per_method.get(method, {}), shared_parameters=self.shared,
+                               region=self.region, roi_only=self.roi_only,
+                               **frame_details(self.images)) as operation:
+                try:
+                    rendered = self._fuse(method)
+                    if self._should_cancel():
+                        operation.cancel()
+                        return failed
+                    if rendered is not None:
+                        result, bounds = rendered
+                        self.result_ready.emit(method, result, bounds)
+                except Exception as exc:
+                    if self._should_cancel():
+                        operation.cancel()
+                        return failed
+                    operation.fail()
+                    failed = True
+                    self.method_failed.emit(method, str(exc) or type(exc).__name__)
         if not self._should_cancel():
             self.progress.emit(total, total, "")
+        return failed

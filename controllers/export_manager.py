@@ -1,10 +1,12 @@
 import datetime
 import os
+import threading
+from dataclasses import replace
 from typing import Any, Optional
 
 import cv2
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtWidgets import QFileDialog, QMessageBox, QProgressDialog, QInputDialog
 
 from dialogs import DurationDialog
 from ui import styles as ui_styles
@@ -18,6 +20,7 @@ from core.workers import GifSaverWorker
 from locales import trans
 from utils.image_utils import imwrite_auto
 from utils import scalebar
+from utils.export_paths import create_stack_directory, frame_export_name, unique_path
 
 ALLOWED_EXPORT_EXTENSION_MAP = {
     ".png": ".png",
@@ -26,13 +29,29 @@ ALLOWED_EXPORT_EXTENSION_MAP = {
     ".tif": ".tif",
     ".tiff": ".tiff",
     ".webp": ".webp",
+    ".dng": ".dng",
 }
+
+def extension_from_filter(selected_filter: str) -> str:
+    """First extension offered by a QFileDialog filter string.
+
+    "TIFF Files (*.tif *.tiff)" -> ".tif"; "All Files (*)" -> "".
+    """
+    import re as _re
+    match = _re.search(r"\(([^)]*)\)", selected_filter or "")
+    if not match:
+        return ""
+    for token in match.group(1).split():
+        token = token.strip().lstrip("*").lower()
+        if token.startswith(".") and token in ALLOWED_EXPORT_EXTENSION_MAP:
+            return ALLOWED_EXPORT_EXTENSION_MAP[token]
+    return ""
+
 
 EXPORT_EXTENSION_ALIASES = {
     ".jpeg": ".jpg",
     ".jpe": ".jpg",
     ".jfif": ".jpg",
-    ".jp2": ".jpg",
 }
 
 DEFAULT_EXPORT_EXTENSION = ".png"
@@ -42,6 +61,58 @@ DEFAULT_EXPORT_EXTENSION = ".png"
 from utils.image_utils import get_imwrite_params  # noqa: E402,F401
 
 
+class LayeredTiffWorker(QThread):
+    completed = pyqtSignal(bool, str)
+
+    def __init__(self, path, image, context, icc_profile):
+        super().__init__()
+        self.path = path
+        self.image = image
+        self.context = context
+        self.icc_profile = icc_profile
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def run(self):
+        try:
+            from utils.layered_tiff import export_layered_tiff, _preflight
+            image, context = self.image, self.context
+            metadata = getattr(context, 'linear_dng_metadata', None)
+            if metadata is not None:
+                _preflight(image, context, self.icc_profile, self._cancelled.is_set)
+                from core.resource_policy import require_memory
+                from utils.layered_tiff import MAX_WORKING_BYTES
+                sources = [image, *(frame.image for frame in context.frames)]
+                developed_bytes = sum(source.nbytes for source in sources)
+                pixels = image.shape[0] * image.shape[1]
+                largest = max(source.shape[0] * source.shape[1] for source in sources)
+                layers = pixels * 6 * image.dtype.itemsize + sum(
+                    frame.image.shape[0] * frame.image.shape[1] * 4 * image.dtype.itemsize
+                    for frame in context.frames)
+                strips = max(min(128, source.shape[0]) * source.shape[1] * 80
+                             for source in sources)
+                require_memory(developed_bytes + layers * 8 + largest * 24 + strips
+                               + len(self.icc_profile) * 2 + 16 * 1024 * 1024,
+                               user_limit=MAX_WORKING_BYTES)
+                from utils.linear_dng import develop_linear
+                image = develop_linear(image, metadata)
+                context = replace(context, frames=tuple(
+                    replace(frame, image=develop_linear(frame.image, metadata))
+                    for frame in context.frames), linear_dng_metadata=None)
+            export_layered_tiff(self.path, image, context,
+                                icc_profile=self.icc_profile,
+                                cancelled=self._cancelled.is_set)
+        except Exception as exc:  # Errors must reach the GUI thread.
+            if self._cancelled.is_set() and str(exc) == 'Layered export cancelled':
+                self.completed.emit(False, '')
+            else:
+                self.completed.emit(False, str(exc) or type(exc).__name__)
+        else:
+            self.completed.emit(True, self.path)
+
+
 class ExportManager:
     """Handles save and export workflows for the main window."""
 
@@ -49,9 +120,20 @@ class ExportManager:
         self.window = window
         self.gif_progress_dialog: Optional[QProgressDialog] = None
         self.gif_worker: Optional[GifSaverWorker] = None
+        self.layered_worker: Optional[LayeredTiffWorker] = None
+        self.layered_progress_dialog: Optional[QProgressDialog] = None
+        self._layered_record = None
 
-    def normalize_export_path(self, file_path: str, fallback_extension: str = DEFAULT_EXPORT_EXTENSION) -> str:
-        """Map user supplied paths onto the supported export extensions."""
+    def normalize_export_path(self, file_path: str,
+                              fallback_extension: str = DEFAULT_EXPORT_EXTENSION,
+                              selected_filter: str = "") -> str:
+        """Map a user supplied path onto a supported export extension.
+
+        The chosen file-type filter is used when the name has no extension:
+        picking "TIFF Files (*.tif *.tiff)" and typing a bare name used to
+        fall back to PNG, so the file on disk was a PNG while the dialog said
+        TIFF. An explicit, different extension keeps the user's choice.
+        """
         root, ext = os.path.splitext(file_path)
         ext_lower = ext.lower()
 
@@ -60,51 +142,58 @@ class ExportManager:
             fallback = DEFAULT_EXPORT_EXTENSION
 
         if not ext:
-            return root + fallback
+            from_filter = extension_from_filter(selected_filter)
+            return self._safe_export_path(root + (from_filter or fallback))
 
         mapped = ALLOWED_EXPORT_EXTENSION_MAP.get(ext_lower)
         if mapped:
-            return root + mapped
+            return self._safe_export_path(root + mapped)
 
         alias_target = EXPORT_EXTENSION_ALIASES.get(ext_lower)
         if alias_target:
             mapped_alias = ALLOWED_EXPORT_EXTENSION_MAP.get(alias_target)
             if mapped_alias:
-                return root + mapped_alias
+                return self._safe_export_path(root + mapped_alias)
 
-        return root + fallback
+        raise ValueError(f'{trans.t("msg_save_failed_info_write")} {ext} · PNG / TIFF / JPG / BMP / WebP')
+
+    def _safe_export_path(self, path, extra_sources=()):
+        sources = list(getattr(self.window, 'image_source_paths', ()) or ())
+        sources.extend(getattr(getattr(self.window, 'image_loader', None), 'image_paths', ()) or ())
+        sources.extend(getattr(self.window, '_standalone_retouch_paths', ()) or ())
+        sources.extend(extra_sources)
+        target = os.path.normcase(os.path.realpath(path))
+        for source in sources:
+            if not source:
+                continue
+            same = target == os.path.normcase(os.path.realpath(source))
+            if not same and os.path.exists(path) and os.path.exists(source):
+                same = os.path.samefile(path, source)
+            if same:
+                raise ValueError(f'{trans.t("msg_save_failed_text")}\n{source}')
+        return path
 
     # ------------------------------------------------------------------
     # Filename helpers
     # ------------------------------------------------------------------
-    _FUSION_FILE_TAGS = {
-        "guided_filter": "GuidedFilter",
-        "dct": "DCT",
-        "dtcwt": "DTCWT",
-        "gfgfgf": "GFGFGF",
-        "stackmffv3": "StackMFFV3",
-        "openfocus_a": "OpenFocusA",
-        "openfocus_b": "OpenFocusB",
-        "openfocus_c": "OpenFocusC",
-    }
-    _ALIGN_FILE_TAGS = {
-        "homography": "Homography",
-        "ecc": "ECC",
-        "openfocus": "OpenFocusAlign",
-    }
-
     def _fusion_tag(self) -> str:
-        return self._FUSION_FILE_TAGS.get(
-            self.window.current_fusion_method(), "None")
+        from core.algorithms import get_fusion
+
+        method = self.window.current_fusion_method()
+        return "None" if method == "none" else get_fusion(method).file_tag
 
     def _align_tag(self) -> str:
-        return self._ALIGN_FILE_TAGS.get(
-            self.window.current_alignment_method(), "NoAlign")
+        from core.algorithms import get_registration
+
+        method = self.window.current_alignment_method()
+        return "NoAlign" if method == "none" else get_registration(method).file_tag
 
     def generate_default_filename(self) -> str:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return (f"OpenFocus_{timestamp}_{self._fusion_tag()}_"
+        name = (f"OpenFocus_{timestamp}_{self._fusion_tag()}_"
                 f"{self._align_tag()}")
+        from utils.export_paths import prefix_output_name
+        return prefix_output_name(getattr(self.window, "output_name_prefix", ""), name)
 
     def selected_output(self):
         """(image, default filename) of the output the user has selected in
@@ -158,8 +247,92 @@ class ExportManager:
         folder = item.data(ALIGNED_DIR_ROLE)
         return folder if folder and os.path.isdir(folder) else None
 
+    def export_layered_tiff(self, item=None) -> None:
+        window = self.window
+        if self.layered_worker is not None:
+            return
+        if item is None:
+            item = window.output_list.currentItem()
+        record = window.output_manager.record_for_item(item)
+        if record is None or not record.retouchable:
+            show_warning_box(window, trans.t('action_export_layered_tiff'),
+                             trans.t('layered_tiff_no_source'))
+            return
+        default = self.filename_from_label(record.label) + '.tif'
+        path, _ = QFileDialog.getSaveFileName(
+            window, trans.t('action_export_layered_tiff'), default,
+            'TIFF (*.tif *.tiff)')
+        if not path:
+            return
+        root, ext = os.path.splitext(path)
+        if not ext:
+            path = root + '.tif'
+        elif ext.lower() not in ('.tif', '.tiff'):
+            show_error_box(window, trans.t('msg_save_failed_title'),
+                           trans.t('layered_tiff_extension'))
+            return
+        try:
+            frame_paths = (frame.name for frame in record.context.frames
+                           if os.path.isabs(frame.name))
+            self._safe_export_path(path, frame_paths)
+        except (ValueError, OSError) as exc:
+            show_error_box(window, trans.t('msg_save_failed_title'), str(exc))
+            return
+
+        progress = QProgressDialog(trans.t('layered_tiff_exporting'),
+                                   trans.t('btn_cancel'), 0, 0, window)
+        progress.setWindowTitle(trans.t('action_export_layered_tiff'))
+        progress.setStyleSheet(ui_styles.PROGRESS_DIALOG_STYLE)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        self.layered_progress_dialog = progress
+        worker = LayeredTiffWorker(path, record.image, record.context,
+                                   record.icc_profile or record.context.icc_profile)
+        self.layered_worker = worker
+        self._layered_record = record
+        progress.canceled.connect(self._cancel_layered_tiff)
+        worker.completed.connect(self._layered_tiff_completed)
+        worker.finished.connect(self._layered_tiff_finished)
+        progress.show()
+        worker.start()
+
+    def _cancel_layered_tiff(self):
+        if self.layered_worker is not None:
+            self.layered_worker.cancel()
+        if self.layered_progress_dialog is not None:
+            self.layered_progress_dialog.setLabelText(trans.t('depth_cancelling'))
+            self.layered_progress_dialog.setCancelButton(None)
+            self.layered_progress_dialog.show()
+
+    def _layered_tiff_completed(self, success, message):
+        if success:
+            if self._layered_record is not None and self.layered_worker is not None:
+                # Layered output contains the captured pixels without live
+                # labels or scale bars. Compare those against the current
+                # annotation state so omitted changes stay protected.
+                self.window.output_manager._mark_record_exported(
+                    self._layered_record, self.layered_worker.image, message,
+                    {'labels': [], 'scale': None})
+            self.window.statusBar().showMessage(
+                trans.t('msg_image_saved_info').format(path=message).replace('\n', ' '), 8000)
+        elif message:
+            show_error_box(self.window, trans.t('action_export_layered_tiff'),
+                           f"{trans.t('msg_save_failed_text')}\n{message}")
+
+    def _layered_tiff_finished(self):
+        if self.layered_progress_dialog is not None:
+            self.layered_progress_dialog.close()
+            self.layered_progress_dialog = None
+        self.layered_worker = None
+        self._layered_record = None
+
     def save_result(self) -> None:
         window = self.window
+        output_list = getattr(window, 'output_list', None)
+        output_manager = getattr(window, 'output_manager', None)
+        if output_list is not None and output_manager is not None and output_list.currentItem() is not None:
+            output_manager.save_output_image_as(output_list.currentItem())
+            return
 
         # An align-only result is a folder, not a picture. There is no fused
         # image, so both the selected entry and the plain fallback must export
@@ -186,40 +359,56 @@ class ExportManager:
             result_to_save = window.fusion_result
             title = trans.t("action_save")
         elif window.registration_results:
-            index = window.current_result_index if window.current_result_index >= 0 else 0
-            result_to_save = window.registration_results[index]
-            title = trans.t("action_save")
+            self.save_result_stack()
+            return
         else:
             show_warning_box(window, trans.t("msg_no_result_title"), trans.t("msg_no_result_text"))
             return
 
+        labels = window.label_manager.snapshot()
+        preview_record = getattr(window, '_wipe_preview_record', None)
+        metadata = (preview_record.linear_dng_metadata
+                    if preview_record is not None and preview_record.image is result_to_save else None)
+        if metadata is None and result_to_save is window.fusion_result:
+            render_context = getattr(getattr(window, 'render_manager', None), '_render_context', None) or {}
+            metadata = render_context.get('linear_dng_metadata')
+        cfg = scalebar.export_cfg(window, target='output')
         if not default_filename:
             default_filename = self.generate_default_filename()
-        file_path, _ = QFileDialog.getSaveFileName(
-            window,
-            title,
-            default_filename,
-            "All Supported Formats (*.png *.jpg *.bmp *.tif *.tiff);;"
-            "JPG Files (*.jpg);;PNG Files (*.png);;Bitmap Files (*.bmp);;TIFF Files (*.tif *.tiff);;All Files (*)",
-        )
+        filters = ('PNG 8/16-bit (*.png);;TIFF 8/16-bit (*.tif *.tiff);;'
+                   'JPG 8-bit (*.jpg);;BMP 8-bit (*.bmp);;WebP 8-bit (*.webp)')
+        if metadata is not None:
+            filters += ';;' + trans.t('linear_dng_filter')
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            window, title, default_filename, filters)
 
         if not file_path:
             return
 
-        file_path = self.normalize_export_path(file_path)
-
-        from utils.logging_setup import log_action
-        log_action("export_image", path=file_path)
         try:
-            index = 0 if window.fusion_result is not None else window.current_result_index
-            if index < 0:
-                index = 0
-            image_to_save = window.label_manager.prepare_bgr_image("registered", result_to_save, index)
+            file_path = self.normalize_export_path(file_path, selected_filter=selected_filter)
+            from utils.logging_setup import log_action
+            log_action('export_image', path=file_path)
+            if os.path.splitext(file_path)[1].lower() == '.dng':
+                if metadata is None:
+                    raise ValueError(trans.t('linear_dng_export_failed'))
+                from controllers.output_manager import OutputRecord
+                record = OutputRecord.create(result_to_save, default_filename)
+                record.linear_dng_metadata = metadata
+                window.output_manager.start_linear_dng_export(
+                    record, None, file_path, labels,
+                    px_size_um=scalebar.effective_px_um(window))
+                return
+            if metadata is not None:
+                from utils.linear_dng import develop_linear
+                result_to_save = develop_linear(result_to_save, metadata)
+            if result_to_save.ndim == 3 and result_to_save.shape[2] == 4 and os.path.splitext(file_path)[1].lower() != '.png':
+                raise ValueError(trans.t('transparent_desktop_unsupported').format(path=file_path))
+            image_to_save = labels.prepare_bgr_image('output', result_to_save, 0)
             ext = os.path.splitext(file_path)[1].lower()
             params = get_imwrite_params(ext)
-            if imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params):
-                if hasattr(window, "output_manager"):
-                    window.output_manager.mark_selected_exported()
+            profile = getattr(getattr(window, 'last_render_context', None), 'icc_profile', b'')
+            if imwrite_auto(file_path, scalebar.burn(image_to_save, cfg), params, exif=b'', icc_profile=profile):
                 # Non-blocking confirmation (errors still get a dialog)
                 window.statusBar().showMessage(
                     trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
@@ -249,115 +438,117 @@ class ExportManager:
                 QMessageBox.Icon.Critical,
             )
 
-    def save_aligned_stack_as(self, source_dir: str, label: str = "") -> None:
-        """Public entry: copy a staged align-only stack to a picked folder."""
-        self._save_aligned_dir(source_dir, label)
+    def save_aligned_frames_as(self, frames, filenames, label: str = '', *, destination=None, extension=None, record=None, labels_snapshot=None):
+        """Export in-memory aligned pixels once, into one chosen stack folder."""
+        return self._save_frames_as(tuple(frames), tuple(filenames), 'registered', label,
+                                    destination=destination, extension=extension, record=record,
+                                    labels_snapshot=labels_snapshot)
 
-    def _save_aligned_dir(self, source_dir: str, label: str = "") -> None:
-        """Copy a staged align-only stack to a folder the user picks."""
-        import shutil
+    def save_aligned_stack_as(self, source_dir: str, label: str = '', *, destination=None, extension=None):
+        return self._save_aligned_dir(source_dir, label, destination=destination, extension=extension)
 
+    def _save_aligned_dir(self, source_dir: str, label: str = '', *, destination=None, extension=None):
+        """Already exported stacks retain their pixels without reburning annotations."""
+        from utils.sorting import natural_sort_key
+        names = sorted((name for name in os.listdir(source_dir)
+                        if os.path.isfile(os.path.join(source_dir, name)) and
+                        os.path.splitext(name)[1].lower() in ALLOWED_EXPORT_EXTENSION_MAP),
+                       key=natural_sort_key)
+        return self._save_frames_as(
+            (os.path.join(source_dir, name) for name in names), names,
+            'registered', os.path.basename(source_dir), baked=True,
+            destination=destination, extension=extension)
+
+    def _save_frames_as(self, frames, filenames, target, label='', *, baked=False, destination=None, extension=None, record=None, labels_snapshot=None):
         window = self.window
-        # Suggest the folder that contains the staging directory, so the copy
-        # lands next to the user's other work. (`parent` here was a leftover
-        # name from the dialog that used to own this code — the NameError it
-        # raised inside the Qt slot made "Save as" do nothing at all.)
-        base = QFileDialog.getExistingDirectory(
-            window, trans.t("output_save_aligned_title"),
-            os.path.dirname(os.path.normpath(source_dir)),
-            QFileDialog.Option.ShowDirsOnly)
-        if not base:
-            return
-        # Create a named SUB-folder in the chosen location. Dumping the frames
-        # straight onto e.g. the Desktop was unusable and broke the naming
-        # contract: the sub-folder carries the same name the UI showed.
-        target = os.path.join(base, os.path.basename(source_dir))
-        os.makedirs(target, exist_ok=True)
-        if os.path.normcase(os.path.abspath(target)) == os.path.normcase(
-                os.path.abspath(source_dir)):
-            window.statusBar().showMessage(
-                trans.t("output_save_aligned_same"), 6000)
-            return
-        copied = 0
-        try:
-            for name in sorted(os.listdir(source_dir)):
-                src = os.path.join(source_dir, name)
-                if os.path.isfile(src):
-                    shutil.copy2(src, os.path.join(target, name))
-                    copied += 1
-        except Exception as exc:
-            show_message_box(window, trans.t("msg_error"),
-                             trans.t("msg_save_failed_text"), str(exc),
-                             QMessageBox.Icon.Critical)
-            return
-        window.statusBar().showMessage(
-            trans.t("output_save_aligned_done").format(
-                n=copied, path=target), 9000)
+        frames, filenames = tuple(frames), tuple(filenames)
+        annotate = not baked and not getattr(record, 'annotations_baked', False)
+        labels = (labels_snapshot or window.label_manager.snapshot()) if annotate else None
+        cfg = scalebar.export_cfg(window, target=target, record=record) if annotate else None
+        base = destination
+        if base is None:
+            base = QFileDialog.getExistingDirectory(
+                window, trans.t('output_save_aligned_title'),
+                getattr(window, 'current_folder_path', '') or '', QFileDialog.Option.ShowDirsOnly)
+            if not base:
+                return None
+            extension, accepted = QInputDialog.getItem(
+                window, trans.t('action_save'),
+                trans.t('batch_format_label') + '\n' + trans.t('export_depth_hint'),
+                ['PNG', 'TIFF', 'JPG', 'BMP'], 0, False)
+            if not accepted:
+                return None
+        extension = (extension or ('' if baked else 'png')).lstrip('.').lower()
+        folder_name = label or os.path.basename(getattr(window, 'current_folder_path', '') or 'Stack')
+        if not folder_name.endswith('_aligned') and target == 'registered':
+            folder_name += '_aligned'
+        if target == 'input':
+            folder_name += '_processed'
+        directory = create_stack_directory(base, self.filename_from_label(folder_name))
+        failures = []
+        saved = 0
+        from core.image_loader import stack_icc_profile
+        exif = (b'' if baked else getattr(getattr(window, 'image_loader', None), 'source_exif', b''))
+        profile = (getattr(record, 'icc_profile', b'') if record is not None else
+                   stack_icc_profile(window))
+        metadata = (getattr(record, 'linear_dng_metadata', None) if record is not None
+                    else getattr(window, 'linear_dng_metadata', None))
+        for index, frame in enumerate(frames):
+            name = frame_export_name(filenames[index] if index < len(filenames) else '', index, extension)
+            path = unique_path(os.path.join(directory, name))
+            try:
+                if baked and not extension:
+                    import shutil
+                    shutil.copy2(frame, path)
+                    saved += 1
+                    continue
+                image = _read_image_any(frame) if baked else frame
+                if image is None:
+                    raise OSError(f'Cannot read {frame}')
+                if metadata is not None and not baked:
+                    from utils.linear_dng import develop_linear
+                    image = develop_linear(image, metadata)
+                if image.ndim == 3 and image.shape[2] == 4 and extension != 'png':
+                    raise ValueError(trans.t('transparent_desktop_unsupported').format(path=path))
+                if labels is not None:
+                    image = labels.prepare_bgr_image(target, image, index)
+                    image = scalebar.burn(image, cfg)
+                if baked:
+                    from core.image_loader import _read_exif_bytes, _read_icc_profile
+                    exif = _read_exif_bytes(frame)
+                    profile = _read_icc_profile(frame)
+                if not imwrite_auto(path, image, get_imwrite_params('.' + extension.lower()), exif=exif, icc_profile=profile):
+                    raise OSError(trans.t('msg_save_failed_info_write'))
+                saved += 1
+            except Exception as exc:
+                failures.append(f'{path}: {exc}')
+        if failures:
+            show_message_box(window, trans.t('msg_save_failed_title'),
+                             trans.t('msg_stack_saved_info').format(saved=saved, total=len(frames), folder=directory),
+                             '\n'.join(failures), QMessageBox.Icon.Warning)
+        else:
+            window.statusBar().showMessage(trans.t('output_save_aligned_done').format(n=saved, path=directory), 9000)
+        return directory if saved == len(frames) and saved else None
+
+    def _registered_record(self):
+        window = self.window
+        manager = getattr(window, 'output_manager', None)
+        items = getattr(window, 'output_list', None)
+        record = manager.record_for_item(items.currentItem()) if manager and items else None
+        return record if record is not None and record.kind == 'aligned' else None
 
     def save_result_stack(self) -> None:
         window = self.window
         if not window.registration_results:
-            show_warning_box(window, trans.t("msg_no_stack_title"), trans.t("msg_no_stack_text"))
+            show_warning_box(window, trans.t('msg_no_stack_title'), trans.t('msg_no_stack_text'))
             return
-
-        default_foldername = self.generate_default_foldername()
-        folder_path = QFileDialog.getExistingDirectory(
-            window,
-            "Select Folder to Save Registration Stack",
-            default_foldername,
-            QFileDialog.Option.ShowDirsOnly,
-        )
-
-        if not folder_path:
-            return
-
-        from utils.logging_setup import log_action
-        log_action("export_stack", folder=folder_path)
-        try:
-            saved_count = 0
-            for index, image in enumerate(window.registration_results):
-                image_to_save = window.label_manager.prepare_bgr_image("registered", image, index)
-                if index < len(window.image_filenames):
-                    filename = window.image_filenames[index]
-                else:
-                    filename = f"registered_{index + 1:04d}{DEFAULT_EXPORT_EXTENSION}"
-                file_path = os.path.join(folder_path, filename)
-                file_path = self.normalize_export_path(file_path)
-                ext = os.path.splitext(file_path)[1].lower()
-                params = get_imwrite_params(ext)
-                if imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params):
-                    saved_count += 1
-
-            show_message_box(
-                window,
-                trans.t("msg_success"),
-                trans.t("msg_stack_saved_text"),
-                trans.t("msg_stack_saved_info").format(
-                    saved=saved_count,
-                    total=len(window.registration_results),
-                    folder=folder_path,
-                ),
-                QMessageBox.Icon.Information,
-            )
-        except cv2.error as exc:
-            show_message_box(
-                window,
-                trans.t("msg_error"),
-                trans.t("msg_save_stack_failed_text"),
-                trans.t("msg_save_stack_opencv_info").format(error=str(exc)),
-                QMessageBox.Icon.Critical,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            show_message_box(
-                window,
-                trans.t("msg_error"),
-                trans.t("msg_save_stack_failed_text"),
-                trans.t("msg_save_stack_unexpected_info").format(error=str(exc)),
-                QMessageBox.Icon.Critical,
-            )
+        self.save_aligned_frames_as(window.registration_results,
+            getattr(window, 'registration_filenames', window.image_filenames), record=self._registered_record())
 
     def save_as_gif(self, target_type: str = "registered") -> None:
         window = self.window
+        if self.gif_worker is not None:
+            return
 
         if target_type == "registered":
             if not window.registration_results:
@@ -369,6 +560,14 @@ class ExportManager:
                 show_warning_box(window, trans.t("msg_no_input_images_title"), trans.t("msg_no_input_images_text"))
                 return
             images_to_save = window.raw_images
+        images_to_save = tuple(images_to_save)
+        record = self._registered_record() if target_type == 'registered' else None
+        metadata = (getattr(record, 'linear_dng_metadata', None) if record is not None
+                    else getattr(window, 'linear_dng_metadata', None))
+        baked = bool(record and record.annotations_baked)
+        labels = None if baked else window.label_manager.snapshot()
+        scale_cfg = None if baked else scalebar.export_cfg(
+            window, target='source' if target_type == 'input' else 'registered', record=record)
 
         duration_dialog = DurationDialog(window)
         if not duration_dialog.exec():
@@ -378,12 +577,20 @@ class ExportManager:
         default_filename = self.generate_default_filename() + ".gif"
         file_path, _ = QFileDialog.getSaveFileName(
             window,
-            "Save as GIF",
+            trans.t('action_save') + ' GIF · 8-bit',
             default_filename,
             "GIF Files (*.gif);;All Files (*)",
         )
 
         if not file_path:
+            return
+        if os.path.splitext(file_path)[1].lower() != '.gif':
+            file_path = os.path.splitext(file_path)[0] + '.gif'
+
+        try:
+            self._safe_export_path(file_path)
+        except ValueError as exc:
+            show_error_box(window, trans.t('msg_save_failed_title'), trans.t('msg_save_failed_text'), str(exc))
             return
 
         self.gif_progress_dialog = QProgressDialog(
@@ -398,15 +605,32 @@ class ExportManager:
             ui_styles.PROGRESS_DIALOG_STYLE)
         self.gif_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.gif_progress_dialog.setMinimumDuration(0)
-        self.gif_progress_dialog.setCancelButton(None)
+        self.gif_progress_dialog.canceled.connect(self._cancel_gif)
         self.gif_progress_dialog.show()
 
         duration_sec = duration_ms / 1000.0
-        self.gif_worker = GifSaverWorker(images_to_save, file_path, duration_sec, window.label_manager, target_type, scale_cfg=scalebar.export_cfg(window))
+        self.gif_worker = GifSaverWorker(
+            images_to_save, file_path, duration_sec, labels,
+            target_type, scale_cfg=scale_cfg, linear_dng_metadata=metadata)
         self.gif_worker.finished_signal.connect(
             lambda success, msg: self.on_gif_saved(success, msg, duration_ms)
         )
+        self.gif_worker.finished.connect(self._gif_thread_finished)
         self.gif_worker.start()
+
+    def _cancel_gif(self):
+        if self.gif_worker:
+            self.gif_worker.cancel()
+        if self.gif_progress_dialog:
+            self.gif_progress_dialog.setLabelText(trans.t('depth_cancelling'))
+            self.gif_progress_dialog.setCancelButton(None)
+            self.gif_progress_dialog.show()
+
+    def _gif_thread_finished(self):
+        worker = self.gif_worker
+        self.gif_worker = None
+        if worker:
+            worker.deleteLater()
 
     def on_gif_saved(self, success: bool, message: str, duration_ms: int) -> None:
         window = self.window
@@ -415,7 +639,9 @@ class ExportManager:
             self.gif_progress_dialog.close()
             self.gif_progress_dialog = None
 
-        self.gif_worker = None
+        if message == 'CANCELLED':
+            window.statusBar().showMessage(trans.t('compare_cancelled'), 8000)
+            return
 
         if success:
             show_success_box(
@@ -450,6 +676,12 @@ class ExportManager:
             images = window.raw_images
             label_target = "input"
             default_name = f"Input_Stack_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.tif"
+        images = tuple(images)
+        record = self._registered_record() if target_type == 'registered' else None
+        baked = bool(record and record.annotations_baked)
+        labels = None if baked else window.label_manager.snapshot()
+        cfg = None if baked else scalebar.export_cfg(
+            window, target='source' if label_target == 'input' else 'registered', record=record)
 
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
         file_path, _ = QFileDialog.getSaveFileName(
@@ -459,14 +691,21 @@ class ExportManager:
         if not file_path:
             return
         if os.path.splitext(file_path)[1].lower() not in ('.tif', '.tiff'):
-            file_path += '.tif'
+            file_path = os.path.splitext(file_path)[0] + '.tif'
         set_last_dialog_dir(file_path)
 
         try:
-            cfg = scalebar.export_cfg(window)
-            labeled = [scalebar.burn(
-                           window.label_manager.prepare_bgr_image(label_target, img, i), cfg)
-                       for i, img in enumerate(images)]
+            metadata = (getattr(record, 'linear_dng_metadata', None) if record is not None
+                        else getattr(window, 'linear_dng_metadata', None))
+            self._safe_export_path(file_path)
+            labeled = []
+            for i, img in enumerate(images):
+                if metadata is not None:
+                    from utils.linear_dng import develop_linear
+                    img = develop_linear(img, metadata)
+                if not baked:
+                    img = scalebar.burn(labels.prepare_bgr_image(label_target, img, i), cfg)
+                labeled.append(img)
             from utils.image_utils import imwrite_multi_tiff
             if imwrite_multi_tiff(file_path, labeled):
                 show_success_box(
@@ -485,57 +724,22 @@ class ExportManager:
     def save_processed_input_stack(self) -> None:
         window = self.window
         if not window.raw_images:
-            show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_no_images_save_stack_text"))
+            show_warning_box(window, trans.t('msg_no_images_title'), trans.t('msg_no_images_save_stack_text'))
             return
+        self._save_frames_as(window.raw_images, window.image_filenames, 'input')
 
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_foldername = f"Processed_Input_Stack_{timestamp}"
-        folder_path = QFileDialog.getExistingDirectory(
-            window,
-            "Select Folder to Save Processed Input Stack",
-            default_foldername,
-            QFileDialog.Option.ShowDirsOnly,
-        )
 
-        if not folder_path:
-            return
+def _read_image_any(path: str):
+    """Read an image from a Unicode path (cv2.imread cannot on Windows)."""
+    import os
 
-        try:
-            saved_count = 0
-            for index, image in enumerate(window.raw_images):
-                image_to_save = window.label_manager.prepare_bgr_image("input", image, index)
-                if index < len(window.image_filenames):
-                    filename = window.image_filenames[index]
-                else:
-                    filename = f"processed_{index + 1:04d}{DEFAULT_EXPORT_EXTENSION}"
-                file_path = os.path.join(folder_path, filename)
-                file_path = self.normalize_export_path(file_path)
-                ext = os.path.splitext(file_path)[1].lower()
-                params = get_imwrite_params(ext)
-                if imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params):
-                    saved_count += 1
+    import cv2
+    import numpy as _np
 
-            show_success_box(
-                window,
-                trans.t("msg_success"),
-                trans.t("msg_processed_stack_saved_text"),
-                trans.t("msg_processed_stack_saved_info").format(
-                    saved=saved_count,
-                    total=len(window.raw_images),
-                    folder=folder_path,
-                ),
-            )
-        except cv2.error as exc:
-            show_error_box(
-                window,
-                trans.t("msg_error"),
-                trans.t("msg_save_stack_failed_text"),
-                trans.t("msg_save_stack_opencv_info").format(error=str(exc)),
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            show_error_box(
-                window,
-                trans.t("msg_error"),
-                trans.t("msg_save_stack_failed_text"),
-                trans.t("msg_save_stack_unexpected_info").format(error=str(exc)),
-            )
+    try:
+        data = _np.fromfile(path, dtype=_np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)

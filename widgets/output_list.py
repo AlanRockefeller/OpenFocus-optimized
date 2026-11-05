@@ -1,9 +1,8 @@
 import os
 import re
 import tempfile
-from typing import Any, Iterable
+from typing import Any
 
-import cv2
 from PyQt6.QtCore import QMimeData, Qt, QUrl
 from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import QListWidget
@@ -12,7 +11,7 @@ from utils.image_utils import get_imwrite_params
 
 
 class OutputListWidget(QListWidget):
-    """Output list that supports dragging results out of the app as JPG."""
+    """Drag image or directory artifacts using their explicit output records."""
 
     def __init__(self, parent: Any | None = None) -> None:
         super().__init__(parent)
@@ -48,11 +47,27 @@ class OutputListWidget(QListWidget):
             if row < 0:
                 continue
 
-            image = self._get_output_image_for_row(row)
-            if image is None:
+            from controllers.output_manager import ALIGNED_DIR_ROLE
+            record = self._window.output_manager.record_for_item(item)
+            if record is not None and record.kind == 'aligned':
+                folder = item.data(ALIGNED_DIR_ROLE)
+                if not folder and record.aligned_frames:
+                    folder = self._window.export_manager.save_aligned_frames_as(
+                        record.aligned_frames, record.aligned_names, record.label)
+                if folder and os.path.isdir(folder):
+                    urls.append(QUrl.fromLocalFile(folder))
                 continue
-
-            file_path = self._write_temp_jpg(image, item.text())
+            try:
+                image = self._get_output_image_for_row(row)
+                if image is None:
+                    continue
+                file_path = self._write_temp_jpg(image, item.text(), record)
+            except Exception as exc:
+                from utils import show_error_box
+                from locales import trans
+                show_error_box(self._window, trans.t('msg_save_failed_title'),
+                               trans.t('msg_save_failed_text'), str(exc))
+                continue
             if file_path:
                 self._temp_files.append(file_path)
                 urls.append(QUrl.fromLocalFile(file_path))
@@ -80,13 +95,26 @@ class OutputListWidget(QListWidget):
         else:
             return None
 
-        return window.label_manager.prepare_bgr_image("registered", image, 0)
+        record = window.output_manager.record_for_row(row)
+        if record is not None and record.linear_dng_metadata is not None:
+            from utils.linear_dng import develop_linear
+            image = develop_linear(image, record.linear_dng_metadata)
+        if record is not None and record.annotations_baked:
+            return image
+        from utils import scalebar
+        labels = window.label_manager.snapshot()
+        image = labels.prepare_bgr_image('output', image, 0,
+                                        output_id=record.output_id if record else None)
+        return scalebar.burn(image, scalebar.export_cfg(window, target='output', record=record))
 
-    def _write_temp_jpg(self, image, base_name: str) -> str | None:
+    def _write_temp_jpg(self, image, base_name: str, record=None) -> str | None:
         window = self._window
         fmt = ".jpg"
         if window is not None and hasattr(window, "drag_export_format"):
             fmt = window.drag_export_format
+        if image.ndim == 3 and image.shape[2] == 4 and fmt.lower() != '.png':
+            from locales import trans
+            raise ValueError(trans.t('transparent_desktop_unsupported').format(path=''))
         safe_name = self._sanitize_filename(base_name)
         params = get_imwrite_params(fmt)
 
@@ -99,12 +127,22 @@ class OutputListWidget(QListWidget):
             ) as temp_file:
                 file_path = temp_file.name
 
-            success = imwrite_auto(file_path, image, params)
+            profile = b''
+            if record is not None:
+                if record.annotations_baked and record.export_path:
+                    from core.image_loader import _read_icc_profile
+                    profile = _read_icc_profile(record.export_path)
+                else:
+                    profile = getattr(record.context, 'icc_profile', record.icc_profile)
+            success = imwrite_auto(file_path, image, params, icc_profile=profile)
             if not success:
-                return None
+                os.remove(file_path)
+                raise OSError(file_path)
             return file_path
         except Exception:
-            return None
+            if 'file_path' in locals() and os.path.isfile(file_path):
+                os.remove(file_path)
+            raise
 
     @staticmethod
     def _sanitize_filename(name: str) -> str:

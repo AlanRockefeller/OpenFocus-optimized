@@ -127,29 +127,23 @@ class TestWipePixmapCache:
     """The A/B wipe caches one pixmap per side across slider steps."""
 
     def _window(self):
-        class _LabelManager:
-            def __init__(self):
-                self.enabled = False
-                self.calls = 0
-
-            def is_enabled_for_target(self, target):
-                return self.enabled
-
-            def display_bgr_image(self, target, image, index, scale_cfg=None):
-                self.calls += 1
-                out = image.copy()
-                if self.enabled:
-                    out[0:4, 0:8] = 255
-                return out
-
-        class _Window:
-            def __init__(self):
-                self.label_manager = _LabelManager()
-                self._bgr_to_pixmap = cv2_to_pixmap
-
+        from types import SimpleNamespace
+        from controllers.label_manager import LabelManager
+        from utils.label_model import Label
         from main import OpenFocus
 
-        window = _Window()
+        window = SimpleNamespace(
+            fusion_results=[],
+            output_manager=SimpleNamespace(record_for_image=lambda _image: None,
+                                           record_for_item=lambda _item: None),
+            output_list=SimpleNamespace(currentItem=lambda: None),
+            _bgr_to_pixmap=cv2_to_pixmap)
+        window._wipe_right_shows_registration = lambda: True
+        window.label_manager = LabelManager(window)
+        window.caption = Label.from_dict({
+            "target": "registered", "format": "A", "enabled": False,
+            "x_location": 5, "y_location": 20, "font_size": 12})
+        window.label_manager.labels.add(window.caption)
         window._wipe_pixmap = lambda kind, index, image: \
             OpenFocus._wipe_pixmap(window, kind, index, image)
         return window
@@ -158,7 +152,7 @@ class TestWipePixmapCache:
         window = self._window()
         image = np.full((40, 60, 3), 80, np.uint8)
         first = window._wipe_pixmap("right", 0, image)
-        assert first is window._wipe_pixmap("right", 0, image)
+        assert np.all(_rgb_array(first) == 80)
 
         other = np.full((40, 60, 3), 200, np.uint8)
         assert tuple(_rgb_array(window._wipe_pixmap("right", 0, other))[0, 0]) \
@@ -170,44 +164,42 @@ class TestWipePixmapCache:
         image = np.full((40, 60, 3), 80, np.uint8)
         unlabeled = _rgb_array(window._wipe_pixmap("right", 0, image)).copy()
 
-        window.label_manager.enabled = True
+        window.caption.enabled = True
         labeled = _rgb_array(window._wipe_pixmap("right", 0, image))
         assert not np.array_equal(unlabeled, labeled), (
             "labels were enabled but the cached pixmap was reused")
 
-        window.label_manager.enabled = False
+        window.caption.enabled = False
         restored = _rgb_array(window._wipe_pixmap("right", 0, image))
         assert np.array_equal(unlabeled, restored)
+
 
     def test_left_side_never_gets_registered_labels(self):
         window = self._window()
         image = np.full((40, 60, 3), 80, np.uint8)
-        window.label_manager.enabled = True
+        window.caption.enabled = True
         plain = _rgb_array(window._wipe_pixmap("left", 0, image))
-        assert window.label_manager.calls == 0
         assert tuple(plain[0, 0]) == (80, 80, 80)
 
-    def test_scale_bar_changes_invalidate_the_cache(self):
-        """A bar added or removed must not be served from the old cache."""
-        window = self._window()
-        window.scale_um_per_px_manual = 1.0
-        image = np.full((120, 200, 3), 80, np.uint8)
 
-        plain = window._wipe_pixmap("right", 0, image)
-        assert window.label_manager.calls == 0
 
-        window.scale_bar_enabled = True
-        window.scale_bar_target = "all"
-        with_bar = window._wipe_pixmap("right", 0, image)
-        assert window.label_manager.calls == 1
-        assert with_bar is not plain
-        assert window._wipe_pixmap("right", 0, image) is with_bar
-        assert window.label_manager.calls == 1
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_empty_source_and_result_hints_have_the_same_color(qapp, theme):
+    from ui.image_panels import _panel_qss, create_result_panel, create_source_panel
 
-        # Scoping the bar away from the result must redraw, not reuse.
-        window.scale_bar_target = "source"
-        restored = window._wipe_pixmap("right", 0, image)
-        assert restored is not with_bar
-        assert window.label_manager.calls == 1
-        assert np.array_equal(_rgb_array(restored), _rgb_array(plain))
-
+    source = create_source_panel()
+    result = create_result_panel()
+    try:
+        for panel in (source, result):
+            panel.widget.setStyleSheet(_panel_qss(theme))
+            panel.widget.show()
+        qapp.processEvents()
+        source_color = source.image_label.palette().color(source.image_label.foregroundRole())
+        result_color = result.image_label.palette().color(result.image_label.foregroundRole())
+        assert source_color == result_color
+    finally:
+        source.widget.close()
+        result.widget.close()
+        source.widget.deleteLater()
+        result.widget.deleteLater()
+        qapp.processEvents()

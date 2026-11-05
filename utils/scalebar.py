@@ -1,10 +1,10 @@
 """Publication-grade scale bars for microscopy images.
 
-Calibration (micrometres per pixel) is auto-detected from TIFF metadata —
-ImageJ's ``unit=micron`` convention and OME-TIFF's ``PhysicalSizeX`` XML —
-with a manual fallback. Bars are burned into exported images: a 1-2-5 nice
-length spanning ~12% of the image width, stroked text readable on any
-background, auto inverse color, four corner positions.
+Calibration (micrometres per pixel) is auto-detected from TIFF or
+TIFF-based DNG metadata — ImageJ's ``unit=micron`` convention and OME-TIFF's
+``PhysicalSizeX`` XML — with a manual fallback. Bars are burned into exported
+images: a 1-2-5 nice length spanning ~12% of the image width, stroked text
+readable on any background, auto inverse color, four corner positions.
 
 Pure NumPy/OpenCV/PIL, thread-safe: safe to call from worker threads
 (batch processing, GIF export).
@@ -70,21 +70,8 @@ def _rational(value) -> Optional[float]:
         return None
 
 
-def detect_px_size_um(path: str) -> Optional[float]:
-    """Read µm/px from a TIFF's metadata (ImageJ or OME-TIFF first, then
-    standard resolution tags). None when uncalibrated or implausible."""
-    import os
-    if os.path.splitext(path)[1].lower() not in (".tif", ".tiff"):
-        return None
-    try:
-        from PIL import Image
-        with Image.open(path) as im:
-            tags = getattr(im, "tag_v2", None) or getattr(im, "tag", {})
-            desc = str(tags.get(270, "") or "")
-            xres = _rational(tags.get(282))
-            resunit = tags.get(296, 2)
-    except Exception:
-        return None
+def _calibration_from_tags(desc, xres, resunit) -> Optional[float]:
+    """Shared microscopy-calibration rules for TIFF and TIFF-based DNG tags."""
     # OME-TIFF: PhysicalSizeX="0.65" PhysicalSizeXUnit="µm" — carries its
     # own absolute scale, so no resolution tag is needed.
     if "PhysicalSizeX=" in desc:
@@ -125,6 +112,58 @@ def detect_px_size_um(path: str) -> Optional[float]:
     return None
 
 
+def _read_tiff_calibration_tags(path: str):
+    from PIL import Image
+    with Image.open(path) as im:
+        tags = getattr(im, "tag_v2", None) or getattr(im, "tag", {})
+        return (str(tags.get(270, "") or ""), _rational(tags.get(282)),
+                tags.get(296, 2))
+
+
+def _read_dng_calibration_tags(path: str):
+    """Read TIFF tags from a DNG IFD, including LinearRaw payloads PIL rejects."""
+    import tifffile
+    with tifffile.TiffFile(path) as tif:
+        tags = tif.pages[0].tags
+        desc = tags.get(270).value if 270 in tags else ""
+        xres = _rational(tags.get(282).value) if 282 in tags else None
+        resunit = int(tags.get(296).value) if 296 in tags else 2
+    return str(desc or ""), xres, resunit
+
+
+def detect_px_size_um(path: str) -> Optional[float]:
+    """Read µm/px from a TIFF or TIFF-based DNG's microscopy metadata.
+
+    ImageJ and OME tags are trusted first, then explicit resolution units;
+    None when uncalibrated or implausible.  DNG uses the same rules because
+    camera/print DPI is not a physical sample size either.
+    """
+    import os
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".tif", ".tiff", ".dng"):
+        return None
+    try:
+        if ext == ".dng":
+            desc, xres, resunit = _read_dng_calibration_tags(path)
+        else:
+            desc, xres, resunit = _read_tiff_calibration_tags(path)
+    except Exception:
+        return None
+    return _calibration_from_tags(desc, xres, resunit)
+
+
+def _next_shorter_nice(value: float) -> float:
+    """The next smaller 1-2-5 value (5 -> 2 -> 1 -> 0.5 ...)."""
+    if value <= 0:
+        return 0.0
+    k = math.floor(math.log10(value))
+    for mantissa in (5.0, 2.0, 1.0):
+        candidate = mantissa * 10 ** k
+        if candidate < value * 0.999:
+            return candidate
+    return 10 ** (k - 1)
+
+
 def nice_bar_um(target_um: float) -> float:
     """Round to the nearest 1-2-5 x 10^k value (>= 75% of the target)."""
     if target_um <= 0:
@@ -145,54 +184,19 @@ def format_length(um: float) -> str:
     return f"{um:g} µm"
 
 
-def _load_font(size: int, family: str = None, bold: bool = False):
-    """A PIL font at `size`, preferring `family` when one is named.
-
-    The cache key includes the family and the weight. Caching by size alone
-    meant the first font requested was reused for every later one, so picking
-    a typeface in the dialog had no effect on the drawn bar.
-    """
-    key = (int(size), (family or "").strip().lower(), bool(bold))
-    if key in _font_cache:
-        return _font_cache[key]
-
-    font = None
-    try:
-        from PIL import ImageFont
-        wanted = (family or "").strip()
-        # A named family first: PIL resolves it against the system fonts and
-        # raises when the family is absent, which lets us fall through.
-        if wanted:
-            candidates = [f"{wanted}-Bold.ttf", f"{wanted}.ttf", wanted]
-            if not bold:
-                candidates = [f"{wanted}.ttf", wanted] + candidates[:1]
-            for name in candidates:
-                try:
-                    font = ImageFont.truetype(name, size)
-                    break
-                except Exception:
-                    continue
-        if font is None:
-            for path in _FONT_CANDIDATES:
-                try:
-                    font = ImageFont.truetype(path, size)
-                    break
-                except Exception:
-                    continue
-        if font is None and sys_platform() == "linux":
-            import glob
-            for path in sorted(glob.glob("/usr/share/fonts/**/*.ttf",
-                                         recursive=True))[:80]:
-                try:
-                    font = ImageFont.truetype(path, size)
-                    break
-                except Exception:
-                    continue
-    except Exception:
-        font = None
-
-    _font_cache[key] = font
-    return font
+def font_substitution(size: int, family: str = None,
+                      bold: bool = False) -> str:
+    """Requested family vs the one actually used ("" when they agree)."""
+    from utils.fonts import load_font
+    _font, actual = load_font(size, family, bold)
+    wanted = (family or "").strip()
+    if not wanted:
+        return ""
+    if not actual or actual == "default":
+        return wanted
+    if actual.lower() != wanted.lower():
+        return wanted
+    return ""
 
 
 def sys_platform():
@@ -208,6 +212,32 @@ def _region_mean(img, x1: int, y1: int, x2: int, y2: int) -> float:
     return float(img[y1:y2, x1:x2].mean())
 
 
+def draw_scale_bar_ex(img: np.ndarray, px_um: float,
+                      position: str = "bottom-right",
+                      color: str = "auto",
+                      font_family: str = None,
+                      font_size: float = 0.0,
+                      font_bold: bool = False,
+                      text_align: str = "auto",
+                      custom_x: float = None,
+                      custom_y: float = None):
+    """Draw the bar and report what actually happened.
+
+    Returns ``(image, info)`` where info may contain ``bar_um``, ``bar_px``,
+    ``too_small`` (no legal length fits) and ``substituted_font`` (the
+    requested family could not draw the label). The preview needs these to
+    avoid showing a success state for a bar that was not drawn as requested.
+    """
+    info = {"bar_um": None, "bar_px": None, "too_small": False,
+            "substituted_font": ""}
+    drawn = draw_scale_bar(img, px_um, position, color,
+                           font_family=font_family, font_size=font_size,
+                           font_bold=font_bold, text_align=text_align,
+                           custom_x=custom_x, custom_y=custom_y,
+                           _info=info)
+    return drawn, info
+
+
 def draw_scale_bar(img: np.ndarray, px_um: float,
                    position: str = "bottom-right",
                    color: str = "auto",
@@ -216,14 +246,14 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
                    font_bold: bool = False,
                    text_align: str = "auto",
                    custom_x: float = None,
-                   custom_y: float = None) -> np.ndarray:
+                   custom_y: float = None,
+                   _info: Optional[dict] = None) -> np.ndarray:
     """Return a copy of ``img`` (BGR) with a scale bar burned into a corner.
 
     No-op (same array) when calibration is missing or implausible. Drawing
-    happens in RGB via PIL so the label can use a real font with a stroke;
-    the text falls back to cv2 "um" when no system font exists.
+    happens in RGB via PIL so the label can use a real font with a stroke.
     """
-    if img is None or not px_um or px_um <= 0:
+    if img is None or not px_um or not math.isfinite(px_um) or px_um <= 0:
         return img
     if position not in _VALID_POSITIONS:
         position = "bottom-right"
@@ -242,7 +272,11 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
             img8 = (img.astype(np.float32) * (255.0 / 65535.0)).round().astype(np.uint8)
         else:
             img8 = np.clip(img, 0, 255).astype(np.uint8)
-        drawn = draw_scale_bar(img8, px_um, position, color)
+        drawn = draw_scale_bar(
+            img8, px_um, position, color, font_family=font_family,
+            font_size=font_size,
+            font_bold=font_bold, text_align=text_align,
+            custom_x=custom_x, custom_y=custom_y, _info=_info)
         if drawn is img8:
             return img
         mask = np.any(drawn != img8, axis=2)
@@ -254,15 +288,33 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
         return out
 
     h, w = img.shape[:2]
-    bar_um = nice_bar_um(w * px_um * BAR_FRACTION)
-    bar_px = max(8, int(round(bar_um / px_um)))
     thickness = max(2, int(round(h * 0.004)))
     margin = max(10, int(round(min(h, w) * 0.02)))
     # Very small frames made the "tight frame" fallback below push bar_y1
     # past bar_y2, which PIL rejects with ValueError and turned every small
     # export into a failure. Keep the whole motif inside the canvas.
     margin = min(margin, max(1, h // 4), max(1, w // 4))
-    bar_px = min(bar_px, max(4, w - 2 * margin))
+    available_px = max(0, w - 2 * margin)
+    # The drawn length and the printed physical length must describe the same
+    # distance. A minimum pixel width with the original label (the old
+    # ``max(8, ...)``) silently changed the scale on small frames: a 2 um bar
+    # was drawn 8 px long at 1 um/px and still said "2 µm".
+    target_um = w * px_um * BAR_FRACTION
+    if available_px > 0:
+        target_um = min(target_um, available_px * px_um)
+    bar_um = nice_bar_um(target_um)
+    bar_px = int(round(bar_um / px_um))
+    while bar_px > available_px and bar_um > 0:
+        bar_um = _next_shorter_nice(bar_um)
+        bar_px = int(round(bar_um / px_um))
+    if bar_px < 4 or bar_px > available_px:
+        if _info is not None:
+            _info["too_small"] = True
+            _info["bar_um"] = bar_um if bar_um > 0 else None
+        return img
+    if _info is not None:
+        _info["bar_um"] = bar_um
+        _info["bar_px"] = bar_px
     thickness = min(thickness, max(1, h // 3))
     # Font size must leave room for the bar + gap + label inside the frame.
     # A hard floor of 14 px made the label taller than a 60 px frame, so it
@@ -278,8 +330,12 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     else:
         font_size = auto_size
 
-    font = _load_font(font_size, font_family, font_bold)
+    from utils.fonts import load_font_for_text
     label = format_length(bar_um)
+    font, _actual_family, substituted = load_font_for_text(
+        font_size, font_family, label, bold=font_bold)
+    if _info is not None and substituted:
+        _info["substituted_font"] = f"{substituted} → {_actual_family}"
     if font is None:
         label = label.replace("µ", "u")
 
@@ -287,12 +343,13 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil)
     if font is not None:
-        left, _top, right, bottom = font.getbbox(label)
-        text_w, text_h = right - left, bottom - _top
+        left, top, right, bottom = font.getbbox(label)
+        text_w, text_h = right - left, bottom - top
     else:
         (text_w, text_h), _baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, font_size / 30.0,
             max(1, font_size // 14))
+        left = top = 0
 
     # Gap between the label and the bar. PIL's getbbox() ignores the stroke
     # it draws around the glyphs, so a gap of a few pixels let the label sit
@@ -301,6 +358,10 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     stroke_w = max(1, font_size // 14)
     gap = max(4, font_size // 3) + stroke_w
     stroke = 1 if thickness <= 3 else 2
+    if text_w + 2 * stroke_w > w or text_h + gap + thickness + 2 * stroke_w > h:
+        if _info is not None:
+            _info["too_small"] = True
+        return img
 
     # Horizontal placement
     if position == "custom":
@@ -348,10 +409,19 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
         bar_y2 = bar_y1 + thickness
         text_y = bar_y2 + gap
 
-    # Clamp defensively: any negative/overflowing coordinate pair reaches PIL
-    # as an invalid rectangle (y1 < y0) and aborts the export.
-    bar_x1, bar_x2 = sorted((min(max(bar_x1, 0), w), min(max(bar_x2, 0), w)))
-    bar_y1, bar_y2 = sorted((min(max(bar_y1, 0), h), min(max(bar_y2, 0), h)))
+    # Translate the complete motif into the image; never shorten its bar.
+    bar_x1 = min(max(bar_x1, stroke), w - bar_px - stroke)
+    bar_x2 = bar_x1 + bar_px
+    lower = min(text_y - stroke_w, bar_y1 - stroke)
+    upper = max(text_y + text_h + stroke_w, bar_y2 + stroke)
+    if upper - lower > h:
+        if _info is not None:
+            _info["too_small"] = True
+        return img
+    shift = max(0, -lower) - max(0, upper - h)
+    text_y += shift
+    bar_y1 += shift
+    bar_y2 += shift
 
     if color == "auto":
         mean = _region_mean(img, bar_x1 - margin, bar_y1 - margin,
@@ -364,15 +434,14 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     # Outline pass then fill keeps the bar visible on same-color regions
     draw.rectangle((bar_x1 - stroke, bar_y1 - stroke,
                     bar_x2 + stroke, bar_y2 + stroke), fill=edge_rgb)
-    draw.rectangle((bar_x1, bar_y1, bar_x2, bar_y2), fill=bar_rgb)
+    draw.rectangle((bar_x1, bar_y1, bar_x2 - 1, bar_y2 - 1), fill=bar_rgb)
 
     # Keep the label inside the canvas: PIL clips silently, but a label cut
     # in half is worse than a nudged one.
-    text_x = max(0, min(int(text_x), max(0, w - text_w - 1)))
-    text_y = max(0, min(int(text_y), max(0, h - text_h - 1)))
+    text_x = max(stroke_w, min(int(text_x), w - text_w - stroke_w))
 
     if font is not None:
-        draw.text((text_x, text_y), label, font=font, fill=bar_rgb,
+        draw.text((text_x - left, text_y - top), label, font=font, fill=bar_rgb,
                   stroke_width=stroke_w, stroke_fill=edge_rgb)
         out = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         return out
@@ -384,46 +453,123 @@ def draw_scale_bar(img: np.ndarray, px_um: float,
     return out
 
 
-def effective_px_um(window) -> Optional[float]:
-    """Calibration for the current stack: an explicit manual value wins over
-    auto-detected metadata.
+_STATE_FIELDS = {
+    "enabled": ("scale_bar_enabled", False),
+    "manual": ("scale_um_per_px_manual", 0.0),
+    "position": ("scale_bar_position", "bottom-right"),
+    "color": ("scale_bar_color", "auto"),
+    "font_family": ("scale_bar_font_family", ""),
+    "font_size": ("scale_bar_font_size", 0.0),
+    "font_bold": ("scale_bar_font_bold", False),
+    "text_align": ("scale_bar_text_align", "auto"),
+    "target": ("scale_bar_target", "all"),
+    "custom_x": ("scale_bar_custom_x", 0.95),
+    "custom_y": ("scale_bar_custom_y", 0.95),
+}
 
-    The user typed that number for *this* stack because they know the optics;
-    metadata can be wrong (or left over from another file), and a
-    plausible-looking wrong scale bar in a publication is worse than none.
+
+def capture_state(window) -> dict:
+    state = {key: getattr(window, attr, default)
+             for key, (attr, default) in _STATE_FIELDS.items()}
+    manager = getattr(window, "output_manager", None)
+    outputs = getattr(window, "output_list", None)
+    if manager is not None and outputs is not None:
+        state["outputs"] = {
+            record.output_id: (dict(record.scale_bar_config)
+                               if record.scale_bar_config else None)
+            for row in range(outputs.count())
+            if (record := manager.record_for_row(row)) is not None
+        }
+    return state
+
+
+def restore_state(window, state) -> None:
+    if not isinstance(state, dict):
+        return
+    for key, (attr, default) in _STATE_FIELDS.items():
+        setattr(window, attr, state.get(key, default))
+    manager = getattr(window, "output_manager", None)
+    outputs = getattr(window, "output_list", None)
+    if manager is not None and outputs is not None:
+        saved_outputs = state.get("outputs", {})
+        for row in range(outputs.count()):
+            record = manager.record_for_row(row)
+            if record is not None and record.output_id in saved_outputs:
+                cfg = saved_outputs[record.output_id]
+                record.scale_bar_config = dict(cfg) if cfg else None
+                record.scale_bar_initialized = True
+
+
+def effective_px_um(window) -> Optional[float]:
+    """Calibration for the CURRENT working pixels of this window.
+
+    A manual value is stored in original-pixel units (that is what the user
+    typed and what a project stores), so it is divided by the working scale:
+    0.5 µm/px loaded at 50% is 1 µm per working pixel. Metadata is already
+    expressed for the loaded pixels by the loader.
+
+    The manual value wins over metadata: the user typed it for this stack
+    because they know the optics, and a plausible-looking wrong bar in a
+    publication is worse than none.
     """
     manual = getattr(window, "scale_um_per_px_manual", 0.0) or 0.0
-    if manual > 0:
-        return manual
+    if math.isfinite(manual) and manual > 0:
+        scale = float(getattr(window, "current_scale_factor", 1.0) or 1.0)
+        if not math.isfinite(scale) or scale <= 0:
+            return None
+        return manual / scale
     source = getattr(window, "source_px_um", None)
-    if source and source > 0:
-        # source_px_um describes base_images, which may already have been
-        # decoded below full resolution. A later resize starts from that base,
-        # so account for the additional base/current scale ratio as well.
-        try:
-            base_scale = float(getattr(window, "base_scale_factor", 1.0) or 1.0)
-            current_scale = float(
-                getattr(window, "current_scale_factor", base_scale) or base_scale)
-        except (TypeError, ValueError):
-            base_scale = current_scale = 1.0
-        if base_scale > 0 and current_scale > 0:
-            return source * base_scale / current_scale
+    if source and math.isfinite(source) and source > 0:
         return source
     return None
 
 
-def export_cfg(window, target: str = "output") -> Optional[dict]:
+def calibration_px_um(window, record=None) -> Optional[float]:
+    """Physical µm per pixel for a record's own pixels, or the working stack.
+
+    A historical output keeps its render-context calibration (or the manual
+    value the user committed for it).  A record without provenance never
+    borrows the current stack: that would attach a plausible but unverified
+    scale to pixels from another acquisition.
+    """
+    if record is None:
+        return effective_px_um(window)
+    cfg = getattr(record, "scale_bar_config", None)
+    context = getattr(record, "context", None)
+    if isinstance(cfg, dict):
+        manual = cfg.get("mode") == "manual" or "manual" in cfg
+        if context is not None or manual:
+            try:
+                px_um = float(cfg.get("px_um"))
+            except (TypeError, ValueError):
+                px_um = None
+            if px_um and math.isfinite(px_um) and px_um > 0:
+                return px_um
+    if context is not None:
+        px_um = getattr(context, "pixel_size_um", None)
+        if px_um and math.isfinite(px_um) and px_um > 0:
+            return float(px_um)
+    return None
+
+
+def export_cfg(window, target: str = "output", *, record=None) -> Optional[dict]:
     """Config passed to burn() at export time; None when disabled/unknown.
 
     `target` honours the dialog's "apply to" choice: a bar scoped to the
     source stack must not appear on exported fused images, and vice versa.
     """
+    if record is not None and getattr(record, "annotations_baked", False):
+        return None
+    if record is not None and getattr(record, "scale_bar_initialized", False):
+        return record.scale_bar_config
     if not getattr(window, "scale_bar_enabled", False):
         return None
     where = getattr(window, "scale_bar_target", "all") or "all"
     if where != "all" and where != target:
         return None
     px_um = effective_px_um(window)
+    if record is not None and record.context is not None:
+        px_um = record.context.pixel_size_um
     if not px_um or px_um <= 0:
         return None
     cfg = {
@@ -444,6 +590,8 @@ def burn(img: np.ndarray, cfg: Optional[dict]) -> np.ndarray:
     """Apply draw_scale_bar from an export_cfg dict; passthrough on None."""
     if not cfg:
         return img
+    if img.ndim == 3 and img.shape[2] == 4:
+        raise ValueError("Scale bars on transparent images are unsupported")
     return draw_scale_bar(
         img, cfg["px_um"], cfg["position"], cfg["color"],
         font_family=cfg.get("font_family"),

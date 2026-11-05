@@ -77,6 +77,128 @@ def _document(frames=None, result=None, **kwargs):
     return RetouchDocument(result, _context(frames, result), **kwargs)
 
 
+def test_global_tones_preserve_precision_and_are_one_history_step():
+    image = np.full((160, 180, 3), 10001, np.uint16)
+    frame = np.full_like(image, 23456)
+    doc = _document(frames=[frame], result=image)
+    assert doc.adjust_tones(1.0, 0.0) == "committed"
+    assert doc.working.dtype == np.uint16
+    assert (doc.working == 20002).all()
+    assert (image == 10001).all() and (frame == 23456).all()
+    changed = doc.working.copy()
+    assert doc.undo() and np.array_equal(doc.working, image)
+    assert not doc.can_undo
+    assert doc.redo() and np.array_equal(doc.working, changed)
+
+
+def test_global_tones_cancel_and_history_limit_leave_result_untouched():
+    image = np.full((256, 256, 3), 100, np.uint8)
+    doc = _document(frames=[image.copy()], result=image)
+    calls = []
+    def cancel_after_one_tile():
+        calls.append(1)
+        return len(calls) > 1
+    assert doc.adjust_tones(1.0, 0.0, cancel_after_one_tile) == "cancelled"
+    assert np.array_equal(doc.working, image)
+    assert not doc.can_undo and not doc.is_dirty
+    small = _document(frames=[image.copy()], result=image, max_bytes=100)
+    assert small.adjust_tones(1.0, 0.0) == "oversize"
+    assert np.array_equal(small.working, image) and not small.can_undo
+
+
+def test_tone_cancellation_during_history_commit_preserves_redo(monkeypatch):
+    image = np.full((256, 256, 3), 10000, np.uint16)
+    doc = _document(frames=[image.copy()], result=image)
+    assert doc.adjust_tones(1.0, 0.0) == "committed"
+    painted = doc.working.copy()
+    assert doc.undo() and doc.can_redo
+    cancelled = [False]
+    original_end = doc.history.end
+    original_slice = doc.history._tile_slice
+
+    def commit_with_interruption(*args, **kwargs):
+        def interrupt_after_first_comparison(key):
+            cancelled[0] = True
+            return original_slice(key)
+        monkeypatch.setattr(doc.history, "_tile_slice", interrupt_after_first_comparison)
+        try:
+            return original_end(*args, **kwargs)
+        finally:
+            monkeypatch.setattr(doc.history, "_tile_slice", original_slice)
+
+    monkeypatch.setattr(doc.history, "end", commit_with_interruption)
+    assert doc.adjust_tones(-1.0, 0.0, lambda: cancelled[0]) == "cancelled"
+    np.testing.assert_array_equal(doc.working, image)
+    assert doc.can_redo and not doc.can_undo and not doc.is_dirty
+    assert doc.redo()
+    np.testing.assert_array_equal(doc.working, painted)
+
+
+def test_global_tones_contrast_and_alpha():
+    from utils.retouch import adjust_tones
+    pixels = np.array([[[10000, 32768, 50000, 12345]]], dtype=np.uint16)
+    adjusted = adjust_tones(pixels, 0.0, 1.0)
+    assert adjusted.dtype == np.uint16
+    assert adjusted[0, 0, 0] == 0
+    assert adjusted[0, 0, 1] == 32768
+    assert adjusted[0, 0, 2] == 65535
+    assert adjusted[0, 0, 3] == 12345
+
+
+def test_exposure_brush_is_local_undoable_and_preserves_16bit():
+    base = np.full((64, 64, 3), 12001, np.uint16)
+    frames = [np.full_like(base, 25000)]
+    source = frames[0].copy()
+    doc = _document(frames=frames, result=base)
+    assert doc.set_tool("exposure")
+    doc.exposure = 1.0
+    doc.set_brush(diameter=12, hardness=1.0, opacity=1.0)
+    assert doc.begin_stroke(30, 30)
+    doc.stroke_to(31, 30)
+    assert doc.end_stroke() == "committed"
+    assert (doc.working[30, 30] == 24002).all()
+    assert (doc.working[0, 0] == 12001).all()
+    assert doc.working.dtype == np.uint16
+    painted = doc.working.copy()
+    assert doc.undo() and np.array_equal(doc.working, base)
+    assert doc.redo() and np.array_equal(doc.working, painted)
+    assert np.array_equal(frames[0], source)
+    assert (base == 12001).all()
+
+
+def test_zero_exposure_stroke_preserves_redo():
+    base = np.full((64, 64, 3), 12001, np.uint16)
+    doc = _document(frames=[np.full_like(base, 25000)], result=base)
+    doc.set_tool("exposure")
+    doc.exposure = 1.0
+    assert doc.begin_stroke(30, 30)
+    assert doc.end_stroke() == "committed"
+    painted = doc.working.copy()
+    assert doc.undo()
+    doc.exposure = 0.0
+    assert doc.begin_stroke(30, 30)
+    doc.stroke_to(35, 30)
+    assert doc.end_stroke() == "empty"
+    assert doc.can_redo and not doc.can_undo and not doc.is_dirty
+    np.testing.assert_array_equal(doc.working, base)
+    assert doc.redo()
+    np.testing.assert_array_equal(doc.working, painted)
+
+
+def test_exposure_brush_locks_amount_and_cancels():
+    doc = _document()
+    doc.set_tool("exposure")
+    doc.exposure = -1.0
+    doc.set_brush(diameter=12, hardness=1.0, opacity=1.0)
+    assert doc.begin_stroke(30, 30)
+    doc.exposure = 1.0
+    doc.stroke_to(36, 30)
+    assert (doc.working[30, 36] == 60).all()
+    assert doc.cancel_stroke()
+    assert np.array_equal(doc.working, doc.base)
+    assert not doc.can_undo and not doc.is_dirty
+
+
 def test_stroke_locks_the_source_frame_and_settings():
     doc = _document()
     doc.set_frame(0)
@@ -320,6 +442,113 @@ def _dialog(qapp, monkeypatch=None, apply_result=True):
     return dlg, published
 
 
+def test_closed_parented_dialog_releases_document_without_deleting_worker(qapp, monkeypatch):
+    import gc
+    import threading
+    import weakref
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from PyQt6.QtWidgets import QWidget
+    from controllers.output_manager import OutputRecord
+    from dialogs.retouch import RetouchDialog, _SharpnessWorker
+
+    entered, release = threading.Event(), threading.Event()
+    def run_until_released(worker):
+        entered.set()
+        release.wait(5)
+    monkeypatch.setattr(_SharpnessWorker, "run", run_until_released)
+    parent = QWidget()
+    image = np.full((96, 120, 3), 100, np.uint8)
+    record = OutputRecord.create(image, "result", context=_context([image], image))
+    dialog = RetouchDialog(parent, record=record, apply_callback=lambda *_: (True, ""))
+    document = weakref.ref(dialog.doc)
+    working = weakref.ref(dialog.doc.working)
+    base = weakref.ref(dialog.doc.base)
+    dialog.show()
+    qapp.processEvents()
+    dialog._start_sharpness_worker()
+    worker = dialog._sharpness_worker
+    try:
+        assert entered.wait(2)
+        dialog._confirm_close = lambda: False
+        dialog.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert not sip.isdeleted(dialog) and worker.isRunning()
+        del dialog._confirm_close
+        dialog.close()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert sip.isdeleted(dialog)
+        assert worker.isRunning() and not sip.isdeleted(worker)
+        assert document() is None
+        assert working() is None and base() is None
+        del dialog
+        gc.collect()
+        assert document() is None
+    finally:
+        release.set()
+        worker.wait(5000)
+
+
+def test_global_tone_dialog_previews_cancels_and_applies(qapp):
+    from PyQt6.QtCore import QEventLoop, QTimer
+    from PyQt6.QtWidgets import QDialog
+    from dialogs.retouch import _ToneDialog
+
+    parent, published = _dialog(qapp)
+    dialog = _ToneDialog(parent.doc, parent)
+    dialog.exposure.spin.setValue(100)
+    after = dialog.preview.pixmap().toImage().pixelColor(10, 10).red()
+    dialog.before.setChecked(True)
+    before = dialog.preview.pixmap().toImage().pixelColor(10, 10).red()
+    assert (before, after) == (110, 220)
+    dialog.reject()
+    assert (parent.doc.working == 110).all() and not parent.doc.can_undo
+
+    dialog = _ToneDialog(parent.doc, parent)
+    dialog.exposure.spin.setValue(100)
+    dialog._apply()
+    loop = QEventLoop()
+    dialog.worker.finished.connect(loop.quit)
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert (parent.doc.working == 220).all()
+    parent._update_dirty_ui()
+    assert parent._apply()
+    assert (published[0][1] == 220).all()
+    parent.close()
+
+
+def test_dialog_exposure_preview_undo_and_publish(qapp):
+    dlg, published = _dialog(qapp)
+    dlg.rb_exposure.setChecked(True)
+    dlg.num_exposure.spin.setValue(100)
+    assert dlg.begin_stroke(60, 48)
+    dlg.end_stroke()
+    assert (dlg.doc.working[48, 60] == 220).all()
+    dlg._undo()
+    assert (dlg.doc.working[48, 60] == 110).all()
+    dlg._redo()
+    assert (dlg.doc.working[48, 60] == 220).all()
+    assert dlg._apply()
+    assert (published[0][1][48, 60] == 220).all()
+    assert (published[0][0].image[48, 60] == 110).all()
+    dlg.close()
+
+
+def test_dialog_exposure_amount_is_hidden_for_other_tools(qapp):
+    dlg, _ = _dialog(qapp)
+    assert not dlg.num_exposure.isVisible()
+    dlg.rb_exposure.setChecked(True)
+    qapp.processEvents()
+    assert dlg.num_exposure.isVisible() and dlg.num_exposure.isEnabled()
+    dlg.rb_restore.setChecked(True)
+    qapp.processEvents()
+    assert not dlg.num_exposure.isVisible()
+    dlg._allow_close = True
+    dlg.close()
+
+
 def test_dialog_preserves_zoom_and_frame_when_switching(qapp):
     from PyQt6.QtCore import QPointF
     dlg, _ = _dialog(qapp)
@@ -335,6 +564,37 @@ def test_dialog_preserves_zoom_and_frame_when_switching(qapp):
     assert dlg.frame_list.count() == 3
     dlg._allow_close = True
     dlg.close()
+
+
+def test_zoom_indicator_tracks_wheel_and_keeps_canvases_aligned(qapp):
+    from PyQt6.QtCore import QPoint, QPointF, Qt
+    from PyQt6.QtGui import QWheelEvent
+    from locales import trans
+    from ui.styles import get_theme_style
+
+    previous_style = qapp.styleSheet()
+    qapp.setStyleSheet(get_theme_style("light"))
+    dlg, _ = _dialog(qapp)
+    try:
+        dlg.resize(1280, 820)
+        dlg._set_focus_layout(False, True)
+        qapp.processEvents()
+        assert dlg.source_canvas.mapTo(dlg, QPoint()).y() == \
+            dlg.result_canvas.mapTo(dlg, QPoint()).y()
+        assert dlg.source_canvas.height() == dlg.result_canvas.height()
+
+        dlg.btn_100.click()
+        assert dlg.lbl_zoom.text() == trans.t("retouch_zoom_level").format(percent=100)
+        point = QPointF(dlg.result_canvas.rect().center())
+        wheel = QWheelEvent(point, point, QPoint(), QPoint(0, 120),
+                            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                            Qt.ScrollPhase.NoScrollPhase, False)
+        qapp.sendEvent(dlg.result_canvas, wheel)
+        assert dlg.lbl_zoom.text() == trans.t("retouch_zoom_level").format(percent=125)
+    finally:
+        dlg._allow_close = True
+        dlg.close()
+        qapp.setStyleSheet(previous_style)
 
 
 def test_dialog_keeps_16bit_through_display_and_apply(qapp):
@@ -730,7 +990,7 @@ def test_render_completion_attaches_provenance(qapp, monkeypatch):
     manager._render_context = {
         "source": w.raw_images,
         "source_ref": w.raw_images,
-        "alignment_options": (False, False, False),
+        "alignment_options": (),
         "preview": False,
         "roi": False,
         "roi_rect": None,
@@ -738,7 +998,6 @@ def test_render_completion_attaches_provenance(qapp, monkeypatch):
         "roi_base_index": 0,
         "algorithm": "guided_filter",
         "aligned": False,
-        "all_filenames": list(w.image_filenames),
         "filenames": list(w.image_filenames),
         "included": [0, 1],
     }
@@ -760,3 +1019,122 @@ def test_output_label_to_filename():
     assert f("OpenFocus_20261015_GuidedFilter_ECC — DCT") == "OpenFocus_20261015_GuidedFilter_ECC_DCT"
     assert f('a/b:c*?"<>|') == "a_b_c_"
     assert f("") == "OpenFocus_result"
+
+
+def test_diameter_shortcut_updates_the_document(qapp):
+    """`[` / `]` must change the brush the next stroke actually uses.
+
+    `_NumberRow.setValue` is also used to seed the controls and therefore
+    suppresses valueChanged; calling it alone updated the number and left the
+    document at the old diameter.
+    """
+    from types import SimpleNamespace
+
+    from dialogs.retouch import RetouchDialog, _NumberRow
+
+    row = _NumberRow("Diameter", 1, 2048, 64)
+    applied = []
+
+    class Doc:
+        stroke_active = False
+
+    host = SimpleNamespace(
+        doc=Doc(),
+        num_diameter=row,
+        _on_brush_changed=lambda: applied.append(row.value()),
+    )
+    try:
+        RetouchDialog._bump_diameter(host, 1.25)
+        assert row.value() == 80
+        assert applied == [80], "the document must be told about the change"
+
+        applied.clear()
+        RetouchDialog._bump_diameter(host, 0.8)
+        assert row.value() == 64
+        assert applied == [64]
+    finally:
+        row.deleteLater()
+
+
+def test_apply_is_refused_during_preview(qapp):
+    """Ctrl+Enter must obey the same condition as the visible button."""
+    from types import SimpleNamespace
+
+    from dialogs.retouch import RetouchDialog
+
+    class Doc:
+        stroke_active = False
+        is_dirty = True
+
+    host = SimpleNamespace(
+        _applied=False, _applying=False, _closing=False, doc=Doc(), preview_mode="before",
+        btn_apply=None, apply_callback=lambda *a: (True, ""))
+    assert RetouchDialog._can_apply(host) is False
+
+    host.preview_mode = None
+    assert RetouchDialog._can_apply(host) is True
+
+    host.doc.stroke_active = True
+    assert RetouchDialog._can_apply(host) is False
+
+    host.doc.stroke_active = False
+    host.doc.is_dirty = False
+    assert RetouchDialog._can_apply(host) is False
+
+
+def test_source_peek_never_contains_sharpness_overlay(qapp):
+    dlg, _published = _dialog(qapp)
+    try:
+        dlg._sharpness_started = True
+        dlg._sharpness_maps = {0: np.full((96, 120, 3), (0, 0, 255), np.uint8)}
+        dlg.chk_sharp.setChecked(True)
+        dlg._press_preview("source")
+        peek = dlg.canvas_image("result")[0]
+        helper = dlg.canvas_image("source")[0]
+        assert peek.pixelColor(40, 40).red() == 20
+        assert helper.pixelColor(40, 40).red() > 20
+        assert not dlg.doc.is_dirty
+    finally:
+        dlg._allow_close = True
+        dlg.close()
+
+
+def test_apply_exception_preserves_dirty_document_and_allows_retry(qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    dlg, _published = _dialog(qapp)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args: None)
+    def failing_callback(*args):
+        assert dlg._apply() is False, "publishing must refuse reentry"
+        raise RuntimeError("display failed")
+    try:
+        dlg.begin_stroke(40, 40)
+        dlg.end_stroke()
+        expected = dlg.doc.working.copy()
+        dlg.apply_callback = failing_callback
+        assert dlg._apply() is False
+        assert dlg.doc.is_dirty and dlg.btn_apply.isEnabled()
+        np.testing.assert_array_equal(dlg.doc.working, expected)
+        dlg.apply_callback = lambda *args: (True, "")
+        assert dlg._apply() is True
+    finally:
+        dlg._allow_close = True
+        dlg.close()
+
+
+def test_keyboard_diameter_changes_real_stroke_pixels(qapp):
+    dlg, _published = _dialog(qapp)
+    try:
+        dlg.num_diameter.setValue(16)
+        dlg.num_hardness.setValue(100)
+        dlg._on_brush_changed()
+        dlg._bump_diameter(2.0)
+        assert dlg.num_diameter.value() == dlg.doc.diameter == 32
+        dlg.begin_stroke(50, 45)
+        dlg.end_stroke()
+        assert np.all(dlg.doc.working[45, 63] == 20)
+        assert np.all(dlg.doc.working[45, 68] == 110)
+        dlg._undo()
+        assert not dlg.doc.is_dirty
+    finally:
+        dlg._allow_close = True
+        dlg.close()

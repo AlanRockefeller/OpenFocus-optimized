@@ -1,30 +1,8 @@
-"""Focus-position (pseudo-depth) index maps.
+"""Focus-position estimates, returned as float32 normalized frame indices.
 
-Computes, per pixel, which frame of the stack is in focus — the "depth"
-signal the fusion itself decides on — using each method's own activity
-measure, so the exported map matches the fusion the user sees. Only
-methods whose pipeline actually decides a per-pixel focus index are
-offered: weighted-average fusions (guided_filter, openfocus_a) have no
-per-pixel decision and are deliberately absent.
-
-- dct:           block-variance winner + double median filter (dct's own
-                 consistency pass), upsampled from the block grid
-- dtcwt:         argmax of the per-pixel DTCWT high-pass energy (the wavelet
-                 activity level the fusion uses, on the gray channel)
-- gfgfgf:        argmax of the GFG + fast-guided-filter focus map (paper eqs 1-13)
-- stackmffv3:    the model's own focus-index output (tiled with the same
-                 memory budget as AI fusion)
-- openfocus_b:   argmax of the window local variance
-                 (blur(x²) − blur(x)²); the kernel slider is the
-                 variance window, exactly as in B's fusion
-- openfocus_c:   argmax of the finest Laplacian-band energy (gray −
-                 blur(σ1), the pyramid's own decision signal)
-
-The fusion pipeline itself is untouched; these are faithful mirrors of the
-measures, factored out so they are testable and reusable (dialog, CLI).
-
-All functions take images in the 0-255 BGR domain (uint8 or float) and
-return a float32 [H, W] map in [0, 1] — the normalized frame index.
+Hard selectors estimate a dominant source frame; wavelet and pyramid methods
+estimate activity rather than an exact pixel provenance map. These maps are
+not physical surface measurements. Input normalization is shared with fusion.
 """
 import os
 from typing import Callable, List, Optional, Sequence
@@ -32,21 +10,28 @@ from typing import Callable, List, Optional, Sequence
 import cv2
 import numpy as np
 
-# 与融合下拉同序（仅保留"按索引决策"的方法；加权平均类无逐像素决策）
-SUPPORTED_METHODS = ("dct", "dtcwt", "gfgfgf", "stackmffv3",
-                     "openfocus_b", "openfocus_c")
+from core.algorithms import get_fusion, resolve_fusion_parameters, resolve_runner
 
 
 class DepthMapCancelled(Exception):
     """Raised when should_cancel returns True mid-computation."""
 
 
-def _check(images: Sequence[np.ndarray]) -> None:
+def _check(images: Sequence[np.ndarray], allow_grayscale=False) -> None:
     if len(images) < 2:
         raise ValueError("A focus index map needs at least 2 frames")
+    from core.image_loader import _has_transparency
+    if any(_has_transparency(image) for image in images):
+        raise ValueError("Depth maps of transparent images are unsupported")
     first = images[0]
-    if first.ndim != 3 or first.shape[2] < 3:
-        raise ValueError("Depth map expects BGR images")
+    if not ((first.ndim == 3 and first.shape[2] >= 3) or
+            (allow_grayscale and (first.ndim == 2 or
+                                  (first.ndim == 3 and first.shape[2] == 1)))):
+        raise ValueError("Depth map expects BGR images or supported grayscale images")
+    if any(image.shape != first.shape for image in images):
+        raise ValueError("Depth map frames must have matching shapes")
+    if min(first.shape[:2]) <= 0:
+        raise ValueError("Empty image dimensions")
 
 
 def _norm_index(argmax_map: np.ndarray, n: int) -> np.ndarray:
@@ -76,8 +61,8 @@ def _measure_dct(images, progress, should_cancel, kernel_size=7, block_size=8):
         kernel_size += 1
     block_size = max(2, int(block_size))
     h, w = images[0].shape[:2]
-    h_trim = (h // block_size) * block_size
-    w_trim = (w // block_size) * block_size
+    h_trim = ((h + block_size - 1) // block_size) * block_size
+    w_trim = ((w + block_size - 1) // block_size) * block_size
     map_h, map_w = h_trim // block_size, w_trim // block_size
     if map_h == 0 or map_w == 0:
         raise ValueError("Block size too large for the image")
@@ -86,8 +71,10 @@ def _measure_dct(images, progress, should_cancel, kernel_size=7, block_size=8):
     best = np.zeros((map_h, map_w), np.int32)
     for idx, bgr in enumerate(images):
         _tick(progress, idx, len(images), should_cancel)
-        gray = cv2.cvtColor(bgr[:h_trim, :w_trim].astype(np.float32),
-                            cv2.COLOR_BGR2GRAY)
+        if (h_trim, w_trim) != (h, w):
+            bgr = cv2.copyMakeBorder(bgr, 0, h_trim - h, 0, w_trim - w,
+                                     cv2.BORDER_REPLICATE)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
         mean_sq = cv2.resize(gray ** 2, (map_w, map_h),
                              interpolation=cv2.INTER_AREA)
         mean_val = cv2.resize(gray, (map_w, map_h),
@@ -99,12 +86,9 @@ def _measure_dct(images, progress, should_cancel, kernel_size=7, block_size=8):
 
     best = median_filter(best, size=kernel_size, mode="nearest")
     best = median_filter(best, size=kernel_size, mode="nearest")
-    # 块级索引回到全分辨率（与 dct 融合重建的掩膜放大方式一致）；
-    # 融合输出会裁到 block 的整数倍，但深度图必须与栈同尺寸，否则
-    # 叠加/保存侧的形状守卫会静默失效
-    best = cv2.resize(best.astype(np.float32), (w, h),
+    best = cv2.resize(best.astype(np.float32), (w_trim, h_trim),
                       interpolation=cv2.INTER_NEAREST).astype(np.int32)
-    return best
+    return best[:h, :w]
 
 
 # --------------------------------------------------------------------------
@@ -156,6 +140,7 @@ def _measure_dtcwt(images, progress, should_cancel, nlevels=4):
         coeffs = transform.forward(gray, nlevels=nlevels)
         acc = np.zeros((h, w), np.float32)
         for level_yh in coeffs.highpasses:
+            _tick(None, idx, n, should_cancel)
             # (H', W', 6) -> 每方向幅值平方求和，上采样回全分辨率累加
             mag2 = np.sum(np.abs(level_yh) ** 2, axis=2).astype(np.float32)
             lvl = cv2.resize(mag2, (w, h), interpolation=cv2.INTER_LINEAR)
@@ -194,169 +179,187 @@ def _tile_weight(x0, y0, x1, y1, fw, fh, W, H, overlap):
     return wgt
 
 
-def _measure_stackmffv3(images, progress, should_cancel,
-                       model_path=None, use_gpu=False):
-    """Focus index from the V3 probabilities.
+# This is the historical whole-frame/tile decision, a result parameter.
+# Available RAM must never move this boundary or shrink its spatial tiles.
+_NEURAL_WHOLE_FRAME_PIXELS = 80 * 1024 * 1024
 
-    The network classifies every pixel against the frames, so its softmax is
-    the probability of "this pixel comes from frame k". The expectation of
-    that distribution still lands on frame positions (measured: 5 distinct
-    levels for a 5-frame stack - 0, 0.25, 0.5, 0.75, 1.0), because a
-    classifier is confident at almost every pixel. The map therefore reports
-    *which frame* won at each pixel, expressed on the same 0..N-1 axis as the
-    classical measures so the colormaps and scale bar stay valid.
-    """
-    from fusion_methods.stackmffv3 import model_probabilities
 
+def _neural_depth_tiles(images):
+    h, w = images[0].shape[:2]
+    if len(images) * h * w <= _NEURAL_WHOLE_FRAME_PIXELS:
+        return 0, [(0, 0, w, h)]
+    from core.multi_focus_fusion import _ai_effective_tiling
+    block, _batch, coords = _ai_effective_tiling(len(images), 1024, h, w, 256, 1)
+    return max(0, min(256, block // 2)), coords
+
+
+def _plan_neural_depth(images, model_path, use_gpu, thread_count,
+                       resource_preference):
+    from fusion_methods.stackmffv3 import _prepare_inference
     if model_path is None:
         from utils import resource_path
         model_path = resource_path("weights", "stackmff_v3_final.pth")
+    h, w = images[0].shape[:2]
+    _overlap, coords = _neural_depth_tiles(images)
+    x0, y0, x1, y1 = max(coords, key=lambda xy: (xy[2] - xy[0]) * (xy[3] - xy[1]))
+    crops = [image[y0:y1, x0:x1] for image in images]
+    normalization = sum(image.size * 4 for image in images) if any(
+        image.dtype == np.uint16 for image in images) else 0
+    # Map accumulator, weight, normalization result and clipped publication.
+    fixed = normalization + h * w * 4 * 4
+    _model, _device, plan = _prepare_inference(
+        crops, model_path, use_gpu, thread_count=thread_count,
+        resource_preference=resource_preference, fixed_bytes=fixed)
+    return plan, model_path
 
+
+def _measure_stackmffv2(images, progress, should_cancel,
+                        model_path=None, use_gpu=False, execution_plan=None,
+                        thread_count=None, resource_preference='balanced'):
+    """Sampled focal layer from the V2 network."""
+    from fusion_methods.stackmff_v2 import DEFAULT_WEIGHTS, depth_positions
+    from utils.weights import weights_path
+
+    if model_path is None:
+        model_path = weights_path(os.path.basename(DEFAULT_WEIGHTS))
+    n = len(images)
+    _tick(progress, 0, 1, should_cancel)
+    result = depth_positions(
+        images, model_path, use_gpu,
+        should_cancel=should_cancel, execution_plan=execution_plan,
+        thread_count=thread_count, resource_preference=resource_preference)
+    _tick(progress, 1, 1, should_cancel)
+    return np.clip(result, 0, n - 1).astype(np.float32)
+
+
+def _plan_stackmffv2_depth(images, model_path, use_gpu, thread_count,
+                           resource_preference):
+    """Admit the V2 network for one depth-map pass."""
+    from fusion_methods.stackmff_v2 import DEFAULT_WEIGHTS, _prepare_inference
+    from utils.weights import weights_path
+
+    if model_path is None:
+        model_path = weights_path(os.path.basename(DEFAULT_WEIGHTS))
+    h, w = images[0].shape[:2]
+    normalization = sum(image.size * 4 for image in images) if any(
+        image.dtype == np.uint16 for image in images) else 0
+    _model, _device, plan = _prepare_inference(
+        images, model_path, use_gpu, thread_count=thread_count,
+        resource_preference=resource_preference,
+        fixed_bytes=normalization + h * w * 4 * 4)
+    return plan, model_path
+
+
+def _measure_stackmffv3(images, progress, should_cancel,
+                       model_path=None, use_gpu=False, execution_plan=None,
+                       mode="soft"):
+    """Soft: expected frame position. Hard: per-pixel most probable frame."""
+    from fusion_methods.stackmffv3 import model_probabilities, normalize_mode
+
+    mode = normalize_mode(mode)
     h, w = images[0].shape[:2]
     n = len(images)
-    from core.multi_focus_fusion import AI_IMAGE_BUDGET
-    budget_px = AI_IMAGE_BUDGET * 1024 * 1024  # 与融合路径同一预算
+    overlap, coords = _neural_depth_tiles(images)
+    indices = np.arange(n, dtype=np.float32)[:, None, None]
 
-    # The network returns every pixel's probability distribution in ONE pass,
-    # so there are no per-frame steps to report. i=0/n would read "frame 0/13"
-    # for a method that never visits the frames one by one.
-    _tick(progress, 1, 1, should_cancel)
-    if n * h * w <= budget_px:
-        P = model_probabilities(images, model_path, use_gpu, sigma=0.5)
-        idx = (P * np.arange(n, dtype=np.float32)[:, None, None]).sum(0)
-        del P
-        return np.clip(idx.round(), 0, n - 1).astype(np.int32)
+    def measure(crops):
+        probabilities = model_probabilities(
+            crops, model_path, use_gpu, sigma=0.0 if mode == "hard" else 0.5,
+            should_cancel=should_cancel, execution_plan=execution_plan)
+        if mode == "hard":
+            return probabilities.argmax(0).astype(np.float32)
+        return (probabilities * indices).sum(0).astype(np.float32)
 
-    # 大图：按瓦片取概率，瓦片尺寸与融合路径同一预算
-    from core.multi_focus_fusion import _ai_effective_tiling
-    block, batch, coords = _ai_effective_tiling(n, 1024, h, w, 256, 2)
-    ov = max(0, min(256, block // 2))
+    _tick(progress, 0, len(coords), should_cancel)
+    if len(coords) == 1:
+        result = measure(images)
+        _tick(progress, 1, 1, should_cancel)
+        return np.clip(result, 0, n - 1).astype(np.float32)
+
     acc = np.zeros((h, w), np.float32)
     wsum = np.zeros((h, w), np.float32)
-    done = 0
-    for start in range(0, len(coords), batch):
-        _tick(progress, done, len(coords), should_cancel)
-        chunk = coords[start:start + batch]
-        for (x0, y0, x1, y1) in chunk:
-            crops = [img[y0:y1, x0:x1] for img in images]
-            P = model_probabilities(crops, model_path, use_gpu, sigma=0.5)
-            fmap = (P * np.arange(n, dtype=np.float32)[:, None, None]).sum(0)
-            del P
-            fh, fw = y1 - y0, x1 - x0
-            wgt = _tile_weight(x0, y0, x1, y1, fw, fh, w, h, ov)
-            acc[y0:y1, x0:x1] += fmap * wgt
-            wsum[y0:y1, x0:x1] += wgt
-        done += len(chunk)
+    for done, (x0, y0, x1, y1) in enumerate(coords):
+        _tick(None, done, len(coords), should_cancel)
+        crops = [img[y0:y1, x0:x1] for img in images]
+        fmap = measure(crops)
+        fh, fw = y1 - y0, x1 - x0
+        weight = _tile_weight(x0, y0, x1, y1, fw, fh, w, h, overlap)
+        acc[y0:y1, x0:x1] += fmap * weight
+        wsum[y0:y1, x0:x1] += weight
+        _tick(progress, done + 1, len(coords), should_cancel)
     wsum[wsum == 0] = 1.0
-    return np.clip((acc / wsum).round(), 0, n - 1).astype(np.int32)
+    result = np.clip(acc / wsum, 0, n - 1).astype(np.float32)
+    _tick(None, len(coords), len(coords), should_cancel)
+    return result
 
-
-# --------------------------------------------------------------------------
-# openfocus_a/b/c — 各自融合管线的"焦点位置"可视化（三种不同的图）
-# --------------------------------------------------------------------------
-def _measure_openfocus(images, progress, should_cancel, kernel_size=11):
-    """B：argmax of blur(x²) − blur(x)² on the gray channel.
-
-    与 fusion_methods/openfocus_ab.py 的 B 方法度量一致——硬拾取的
-    逐像素获胜帧。kernel 滑块即方差窗口（默认半径 5）；流式 argmax
-    （严格 > 保持 np.argmax 首胜语义）。
-    """
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    k = max(1, int(kernel_size))
-    best_val = best_idx = None
-    for idx, bgr in enumerate(images):
-        _tick(progress, idx, len(images), should_cancel)
-        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
-        mean = cv2.blur(gray, (k, k))
-        var = cv2.blur(gray * gray, (k, k)) - mean * mean
-        if best_val is None:
-            best_val, best_idx = var, np.zeros(var.shape, np.int32)
-        else:
-            hit = var > best_val
-            best_val[hit] = var[hit]
-            best_idx[hit] = idx
-    return best_idx
-
-
-def _measure_openfocus_c(images, progress, should_cancel, kernel_size=11):
-    """C：最细带通层能量 argmax（金字塔法按频带决策的深度侧写）。
-
-    band = gray − blur(gray, σ1)（拉普拉斯金字塔最细层的同款构造），
-    W = blur(|band|, window)，逐像素取能量最大帧——与 B 的窗口方差
-    （二阶统计）不同，这是带通能量的选择行为。
-    """
-    if kernel_size % 2 == 0:
-        kernel_size += 1
-    k = max(1, int(kernel_size))
-    best_val = best_idx = None
-    for idx, bgr in enumerate(images):
-        _tick(progress, idx, len(images), should_cancel)
-        gray = cv2.cvtColor(bgr.astype(np.float32), cv2.COLOR_BGR2GRAY)
-        band = gray - cv2.GaussianBlur(gray, (0, 0), 1.0)
-        energy = cv2.blur(np.abs(band), (k, k))
-        if best_val is None:
-            best_val, best_idx = energy, np.zeros(energy.shape, np.int32)
-        else:
-            hit = energy > best_val
-            best_val[hit] = energy[hit]
-            best_idx[hit] = idx
-    return best_idx
 
 
 # --------------------------------------------------------------------------
 # public entry
 # --------------------------------------------------------------------------
-# The depth map must use the same window as the fusion it explains:
-# DCT/GFG-FGF fuse with 7, the OpenFocus family with 11 (Radius 5).
-_DEPTH_KERNEL_DEFAULTS = {"dct": 7, "gfgfgf": 7,
-                          "openfocus_b": 11, "openfocus_c": 11}
 
 
-def compute_focus_index(images: Sequence[np.ndarray],
-                         method: str,
-                         kernel_size: Optional[int] = None,
-                         block_size: int = 8,
-                         model_path: Optional[str] = None,
-                         use_gpu: bool = False,
-                         progress_callback: Optional[Callable] = None,
-                         should_cancel: Optional[Callable[[], bool]] = None,
-                         ) -> np.ndarray:
-    """Focus-position map: float32 [H, W] in [0, 1] (normalized frame index).
+def compute_focus_index(images: Sequence[np.ndarray], method: str, parameters=None, *,
+                         model_path=None, use_gpu=False, progress_callback=None,
+                         should_cancel=None, thread_count=None,
+                         resource_preference='balanced', **legacy_parameters):
+    """Return normalized focus positions using the descriptor's depth runner.
 
-    `images` are 0-255-domain BGR frames (uint8 or float). The output is
-    always full stack size — dct decides winners on its block grid and the
-    map is upscaled back, mirroring how dct fusion upscales its masks.
-    `kernel_size=None` uses the fusion default for that method (7 for
-    DCT/GFG-FGF, 11 for OpenFocus B/C).
+    Legacy named numeric arguments are translated only at this input boundary.
     """
-    _check(images)
-    if images[0].dtype == np.uint16:
-        # 与融合管线同口径：0-65535 -> 0-255 float（详见 normalize_fuse_input）
-        images = [f.astype(np.float32) * (255.0 / 65535.0) for f in images]
-    n = len(images)
-    kernel = (kernel_size if kernel_size is not None
-              else _DEPTH_KERNEL_DEFAULTS.get(method))
-    if method == "dct":
-        idx = _measure_dct(images, progress_callback, should_cancel,
-                           kernel_size=kernel, block_size=block_size)
-    elif method == "gfgfgf":
-        idx = _measure_gfgfgf(images, progress_callback, should_cancel,
-                              kernel_size=kernel)
-    elif method == "dtcwt":
-        idx = _measure_dtcwt(images, progress_callback, should_cancel)
-    elif method == "stackmffv3":
-        idx = _measure_stackmffv3(images, progress_callback, should_cancel,
-                                  model_path=model_path, use_gpu=use_gpu)
-    elif method == "openfocus_b":
-        idx = _measure_openfocus(images, progress_callback, should_cancel,
-                                 kernel_size=kernel)
-    elif method == "openfocus_c":
-        idx = _measure_openfocus_c(images, progress_callback, should_cancel,
-                                   kernel_size=kernel)
-    else:
-        raise ValueError(f"Unsupported method for depth maps: {method}")
-    return _norm_index(idx, n)
+    from core.resource_policy import Workload, heavy_job, plan_execution
+    from core.registration import RegistrationCancelled
+    from utils.image_utils import normalize_fuse_input
+
+    _check(images, allow_grayscale=method in ('openfocus_b', 'openfocus_c'))
+    spec = get_fusion(method)
+    values = resolve_fusion_parameters(method, parameters, depth=True)
+    declared_keys = {parameter.key for parameter in spec.depth.parameters}
+    for key, value in legacy_parameters.items():
+        target = {'nlevels': 'N', 'ai_mode': 'mode'}.get(key, key)
+        if target not in declared_keys:
+            # ``block_size`` selects the DCT depth grid without being a declared
+            # descriptor parameter; it is forwarded to the DCT runner below.
+            if key == 'block_size' and method == 'dct':
+                continue
+            raise ValueError(f'Unknown depth parameter: {key}')
+        if value is not None:
+            values[target] = value
+    values = resolve_fusion_parameters(method, values, depth=True)
+    depth_block = legacy_parameters.get('block_size')
+    try:
+        with heavy_job(should_cancel):
+            n = len(images)
+            h, w = images[0].shape[:2]
+            if spec.depth_planner:
+                plan, model_path = resolve_runner(spec.depth_planner)(
+                    images, model_path, use_gpu, thread_count, resource_preference)
+            else:
+                # The shared CPU model includes normalization, map storage,
+                # method scratch and the final normalized output.
+                plan = plan_execution(
+                    Workload(algorithm=method, frames=n, height=h, width=w,
+                             channels=images[0].shape[2] if images[0].ndim == 3 else 1,
+                             itemsize=max(image.dtype.itemsize for image in images),
+                             parallel_layer='native'),
+                    preference=resource_preference, user_threads=thread_count)
+            _tick(None, 0, n, should_cancel)
+            # B/C prepare each source themselves; retaining its dtype also
+            # preserves their 8-bit quantization rule in mixed-depth stacks.
+            if method not in ('openfocus_b', 'openfocus_c'):
+                images, _is_16bit = normalize_fuse_input(images)
+            runtime = {'progress_callback': progress_callback, 'should_cancel': should_cancel,
+                       'thread_count': plan.native_threads, 'use_gpu': use_gpu,
+                       'model_path': model_path, 'execution_plan': plan}
+            if depth_block is not None:
+                runtime['block_size'] = depth_block
+            idx = resolve_runner(spec.depth.runner)(images, **runtime, **values)
+            _tick(None, n, n, should_cancel)
+            result = _norm_index(idx, n)
+            _tick(None, n, n, should_cancel)
+            return result
+    except RegistrationCancelled as exc:
+        raise DepthMapCancelled() from exc
 
 
 def smooth_index_map(index01: np.ndarray, strength: int = 0) -> np.ndarray:
@@ -366,9 +369,8 @@ def smooth_index_map(index01: np.ndarray, strength: int = 0) -> np.ndarray:
     if strength <= 0:
         return m
     k = min(2 * int(strength) + 1, 15)
-    u8 = np.clip(m * 255.0, 0, 255).astype(np.uint8)
-    u8 = cv2.medianBlur(u8, k if k % 2 == 1 else k + 1)
-    m = u8.astype(np.float32) / 255.0
+    from scipy.ndimage import median_filter
+    m = median_filter(m, size=k, mode="nearest")
     if strength >= 3:
         m = cv2.bilateralFilter(m, 9, 0.15, 9)
     return np.clip(m, 0.0, 1.0)

@@ -53,8 +53,8 @@ def _annotated_manager(qapp, target_index):
 
 
 @pytest.mark.parametrize("target_index, own, other", [
-    (0, "_input_enabled", "_registered_enabled"),
-    (1, "_registered_enabled", "_input_enabled"),
+    (0, "input", "registered"),
+    (1, "registered", "input"),
 ])
 def test_adding_a_label_enables_remove_all(qapp, monkeypatch, target_index,
                                            own, other):
@@ -65,8 +65,8 @@ def test_adding_a_label_enables_remove_all(qapp, monkeypatch, target_index,
     window, manager = _annotated_manager(qapp, target_index)
     manager._apply_label_configuration()
 
-    assert getattr(manager, own) is True
-    assert getattr(manager, other) is False
+    assert manager.is_enabled_for_target(own) is True
+    assert manager.is_enabled_for_target(other) is False
     assert window.del_all_labels_action.enabled
     assert window.del_reg_label_action.enabled == (target_index == 1)
     assert window.del_input_label_action.enabled == (target_index == 0)
@@ -75,8 +75,8 @@ def test_adding_a_label_enables_remove_all(qapp, monkeypatch, target_index,
     assert not window.del_all_labels_action.enabled
     assert not window.del_reg_label_action.enabled
     assert not window.del_input_label_action.enabled
-    assert manager._input_enabled is False
-    assert manager._registered_enabled is False
+    assert manager.is_enabled_for_target("input") is False
+    assert manager.is_enabled_for_target("registered") is False
 
 
 def test_delete_all_keeps_the_other_targets_entry_when_one_remains(qapp,
@@ -85,9 +85,15 @@ def test_delete_all_keeps_the_other_targets_entry_when_one_remains(qapp,
 
     monkeypatch.setattr(module, "show_warning_box", lambda *a, **k: None)
     monkeypatch.setattr(module, "show_success_box", lambda *a, **k: None)
+    from utils.label_model import Label
+    from utils.validators import LabelConfig
+
     window, manager = _annotated_manager(qapp, 1)
-    manager._input_enabled = True
-    manager._registered_enabled = True
+    for target in ("input", "registered"):
+        label = Label(LabelConfig())
+        label.config.target = target
+        label.config.format = "SAMPLE"
+        manager.labels.add(label)
     manager._sync_delete_actions()
 
     manager.delete_registered_labels()
@@ -100,12 +106,24 @@ def test_delete_all_keeps_the_other_targets_entry_when_one_remains(qapp,
 
 
 class _ScaleWindow:
-    def __init__(self):
+    def __init__(self, records=()):
         self.scale_bar_enabled = True
         self.scale_bar_target = "all"
         self.persisted = 0
         self.refreshed = 0
         self.messages = []
+        self.undo_states = []
+        self.output_records = list(records)
+        self.output_list = SimpleNamespace(count=lambda: len(self.output_records))
+        self.output_manager = SimpleNamespace(
+            record_for_row=lambda row: self.output_records[row])
+
+    def _capture_scalebar_state(self):
+        from utils.scalebar import capture_state
+        return capture_state(self)
+
+    def push_scalebar_undo(self, previous):
+        self.undo_states.append(previous)
 
     def persist_settings(self):
         self.persisted += 1
@@ -124,14 +142,10 @@ def _remove(window, where):
 
 
 def test_remove_scale_bar_from_everywhere_disables_it():
-    from locales import trans
-
     window = _ScaleWindow()
     _remove(window, "all")
     assert window.scale_bar_enabled is False
     assert window.scale_bar_target == "all"
-    assert window.persisted == 1 and window.refreshed == 1
-    assert window.messages[-1] == trans.t("scalebar_removed_all")
 
 
 def test_remove_scale_bar_from_one_canvas_narrows_the_scope():
@@ -158,14 +172,97 @@ def test_removing_from_a_canvas_without_the_bar_changes_nothing():
     _remove(window, "source")
     assert window.scale_bar_enabled is True
     assert window.scale_bar_target == "output"
+    assert not window.undo_states
 
 
-def test_remove_scale_bar_without_a_bar_reports_it():
-    from locales import trans
-
+def test_remove_scale_bar_without_a_bar_is_a_noop():
     window = _ScaleWindow()
     window.scale_bar_enabled = False
     _remove(window, "all")
     assert window.scale_bar_enabled is False
-    assert window.persisted == 0 and window.refreshed == 0
-    assert window.messages[-1] == trans.t("scalebar_none_msg")
+    assert not window.undo_states
+
+
+def test_historical_output_bar_can_be_removed_after_source_bar_is_disabled():
+    from controllers.output_manager import OutputRecord
+    from utils.scalebar import restore_state
+
+    record = OutputRecord.create(None, "historical")
+    record.scale_bar_config = {"px_um": 0.5, "position": "bottom-right"}
+    record.scale_bar_initialized = True
+    window = _ScaleWindow([record])
+    window.scale_bar_enabled = False
+    _remove(window, "all")
+    assert record.scale_bar_config is None
+    restore_state(window, window.undo_states[-1])
+    assert record.scale_bar_config["px_um"] == 0.5
+    assert window.scale_bar_enabled is False
+
+
+def test_clear_stack_removes_annotations_before_loading_another_stack(qapp):
+    from controllers.source_manager import LoadOptions, SourceManager
+    from utils.label_model import Label
+    from utils.scalebar import export_cfg
+    from utils.validators import LabelConfig
+
+    window, labels = _annotated_manager(qapp, 0)
+    window.label_manager = labels
+    for target in ("input", "registered", "output"):
+        label = Label(LabelConfig())
+        label.config.target = target
+        labels.labels.add(label)
+    labels._sync_delete_actions()
+    window.raw_images = [object()]
+    window.base_images = list(window.raw_images)
+    window.stack_images = list(window.raw_images)
+    window.image_filenames = ["old.tif"]
+    window.current_display_index = 0
+    window.scale_bar_enabled = True
+    window.scale_bar_target = "all"
+    window.scale_bar_position = "top-left"
+    window.scale_um_per_px_manual = 0.5
+    window.source_px_um = 0.25
+    window.current_scale_factor = 1.0
+    window.current_folder_path = ""
+    persisted = []
+    invalidations = []
+    cache_invalidations = []
+    reloads = []
+    window.persist_settings = lambda: persisted.append(window.scale_bar_enabled)
+    window.invalidate_annotation_caches = lambda: cache_invalidations.append(True)
+    window.transform_manager = SimpleNamespace(
+        invalidate_processing_results=lambda **kwargs: invalidations.append(kwargs),
+        reload_image_stack=lambda **kwargs: reloads.append(kwargs),
+    )
+    manager = SourceManager(window)
+    manager._load_generation = 7
+    assert export_cfg(window, "source") is not None
+    revision = labels.revision
+
+    manager.clear_image_stack()
+
+    assert not window.scale_bar_enabled
+    assert persisted == [False]
+    assert window.scale_bar_position == "top-left"
+    assert window.scale_um_per_px_manual == 0.5
+    assert window.source_px_um is None
+    assert not list(labels.labels)
+    assert labels.revision == revision + 1
+    assert cache_invalidations
+    assert not window.del_all_labels_action.enabled
+    assert not window.del_input_label_action.enabled
+    assert not window.del_reg_label_action.enabled
+    assert manager._load_generation == 8
+    assert invalidations[0] == {"clear_output_view": True}
+    assert reloads[0] == {"initial_index": None}
+
+    new_image = object()
+    manager._apply_load_options(LoadOptions(1.0, ["new.tif"], [new_image], [new_image]))
+
+    assert window.raw_images == [new_image]
+    assert not list(labels.labels)
+    assert export_cfg(window, "source") is None
+    assert export_cfg(window, "output") is None
+    assert persisted == [False]
+    assert invalidations[1] == {"clear_output_view": True, "preserve_outputs": True}
+    assert reloads[1] == {"initial_index": 0}

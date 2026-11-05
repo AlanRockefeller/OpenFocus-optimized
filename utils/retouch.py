@@ -11,6 +11,7 @@ owns the pixel math, the per-stroke coverage map and tile-based history.
 from __future__ import annotations
 
 from collections import OrderedDict
+import threading
 from typing import Optional, Tuple
 
 import cv2
@@ -38,6 +39,21 @@ def _to_dtype(patch: np.ndarray, dst_dtype) -> np.ndarray:
     if scale != 1.0:
         out *= scale
     return out
+
+
+def adjust_tones(image: np.ndarray, exposure: float, contrast: float) -> np.ndarray:
+    """Apply exposure and midpoint contrast in the image's native range."""
+    maximum = _dtype_max(image.dtype)
+    pixels = image.astype(np.float32)
+    color = pixels[..., :3] if pixels.ndim == 3 and pixels.shape[2] == 4 else pixels
+    color *= 2.0 ** exposure
+    color -= maximum / 2.0
+    color *= 2.0 ** contrast
+    color += maximum / 2.0
+    np.clip(color, 0, maximum, out=color)
+    if np.issubdtype(image.dtype, np.integer):
+        np.rint(color, out=color)
+    return pixels.astype(image.dtype)
 
 
 def _as_bgr(img: np.ndarray) -> np.ndarray:
@@ -140,6 +156,7 @@ def apply_dab(
     history: Optional["TileHistory"] = None,
     source_valid: Optional[np.ndarray] = None,
     offset: Tuple[int, int] = (0, 0),
+    exposure: Optional[float] = None,
 ) -> Optional[Tuple[int, int, int, int]]:
     """Blend one brush dab from `source` into `target` in place.
 
@@ -147,6 +164,8 @@ def apply_dab(
     `source_valid` is an optional boolean mask in source coordinates; pixels
     outside it are never written.  Returns the dirty rect or None.
     """
+    if exposure == 0:
+        return None
     th, tw = target.shape[:2]
     sh, sw = source.shape[:2]
     d = max(1, int(diameter))
@@ -188,10 +207,23 @@ def apply_dab(
     blend = (coverage.apply(tx0, ty0, tx1, ty1, alpha)
              if coverage is not None else alpha)
 
-    src = _to_dtype(_as_bgr(source)[nsy0:nsy1, nsx0:nsx1], target.dtype)
+    if exposure is None:
+        src = _to_dtype(_as_bgr(source)[nsy0:nsy1, nsx0:nsx1], target.dtype)
+    else:
+        # Use the pixels at the beginning of the stroke, so overlapping
+        # dabs cannot compound the adjustment within one stroke.
+        original = target[ty0:ty1, tx0:tx1].copy()
+        for key in history._tile_keys(tx0, ty0, tx1, ty1):
+            tile = history._current[key]
+            bx, by = key[0] * TILE, key[1] * TILE
+            ix0, iy0 = max(tx0, bx), max(ty0, by)
+            ix1, iy1 = min(tx1, bx + tile.shape[1]), min(ty1, by + tile.shape[0])
+            original[iy0-ty0:iy1-ty0, ix0-tx0:ix1-tx0] = tile[iy0-by:iy1-by, ix0-bx:ix1-bx]
+        src = np.clip(original.astype(np.float32) * (2.0 ** exposure),
+                      0, _dtype_max(target.dtype))
     tgt = target[ty0:ty1, tx0:tx1]
     cur = tgt.astype(np.float32)
-    if cur.ndim == 2:
+    if cur.ndim == 2 and src.ndim == 3:
         src = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
     factor = blend[..., None] if cur.ndim == 3 else blend
     blended = cur + (src - cur) * factor
@@ -251,9 +283,8 @@ class TileHistory:
             self._current[key] = data
             self._current_bytes += data.nbytes
 
-    def end(self) -> str:
-        """Commit the open stroke.  Returns "empty", "committed",
-        "oversize" or "idle".  An oversized stroke is rolled back."""
+    def end(self, cancelled=None) -> str:
+        """Commit the open stroke, rolling back if it is too large or cancelled."""
         if self._current is None:
             return "idle"
         if self._current_bytes > self.max_bytes:
@@ -263,13 +294,27 @@ class TileHistory:
             self._current = None
             self._current_bytes = 0
             return "empty"
+        # Determine dirty state before publishing history.  Comparing full-image
+        # tiles can take long enough for cancellation to arrive during commit.
+        dirty = set(self._dirty)
+        for key in self._current:
+            if cancelled is not None and cancelled():
+                self.abort()
+                return "cancelled"
+            sl = self._tile_slice(key)
+            if np.array_equal(self.target[sl], self.base[sl]):
+                dirty.discard(key)
+            else:
+                dirty.add(key)
+        if cancelled is not None and cancelled():
+            self.abort()
+            return "cancelled"
         entry = self._current
         self._current = None
         self._current_bytes = 0
         self._undo.append(entry)
         self._redo.clear()
-        for key in entry:
-            self._refresh_dirty(key)
+        self._dirty = dirty
         self._enforce_budget()
         return "committed"
 
@@ -388,7 +433,7 @@ class TileHistory:
 class RetouchDocument:
     """One retouch session: base image, source frames, brush and history."""
 
-    TOOLS = ("source", "restore")
+    TOOLS = ("source", "restore", "exposure")
 
     def __init__(self, base_image: np.ndarray, context: RenderContext,
                  *, max_strokes: int = DEFAULT_MAX_STROKES,
@@ -397,6 +442,11 @@ class RetouchDocument:
             raise ValueError("a base image is required")
         if base_image.shape[0] != context.height or base_image.shape[1] != context.width:
             raise ValueError("base image does not match the render context")
+        from core.image_loader import _has_transparency, UnsupportedTransparency
+        if (_has_transparency(base_image) or any(
+                frame.image is not None and _has_transparency(frame.image)
+                for frame in context.frames)):
+            raise UnsupportedTransparency("Retouching transparent images is unsupported")
         self.base = np.ascontiguousarray(base_image.copy())
         self.working = self.base.copy()
         self.context = context
@@ -406,13 +456,35 @@ class RetouchDocument:
         self.diameter = 64
         self.hardness = 0.4
         self.opacity = 1.0
+        self.exposure = 0.5
         self.history = TileHistory(self.working, self.base,
                                    max_strokes=max_strokes,
                                    max_bytes=max_bytes)
         self._stroke: Optional[dict] = None
         self._coverage: Optional[StrokeCoverage] = None
         self._mask_cache: OrderedDict[int, Optional[np.ndarray]] = OrderedDict()
+        self._checkpoint_lock = threading.Lock()
+        self._provenance = None
+        self._operations = []
+        self._cursor = 0
+        self._point_count = 0
+        self._record_overflow = False
         self.last_status = ""
+
+    @property
+    def checkpoint_ready(self):
+        return self._provenance is not None
+
+    def initialize_checkpoint(self, cancelled=None):
+        from utils.retouch_checkpoint import provenance
+        with self._checkpoint_lock:
+            if self._provenance is not None:
+                return
+        initial = provenance(self, cancelled)
+        with self._checkpoint_lock:
+            if cancelled is not None and cancelled():
+                raise ValueError("Retouch checkpoint initialization cancelled")
+            self._provenance = initial
 
     # ----------------------------------------------------------- basics
     @property
@@ -455,6 +527,44 @@ class RetouchDocument:
 
     def result(self) -> np.ndarray:
         return self.working
+
+    def adjust_tones(self, exposure: float, contrast: float, cancelled=None) -> str:
+        """Apply a whole-image adjustment as one bounded history transaction.
+
+        Cancellation and errors restore every changed tile.
+        """
+        if self.stroke_active:
+            return "busy"
+        if exposure == 0 and contrast == 0:
+            return "empty"
+        if self._cursor >= 100000:
+            self.last_status = "record_limit"
+            return "record_limit"
+        if self.working.nbytes > self.history.max_bytes:
+            return "oversize"
+        self.history.begin()
+        try:
+            for key in self.history._tile_keys(0, 0, self.width, self.height):
+                if cancelled is not None and cancelled():
+                    self.history.abort()
+                    return "cancelled"
+                sl = self.history._tile_slice(key)
+                tile = self.working[sl]
+                adjusted = adjust_tones(tile, exposure, contrast)
+                if not np.array_equal(tile, adjusted):
+                    self.history.remember_tile(key)
+                    tile[...] = adjusted
+            if cancelled is not None and cancelled():
+                self.history.abort()
+                return "cancelled"
+            status = self.history.end(cancelled=cancelled)
+            if status == "committed":
+                self._record_operation({"type": "tones", "exposure": float(exposure),
+                                        "contrast": float(contrast)})
+            return status
+        except BaseException:
+            self.history.abort()
+            raise
 
     # ---------------------------------------------------------- choices
     def set_frame(self, index: int) -> bool:
@@ -499,7 +609,7 @@ class RetouchDocument:
     def source_valid_at(self, x: float, y: float) -> bool:
         if not (0 <= x < self.width and 0 <= y < self.height):
             return False
-        if self.tool == "restore":
+        if self.tool in ("restore", "exposure"):
             return True
         frame = self.active_frame
         if not frame.contains(x, y):
@@ -514,6 +624,10 @@ class RetouchDocument:
     def begin_stroke(self, x: float, y: float) -> bool:
         if self._stroke is not None:
             return False
+        self.last_status = ""
+        if self._cursor >= 100000 or self._point_count >= 250000:
+            self.last_status = "record_limit"
+            return False
         if not self.source_valid_at(x, y):
             return False
         self._stroke = {
@@ -522,7 +636,9 @@ class RetouchDocument:
             "diameter": self.diameter,
             "hardness": self.hardness,
             "opacity": self.opacity,
+            "exposure": self.exposure,
             "last": (float(x), float(y)),
+            "points": [(float(x), float(y))],
         }
         self._coverage = StrokeCoverage(self.height, self.width)
         self.history.begin()
@@ -535,6 +651,10 @@ class RetouchDocument:
         last_x, last_y = self._stroke["last"]
         dx, dy = x - last_x, y - last_y
         dist = (dx * dx + dy * dy) ** 0.5
+        if self._point_count + len(self._stroke["points"]) >= 250000:
+            self._record_overflow = True
+        else:
+            self._stroke["points"].append((float(x), float(y)))
         if dist < 0.01:
             return None
         step = max(1.0, self._stroke["diameter"] / 8.0)
@@ -551,7 +671,16 @@ class RetouchDocument:
     def end_stroke(self) -> str:
         if self._stroke is None:
             return "idle"
-        status = self.history.end()
+        if self._record_overflow:
+            self.history.abort()
+            status = "record_limit"
+            self._record_overflow = False
+        else:
+            status = self.history.end()
+        if status == "committed":
+            operation = {key: value for key, value in self._stroke.items() if key != "last"}
+            operation["type"] = "stroke"
+            self._record_operation(operation)
         self.last_status = status
         self._stroke = None
         self._coverage = None
@@ -562,6 +691,7 @@ class RetouchDocument:
             return False
         restored = self.history.abort()
         self._stroke = None
+        self._record_overflow = False
         self._coverage = None
         self.last_status = "cancelled"
         return restored
@@ -587,23 +717,58 @@ class RetouchDocument:
             history=self.history,
             source_valid=valid,
             offset=offset,
+            exposure=locked["exposure"] if locked["tool"] == "exposure" else None,
         )
 
     # -------------------------------------------------------- history ops
     def undo(self) -> bool:
         if self._stroke is not None:
             self.end_stroke()
-        return self.history.undo(self.working)
+        changed = self.history.undo(self.working)
+        if changed:
+            self._cursor -= 1
+            self._trim_redo()
+        return changed
 
     def redo(self) -> bool:
         if self._stroke is not None:
             self.end_stroke()
-        return self.history.redo(self.working)
+        changed = self.history.redo(self.working)
+        if changed:
+            self._cursor += 1
+            self._trim_redo()
+        return changed
 
     def restore_all(self) -> bool:
         if self._stroke is not None:
             self.end_stroke()
-        return self.history.restore_all()
+        if self._cursor >= 100000:
+            self.last_status = "record_limit"
+            return False
+        changed = self.history.restore_all()
+        if changed:
+            self._record_operation({"type": "restore_all"})
+        return changed
+
+    def _trim_redo(self):
+        end = self._cursor + len(self.history._redo)
+        self._point_count -= sum(len(op.get("points", ())) for op in self._operations[end:])
+        del self._operations[end:]
+
+    def _record_operation(self, operation):
+        self._point_count -= sum(len(op.get("points", ())) for op in self._operations[self._cursor:])
+        del self._operations[self._cursor:]
+        self._operations.append(operation)
+        self._cursor += 1
+        self._point_count += len(operation.get("points", ()))
+
+    def save_checkpoint(self, path, cancelled=None):
+        from utils.retouch_checkpoint import save_checkpoint
+        return save_checkpoint(self, path, cancelled)
+
+    def load_checkpoint(self, path, cancelled=None):
+        from utils.retouch_checkpoint import load_checkpoint
+        return load_checkpoint(self, path, cancelled)
 
 
 def _union_rect(first, second):

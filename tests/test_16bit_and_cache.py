@@ -102,17 +102,15 @@ class TestFuseBitDepth:
         # has more, so seeing them proves the depth survived the back-end.
         assert np.unique(result).size > 256, f"{algorithm} quantized to 8 bits"
 
-    def test_render_worker_gui_path_stays_16bit(self):
+    def test_render_worker_gui_path_stays_16bit(self, qapp):
         """The GUI render path must hand back uint16, not a collapsed 8-bit image.
 
         Covers loader-shaped input through RenderWorker, which is where the
         normalize/quantize pair is actually wired up.
         """
         pytest.importorskip("PyQt6")
-        from PyQt6.QtWidgets import QApplication
         from core.workers import RenderWorker
 
-        QApplication.instance() or QApplication([])
 
         ramp = np.linspace(10000, 55000, 300, dtype=np.float32)
         grad = np.broadcast_to(ramp[None, :, None], (300, 300, 3)).astype(np.uint16)
@@ -122,11 +120,7 @@ class TestFuseBitDepth:
 
         worker = RenderWorker(
             raw_images=[f1, f2], aligned_images=[], is_images_aligned=False,
-            last_alignment_options=(False, False),
-            need_align_homography=False, need_align_ecc=False, need_fusion=True,
-            rb_a_checked=True, rb_b_checked=False, rb_c_checked=False,
-            rb_gfg_checked=False, rb_d_checked=False,
-            kernel_slider_value=9,
+            algorithm='guided_filter', fusion_parameters={'kernel_size': 9},
             tile_enabled=True, tile_block_size=128, tile_overlap=32,
             tile_threshold=256, thread_count=2, use_gpu=False,
         )
@@ -158,47 +152,204 @@ class TestAlignCache:
     def test_round_trip(self, stack_dir):
         names = self.names(stack_dir)
         frames = [np.full((8, 8, 3), 9, np.uint8) for _ in names]
-        align_cache.save_aligned(stack_dir, names, frames, (True, False), 1024, 1.0)
-        loaded = align_cache.load_aligned(stack_dir, names, (True, False), 1024, 1.0)
+        align_cache.save_aligned(stack_dir, names, frames, ('homography',), 1024, 1.0)
+        loaded = align_cache.load_aligned(stack_dir, names, ('homography',), 1024, 1.0)
         assert loaded is not None and len(loaded) == 3
         assert np.array_equal(loaded[0], frames[0])
 
     def test_signature_invalidates_on_options(self, stack_dir):
         names = self.names(stack_dir)
         align_cache.save_aligned(stack_dir, names, [np.zeros((8, 8, 3), np.uint8)] * 3,
-                                 (True, False), 1024, 1.0)
-        assert align_cache.load_aligned(stack_dir, names, (False, True), 1024, 1.0) is None
+                                 ('homography',), 1024, 1.0)
+        assert align_cache.load_aligned(stack_dir, names, ('ecc',), 1024, 1.0) is None
 
     def test_missing_cache_returns_none(self, stack_dir):
         assert align_cache.load_aligned(stack_dir, self.names(stack_dir),
-                                        (True, False), 1024) is None
+                                        ('homography',), 1024) is None
 
     def test_stale_signature_after_file_change(self, stack_dir):
         names = self.names(stack_dir)
         align_cache.save_aligned(stack_dir, names, [np.zeros((8, 8, 3), np.uint8)] * 3,
-                                 (True, False), 1024, 1.0)
+                                 ('homography',), 1024, 1.0)
         # Touch one source file (size change -> new signature)
         cv2.imwrite(os.path.join(stack_dir, "f0.png"), np.full((16, 16, 3), 7, np.uint8))
-        assert align_cache.load_aligned(stack_dir, names, (True, False), 1024, 1.0) is None
+        assert align_cache.load_aligned(stack_dir, names, ('homography',), 1024, 1.0) is None
 
     def test_signature_invalidates_on_scale(self, stack_dir):
         names = self.names(stack_dir)
         align_cache.save_aligned(stack_dir, names, [np.zeros((8, 8, 3), np.uint8)] * 3,
-                                 (True, False), 1024, 1.0)
-        assert align_cache.load_aligned(stack_dir, names, (True, False), 1024, 0.5) is None
+                                 ('homography',), 1024, 1.0)
+        assert align_cache.load_aligned(stack_dir, names, ('homography',), 1024, 0.5) is None
+
+    def test_signature_carries_a_format_version(self, stack_dir):
+        """A cache written by an older alignment build must not be reused.
+
+        The file identity and the request parameters can be identical while
+        the alignment maths changed; the version prefix is what makes that
+        invalidate instead of silently feeding stale frames into a render.
+        """
+        names = self.names(stack_dir)
+        before = align_cache._signature(stack_dir, names, ('homography',), 1024)
+        original = align_cache.CACHE_FORMAT_VERSION
+        try:
+            align_cache.CACHE_FORMAT_VERSION = original + 1
+            after = align_cache._signature(stack_dir, names, ('homography',), 1024)
+        finally:
+            align_cache.CACHE_FORMAT_VERSION = original
+        assert before != after
+
+
+class TestAlignCacheIsNotOnTheGuiThread:
+    """Reading a cache hit used to decode every PNG synchronously in the GUI."""
+
+    def _worker(self, tmp_path, frames, request, parameters=None):
+        from core.workers import RenderWorker
+        worker = RenderWorker(
+            frames, algorithm='guided_filter', alignment='homography', need_fusion=False,
+            registration_parameters=parameters, use_gpu=False, disk_cache=request,
+        )
+        return worker
+
+    def test_worker_loads_a_cache_hit(self, tmp_path):
+        folder = tmp_path / "stack"
+        folder.mkdir()
+        frames = []
+        for i in range(3):
+            frame = np.full((8, 8, 3), i * 40, np.uint8)
+            frames.append(frame)
+            cv2.imwrite(str(folder / f"f{i}.png"), frame)
+        names = sorted(os.listdir(folder))
+        aligned = [np.full((8, 8, 3), 9, np.uint8) for _ in names]
+        writer = self._worker(tmp_path, frames, {
+            "mode": "save", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        writer._save_cached_alignment(aligned)
+
+        worker = self._worker(tmp_path, frames, {
+            "mode": "load", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        loaded = worker._load_cached_alignment()
+        assert loaded is not None and len(loaded) == len(frames)
+        assert np.array_equal(loaded[0], aligned[0])
+
+    def test_worker_ignores_a_missing_cache(self, tmp_path):
+        frames = [np.zeros((8, 8, 3), np.uint8) for _ in range(2)]
+        worker = self._worker(tmp_path, frames, {
+            "mode": "load", "folder": str(tmp_path / "absent"),
+            "filenames": ["a.png", "b.png"], "align_options": ('homography',),
+        })
+        assert worker._load_cached_alignment() is None
+
+    def test_no_request_means_no_io(self, tmp_path):
+        frames = [np.zeros((8, 8, 3), np.uint8) for _ in range(2)]
+        worker = self._worker(tmp_path, frames, None)
+        assert worker._load_cached_alignment() is None
+
+    def test_worker_writes_only_when_asked(self, tmp_path):
+        folder = tmp_path / "stack"
+        folder.mkdir()
+        frames = []
+        for i in range(2):
+            frame = np.full((8, 8, 3), i * 10, np.uint8)
+            frames.append(frame)
+            cv2.imwrite(str(folder / f"f{i}.png"), frame)
+        names = sorted(os.listdir(folder))
+
+        # mode="load" must never write.
+        loader = self._worker(tmp_path, frames, {
+            "mode": "load", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        loader._save_cached_alignment(frames)
+        assert loader._load_cached_alignment() is None
+
+        saver = self._worker(tmp_path, frames, {
+            "mode": "save", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        saver._save_cached_alignment(frames)
+        saved = loader._load_cached_alignment()
+        assert saved is not None and np.array_equal(saved[0], frames[0])
+
+    def test_reused_flag_distinguishes_load_from_compute(self, tmp_path, monkeypatch):
+        """A cache hit must be reportable as a hit, not as a fresh alignment."""
+        folder = tmp_path / "stack"
+        folder.mkdir()
+        frames = []
+        for i in range(2):
+            frame = np.full((8, 8, 3), i * 20, np.uint8)
+            frames.append(frame)
+            cv2.imwrite(str(folder / f"f{i}.png"), frame)
+        names = sorted(os.listdir(folder))
+        saver = self._worker(tmp_path, frames, {
+            "mode": "save", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        saver._save_cached_alignment(frames)
+
+        worker = self._worker(tmp_path, frames, {
+            "mode": "load", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        assert worker.alignment_reused is False
+        monkeypatch.setattr(worker, '_run_registration', lambda *args, **kwargs:
+                            pytest.fail('registration ran despite a valid cache'))
+        worker._run_admitted()
+        assert worker.alignment_reused is True
+        assert worker.alignment_computed is False
+
+    def test_worker_cache_rejects_changed_parameters_and_decoded_pixels(self, tmp_path):
+        folder = tmp_path / 'stack'
+        folder.mkdir()
+        frames = [np.full((8, 8, 3), i * 20, np.uint8) for i in range(2)]
+        for i, frame in enumerate(frames):
+            cv2.imwrite(str(folder / f'f{i}.png'), frame)
+        names = sorted(os.listdir(folder))
+        request = {'folder': str(folder), 'filenames': names,
+                   'align_options': ('homography',), 'downscale_width': 1024}
+        saver = self._worker(tmp_path, frames, {**request, 'mode': 'save'})
+        saver._save_cached_alignment(frames)
+
+        same = self._worker(tmp_path, frames, {**request, 'mode': 'load'})
+        assert same._load_cached_alignment() is not None
+        changed_policy = self._worker(tmp_path, frames, {**request, 'mode': 'load'},
+                                      {'failure_policy': 'fail'})
+        assert changed_policy._load_cached_alignment() is None
+        changed_frames = [frame.copy() for frame in frames]
+        changed_frames[0][0, 0, 0] = 1
+        changed_pixels = self._worker(tmp_path, changed_frames, {**request, 'mode': 'load'})
+        assert changed_pixels._load_cached_alignment() is None
+
+    def test_a_failed_write_never_fails_the_render(self, tmp_path, monkeypatch):
+        folder = tmp_path / "stack"
+        folder.mkdir()
+        frames = [np.zeros((8, 8, 3), np.uint8) for _ in range(2)]
+        for i, frame in enumerate(frames):
+            cv2.imwrite(str(folder / f"f{i}.png"), frame)
+        names = sorted(os.listdir(folder))
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(align_cache, "save_aligned", boom)
+        worker = self._worker(tmp_path, frames, {
+            "mode": "save", "folder": str(folder), "filenames": names,
+            "align_options": ('homography',), "downscale_width": 1024,
+        })
+        worker._save_cached_alignment(frames)  # must not raise
 
 
 class TestBatchWorkerBitDepth:
-    def test_multi_folder_batch_keeps_16bit(self, tmp_path):
+    def test_multi_folder_batch_keeps_16bit(self, tmp_path, qapp):
         """The multi-folder batch branch fused raw uint16 frames straight through,
         skipping the normalize/quantize pair single-folder rendering uses, so
         every batched 16-bit render collapsed to a blown-out 8-bit file.
         """
         pytest.importorskip("PyQt6")
-        from PyQt6.QtWidgets import QApplication
         from core.workers import BatchWorker
 
-        QApplication.instance() or QApplication([])
 
         folder = tmp_path / "stack"
         folder.mkdir()
@@ -225,15 +376,13 @@ class TestBatchWorkerBitDepth:
         assert 8000 < float(saved.mean()) < 58000, f"batch output blown out: {saved.mean()}"
 
 
-    def test_multi_folder_batch_alignment_only(self, tmp_path):
+    def test_multi_folder_batch_alignment_only(self, tmp_path, qapp):
         """fusion_method='none' batch: registration runs, the aligned frames
         are saved, and no fusion is attempted ('none' used to be handed to
         the MultiFocusFusion constructor and crash the batch)."""
         pytest.importorskip("PyQt6")
-        from PyQt6.QtWidgets import QApplication
         from core.workers import BatchWorker
 
-        QApplication.instance() or QApplication([])
 
         folder = tmp_path / "stack"
         folder.mkdir()
@@ -251,19 +400,20 @@ class TestBatchWorkerBitDepth:
         }, thread_count=2, use_gpu=False)
         worker.process_single_folder(str(folder))
 
-        # 与源文件同名冲突时改名 "_registered" 保存（防覆盖保护）
-        aligned1 = cv2.imread(str(folder / "f1_registered.png"),
-                              cv2.IMREAD_UNCHANGED)
-        aligned2 = cv2.imread(str(folder / "f2_registered.png"),
-                              cv2.IMREAD_UNCHANGED)
+        # One folder artifact; original source basenames remain intact.
+        aligned1 = cv2.imread(str(folder / 'stack_aligned' / 'f1.png'), cv2.IMREAD_UNCHANGED)
+        aligned2 = cv2.imread(str(folder / 'stack_aligned' / 'f2.png'), cv2.IMREAD_UNCHANGED)
         assert aligned1 is not None and aligned2 is not None, \
             "alignment-only batch wrote no aligned frames"
         assert not (folder / "stack.png").exists(), \
             "alignment-only batch must not write a fused result"
+        assert not list(folder.glob('*_registered*'))
+        assert worker.written_paths == []
+        assert len(worker.aligned_stacks) == 1
 
 
 class TestGifDuration:
-    def test_gif_worker_writes_millisecond_durations(self, tmp_path):
+    def test_gif_worker_writes_millisecond_durations(self, tmp_path, qapp):
         """imageio hands `duration` straight to Pillow, which counts milliseconds.
 
         The worker is given seconds, so every frame landed at 0 ms and the GIF
@@ -271,10 +421,8 @@ class TestGifDuration:
         """
         pytest.importorskip("PyQt6")
         from PIL import Image
-        from PyQt6.QtWidgets import QApplication
         from core.workers import GifSaverWorker
 
-        QApplication.instance() or QApplication([])
 
         class NoLabels:
             def prepare_bgr_image(self, target_type, img, index):
@@ -407,10 +555,10 @@ class TestAlignCacheUnicodePath:
 
         names = ["f0.png", "f1.png"]
         frames = [np.full((16, 16, 3), 7, np.uint8) for _ in range(2)]
-        align_cache.save_aligned(str(folder), names, frames, (True, False),
+        align_cache.save_aligned(str(folder), names, frames, ('homography',),
                                  1024, 1.0, (16, 16))
 
-        loaded = align_cache.load_aligned(str(folder), names, (True, False),
+        loaded = align_cache.load_aligned(str(folder), names, ('homography',),
                                           1024, 1.0, (16, 16))
         assert loaded is not None
         assert all(np.array_equal(a, b) for a, b in zip(loaded, frames))
@@ -439,3 +587,55 @@ class TestLoaderFormatsAndOrder:
         ok, _msg, imgs, names = ImageStackLoader().load_from_folder(str(tmp_path))
         assert ok and len(imgs) == 2
         assert names == ["w0.webp", "w1.webp"]
+
+
+def test_split_count_accepts_the_stepper_float():
+    """The dialog's stepper returns a float; range() rejected it."""
+    from core.image_loader import ImageStackLoader
+
+    loader = ImageStackLoader()
+    items = [(f"f{i}.png", None, None) for i in range(5)]
+    groups = loader.split_by_count(items, 2.0)
+    assert [len(g) for g in groups] == [2, 2, 1]
+
+
+def test_missing_timestamps_are_counted():
+    from core.image_loader import ImageStackLoader
+
+    items = [("a.png", None, None), ("b.png", None, 1.0)]
+    assert ImageStackLoader.missing_timestamps(items) == 1
+
+
+def test_align_only_split_batch_writes_aligned_frames(tmp_path, qapp):
+    """Choosing no fusion method must still export the aligned frames."""
+    import numpy as np
+    from core.workers import BatchWorker
+
+    source = tmp_path / "src"
+    source.mkdir()
+    items = []
+    for i in range(3):
+        image = np.full((24, 32, 3), 40 + i * 20, np.uint8)
+        items.append((f"f{i}.png", image, None))
+
+    outdir = tmp_path / "out"
+    outdir.mkdir()
+    worker = BatchWorker(
+        folder_paths=[], output_type="custom", output_path=str(outdir),
+        processing_settings={"reg_methods": [], "fusion_method": "none",
+                             "save_aligned": True, "format": "png"},
+        import_mode="single_folder", split_method="count", split_param=2,
+        single_folder_images_with_times=items, use_gpu=False,
+        thread_count=1)
+    finished = {}
+    worker.finished.connect(lambda results: finished.update(results))
+    worker.run()
+
+    assert finished.get("success") == 2, finished
+    assert finished["counts"]["success"] == 2
+    directories = sorted(outdir.iterdir())
+    assert len(directories) == 2 and all(path.is_dir() for path in directories)
+    assert sorted(path.name for path in directories[0].iterdir()) == ['f0.png', 'f1.png']
+    assert sorted(path.name for path in directories[1].iterdir()) == ['f2.png']
+    assert finished['outputs'] == []
+    assert len(finished['aligned_stacks']) == 2

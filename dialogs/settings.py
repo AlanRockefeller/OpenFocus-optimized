@@ -2,7 +2,7 @@
 """Settings and configuration dialogs."""
 
 import os
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QDialog,
@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from ui.styles import PRIMARY_BLUE, help_button_style
 from locales import trans
-from widgets.stepper import StepperSpinBox
+from widgets.stepper import StepperSpinBox, hide_spin_buttons
 from utils import resource_path
 
 
@@ -83,6 +83,20 @@ class DurationDialog(QDialog):
         return self.duration_spinbox.value()
 
 
+class _DownsamplePercentSpinBox(QSpinBox):
+    """Replace the old percentage when typing after entering the field."""
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        # Mouse press places the cursor after focusInEvent; defer selection
+        # until that press has completed, while allowing later cursor edits.
+        QTimer.singleShot(0, self._select_if_focused)
+
+    def _select_if_focused(self):
+        if self.hasFocus():
+            self.selectAll()
+
+
 class DownsampleDialog(QDialog):
     """下采样设置对话框"""
 
@@ -140,8 +154,8 @@ class DownsampleDialog(QDialog):
         self.increase_btn.clicked.connect(lambda: self.slider.setValue(self.slider.value() + 1))
 
         # 旋转框
-        self.spinbox = QSpinBox()
-        self.spinbox.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)  # 隐藏自带按钮
+        self.spinbox = _DownsamplePercentSpinBox()
+        hide_spin_buttons(self.spinbox)
         self.spinbox.setRange(1, self.max_percent)
         self.spinbox.setValue(self.scale_percent)
         self.spinbox.setSuffix("%")
@@ -284,6 +298,9 @@ class TileSettingsDialog(QDialog):
 
         # load defaults from parent if available
         self.load_defaults()
+        self.spin_block.valueChanged.connect(
+            lambda value: self.spin_overlap.setMaximum(int(value) // 2))
+        self.spin_overlap.setMaximum(int(self.spin_block.value()) // 2)
 
     def load_defaults(self):
         if self.parent_window:
@@ -346,11 +363,9 @@ class RegistrationSettingsDialog(QDialog):
         self.spin_downscale = QSpinBox()
         self.spin_downscale.setRange(64, 8192)
         self.spin_downscale.setSingleStep(1)
-        # 默认值会在 load_defaults 中设置
-        self.spin_downscale.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
+        self.spin_downscale.setKeyboardTracking(False)
         self.spin_downscale.setValue(1024)
-        # A usable minimum: sizeHint for a NoButtons spin is only ~45 px.
-        self.spin_downscale.setMinimumWidth(90)
+        self.spin_downscale.setMinimumWidth(110)
         g_layout.addWidget(self.spin_downscale)
         g_layout.addStretch()
 

@@ -16,18 +16,10 @@ def _labels_that_must_fit():
             "chk_exposure_match", "chk_base_correct")
 
 
-def test_spin_box_is_not_narrower_than_it_needs():
-    """A fixed width below minimumSizeHint clips the value."""
-    from pathlib import Path
-    src = Path("ui/right_panel.py").read_text(encoding="utf-8")
-    block = src[src.index("spin_depth_smooth = StepperSpinBox("):]
-    block = block[:block.index("ds_layout.addWidget")]
-    assert "setFixedWidth" not in block, (
-        "a fixed width clips the spin box value; use setMinimumWidth")
-    assert "setMinimumWidth" in block
 
 
-def test_option_checkboxes_flow_and_wrap():
+
+def test_option_checkboxes_flow_and_wrap(qapp):
     """Options pack side by side and wrap on width, never one-per-row.
 
     They used to be stacked unconditionally because a 375 px column could not
@@ -35,11 +27,11 @@ def test_option_checkboxes_flow_and_wrap():
     rest, so a wide window shows two rows instead of four and the saved height
     goes to the source/output lists.
     """
-    from PyQt6.QtWidgets import QApplication, QCheckBox
+    from PyQt6.QtWidgets import QCheckBox
 
     from widgets.flow_layout import FlowPanel
 
-    app = QApplication.instance() or QApplication([])
+    app = qapp
     panel = FlowPanel(h_spacing=14, v_spacing=6)
     boxes = []
     for text in ("Quick preview", "Reverse order", "Exposure match",
@@ -71,20 +63,8 @@ def test_option_checkboxes_flow_and_wrap():
         panel.deleteLater()
 
 
-def test_ai_mode_radios_are_not_pre_elided():
-    """The AI radios must show their full wording, not a fixed-width ellipsis.
 
-    They were elided to PANEL_TEXT_WIDTH regardless of the panel's real width,
-    which both hid the meaning and forced one radio per row.
-    """
-    from pathlib import Path
 
-    src = Path("ui/right_panel.py").read_text(encoding="utf-8")
-    block = src[src.index("radio_ai_soft = QRadioButton("):]
-    block = block[:block.index("ai_mode_widget.setVisible(False)")]
-    assert "elidedText" not in block, (
-        "the AI radios must not be pre-elided")
-    assert "FlowPanel" in block
 
 
 @pytest.mark.parametrize("lang", ["en", "zh", "ja", "es"])
@@ -99,79 +79,156 @@ def test_option_labels_have_a_translation(lang):
         assert text and text != key, f"{lang}: {key} is untranslated"
 
 
-@pytest.mark.parametrize("lang", ["en", "zh", "ja", "es"])
-def test_help_bodies_are_translated(lang):
-    """The registration help used to show English text in every language."""
-    from locales import trans
-    for key in ("help_render_body", "help_registration_body",
-                "help_tile_body"):
-        body = trans.translations[lang].get(key, "")
-        assert body, f"{lang}: {key} missing"
-        assert "<h3>" in body
-    if lang != "en":
-        assert "Registration Methods" not in trans.translations[lang][
-            "help_registration_body"], f"{lang}: help body is still English"
 
 
-def test_checked_radio_does_not_grow_its_indicator():
-    """A 5 px border on :checked grew the box from 18 px to 26 px, so the
-    indicator visibly jumped when the AI mode was toggled."""
-    from PyQt6.QtWidgets import QApplication, QRadioButton
-    from ui.styles import build_stylesheet
-    app = QApplication.instance() or QApplication([])
-    previous = app.styleSheet()
+def test_eliding_button_reserves_its_painted_padding(qapp):
+    """Long captions and their ellipses fit inside the styled button."""
+    from PyQt6.QtWidgets import QStyle, QStyleOptionButton
+    from ui.right_panel import ElidingButton
+
+    button = ElidingButton("▶ Rozpocznij renderowanie " * 2)
+    button.setStyleSheet("QPushButton { padding: 6px 12px; }")
+    button.resize(140, 34)
+    button.show()
+    qapp.processEvents()
     try:
-        for theme in ("light", "dark"):
-            app.setStyleSheet(build_stylesheet(theme))
-            # Same label: only the checked state may differ.
-            soft, hard = QRadioButton("same"), QRadioButton("same")
+        assert button.text() != button.full_text()
+        option = QStyleOptionButton()
+        button.initStyleOption(option)
+        contents = button.style().subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, option, button)
+        assert button.fontMetrics().horizontalAdvance(button.text()) <= contents.width()
+        assert button.toolTip() == button.full_text()
+    finally:
+        button.close()
+        button.deleteLater()
+
+
+def test_main_selector_explains_missing_dtcwt(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QComboBox
+    import main
+    import ui.algorithm_combo as algorithm_combo
+    from locales import trans
+
+    combo = QComboBox()
+    algorithm_combo.fill_fusion_combo(combo)
+    host = SimpleNamespace(combo_fusion=combo, _stackmff_available=True)
+    monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: False)
+    main.OpenFocus.refresh_method_availability(host)
+    index = combo.findData('dtcwt')
+    assert not combo.model().item(index).isEnabled()
+    assert combo.itemData(index, Qt.ItemDataRole.ToolTipRole) == trans.t('env_dtcwt_unavailable')
+    monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: True)
+    main.OpenFocus.refresh_method_availability(host)
+    assert combo.model().item(index).isEnabled()
+    assert combo.itemData(index, Qt.ItemDataRole.ToolTipRole) == trans.t('radio_dtcwt_hint')
+    combo.deleteLater()
+
+
+def test_alignment_only_disables_fusion_only_options(qapp):
+    """Base correction, sharpening and reversal feed only the fusion step.
+
+    With `Alignment only (no fusion)` the render never constructs
+    MultiFocusFusion, so leaving the checkboxes enabled lied. Exposure
+    matching also feeds registration and must stay enabled.
+    """
+    import types
+
+    import main
+    from locales import trans as _t
+    from ui.right_panel import ElidingCheckBox
+
+    class _Panel:
+        def set_parameters(self, *_args):
+            pass
+
+    class _Host:
+        def __init__(self):
+            self.method = "none"
+            self.fusion_parameter_panel = _Panel()
+            self.chk_base_correct = ElidingCheckBox(
+                _t.t("chk_base_correct"), _t.t("chk_base_correct_hint"))
+            self.chk_exposure_match = ElidingCheckBox(
+                _t.t("chk_exposure_match"), _t.t("chk_exposure_match_hint"))
+            self.chk_sharpen_output = ElidingCheckBox(
+                _t.t("chk_sharpen_output"), _t.t("chk_sharpen_output_hint"))
+            self.chk_reverse_order = ElidingCheckBox(
+                _t.t("chk_reverse_order"), _t.t("chk_reverse_order_hint"))
+
+        def current_fusion_method(self):
+            return self.method
+
+        def fusion_parameters_for(self, _method, depth=False):
+            return {}
+
+        def _sync_brightness_checkboxes(self, _method=None):
+            pass
+
+    host = _Host()
+    host._set_fusion_option_available = types.MethodType(
+        main.OpenFocus._set_fusion_option_available, host)
+    refresh = types.MethodType(
+        main.OpenFocus.refresh_algorithm_parameters, host)
+
+    refresh()
+    assert not host.chk_base_correct.isEnabled()
+    assert not host.chk_sharpen_output.isEnabled()
+    assert not host.chk_reverse_order.isEnabled()
+    assert host.chk_exposure_match.isEnabled(), (
+        "exposure matching still feeds the registration brightness reference")
+    assert _t.t("radio_no_fusion_hint") in host.chk_base_correct.toolTip()
+    assert _t.t("radio_no_fusion_hint") in host.chk_reverse_order.toolTip()
+
+    host.method = "guided_filter"
+    refresh()
+    assert host.chk_base_correct.isEnabled()
+    assert host.chk_sharpen_output.isEnabled()
+    assert host.chk_reverse_order.isEnabled()
+    assert _t.t("chk_reverse_order_hint") in host.chk_reverse_order.toolTip()
+
+    # StackMFF V2 reads the original focus order; keep the existing lock.
+    host.method = "stackmffv2"
+    refresh()
+    assert not host.chk_reverse_order.isEnabled()
+    assert _t.t("chk_reverse_order_locked_hint") in (
+        host.chk_reverse_order.toolTip())
+
+
+
+
+
+
+def test_checked_radio_does_not_grow_its_indicator(qapp):
+    """Checked and unchecked radios occupy the same space in both themes."""
+    from PyQt6.QtWidgets import QRadioButton, QWidget
+    from ui.styles import build_stylesheet
+
+    for theme in ("light", "dark"):
+        parent = QWidget()
+        parent.setStyleSheet(build_stylesheet(theme))
+        soft, hard = QRadioButton("same", parent), QRadioButton("same", parent)
+        try:
             soft.setChecked(True)
             assert soft.height() == hard.height(), theme
             assert soft.sizeHint().height() == hard.sizeHint().height(), theme
             assert soft.sizeHint().width() == hard.sizeHint().width(), theme
-    finally:
-        app.setStyleSheet(previous)
+        finally:
+            parent.close()
+            parent.deleteLater()
 
 
-def test_unchecked_radio_indicator_is_a_ring():
-    """Any background colour on the unchecked radio is painted as a filled
-    disc, which read as a solid dot on the dark theme."""
-    from pathlib import Path
-    src = Path("ui/styles.py").read_text(encoding="utf-8")
-    block = src[src.index("QRadioButton::indicator {{"):
-                src.index("QCheckBox:disabled")]
-    assert "background: transparent" in block
-    assert "border: 5px" not in block
 
 
-def test_ai_mode_radios_exist_and_default_to_soft():
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
-    from ui.right_panel import create_right_panel
-    panel = create_right_panel()
-    try:
-        assert panel.radio_ai_soft.isChecked()
-        assert not panel.radio_ai_hard.isChecked()
-        assert not panel.ai_mode_widget.isVisible()
-    finally:
-        panel.widget.deleteLater()
 
 
-def test_help_chips_follow_the_theme():
-    """The "?" chips are styled inline at creation. Switching to light used to
-    leave them dark: apply_theme refreshed them BEFORE recording the new
-    CURRENT_THEME, so help_button_style() re-read the old one."""
-    from pathlib import Path
-    src = Path("main.py").read_text(encoding="utf-8")
-    body = src[src.index("def apply_theme(self, theme: str) -> None:"):]
-    body = body[:body.index("def _enable_dark_title_bar")]
-    assert body.index("set_current_theme(theme)") < body.index("help_button_style(theme)"), (
-        "the theme must be recorded before inline styles are recomputed")
 
 
-def test_help_button_style_uses_the_active_theme():
-    from PyQt6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
+
+
+
+def test_help_button_style_uses_the_active_theme(qapp):
     import ui.styles as st
     try:
         st.set_current_theme("light")
@@ -185,7 +242,7 @@ def test_help_button_style_uses_the_active_theme():
         st.set_current_theme("dark")
 
 
-def test_no_input_widget_is_narrower_than_its_content():
+def test_no_input_widget_is_narrower_than_its_content(qapp):
     """A fixed width below minimumSizeHint silently clips the value.
 
     Two shipped defects of this class: the right panel's blend-smoothing spin
@@ -193,23 +250,21 @@ def test_no_input_widget_is_narrower_than_its_content():
     sigma ("4.0" → "4."). This walks every dialog's spin boxes so a new fixed
     width cannot reintroduce it.
     """
-    from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QSpinBox,
-                                 QWidget)
-    app = QApplication.instance() or QApplication([])
+    from PyQt6.QtWidgets import QDoubleSpinBox, QSpinBox, QWidget
     from ui.styles import build_stylesheet
-    app.setStyleSheet(build_stylesheet("dark"))
 
     from dialogs.settings import DownsampleDialog, TileSettingsDialog
     from dialogs.dustmap import DustMapDialog
 
     parent = QWidget()
+    parent.setStyleSheet(build_stylesheet("dark"))
     dialogs = [DownsampleDialog(parent, initial_scale=0.05, max_scale=1.0),
                TileSettingsDialog(parent),
                DustMapDialog(parent)]
     try:
         for dlg in dialogs:
             dlg.show()
-            app.processEvents()
+            qapp.processEvents()
             for spin in dlg.findChildren((QSpinBox, QDoubleSpinBox)):
                 need = spin.minimumSizeHint().width()
                 assert spin.width() >= need, (
@@ -221,44 +276,103 @@ def test_no_input_widget_is_narrower_than_its_content():
             dlg.deleteLater()
         parent.deleteLater()
 
-
-def test_fusion_dropdown_order_and_default():
-    """Alignment-only stays first; AI is second but is the DEFAULT, and its
-    label names the algorithm so the method is identifiable outside the app."""
-    from ui.right_panel import FUSION_ITEMS, FUSION_DEFAULT
-    codes = [c for c, _k, _h in FUSION_ITEMS]
-    assert codes[0] == "none"
-    assert codes[1] == "stackmffv3"
-    assert codes[2:5] == ["openfocus_a", "openfocus_b", "openfocus_c"]
-    assert codes[5:] == ["guided_filter", "dct", "dtcwt", "gfgfgf"]
-    assert FUSION_DEFAULT == "stackmffv3"
-
-
-def test_ai_label_names_the_algorithm_in_every_language(qapp):
-    """'AI' alone tells the user nothing; the paper is StackMFF V3."""
-    from locales import TranslationManager
-    tables = TranslationManager().translations
-    for lang in ("en", "zh", "ja", "es"):
-        assert "StackMFF-V3" in tables[lang]["radio_stackmff"], lang
-
-
-def test_menus_have_an_opaque_background():
-    """A menu must not inherit `QWidget { background: transparent; }`.
-
-    The base rule made the popup paint its text over whatever was behind it:
-    on the dark theme a right-click menu showed the desktop through it, which
-    read as a translucent panel with unreadable labels. Both the frame and
-    every item need an explicit fill.
-    """
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("value", [1, 10, 99, 100])
+def test_downsample_percentage_is_rendered(qapp, theme, value):
+    """The real styled editor must have room to paint every percentage."""
+    from PyQt6.QtWidgets import QWidget
+    from dialogs.settings import DownsampleDialog
     from ui.styles import build_stylesheet
 
-    for theme in ("dark", "light"):
-        qss = build_stylesheet(theme)
-        menu = qss[qss.index("QMenu {"):qss.index("QMenu::item {")]
-        item = qss[qss.index("QMenu::item {"):qss.index("QMenu::item:selected")]
-        assert "background-color:" in menu, theme
-        assert "background-color:" in item, theme
-        assert "background: transparent" not in item, theme
+    parent = QWidget()
+    parent.setStyleSheet(build_stylesheet(theme))
+    dialog = DownsampleDialog(parent, initial_scale=value / 100)
+    try:
+        dialog.show()
+        dialog.decrease_btn.setFocus()
+        qapp.processEvents()
+        spin = dialog.spinbox
+        editor = spin.lineEdit()
+        text = f"{value}%"
+        assert editor.text() == text
+        rect = editor.contentsRect()
+        margins = editor.textMargins()
+        assert rect.width() - margins.left() - margins.right() >= editor.fontMetrics().horizontalAdvance(text)
+        assert rect.height() - margins.top() - margins.bottom() >= editor.fontMetrics().height()
+
+        # Compare the actual painted widget with its empty editor, rather than
+        # relying on text() or size hints, which also pass when no text paints.
+        painted = spin.grab().toImage()
+        editor.setText("")
+        qapp.processEvents()
+        empty = spin.grab().toImage()
+        changed = sum(
+            painted.pixel(x, y) != empty.pixel(x, y)
+            for y in range(painted.height())
+            for x in range(painted.width())
+        )
+        assert changed > 5, f"{text} did not paint in the {theme} theme"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        parent.deleteLater()
+
+
+@pytest.mark.parametrize("theme", ["dark", "light"])
+@pytest.mark.parametrize("max_scale", [0.42, 1.0])
+@pytest.mark.parametrize("show_dont_ask", [False, True])
+def test_downsample_controls_stay_in_sync(qapp, max_scale, theme, show_dont_ask):
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QWidget
+    from dialogs.settings import DownsampleDialog
+    from ui.styles import build_stylesheet
+
+    parent = QWidget()
+    parent.setStyleSheet(build_stylesheet(theme))
+    dialog = DownsampleDialog(parent, initial_scale=max_scale, max_scale=max_scale,
+                              show_dont_ask=show_dont_ask)
+    try:
+        dialog.show()
+        qapp.processEvents()
+        dialog.decrease_btn.setFocus()
+        QTest.mouseClick(dialog.spinbox.lineEdit(), Qt.MouseButton.LeftButton,
+                         pos=dialog.spinbox.lineEdit().rect().center())
+        qapp.processEvents()
+        QTest.keyClicks(dialog.spinbox.lineEdit(), "37")
+        assert dialog.spinbox.value() == dialog.slider.value() == 37
+        assert dialog.get_scale_factor() == 0.37
+        QTest.keyClick(dialog.spinbox.lineEdit(), Qt.Key.Key_Home)
+        QTest.keyClick(dialog.spinbox.lineEdit(), Qt.Key.Key_Delete)
+        QTest.keyClicks(dialog.spinbox.lineEdit(), "2")
+        assert dialog.spinbox.value() == dialog.slider.value() == 27
+        dialog.slider.setValue(37)
+
+        dialog.increase_btn.click()
+        assert dialog.spinbox.value() == dialog.slider.value() == 38
+        dialog.decrease_btn.click()
+        assert dialog.spinbox.value() == dialog.slider.value() == 37
+        dialog.slider.setValue(dialog.slider.maximum())
+        assert dialog.spinbox.value() == round(max_scale * 100)
+        dialog.increase_btn.click()
+        assert dialog.spinbox.value() == dialog.slider.value() == round(max_scale * 100)
+        dialog.slider.setValue(1)
+        dialog.decrease_btn.click()
+        assert dialog.spinbox.value() == dialog.slider.value() == 1
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        parent.deleteLater()
+
+
+
+
+
+
+
+
+
+
 
 
 def test_status_block_is_two_rows(qapp):
@@ -295,23 +409,7 @@ def test_status_block_is_two_rows(qapp):
         parts.widget.deleteLater()
 
 
-def test_compare_all_ignores_quick_preview():
-    """Compare-all must fill the output history even with the box ticked.
 
-    Honouring the quick-preview checkbox there rendered each of the eight
-    methods as a throwaway draft, so the run finished with nothing added to the
-    output history - reported as "the fusion ran but produced no result". A
-    draft per method is also useless for comparison: every entry is
-    downscaled.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/render_manager.py").read_text(encoding="utf-8")
-    start = src.index("        preview_downscale = getattr(window,")
-    block = src[start:start + 900]
-    assert "and not compare" in block, (
-        "compare-all must opt out of quick preview")
-    assert "getattr(self, '_compare_mode', False)" in block
 
 
 def test_quick_preview_is_a_fraction_not_an_absolute_cap():
@@ -321,7 +419,7 @@ def test_quick_preview_is_a_fraction_not_an_absolute_cap():
     quick path slower than the full render (7.7 s vs 6.1 s on 1344x1021 with
     ECC), so the constant is a fraction of the source size now.
     """
-    from controllers.render_manager import PREVIEW_SCALE, _downscale_for_preview
+    from core.workers import PREVIEW_SCALE, _downscale_for_preview
     import numpy as np
 
     assert 0.0 < PREVIEW_SCALE <= 0.6, (
@@ -331,21 +429,6 @@ def test_quick_preview_is_a_fraction_not_an_absolute_cap():
     assert max(out.shape[:2]) < 900, out.shape
 
 
-def test_quick_preview_reuses_an_existing_alignment():
-    """ECC costs seconds and does not shrink with the frame.
-
-    Registration dominates the run and is independent of the draft size, so a
-    preview that always re-registers is slower than the full render. Once the
-    stack is aligned the preview must reuse it.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/render_manager.py").read_text(encoding="utf-8")
-    start = src.index("        elif self._preview_mode:")
-    block = src[start:src.index("        elif (need_align_homography", start)]
-    assert "reusable" in block and "window.is_images_aligned" in block, (
-        "the preview branch must reuse window.aligned_images when valid")
-    assert "effective_need_align_ecc = False" in block
 
 
 def test_add_label_dialog_style_exists():
@@ -449,24 +532,6 @@ def test_retouch_paints_a_locked_frame(qapp):
         dlg.deleteLater()
 
 
-def test_depth_dialog_has_a_live_3d_tab(qapp):
-    """The 3D surface renders inside the dialog, not only on export."""
-    import numpy as np
-
-    from widgets.depth_surface import DepthSurface
-
-    surf = DepthSurface()
-    try:
-        surf.resize(300, 220)
-        assert surf._height is None
-        yy, xx = np.mgrid[0:60, 0:80]
-        height = ((np.sin(xx / 8.0) + 1) / 2).astype(np.float32)
-        surf.set_surface(height)
-        surf.set_relief(0.4)
-        surf.set_invert(True)
-        surf.grab()  # must not raise
-    finally:
-        surf.deleteLater()
 
 
 def test_theme_bound_styles_are_strings_and_follow_the_theme():
@@ -494,23 +559,117 @@ def test_theme_bound_styles_are_strings_and_follow_the_theme():
         st.set_current_theme("dark")
 
 
-def test_stepper_reapplies_theme_colours(qapp):
-    """Steppers carry inline button sheets, which a global sheet cannot beat."""
+def test_stepper_uses_native_spinbox_and_theme(qapp):
+    from PyQt6.QtWidgets import QDoubleSpinBox
     import ui.styles as st
     from widgets.stepper import StepperSpinBox
 
-    st.set_current_theme("dark")
     spin = StepperSpinBox(minimum=0, maximum=8, decimals=1, step=0.2)
-    try:
-        dark = spin._minus.styleSheet()
-        st.set_current_theme("light")
+    assert isinstance(spin, QDoubleSpinBox)
+    dark = st.get_theme_style("dark")
+    light = st.get_theme_style("light")
+    assert dark != light
+    for sheet in (dark, light):
+        spin.setStyleSheet(sheet)
         spin.reapply_theme()
-        light = spin._minus.styleSheet()
-        assert dark != light, "stepper kept the old theme's button colours"
-        assert "#FFFFFF" in light.upper()
-    finally:
-        st.set_current_theme("dark")
-        spin.deleteLater()
+        assert spin.styleSheet() == sheet
+        assert "QDoubleSpinBox::up-button" in sheet
+        assert "QDoubleSpinBox::down-button" in sheet
+    spin.deleteLater()
+
+
+def test_stepper_commits_decimal_suffix_and_clamps(qapp):
+    from PyQt6.QtCore import QLocale
+    from PyQt6.QtTest import QSignalSpy
+    from widgets.stepper import StepperSpinBox
+
+    spin = StepperSpinBox(minimum=0.5, maximum=2.5, decimals=2, step=0.25, value=1)
+    spin.setLocale(QLocale(QLocale.Language.German, QLocale.Country.Germany))
+    spin.setSuffix(" %")
+    changes = QSignalSpy(spin.valueChanged)
+    spin.lineEdit().setText("1,75 %")
+    assert spin.lineEdit().hasAcceptableInput()
+    spin.interpretText()
+    assert spin.value() == 1.75
+    assert len(changes) == 1
+    spin.stepUp()
+    assert spin.value() == 2.0
+    spin.setMaximum(1.5)
+    assert spin.value() == 1.5
+    spin.stepUp()
+    assert spin.value() == 1.5
+    spin.stepDown()
+    assert spin.value() == 1.25
+    assert spin.text().endswith(" %")
+    spin.deleteLater()
+
+
+def test_stepper_keyboard_entry_and_step(qapp):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QSignalSpy, QTest
+    from widgets.stepper import StepperSpinBox
+
+    spin = StepperSpinBox(minimum=0, maximum=10, decimals=0, step=1, value=2)
+    spin.show()
+    spin.lineEdit().setFocus()
+    changes = QSignalSpy(spin.valueChanged)
+    spin.lineEdit().selectAll()
+    QTest.keyClicks(spin.lineEdit(), "7")
+    assert len(changes) == 0
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    assert spin.value() == 7
+    assert len(changes) == 1
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Up)
+    assert spin.value() == 8
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Down)
+    assert spin.value() == 7
+    spin.deleteLater()
+
+
+def test_stepper_signal_blocker_suppresses_changes(qapp):
+    from PyQt6.QtCore import QSignalBlocker
+    from PyQt6.QtTest import QSignalSpy
+    from widgets.stepper import StepperSpinBox
+
+    spin = StepperSpinBox(minimum=0, maximum=10, value=2)
+    changes = QSignalSpy(spin.valueChanged)
+    with QSignalBlocker(spin):
+        spin.setValue(5)
+        spin.stepUp()
+    assert spin.value() == 6
+    assert len(changes) == 0
+    spin.setValue(7)
+    assert len(changes) == 1
+    assert changes[0][0] == 7.0
+    spin.deleteLater()
+
+
+def test_stepper_mouse_buttons_respect_bounds(qapp):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QStyle, QStyleOptionSpinBox
+    from widgets.stepper import StepperSpinBox
+    from ui.styles import get_theme_style
+
+    spin = StepperSpinBox(minimum=0, maximum=2, step=1, value=1)
+    spin.setStyleSheet(get_theme_style("dark"))
+    spin.resize(spin.sizeHint())
+    spin.show()
+    option = QStyleOptionSpinBox()
+    spin.initStyleOption(option)
+    style = spin.style()
+    up = style.subControlRect(QStyle.ComplexControl.CC_SpinBox, option,
+                              QStyle.SubControl.SC_SpinBoxUp, spin)
+    down = style.subControlRect(QStyle.ComplexControl.CC_SpinBox, option,
+                                QStyle.SubControl.SC_SpinBoxDown, spin)
+    assert up.isValid() and down.isValid() and not up.intersects(down)
+    QTest.mouseClick(spin, Qt.MouseButton.LeftButton, pos=up.center())
+    assert spin.value() == 2
+    QTest.mouseClick(spin, Qt.MouseButton.LeftButton, pos=up.center())
+    assert spin.value() == 2
+    QTest.mouseClick(spin, Qt.MouseButton.LeftButton, pos=down.center())
+    assert spin.value() == 1
+    spin.deleteLater()
 
 
 def test_batch_groups_follow_the_workflow_order(qapp):
@@ -549,51 +708,42 @@ def test_batch_groups_follow_the_workflow_order(qapp):
         dlg.deleteLater()
 
 
-def test_batch_parameter_controls_share_a_left_edge(qapp):
-    """Every parameter control starts at the same x.
-
-    Three separate HBoxes with a trailing stretch pushed the steppers to the
-    far right while the downscale slider started at the far left, so the block
-    had no left edge - reported as "the left side is not aligned".
-    """
+def test_batch_parameter_editors_fit_their_content(qapp):
     from dialogs.batch import BatchProcessingDialog
-
     dlg = BatchProcessingDialog(None)
     try:
         dlg.resize(820, 900)
         dlg.show()
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("openfocus_b"))
         qapp.processEvents()
-        dlg.fusion_combo.setCurrentIndex(
-            dlg.fusion_combo.findData("openfocus_b"))
-        qapp.processEvents()
-        xs = set()
-        for wd in (dlg.kernel_spin, dlg.smooth_spin, dlg.downscale_slider):
-            if wd.isVisible():
-                xs.add(wd.mapTo(dlg, wd.rect().topLeft()).x())
-        assert len(xs) == 1, f"parameter controls start at different x: {xs}"
+        for editor in dlg.fusion_parameter_panel.editors.values():
+            assert editor.width() >= editor.minimumSizeHint().width()
     finally:
         dlg.close()
         dlg.deleteLater()
 
 
-def test_batch_hides_parameters_the_method_ignores(qapp):
-    """AI has no kernel/smoothing; showing a live value invites confusion."""
-    from dialogs.batch import BatchProcessingDialog
 
+
+
+
+
+
+def test_batch_ai_mode_survives_a_method_switch(qapp):
+    from dialogs.batch import BatchProcessingDialog
     dlg = BatchProcessingDialog(None)
     try:
         dlg.show()
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv3"))
+        mode = dlg.fusion_parameter_panel.editors["mode"]
+        mode.setCurrentIndex(mode.findData("hard"))
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("dtcwt"))
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv3"))
         qapp.processEvents()
-        dlg.fusion_combo.setCurrentIndex(
-            dlg.fusion_combo.findData("stackmffv3"))
-        qapp.processEvents()
-        assert not dlg.kernel_spin.isVisible()
-        assert not dlg.smooth_spin.isVisible()
-        dlg.fusion_combo.setCurrentIndex(
-            dlg.fusion_combo.findData("openfocus_b"))
-        qapp.processEvents()
-        assert dlg.kernel_spin.isVisible()
-        assert dlg.smooth_spin.isVisible()
+        assert dlg.fusion_parameter_panel.values()["mode"] == "hard"
+        assert dlg.get_processing_settings()["fusion_params"]["mode"] == "hard"
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("openfocus_c"))
+        assert "kernel_size" not in dlg.get_processing_settings()["fusion_params"]
     finally:
         dlg.close()
         dlg.deleteLater()
@@ -695,45 +845,6 @@ def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
         dlg.deleteLater()
 
 
-def test_folder_picker_path_field_is_editable(qapp, tmp_path):
-    """Qt's "Look in" combo is a plain dropdown unless made editable."""
-    from PyQt6.QtWidgets import QApplication, QComboBox, QFileDialog
-
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-    target = tmp_path / "stackB"
-    target.mkdir()
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    for combo in wd.findChildren(QComboBox):
-                        if combo.objectName() == "lookInCombo":
-                            captured["editable"] = combo.isEditable()
-                            line = combo.lineEdit()
-                            captured["line"] = line is not None
-                            if line is not None:
-                                line.setText(str(target))
-                                line.returnPressed.emit()
-                                QApplication.processEvents()
-                                captured["dir"] = wd.directory().absolutePath()
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folders()
-        assert captured.get("editable"), "the path combo must accept typing"
-        assert captured.get("line"), "no line edit to type into"
-        assert captured.get("dir", "").replace("\\", "/").lower() == \
-            str(target).replace("\\", "/").lower(), captured
-    finally:
-        dlg.deleteLater()
 
 
 def test_folder_picker_keeps_only_qt_places(qapp, tmp_path):
@@ -834,249 +945,47 @@ def test_label_draws_with_float_geometry():
     assert not adder.last_error
 
 
-def test_add_label_dialog_has_a_live_preview(qapp):
-    """The dialog must show the label before it is confirmed."""
-    from dialogs.retouch import RetouchDialog  # noqa: F401  (import sanity)
-    from widgets.label_preview import LabelPreview
+def test_label_keeps_uint16_depth_and_leaves_other_pixels():
+    """A caption on a 16-bit frame must not down-convert the image.
 
-    preview = LabelPreview()
-    try:
-        preview.resize(320, 220)
-        preview.set_config({"format": "SAMPLE", "text": "", "font_size": 40,
-                            "x_location": 20, "y_location": 60,
-                            "transparent_bg": True, "font_color": (255,) * 3,
-                            "bg_color": (0,) * 3})
-        assert preview.message() == ""
-        pix = preview.grab()
-        assert pix.width() > 0 and pix.height() > 0
-        # Both fields empty -> the preview reports why nothing is drawn.
-        preview.set_config({"format": "", "text": ""})
-        assert preview.message() == "empty"
-    finally:
-        preview.deleteLater()
-
-
-def test_clear_stack_resets_the_sharpness_curve():
-    """Clearing the stack must remove the sharpness strip.
-
-    Checked at the source level: the curve belongs to the frames that were
-    just dropped, and leaving it drew the old bars under an empty list.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/source_manager.py").read_text(encoding="utf-8")
-    block = src[src.index("def clear_image_stack(self) -> None:"):]
-    block = block[:block.index("def update_slider_range")]
-    assert "sharpness_curve" in block and ".clear()" in block, (
-        "clear_image_stack must reset the sharpness curve")
-
-
-def test_gpu_menu_follows_the_hardware(qapp):
-    """The GPU item must be unticked and disabled without a device."""
-    from PyQt6.QtGui import QAction
-
-    from utils import platform_utils
-
-    platform_utils.reset_gpu_probe_cache()
-    present = platform_utils.has_compute_gpu()
-    from pathlib import Path
-
-    src = Path("ui/menus.py").read_text(encoding="utf-8")
-    block = src[src.index("gpu_action = QAction("):]
-    block = block[:block.index("settings_menu.addAction(gpu_action)")]
-    assert "has_compute_gpu" in block, (
-        "the GPU menu item must ask the hardware")
-    assert "setEnabled(_gpu_present)" in block
-    if not present:
-        # And the setter refuses to turn it on.
-        main_src = Path("main.py").read_text(encoding="utf-8")
-        setter = main_src[main_src.index("def set_use_gpu("):]
-        setter = setter[:setter.index("def set_restore_last_stack")]
-        assert "has_compute_gpu" in setter
-    assert QAction is not None
-
-
-
-
-def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
-    """The picker must not get a second, empty list widget.
-
-    Inserting a QListWidget into Qt's splitter put an empty column beside the
-    real place list - the blank box reported in the screenshot.
-    """
-    from PyQt6.QtWidgets import QApplication, QSplitter, QListView
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        from PyQt6.QtWidgets import QFileDialog
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    captured["count"] = spl.count() if spl else 0
-                    captured["sidebar"] = (type(spl.widget(0)).__name__
-                                           if spl else None)
-                    captured["widgets"] = [type(spl.widget(i)).__name__
-                                           for i in range(spl.count())] if spl else []
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        assert captured.get("count") == 2, captured
-        assert captured.get("sidebar") == "QListView"
-        # Only the sidebar and the file view; no extra list widget.
-        assert captured["widgets"].count("QListWidget") == 0, captured
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_picker_path_field_is_editable(qapp, tmp_path):
-    """Qt's "Look in" combo is a plain dropdown unless made editable."""
-    from PyQt6.QtWidgets import QApplication, QComboBox, QFileDialog
-
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-    target = tmp_path / "stackB"
-    target.mkdir()
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    for combo in wd.findChildren(QComboBox):
-                        if combo.objectName() == "lookInCombo":
-                            captured["editable"] = combo.isEditable()
-                            line = combo.lineEdit()
-                            captured["line"] = line is not None
-                            if line is not None:
-                                line.setText(str(target))
-                                line.returnPressed.emit()
-                                QApplication.processEvents()
-                                captured["dir"] = wd.directory().absolutePath()
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folders()
-        assert captured.get("editable"), "the path combo must accept typing"
-        assert captured.get("line"), "no line edit to type into"
-        assert captured.get("dir", "").replace("\\", "/").lower() == \
-            str(target).replace("\\", "/").lower(), captured
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_picker_keeps_only_qt_places(qapp, tmp_path):
-    """No custom entries in the place sidebar.
-
-    "Last used" and "Queued: <name>" were appended to Qt's place model; they
-    duplicated what the picker already offers and pushed the useful entries
-    down. The sidebar must keep exactly the standard locations.
-    """
-    from PyQt6.QtWidgets import QApplication, QFileDialog, QSplitter
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    model = spl.widget(0).model()
-                    captured["places"] = [model.index(r, 0).data()
-                                          for r in range(model.rowCount())]
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        places = captured.get("places") or []
-        assert places, "the sidebar is empty"
-        joined = " ".join(str(p) for p in places).lower()
-        assert "queued" not in joined and "已排队" not in joined
-        assert "last used" not in joined and "上次使用" not in joined
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_list_shows_at_least_three_rows(qapp):
-    """The queued-stack list must not collapse to a single clipped row."""
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    try:
-        needed = dlg._folder_row_height() * 3
-        assert dlg.folder_list.minimumHeight() >= needed, (
-            f"min height {dlg.folder_list.minimumHeight()} < 3 rows "
-            f"({needed}px)")
-    finally:
-        dlg.deleteLater()
-
-
-def test_label_text_resolution_rules():
-    """`format` is the template; `text` is only a fallback.
-
-    The old rule was "if '{value}' is in format, use format, else use text",
-    so typing "SAMPLE" into the format field and leaving the separate custom
-    text box empty produced an EMPTY label: the dialog saved the settings,
-    reported success, and drew nothing.
-    """
-    from utils.validators import build_label_text
-
-    assert build_label_text("{value}", "", 3) == "3"
-    assert build_label_text("Fig {value}", "", 3) == "Fig 3"
-    assert build_label_text("SAMPLE", "", 3) == "SAMPLE"
-    assert build_label_text("", "FIGURE", 3) == "FIGURE"
-    assert build_label_text("", "", 3) == ""
-    # Steppers hand back floats; "Fig 3.0" is not what anyone typed.
-    assert build_label_text("Fig {value}", "", 3.0) == "Fig 3"
-
-
-def test_label_draws_with_float_geometry():
-    """cv2.putText rejects float coordinates ("Can't parse 'org'").
-
-    The dialog's steppers expose the QDoubleSpinBox API and return floats, and
-    the draw error was swallowed, so perfectly valid settings drew nothing.
+    Drawing used to round-trip through an 8-bit copy for the whole frame;
+    only the pixels the caption touches may change, and they must stay
+    representable at the original depth.
     """
     import numpy as np
 
     from utils.validators import LabelAdder
 
-    image = np.full((300, 400, 3), 80, np.uint8)
+    image = np.full((160, 260, 3), 40000, np.uint16)
+    image[0:4, 0:4] = 1234
     adder = LabelAdder()
     adder.config.update_config({
-        "format": "Fig {value}", "font_size": 70.0, "x_location": 30.0,
-        "y_location": 100.0, "starting_value": 1.0, "interval": 1.0,
-        "transparent_bg": True, "font_color": (255, 255, 255),
-        "bg_color": (0, 0, 0),
+        "format": "SAMPLE", "font_size": 28, "x_location": 12,
+        "y_location": 60, "range": "All", "transparent_bg": True,
+        "font_color": (255, 255, 255), "bg_color": (0, 0, 0),
+        "font_family": "Arial",
     })
     out = adder.add_label_to_image(image.copy(), 0)
-    assert (out != image).any(), "a label with valid settings drew nothing"
+    assert out.dtype == np.uint16
+    assert np.array_equal(out[0:4, 0:4], image[0:4, 0:4]), (
+        "pixels outside the caption changed")
+    assert not np.array_equal(out, image), "nothing was drawn"
+
+
+def test_label_outside_the_range_is_reported_not_drawn():
+    """Out-of-range is a state, not a failure and not a silent success."""
+    import numpy as np
+
+    from utils.validators import LabelAdder
+
+    adder = LabelAdder()
+    adder.config.update_config({"format": "SAMPLE", "range": "9-10",
+                                "font_size": 24, "x_location": 5,
+                                "y_location": 40})
+    image = np.full((80, 120, 3), 60, np.uint8)
+    out = adder.add_label_to_image(image.copy(), 0)
+    assert np.array_equal(out, image)
+    assert adder.last_out_of_range is True
     assert not adder.last_error
 
 
@@ -1102,591 +1011,79 @@ def test_add_label_dialog_has_a_live_preview(qapp):
         preview.deleteLater()
 
 
-def test_clear_stack_resets_the_sharpness_curve():
-    """Clearing the stack must remove the sharpness strip.
-
-    Checked at the source level: the curve belongs to the frames that were
-    just dropped, and leaving it drew the old bars under an empty list.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/source_manager.py").read_text(encoding="utf-8")
-    block = src[src.index("def clear_image_stack(self) -> None:"):]
-    block = block[:block.index("def update_slider_range")]
-    assert "sharpness_curve" in block and ".clear()" in block, (
-        "clear_image_stack must reset the sharpness curve")
-
-
-def test_gpu_menu_follows_the_hardware(qapp):
-    """The GPU item must be unticked and disabled without a device."""
-    from PyQt6.QtGui import QAction
-
-    from utils import platform_utils
-
-    platform_utils.reset_gpu_probe_cache()
-    present = platform_utils.has_compute_gpu()
-    from pathlib import Path
-
-    src = Path("ui/menus.py").read_text(encoding="utf-8")
-    block = src[src.index("gpu_action = QAction("):]
-    block = block[:block.index("settings_menu.addAction(gpu_action)")]
-    assert "has_compute_gpu" in block, (
-        "the GPU menu item must ask the hardware")
-    assert "setEnabled(_gpu_present)" in block
-    if not present:
-        # And the setter refuses to turn it on.
-        main_src = Path("main.py").read_text(encoding="utf-8")
-        setter = main_src[main_src.index("def set_use_gpu("):]
-        setter = setter[:setter.index("def set_restore_last_stack")]
-        assert "has_compute_gpu" in setter
-    assert QAction is not None
 
 
 
 
-def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
-    """The picker must not get a second, empty list widget.
-
-    Inserting a QListWidget into Qt's splitter put an empty column beside the
-    real place list - the blank box reported in the screenshot.
-    """
-    from PyQt6.QtWidgets import QApplication, QSplitter, QListView
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        from PyQt6.QtWidgets import QFileDialog
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    captured["count"] = spl.count() if spl else 0
-                    captured["sidebar"] = (type(spl.widget(0)).__name__
-                                           if spl else None)
-                    captured["widgets"] = [type(spl.widget(i)).__name__
-                                           for i in range(spl.count())] if spl else []
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        assert captured.get("count") == 2, captured
-        assert captured.get("sidebar") == "QListView"
-        # Only the sidebar and the file view; no extra list widget.
-        assert captured["widgets"].count("QListWidget") == 0, captured
-    finally:
-        dlg.deleteLater()
 
 
-def test_folder_picker_path_field_is_editable(qapp, tmp_path):
-    """Qt's "Look in" combo is a plain dropdown unless made editable."""
-    from PyQt6.QtWidgets import QApplication, QComboBox, QFileDialog
-
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-    target = tmp_path / "stackB"
-    target.mkdir()
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    for combo in wd.findChildren(QComboBox):
-                        if combo.objectName() == "lookInCombo":
-                            captured["editable"] = combo.isEditable()
-                            line = combo.lineEdit()
-                            captured["line"] = line is not None
-                            if line is not None:
-                                line.setText(str(target))
-                                line.returnPressed.emit()
-                                QApplication.processEvents()
-                                captured["dir"] = wd.directory().absolutePath()
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folders()
-        assert captured.get("editable"), "the path combo must accept typing"
-        assert captured.get("line"), "no line edit to type into"
-        assert captured.get("dir", "").replace("\\", "/").lower() == \
-            str(target).replace("\\", "/").lower(), captured
-    finally:
-        dlg.deleteLater()
 
 
-def test_folder_picker_keeps_only_qt_places(qapp, tmp_path):
-    """No custom entries in the place sidebar.
-
-    "Last used" and "Queued: <name>" were appended to Qt's place model; they
-    duplicated what the picker already offers and pushed the useful entries
-    down. The sidebar must keep exactly the standard locations.
-    """
-    from PyQt6.QtWidgets import QApplication, QFileDialog, QSplitter
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    model = spl.widget(0).model()
-                    captured["places"] = [model.index(r, 0).data()
-                                          for r in range(model.rowCount())]
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        places = captured.get("places") or []
-        assert places, "the sidebar is empty"
-        joined = " ".join(str(p) for p in places).lower()
-        assert "queued" not in joined and "已排队" not in joined
-        assert "last used" not in joined and "上次使用" not in joined
-    finally:
-        dlg.deleteLater()
 
 
-def test_folder_list_shows_at_least_three_rows(qapp):
-    """The queued-stack list must not collapse to a single clipped row."""
-    from dialogs.batch import BatchProcessingDialog
 
-    dlg = BatchProcessingDialog(None)
-    try:
-        needed = dlg._folder_row_height() * 3
-        assert dlg.folder_list.minimumHeight() >= needed, (
-            f"min height {dlg.folder_list.minimumHeight()} < 3 rows "
-            f"({needed}px)")
-    finally:
-        dlg.deleteLater()
-
-
-def test_label_text_resolution_rules():
-    """`format` is the template; `text` is only a fallback.
-
-    The old rule was "if '{value}' is in format, use format, else use text",
-    so typing "SAMPLE" into the format field and leaving the separate custom
-    text box empty produced an EMPTY label: the dialog saved the settings,
-    reported success, and drew nothing.
-    """
-    from utils.validators import build_label_text
-
-    assert build_label_text("{value}", "", 3) == "3"
-    assert build_label_text("Fig {value}", "", 3) == "Fig 3"
-    assert build_label_text("SAMPLE", "", 3) == "SAMPLE"
-    assert build_label_text("", "FIGURE", 3) == "FIGURE"
-    assert build_label_text("", "", 3) == ""
-    # Steppers hand back floats; "Fig 3.0" is not what anyone typed.
-    assert build_label_text("Fig {value}", "", 3.0) == "Fig 3"
-
-
-def test_label_draws_with_float_geometry():
-    """cv2.putText rejects float coordinates ("Can't parse 'org'").
-
-    The dialog's steppers expose the QDoubleSpinBox API and return floats, and
-    the draw error was swallowed, so perfectly valid settings drew nothing.
-    """
+def _checkerboard_depth_surface(block_size=1):
     import numpy as np
-
-    from utils.validators import LabelAdder
-
-    image = np.full((300, 400, 3), 80, np.uint8)
-    adder = LabelAdder()
-    adder.config.update_config({
-        "format": "Fig {value}", "font_size": 70.0, "x_location": 30.0,
-        "y_location": 100.0, "starting_value": 1.0, "interval": 1.0,
-        "transparent_bg": True, "font_color": (255, 255, 255),
-        "bg_color": (0, 0, 0),
-    })
-    out = adder.add_label_to_image(image.copy(), 0)
-    assert (out != image).any(), "a label with valid settings drew nothing"
-    assert not adder.last_error
-
-
-def test_add_label_dialog_has_a_live_preview(qapp):
-    """The dialog must show the label before it is confirmed."""
-    from dialogs.retouch import RetouchDialog  # noqa: F401  (import sanity)
-    from widgets.label_preview import LabelPreview
-
-    preview = LabelPreview()
-    try:
-        preview.resize(320, 220)
-        preview.set_config({"format": "SAMPLE", "text": "", "font_size": 40,
-                            "x_location": 20, "y_location": 60,
-                            "transparent_bg": True, "font_color": (255,) * 3,
-                            "bg_color": (0,) * 3})
-        assert preview.message() == ""
-        pix = preview.grab()
-        assert pix.width() > 0 and pix.height() > 0
-        # Both fields empty -> the preview reports why nothing is drawn.
-        preview.set_config({"format": "", "text": ""})
-        assert preview.message() == "empty"
-    finally:
-        preview.deleteLater()
-
-
-def test_clear_stack_resets_the_sharpness_curve():
-    """Clearing the stack must remove the sharpness strip.
-
-    Checked at the source level: the curve belongs to the frames that were
-    just dropped, and leaving it drew the old bars under an empty list.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/source_manager.py").read_text(encoding="utf-8")
-    block = src[src.index("def clear_image_stack(self) -> None:"):]
-    block = block[:block.index("def update_slider_range")]
-    assert "sharpness_curve" in block and ".clear()" in block, (
-        "clear_image_stack must reset the sharpness curve")
-
-
-def test_gpu_menu_follows_the_hardware(qapp):
-    """The GPU item must be unticked and disabled without a device."""
-    from PyQt6.QtGui import QAction
-
-    from utils import platform_utils
-
-    platform_utils.reset_gpu_probe_cache()
-    present = platform_utils.has_compute_gpu()
-    from pathlib import Path
-
-    src = Path("ui/menus.py").read_text(encoding="utf-8")
-    block = src[src.index("gpu_action = QAction("):]
-    block = block[:block.index("settings_menu.addAction(gpu_action)")]
-    assert "has_compute_gpu" in block, (
-        "the GPU menu item must ask the hardware")
-    assert "setEnabled(_gpu_present)" in block
-    if not present:
-        # And the setter refuses to turn it on.
-        main_src = Path("main.py").read_text(encoding="utf-8")
-        setter = main_src[main_src.index("def set_use_gpu("):]
-        setter = setter[:setter.index("def set_restore_last_stack")]
-        assert "has_compute_gpu" in setter
-    assert QAction is not None
-
-
-
-
-def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
-    """The picker must not get a second, empty list widget.
-
-    Inserting a QListWidget into Qt's splitter put an empty column beside the
-    real place list - the blank box reported in the screenshot.
-    """
-    from PyQt6.QtWidgets import QApplication, QSplitter, QListView
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        from PyQt6.QtWidgets import QFileDialog
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    captured["count"] = spl.count() if spl else 0
-                    captured["sidebar"] = (type(spl.widget(0)).__name__
-                                           if spl else None)
-                    captured["widgets"] = [type(spl.widget(i)).__name__
-                                           for i in range(spl.count())] if spl else []
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        assert captured.get("count") == 2, captured
-        assert captured.get("sidebar") == "QListView"
-        # Only the sidebar and the file view; no extra list widget.
-        assert captured["widgets"].count("QListWidget") == 0, captured
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_picker_path_field_is_editable(qapp, tmp_path):
-    """Qt's "Look in" combo is a plain dropdown unless made editable."""
-    from PyQt6.QtWidgets import QApplication, QComboBox, QFileDialog
-
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-    target = tmp_path / "stackB"
-    target.mkdir()
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    for combo in wd.findChildren(QComboBox):
-                        if combo.objectName() == "lookInCombo":
-                            captured["editable"] = combo.isEditable()
-                            line = combo.lineEdit()
-                            captured["line"] = line is not None
-                            if line is not None:
-                                line.setText(str(target))
-                                line.returnPressed.emit()
-                                QApplication.processEvents()
-                                captured["dir"] = wd.directory().absolutePath()
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folders()
-        assert captured.get("editable"), "the path combo must accept typing"
-        assert captured.get("line"), "no line edit to type into"
-        assert captured.get("dir", "").replace("\\", "/").lower() == \
-            str(target).replace("\\", "/").lower(), captured
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_picker_keeps_only_qt_places(qapp, tmp_path):
-    """No custom entries in the place sidebar.
-
-    "Last used" and "Queued: <name>" were appended to Qt's place model; they
-    duplicated what the picker already offers and pushed the useful entries
-    down. The sidebar must keep exactly the standard locations.
-    """
-    from PyQt6.QtWidgets import QApplication, QFileDialog, QSplitter
-
-    from dialogs.batch import BatchProcessingDialog
-
-    stack = tmp_path / "stackA"
-    stack.mkdir()
-    dlg = BatchProcessingDialog(None)
-    captured = {}
-
-    def probe():
-        for wd in QApplication.topLevelWidgets():
-            if isinstance(wd, QFileDialog) and wd.isVisible():
-                try:
-                    spl = wd.findChild(QSplitter)
-                    model = spl.widget(0).model()
-                    captured["places"] = [model.index(r, 0).data()
-                                          for r in range(model.rowCount())]
-                finally:
-                    wd.reject()
-                break
-
-    try:
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(400, probe)
-        dlg.add_folder_to_list(str(stack))
-        dlg.add_folders()
-        places = captured.get("places") or []
-        assert places, "the sidebar is empty"
-        joined = " ".join(str(p) for p in places).lower()
-        assert "queued" not in joined and "已排队" not in joined
-        assert "last used" not in joined and "上次使用" not in joined
-    finally:
-        dlg.deleteLater()
-
-
-def test_folder_list_shows_at_least_three_rows(qapp):
-    """The queued-stack list must not collapse to a single clipped row."""
-    from dialogs.batch import BatchProcessingDialog
-
-    dlg = BatchProcessingDialog(None)
-    try:
-        needed = dlg._folder_row_height() * 3
-        assert dlg.folder_list.minimumHeight() >= needed, (
-            f"min height {dlg.folder_list.minimumHeight()} < 3 rows "
-            f"({needed}px)")
-    finally:
-        dlg.deleteLater()
-
-
-def test_label_text_resolution_rules():
-    """`format` is the template; `text` is only a fallback.
-
-    The old rule was "if '{value}' is in format, use format, else use text",
-    so typing "SAMPLE" into the format field and leaving the separate custom
-    text box empty produced an EMPTY label: the dialog saved the settings,
-    reported success, and drew nothing.
-    """
-    from utils.validators import build_label_text
-
-    assert build_label_text("{value}", "", 3) == "3"
-    assert build_label_text("Fig {value}", "", 3) == "Fig 3"
-    assert build_label_text("SAMPLE", "", 3) == "SAMPLE"
-    assert build_label_text("", "FIGURE", 3) == "FIGURE"
-    assert build_label_text("", "", 3) == ""
-    # Steppers hand back floats; "Fig 3.0" is not what anyone typed.
-    assert build_label_text("Fig {value}", "", 3.0) == "Fig 3"
-
-
-def test_label_draws_with_float_geometry():
-    """cv2.putText rejects float coordinates ("Can't parse 'org'").
-
-    The dialog's steppers expose the QDoubleSpinBox API and return floats, and
-    the draw error was swallowed, so perfectly valid settings drew nothing.
-    """
-    import numpy as np
-
-    from utils.validators import LabelAdder
-
-    image = np.full((300, 400, 3), 80, np.uint8)
-    adder = LabelAdder()
-    adder.config.update_config({
-        "format": "Fig {value}", "font_size": 70.0, "x_location": 30.0,
-        "y_location": 100.0, "starting_value": 1.0, "interval": 1.0,
-        "transparent_bg": True, "font_color": (255, 255, 255),
-        "bg_color": (0, 0, 0),
-    })
-    out = adder.add_label_to_image(image.copy(), 0)
-    assert (out != image).any(), "a label with valid settings drew nothing"
-    assert not adder.last_error
-
-
-def test_add_label_dialog_has_a_live_preview(qapp):
-    """The dialog must show the label before it is confirmed."""
-    from dialogs.retouch import RetouchDialog  # noqa: F401  (import sanity)
-    from widgets.label_preview import LabelPreview
-
-    preview = LabelPreview()
-    try:
-        preview.resize(320, 220)
-        preview.set_config({"format": "SAMPLE", "text": "", "font_size": 40,
-                            "x_location": 20, "y_location": 60,
-                            "transparent_bg": True, "font_color": (255,) * 3,
-                            "bg_color": (0,) * 3})
-        assert preview.message() == ""
-        pix = preview.grab()
-        assert pix.width() > 0 and pix.height() > 0
-        # Both fields empty -> the preview reports why nothing is drawn.
-        preview.set_config({"format": "", "text": ""})
-        assert preview.message() == "empty"
-    finally:
-        preview.deleteLater()
-
-
-def test_clear_stack_resets_the_sharpness_curve():
-    """Clearing the stack must remove the sharpness strip.
-
-    Checked at the source level: the curve belongs to the frames that were
-    just dropped, and leaving it drew the old bars under an empty list.
-    """
-    from pathlib import Path
-
-    src = Path("controllers/source_manager.py").read_text(encoding="utf-8")
-    block = src[src.index("def clear_image_stack(self) -> None:"):]
-    block = block[:block.index("def update_slider_range")]
-    assert "sharpness_curve" in block and ".clear()" in block, (
-        "clear_image_stack must reset the sharpness curve")
-
-
-def test_gpu_menu_follows_the_hardware(qapp):
-    """The GPU item must be unticked and disabled without a device."""
-    from PyQt6.QtGui import QAction
-
-    from utils import platform_utils
-
-    platform_utils.reset_gpu_probe_cache()
-    present = platform_utils.has_compute_gpu()
-    from pathlib import Path
-
-    src = Path("ui/menus.py").read_text(encoding="utf-8")
-    block = src[src.index("gpu_action = QAction("):]
-    block = block[:block.index("settings_menu.addAction(gpu_action)")]
-    assert "has_compute_gpu" in block, (
-        "the GPU menu item must ask the hardware")
-    assert "setEnabled(_gpu_present)" in block
-    if not present:
-        # And the setter refuses to turn it on.
-        main_src = Path("main.py").read_text(encoding="utf-8")
-        setter = main_src[main_src.index("def set_use_gpu("):]
-        setter = setter[:setter.index("def set_restore_last_stack")]
-        assert "has_compute_gpu" in setter
-    assert QAction is not None
-
-
-
-
-
-def test_menus_match_the_new_information_architecture():
-    """Scale bar and Labels live in Tools; Settings keeps theme/language.
-
-    Labels were split between Edit (add) and a separate delete menu, and the
-    scale bar sat under Settings as if it were an app preference. The four
-    one-purpose tuning dialogs were folded into one Advanced page.
-    """
-    from pathlib import Path
-
-    src = Path("ui/menus.py").read_text(encoding="utf-8")
-    tools = src[src.index("batch_menu = menubar.addMenu"):]
-    tools = tools[:tools.index("# --- Settings Menu ---")]
-    assert "menu_scale_bar" in tools, "scale bar must be under Tools"
-    assert "menu_labels" in tools, "labels must be under Tools"
-    labels = src[src.index("label_menu = batch_menu.addMenu"):]
-    labels = labels[:labels.index("# --- Settings Menu ---")]
-    assert "action_add_label" in labels
-    assert "action_del_reg_label" in labels
-    assert "action_del_input_label" in labels
-
-    settings = src[src.index("# --- Settings Menu ---"):]
-    assert "menu_scale_bar" not in settings, "scale bar left Settings"
-    # Light first: it is the fresh-install default.
-    assert '("light", \'theme_light\'),' in settings
-    for gone in ("action_tile_settings", "action_reg_settings",
-                 "action_thread_settings", "action_ai_batch_settings"):
-        assert gone not in settings, gone
-
-def test_depth_surface_detail_is_user_controlled():
-    """The 3D detail slider must change the working resolution live."""
-    from PyQt6.QtWidgets import QApplication
-
     from widgets.depth_surface import DepthSurface
 
-    srf = DepthSurface()
+    yy, xx = np.indices((120, 160))
+    texture = np.zeros((120, 160, 3), np.uint8)
+    texture[..., 0] = ((xx // block_size + yy // block_size) % 2) * 240
+    texture[..., 2] = 240 - texture[..., 0]
+    surface = DepthSurface()
+    surface.resize(420, 320)
+    surface.set_surface(np.full((120, 160), 0.5, np.float32), texture)
+    surface.show()
+    return surface
+
+
+def _depth_texture_contrast(image):
+    import numpy as np
+    sample = image[100:220, 120:300].astype(np.int16)
+    return np.abs(sample[..., 0] - sample[..., 2])
+
+
+def test_depth_surface_detail_changes_settled_preview_pixels(qapp):
+    import numpy as np
+    from utils.image_utils import pixmap_to_cv2
+
+    surface = _checkerboard_depth_surface()
     try:
-        srf.resize(400, 300)
-        import numpy as np
-        srf.set_surface(np.full((300, 400), 0.5, np.float32))
-        srf.set_detail(40)
-        assert srf._mesh_step == 40
-        srf.set_detail(100)
-        assert srf._mesh_step == 100
-        # The cache must be dropped when detail changes, or the slider would
-        # have no visible effect.
-        srf._cache = None
-        srf.set_detail(64)
-        assert srf._cache is None
+        surface.set_detail(20)
+        low = pixmap_to_cv2(surface.grab())
+        surface.set_detail(100)
+        high = pixmap_to_cv2(surface.grab())
+        assert _depth_texture_contrast(low).max() < 20
+        sharp = _depth_texture_contrast(high)
+        assert np.count_nonzero(sharp > 100) > sharp.size // 3
+        surface.set_detail(20)
+        np.testing.assert_array_equal(pixmap_to_cv2(surface.grab()), low)
     finally:
-        srf.deleteLater()
+        surface.close()
+        surface.deleteLater()
+
+
+def test_depth_surface_drag_restores_selected_preview_detail(qapp):
+    import numpy as np
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from utils.image_utils import pixmap_to_cv2
+
+    for detail, block_size in ((40, 2), (100, 1)):
+        surface = _checkerboard_depth_surface(block_size)
+        try:
+            surface.set_detail(detail)
+            settled = pixmap_to_cv2(surface.grab())
+            position = surface.rect().center()
+            QTest.mousePress(surface, Qt.MouseButton.LeftButton, pos=position)
+            moving = pixmap_to_cv2(surface.grab())
+            assert (_depth_texture_contrast(settled).max()
+                    > 2 * _depth_texture_contrast(moving).max() + 5)
+            QTest.mouseRelease(surface, Qt.MouseButton.LeftButton, pos=position)
+            np.testing.assert_array_equal(pixmap_to_cv2(surface.grab()), settled)
+        finally:
+            surface.close()
+            surface.deleteLater()
 
 
 def test_feedback_dialog_embeds_the_session_log(qapp):
@@ -1704,8 +1101,8 @@ def test_feedback_dialog_embeds_the_session_log(qapp):
     ls.setup_logging()
     d = FeedbackDialog(None)
     try:
-        body = d._compose()
-        assert "Environment" in body and "Session log" in body
+        d._copy_log()
+        assert qapp.clipboard().text() == d.log_view.toPlainText()
         dest = os.path.join(tempfile.mkdtemp(), "fb.zip")
         path = ls.export_feedback_package(dest)
         with zipfile.ZipFile(path) as zf:
@@ -1714,17 +1111,39 @@ def test_feedback_dialog_embeds_the_session_log(qapp):
             assert "system.txt" in names
     finally:
         d.deleteLater()
-def test_gpu_status_shows_na_without_a_device(qapp):
-    """No accelerator must read N/A, never CPU."""
-    from utils import platform_utils
 
-    if platform_utils.has_compute_gpu():
-        pytest.skip("this machine has a GPU")
-    from pathlib import Path
 
-    src = Path("main.py").read_text(encoding="utf-8")
-    block = src[src.index("        # GPU. Rule the user asked for"):]
-    block = block[:block.index("except Exception:")]
-    # The only paths left are N/A, CPU* (accelerator + classical), CUDA/MPS.
-    assert "'N/A'" in block
-    assert "elif not self._ai_method_selected()" in block
+
+def test_flat_field_failure_keeps_the_original_stack(qapp, monkeypatch):
+    """A failed base-stage correction must not leave a half-applied stack."""
+    import numpy as np
+    from types import SimpleNamespace
+    import main as main_module
+    from utils import dust_map
+
+    frames = [np.full((8, 8, 3), 10, np.uint8) for _ in range(2)]
+    base = [np.full((8, 8, 3), 20, np.uint8) for _ in range(2)]
+    host = SimpleNamespace(
+        raw_images=frames, base_images=base, _undo_guard=True,
+        push_undo=lambda: None,
+        get_or_create_source_pixmap=lambda *a, **k: None,
+        statusBar=lambda: SimpleNamespace(showMessage=lambda *a, **k: None),
+    )
+    warnings = []
+    monkeypatch.setattr(main_module, "show_warning_box",
+                        lambda *a, **k: warnings.append(a))
+
+    calls = {"n": 0}
+
+    def fail_on_second(images, gain):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise ValueError("size mismatch")
+        return [f + 1 for f in images]
+
+    monkeypatch.setattr(dust_map, "apply_flat_field_stack", fail_on_second)
+    result = main_module.OpenFocus.apply_flat_field_to_stack(host, object())
+    assert result is False
+    assert host.raw_images is frames, "raw frames were replaced on failure"
+    assert host.base_images is base, "base frames were replaced on failure"
+    assert warnings

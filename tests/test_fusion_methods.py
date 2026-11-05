@@ -59,7 +59,7 @@ def test_fusion_rejects_unknown_algorithm():
         MultiFocusFusion(algorithm="does_not_exist")
 
 
-def test_fusion_dtcwt_tiled_matches_reference_within_tolerance(two_focus_stack):
+def test_fusion_guided_filter_tiled_matches_reference_within_tolerance(two_focus_stack):
     """Tiled rendering must stay close to the whole-image result."""
     full = MultiFocusFusion(algorithm="guided_filter", use_gpu=False).fuse(
         input_source=two_focus_stack, img_resize=None, kernel_size=31)
@@ -103,6 +103,114 @@ def test_tiled_fusion_cancels_promptly(two_focus_stack):
 
     assert seen["total"] > 2, "stack produced no tiles; test needs bigger input"
     assert seen["done"] < seen["total"], "every tile ran despite the cancel"
+
+
+def test_last_tile_cancellation_never_returns_a_result(two_focus_stack):
+    from core.registration import RegistrationCancelled
+
+    cancelled = False
+
+    def progress(done, total):
+        nonlocal cancelled
+        cancelled = done == total
+
+    fusion = MultiFocusFusion("dct", tile_threshold=32,
+                              tile_block_size=32, tile_overlap=8)
+    with pytest.raises(RegistrationCancelled):
+        fusion.fuse(two_focus_stack, thread_count=1,
+                    should_cancel=lambda: cancelled, progress_callback=progress)
+
+
+@pytest.mark.parametrize("algorithm", ["guided_filter", "dct", "gfgfgf"])
+def test_tiled_grayscale_matches_repeated_bgr(two_focus_stack, algorithm):
+    gray = [frame[:, :, 0] for frame in two_focus_stack]
+    bgr = [np.repeat(frame[:, :, None], 3, axis=2) for frame in gray]
+    fusion = MultiFocusFusion(algorithm, tile_threshold=32,
+                              tile_block_size=64, tile_overlap=16)
+    expected = fusion.fuse(bgr, thread_count=1)
+    actual = fusion.fuse(gray, thread_count=1)
+    assert np.array_equal(actual, expected)
+
+
+def test_tiled_reduction_order_is_deterministic(two_focus_stack):
+    """Tile results must be accumulated in tile order, not completion order.
+
+    The old loop reduced in ``as_completed`` order, so float32 addition made
+    the output depend on which worker happened to finish first. The bounded
+    window consumes results in tile-coordinate order, which is the same order
+    a single-worker run uses.
+    """
+    stack = make_two_focus_stack((160, 200))
+    results = []
+    for threads in (1, 3):
+        fusion = MultiFocusFusion(algorithm="guided_filter", use_gpu=False,
+                                  tile_enabled=True, tile_block_size=64,
+                                  tile_overlap=16, tile_threshold=10)
+        results.append(fusion.fuse(input_source=list(stack), img_resize=None,
+                                   kernel_size=31, thread_count=threads))
+    assert np.array_equal(results[0], results[1]), \
+        "tile accumulation still depends on the worker schedule"
+
+
+def test_tiled_fusion_bounds_in_flight_tiles(two_focus_stack):
+    """At most `workers` tiles may be alive at once, whatever the tile count.
+
+    The old loop submitted every tile immediately and held each finished
+    result until it was reduced, so peak memory grew with the tile count.
+    """
+    from core import multi_focus_fusion as mff
+
+    stack = make_two_focus_stack((256, 256))
+    original = mff.MultiFocusFusion._calculate_optimal_thread_count
+    observations = []
+    running = {"now": 0, "peak": 0}
+    lock = __import__("threading").Lock()
+
+    def counting(self, *args, **kwargs):
+        return 2
+
+    def tracked(call_algo):
+        return call_algo
+
+    fusion = mff.MultiFocusFusion(algorithm="guided_filter", use_gpu=False,
+                                  tile_enabled=True, tile_block_size=64,
+                                  tile_overlap=16, tile_threshold=10)
+    real_process = fusion._fuse_guided_filter
+
+    def wrapped(input_source, *args, **kwargs):
+        with lock:
+            running["now"] += 1
+            running["peak"] = max(running["peak"], running["now"])
+        try:
+            return real_process(input_source, *args, **kwargs)
+        finally:
+            with lock:
+                running["now"] -= 1
+
+    mff.MultiFocusFusion._calculate_optimal_thread_count = counting
+    fusion._fuse_guided_filter = wrapped
+    try:
+        fusion.fuse(input_source=list(stack), img_resize=None, kernel_size=31)
+    finally:
+        mff.MultiFocusFusion._calculate_optimal_thread_count = original
+    observations.append(running["peak"])
+    assert observations[0] <= 2, observations
+
+
+def test_tiled_progress_reports_every_tile_once(two_focus_stack):
+    stack = make_two_focus_stack((192, 192))
+    seen = []
+    fusion = MultiFocusFusion(algorithm="openfocus_a", use_gpu=False,
+                              tile_enabled=True, tile_block_size=64,
+                              tile_overlap=16, tile_threshold=10)
+    out = fusion.fuse(input_source=list(stack), img_resize=None, kernel_size=7,
+                      progress_callback=lambda done, total: seen.append((done, total)))
+    assert out.shape[:2] == (192, 192)
+    assert seen, "tiled fusion reported no progress"
+    totals = {total for _done, total in seen}
+    assert len(totals) == 1
+    total = totals.pop()
+    assert [done for done, _t in seen] == list(range(1, total + 1))
 
 
 @pytest.mark.parametrize("shape", [(120, 40), (40, 160)])
@@ -240,68 +348,22 @@ class TestStackFootprintTiling:
         assert _stack_footprint_exceeds(f10, 2048)
 
 
-class TestStackMFFV3EffectiveTiling:
-    """The AI tiled path must shrink tiles/batches so one model call stays
-    within frames x pixels budget (2 tiles x 120 frames used to request a
-    16GB conv allocation -> DefaultCPUAllocator OOM)."""
+@pytest.mark.parametrize("shape,block,overlap", [
+    ((1637, 1783), 1024, 256), ((81, 29), 64, 32), ((73, 91), 32, 8),
+])
+def test_neural_grid_is_complete_and_independent_of_stack_depth(shape, block, overlap):
+    from core.multi_focus_fusion import _ai_effective_tiling
 
-    def _tiling(self, n, block=1024, h=1637, w=1783, ov=256, pref=2):
-        from core.multi_focus_fusion import _ai_effective_tiling
-        return _ai_effective_tiling(n, block, h, w, ov, pref)
-
-    def test_moderate_stack_unchanged(self):
-        # 40 frames x 2 tiles x 1024^2 == budget exactly: keep user settings
-        blk, batch, _ = self._tiling(40)
-        assert (blk, batch) == (1024, 2)
-
-    def test_batch_never_exceeds_preference(self):
-        # 24 frames would allow batch 3; the user preference (2) wins
-        blk, batch, _ = self._tiling(24)
-        assert (blk, batch) == (1024, 2)
-
-    def test_deep_stack_shrinks_tiles_and_batch(self):
-        # 120 frames: tile shrinks to 768 (128-aligned sqrt of budget/n) and
-        # only one tile per model call
-        blk, batch, _ = self._tiling(120)
-        assert blk == 768
-        assert batch == 1
-        assert 120 * batch * blk * blk <= 80 * 1024 * 1024
-
-    def test_very_deep_stack_floor_256(self):
-        blk, batch, _ = self._tiling(300)
-        assert blk == 512
-        assert batch == 1
-
-    def test_user_small_tiles_never_grow(self):
-        # user chose 128px tiles: never enlarged even on deep stacks
-        blk, batch, _ = self._tiling(400, block=128)
-        assert blk == 128
-        assert batch >= 1
-
-    def test_budget_respected_across_range(self):
-        from core.multi_focus_fusion import AI_IMAGE_BUDGET
-        budget = AI_IMAGE_BUDGET * 1024 * 1024
-        for n in (40, 60, 80, 120, 200, 300, 600):
-            blk, batch, coords = self._tiling(n)
-            assert n * batch * blk * blk <= budget, f"budget blown at {n} frames"
-            if blk < 1024:
-                # the network downsamples by 128x in total; non-128 tiles
-                # come back spatially shrunk (832 -> 768 focus map)
-                assert blk % 128 == 0, f"tile {blk} not 128-aligned at {n} frames"
-            # tiles must cover the image and never exceed the block size
-            cover = np.zeros((1637, 1783), bool)
-            for x0, y0, x1, y1 in coords:
-                assert x1 - x0 == blk and y1 - y0 == blk
-                assert 0 <= y0 and y1 <= 1637 and 0 <= x0 and x1 <= 1783
-                cover[y0:y1, x0:x1] = True
-            assert cover.all(), f"tile gap at {n} frames"
-
-    def test_tiny_image_clamps(self):
-        # image smaller than the block: tiles clamp to the image itself
-        blk, batch, coords = self._tiling(120, block=1024, h=300, w=400)
-        assert blk <= 300
-        assert all(y1 <= 300 and x1 <= 400 for _, _, x1, y1 in
-                   ((a, b, c, d) for (a, b, c, d) in coords))
+    h, w = shape
+    shallow_block, _, shallow = _ai_effective_tiling(2, block, h, w, overlap, 2)
+    deep_block, _, deep = _ai_effective_tiling(600, block, h, w, overlap, 2)
+    assert shallow_block == deep_block == min(block, h, w)
+    assert shallow == deep
+    cover = np.zeros(shape, dtype=bool)
+    for x0, y0, x1, y1 in deep:
+        assert 0 <= x0 < x1 <= w and 0 <= y0 < y1 <= h
+        cover[y0:y1, x0:x1] = True
+    assert cover.all()
 
 
 def test_dtcwt_keeps_odd_frame_size():
@@ -344,3 +406,52 @@ def test_dtcwt_is_not_tiled_only_because_of_size(monkeypatch, two_focus_stack):
     out = fusion.fuse(input_source=two_focus_stack)
     assert out.shape[:2] == (120, 160)
     assert calls == []
+
+
+@pytest.mark.parametrize('dtype', [np.uint8, np.uint16])
+def test_v3_tiled_exposure_matches_whole_stack_preprocessing(dtype, monkeypatch):
+    import core.multi_focus_fusion as fusion_module
+    import fusion_methods.stackmffv3 as v3
+    from utils.image_utils import apply_exposure_gain, exposure_gains
+
+    monkeypatch.setattr(MultiFocusFusion, '_validate_ai_environment', lambda self: None)
+    monkeypatch.setattr(v3, '_prepare_inference', lambda *a, **k: (None, 'CPU', object()))
+
+    def fuse_crop(source, *args, **kwargs):
+        normalized, _ = normalize_fuse_input(source)
+        return sum(frame.astype(np.float32) for frame in normalized) / len(normalized)
+
+    monkeypatch.setattr(fusion_module, '_stackmffv3_impl', fuse_crop)
+    rng = np.random.default_rng(712)
+    frames = [rng.integers(5, high, (32, 40, 3), dtype=np.uint8)
+              for high in (110, 180, 240)]
+    if dtype == np.uint16:
+        frames = [frame.astype(np.uint16) * 251 + 19 for frame in frames]
+    normalized, _ = normalize_fuse_input(frames)
+    matched = [apply_exposure_gain(frame, gain)
+               for frame, gain in zip(normalized, exposure_gains(normalized))]
+    settings = dict(algorithm='stackmffv3', tile_enabled=True, tile_block_size=16,
+                    tile_overlap=4, tile_threshold=1, base_frame='first')
+    expected = MultiFocusFusion(exposure_match=False, **settings).fuse(matched)
+    actual = MultiFocusFusion(exposure_match=True, **settings).fuse(frames)
+    np.testing.assert_allclose(actual, expected, atol=1e-4)
+    assert all(frame.dtype == dtype for frame in frames)
+
+
+def test_v3_tiled_exposure_budget_excludes_full_stack_copy(monkeypatch):
+    import core.resource_policy as policy
+    import core.multi_focus_fusion as fusion_module
+    import fusion_methods.stackmffv3 as v3
+
+    monkeypatch.setattr(MultiFocusFusion, '_validate_ai_environment', lambda self: None)
+    monkeypatch.setattr(v3, '_prepare_inference', lambda *a, **k: (None, 'CPU', object()))
+    monkeypatch.setattr(fusion_module, '_stackmffv3_impl',
+                        lambda source, *a, **k: normalize_fuse_input(source)[0][0])
+    admitted = []
+    monkeypatch.setattr(policy, 'require_memory', lambda size, **kwargs: admitted.append(size))
+    frames = [np.full((32, 40, 3), 1000 + i, np.uint16) for i in range(24)]
+    fusion = MultiFocusFusion('stackmffv3', tile_enabled=True, tile_block_size=8,
+                              tile_overlap=2, tile_threshold=1, exposure_match=True)
+    fusion.fuse(frames)
+    full_copy = sum(frame.size * 4 for frame in frames)
+    assert admitted and max(admitted) < full_copy

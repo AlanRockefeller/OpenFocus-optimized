@@ -4,16 +4,19 @@ import os
 from PyQt6.QtCore import QEvent, QSignalBlocker, Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider, QSplitter,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 
 from core.compare_worker import AlignmentWorker, PreviewWorker
 from locales import trans
 from utils.image_utils import cv2_to_pixmap
 from utils.settings_store import get_settings
-from utils.validators import normalize_kernel_size
+from core.algorithms import (alignment_steps, fusion_algorithms, get_fusion,
+    registration_parameter_specs, registration_algorithms, resolve_fusion_parameters,
+    resolve_registration_parameters)
+from ui.algorithm_parameters import AlgorithmParameterPanel
 from widgets.compare_canvas import (
     DEFAULT_DETAIL_SIZE, DetailCanvas, SourceCanvas,
 )
@@ -21,33 +24,8 @@ from widgets.flow_layout import FlowPanel
 from widgets.stepper import StepperSpinBox
 
 
-METHOD_ORDER = ("stackmffv3", "openfocus_a", "openfocus_b", "openfocus_c",
-                "guided_filter", "dct", "dtcwt", "gfgfgf")
-METHOD_LABEL_KEYS = {
-    "stackmffv3": "radio_stackmff", "openfocus_a": "radio_openfocus_a",
-    "openfocus_b": "radio_openfocus_b", "openfocus_c": "radio_openfocus_c",
-    "guided_filter": "radio_guided_filter", "dct": "radio_dct",
-    "dtcwt": "radio_dtcwt", "gfgfgf": "radio_gfg",
-}
-# Only parameters consumed by the actual algorithm belong in the editor.
-# (key, caption, minimum, maximum, step, decimals, default)
-METHOD_PARAMS = {
-    "guided_filter": (("kernel_size", "label_kernel_guided", 1, 51, 2, 0, 31),),
-    "dct": (("kernel_size", "label_kernel_dct", 1, 51, 2, 0, 7),),
-    "gfgfgf": (("kernel_size", "label_kernel_gfg", 1, 51, 2, 0, 7),),
-    "dtcwt": (("N", "compare_levels", 1, 6, 1, 0, 4),),
-    "openfocus_a": (
-        ("kernel_size", "label_kernel_of", 1, 21, 2, 0, 11),
-        ("blend_smoothing", "label_blend_smoothing", 0, 8, .2, 1, 2.),
-    ),
-    "openfocus_b": (
-        ("kernel_size", "label_kernel_of", 1, 21, 2, 0, 11),
-        ("depth_smoothing", "label_depth_smoothing", 0, 8, .2, 1, 1.2),
-    ),
-    "openfocus_c": (
-        ("blend_smoothing", "label_blend_smoothing", 0, 8, .2, 1, 3.),
-    ),
-}
+def _method_label(method):
+    return trans.t(get_fusion(method).label_key)
 
 
 class CompareDialog(QDialog):
@@ -58,12 +36,34 @@ class CompareDialog(QDialog):
         self.window_main = window_main
         self.setWindowTitle(trans.t("compare_title"))
         self.resize(1280, 820)
+        # 1280x820 does not fit a 1366x768 work area at 125-150 % scaling; the
+        # action bar then sat below the screen. Clamp the first size the same
+        # way the retouch window does and let the splitter/scroll areas shrink.
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(min(1280, max(480, available.width() - 80)),
+                        min(820, max(360, available.height() - 100)))
         # A plain QDialog has only a close button on Windows; allow the title
         # bar to maximise as well as the explicit fullscreen toggle below.
         self.setWindowFlags(self.windowFlags()
                             | Qt.WindowType.WindowMaximizeButtonHint)
         self._windowed_geometry = None
-        self._raw_frames = list(getattr(window_main, "raw_images", None) or [])
+        # Use the same frames a real render would fuse: the source list
+        # checkboxes are the "participates in processing" control, and this
+        # window used to copy raw_images wholesale, so an excluded frame was
+        # still compared here but never in the actual result.
+        if hasattr(window_main, "effective_stack"):
+            images, names, indices = window_main.effective_stack()
+            self._raw_frames = list(images)
+            self._source_names = list(names)
+            self._source_indices = list(indices)
+        else:
+            self._raw_frames = list(getattr(window_main, "raw_images", None) or [])
+            self._source_names = list(
+                getattr(window_main, "image_filenames", None) or [])
+            self._source_indices = list(range(len(self._raw_frames)))
+        self._total_frames = len(getattr(window_main, "raw_images", None) or [])
         self._frames = self._raw_frames
         self._aligned_frames = None
         self._epoch = 0
@@ -73,7 +73,19 @@ class CompareDialog(QDialog):
         self._active_revision = -1
         self._active_keys = {}
         self._results = {}
+        self._active_method = ""
+        self._stale_methods = set()
+        self._cancelled_methods = set()
+        self._cards = {}
+        self._card_status = {}
         self._errors = {}
+        # Original (unquantised for display) arrays, keyed by method, so a
+        # candidate can be adopted without reading pixels back from a pixmap.
+        self._full_results = {}
+        self._selected_method = ""
+        self._published = False
+        self._publishing = False
+        self._cancel_requested = False
         self._method_params = {}
         self._param_rows = {}
         self.param_widgets = {}
@@ -86,6 +98,21 @@ class CompareDialog(QDialog):
         self._close_code = QDialog.DialogCode.Rejected
         self._ref_index = 0
         self._shared = self._collect_shared_settings()
+        self._source_revision = int(getattr(window_main, "source_revision", 0))
+        manager = getattr(window_main, "label_manager", None)
+        frame_ids = manager.frame_ids("input") if manager is not None else []
+        self._frame_ids = [frame_ids[i] for i in self._source_indices] if frame_ids else None
+        from utils.scalebar import effective_px_um
+        from core.image_loader import stack_icc_profile
+        self._calibration = {
+            "pixel_size_um": effective_px_um(window_main),
+            "source_px_um": getattr(window_main, "source_px_um", None),
+            "source_scale_factor": getattr(window_main, "current_scale_factor", 1.0),
+            "icc_profile": stack_icc_profile(window_main, self._source_indices),
+            "linear_dng_metadata": getattr(window_main, "linear_dng_metadata", None),
+            "source_paths": [window_main.image_source_paths[i] for i in self._source_indices]
+                if len(getattr(window_main, "image_source_paths", ())) == self._total_frames else [],
+        }
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -95,13 +122,64 @@ class CompareDialog(QDialog):
         self._layout_timer.setSingleShot(True)
         self._layout_timer.timeout.connect(self._refresh_layout)
         self._build_ui()
+        self._update_source_summary()
         self._show_frame(0)
         method = (window_main.current_fusion_method()
                   if hasattr(window_main, "current_fusion_method")
-                  else "guided_filter")
-        if method not in self._checks:
-            method = "guided_filter"
-        self._checks[method].setChecked(True)
+                  else fusion_algorithms()[0].id)
+        if method == 'none':
+            method = self._first_available_method()
+        get_fusion(method)
+        box = self._checks.get(method)
+        # An unavailable inherited method stays unchecked (it stays visible and
+        # disabled with its dependency tooltip): silently swapping the request
+        # would compare something the user did not choose.
+        if box is not None and box.isEnabled():
+            box.setChecked(True)
+        if not self._selected_methods():
+            # Only when the inherited method is unavailable: keep the empty
+            # parameter strip and disabled Run button honest.
+            self.param_scroll.setVisible(False)
+            self.btn_run.setEnabled(False)
+            self.status_label.setText(box.property("unavailableReason") if box is not None else "")
+        for _control in ("btn_run", "btn_adopt_params", "btn_adopt_output",
+                         "btn_retry", "btn_verify", "align_combo",
+                         "mode_combo", "view_combo", "registration_parameter_panel"):
+            _widget = getattr(self, _control, None)
+            if _widget is not None:
+                _widget.setProperty("controlId", _control)
+        for _method, _box in self._checks.items():
+            _box.setProperty("controlId", f"method_{_method}")
+
+    def _first_available_method(self) -> str:
+        return next((name for name, box in self._checks.items()
+                     if box.isEnabled()), fusion_algorithms()[0].id)
+
+    def _apply_method_availability(self) -> None:
+        """Disable methods whose optional backend is unavailable."""
+        from core.multi_focus_fusion import is_ai_fusion_available
+        from ui.algorithm_combo import fusion_unavailable_reason
+
+        available = bool(is_ai_fusion_available())
+        for spec in fusion_algorithms():
+            box = self._checks.get(spec.id)
+            if box is None:
+                continue
+            reason = fusion_unavailable_reason(spec, available)
+            box.setEnabled(not reason)
+            box.setProperty("unavailableReason", reason)
+            hint = trans.t(spec.hint_key) if spec.hint_key else ""
+            box.setToolTip("\n\n".join(text for text in (hint, reason) if text))
+
+    def _update_source_summary(self):
+        """State which frames are compared, including excluded ones."""
+        label = getattr(self, "source_summary", None)
+        if label is None:
+            return
+        used = len(self._raw_frames)
+        total = max(used, int(getattr(self, "_total_frames", used) or used))
+        label.setText(trans.t("compare_source_summary").format(
+            used=used, total=total))
 
     def _collect_shared_settings(self):
         window = self.window_main
@@ -109,66 +187,138 @@ class CompareDialog(QDialog):
             "use_gpu": bool(getattr(window, "use_gpu", False)),
             "tile_enabled": bool(getattr(window, "tile_enabled", True)),
             "ai_batch_size": max(1, int(getattr(window, "ai_batch_size", 2))),
-            "thread_count": max(1, int(getattr(window, "thread_count", 4))),
+            "thread_count": max(0, int(getattr(window, "thread_count", 0))),
+            "resource_preference": getattr(window, "resource_preference", "balanced"),
             "reg_downscale_width": int(getattr(window, "reg_downscale_width", 1024)),
             "exposure_match": bool(getattr(window, "exposure_match", True)),
+            "sharpen_output": bool(getattr(window, "sharpen_output", False)),
             "sort_mode": "desc" if getattr(window, "stack_reverse_order", False) else "asc",
         }
         for key in ("tile_block_size", "tile_overlap", "tile_threshold"):
             value = getattr(window, key, None)
             if value is not None:
                 settings[key] = value
+        settings['method_options'] = {}
+        getter = getattr(window, 'brightness_option_for', None)
+        for spec in fusion_algorithms():
+            settings['method_options'][spec.id] = {
+                'exposure_match': bool(getter('exposure_match', spec.id)) if callable(getter) else spec.default_exposure_match,
+                'base_frame': 'last' if (bool(getter('base_correct', spec.id)) if callable(getter) else spec.default_base_correct) else 'none',
+            }
         return settings
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
         root.setSpacing(8)
         methods_row = QHBoxLayout()
-        methods_flow = FlowPanel(h_spacing=12, v_spacing=6)
-        methods_flow.add(QLabel(trans.t("compare_pick")))
+        methods_host = QWidget()
+        methods_layout = QVBoxLayout(methods_host)
+        methods_layout.setContentsMargins(0, 0, 0, 0)
+        methods_layout.setSpacing(4)
+        methods_layout.addWidget(QLabel(trans.t("compare_pick")))
+        methods_policy = QSizePolicy(QSizePolicy.Policy.Preferred,
+                                     QSizePolicy.Policy.Minimum)
+        methods_policy.setHeightForWidth(True)
+        methods_host.setSizePolicy(methods_policy)
         self._checks = {}
-        from core.multi_focus_fusion import is_ai_fusion_available
-        for method in METHOD_ORDER:
-            if method == "stackmffv3" and not is_ai_fusion_available():
-                continue
-            box = QCheckBox(trans.t(METHOD_LABEL_KEYS[method]), methods_flow)
+        # Same family order and captions as the main/batch/depth selectors, so
+        # a method keeps its familiar neighbour and family.
+        from ui.algorithm_combo import CATEGORY_KEYS, CATEGORY_ORDER
+        specs = sorted(fusion_algorithms(),
+                       key=lambda spec: CATEGORY_ORDER.index(spec.category))
+        last_category = None
+        flow = None
+        for spec in specs:
+            method = spec.id
+            if spec.category != last_category:
+                header = QLabel(trans.t(CATEGORY_KEYS[spec.category]))
+                header.setObjectName("sectionLabel")
+                methods_layout.addWidget(header)
+                flow = FlowPanel(h_spacing=12, v_spacing=6)
+                methods_layout.addWidget(flow)
+                last_category = spec.category
+            box = QCheckBox(trans.t(spec.label_key), flow)
             box.toggled.connect(self._methods_changed)
-            methods_flow.add(box)
+            flow.add(box)
             self._checks[method] = box
-        methods_row.addWidget(methods_flow, 1)
+        self._apply_method_availability()
+        methods_row.addWidget(methods_host, 1)
         self.btn_run = QPushButton(trans.t("compare_run"))
         self.btn_run.setObjectName("primaryButton")
         self.btn_run.clicked.connect(self.run_comparison)
         methods_row.addWidget(self.btn_run, 0, Qt.AlignmentFlag.AlignTop)
         root.addLayout(methods_row)
 
-        settings = QHBoxLayout()
-        settings.addWidget(QLabel(trans.t("group_registration")))
+        self.source_summary = QLabel("")
+        self.source_summary.setObjectName("mutedLabel")
+        self.source_summary.setWordWrap(True)
+        root.addWidget(self.source_summary)
+
+        settings = FlowPanel(h_spacing=12, v_spacing=6)
+        registration_group = QWidget()
+        registration_row = QHBoxLayout(registration_group)
+        registration_row.setContentsMargins(0, 0, 0, 0)
+        registration_label = QLabel(trans.t("group_registration"))
+        registration_row.addWidget(registration_label)
         self.align_combo = QComboBox()
-        for code, key in (("none", "check_align_none"),
-                          ("homography", "check_align_homography"),
-                          ("ecc", "check_align_ecc"),
-                          ("openfocus", "check_align_of")):
-            self.align_combo.addItem(trans.t(key), code)
+        for spec in registration_algorithms():
+            self.align_combo.addItem(trans.t(spec.label_key), spec.id)
         current_align = (self.window_main.current_alignment_method()
                          if hasattr(self.window_main, "current_alignment_method") else "none")
         self.align_combo.setCurrentIndex(max(0, self.align_combo.findData(current_align)))
         self.align_combo.currentIndexChanged.connect(self._alignment_changed)
-        settings.addWidget(self.align_combo)
-        settings.addSpacing(12)
-        settings.addWidget(QLabel(trans.t("compare_mode")))
+        registration_label.setBuddy(self.align_combo)
+        registration_row.addWidget(self.align_combo)
+        settings.add(registration_group)
+        mode_group = QWidget()
+        mode_row = QHBoxLayout(mode_group)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_label = QLabel(trans.t("compare_mode"))
+        mode_row.addWidget(mode_label)
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem(trans.t("compare_roi"), True)
         self.mode_combo.addItem(trans.t("compare_full"), False)
+        self.mode_combo.addItem(trans.t("compare_roi"), True)
+        self.mode_combo.setToolTip(trans.t("compare_mode_hint"))
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
-        settings.addWidget(self.mode_combo)
-        settings.addStretch()
+        mode_label.setBuddy(self.mode_combo)
+        mode_row.addWidget(self.mode_combo)
+        settings.add(mode_group)
+        # Viewing is independent of computing: a full result can be inspected
+        # as a detail crop or as the whole frame without re-fusing.
+        view_group = QWidget()
+        view_row = QHBoxLayout(view_group)
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_label = QLabel(trans.t("compare_view"))
+        view_row.addWidget(view_label)
+        self.view_combo = QComboBox()
+        self.view_combo.addItem(trans.t("compare_view_detail"), "detail")
+        self.view_combo.addItem(trans.t("compare_view_full"), "full")
+        self.view_combo.setToolTip(trans.t("compare_view_hint"))
+        self.view_combo.currentIndexChanged.connect(self._view_changed)
+        view_label.setBuddy(self.view_combo)
+        view_row.addWidget(self.view_combo)
+        settings.add(view_group)
         self.fit_button = QPushButton(trans.t("retouch_fit"))
-        settings.addWidget(self.fit_button)
+        settings.add(self.fit_button)
         self.fullscreen_button = QPushButton(trans.t("compare_fullscreen"))
         self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
-        settings.addWidget(self.fullscreen_button)
-        root.addLayout(settings)
+        settings.add(self.fullscreen_button)
+        root.addWidget(settings)
+        self._registration_drafts = {}
+        self._editing_alignment = None
+        self.registration_parameter_panel = AlgorithmParameterPanel(
+            self, hidden_parameters=('failure_policy',))
+        self.registration_parameter_panel.valuesChanged.connect(self._registration_parameters_changed)
+        root.addWidget(self.registration_parameter_panel)
+        self._sync_registration_parameters()
 
         self.param_host = FlowPanel(h_spacing=12, v_spacing=6)
         self.param_scroll = QScrollArea()
@@ -187,6 +337,7 @@ class CompareDialog(QDialog):
         self.preview_note = QLabel(trans.t("compare_preview_note"))
         self.preview_note.setWordWrap(True)
         self.preview_note.setObjectName("mutedLabel")
+        self.preview_note.setVisible(False)
         root.addWidget(self.preview_note)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
@@ -244,6 +395,10 @@ class CompareDialog(QDialog):
         size_label.setBuddy(self.preview_size_spin.lineEdit())
         size_row.addWidget(self.preview_size_spin)
         right_layout.addLayout(size_row)
+        candidate_hint = QLabel(trans.t("compare_candidate_hint"))
+        candidate_hint.setWordWrap(True)
+        candidate_hint.setObjectName("mutedLabel")
+        right_layout.addWidget(candidate_hint)
         self.preview_size_slider.valueChanged.connect(
             self._preview_size_changed)
         self.preview_size_spin.valueChanged.connect(self._preview_size_changed)
@@ -265,10 +420,22 @@ class CompareDialog(QDialog):
         self.split.splitterMoved.connect(lambda *_: self._layout_timer.start(0))
         root.addWidget(self.split, 1)
         for method in self._checks:
-            canvas = DetailCanvas(trans.t(METHOD_LABEL_KEYS[method]), self.grid_host)
+            canvas = DetailCanvas(_method_label(method), self.grid_host)
             canvas.setFixedSize(self._detail_size, self._detail_size)
             canvas.hide()
+            canvas.installEventFilter(self)
+            canvas.setProperty("compare_method", method)
             self._canvases[method] = canvas
+            card = QWidget(self.grid_host)
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(canvas)
+            state = QLabel()
+            state.setWordWrap(True)
+            state.setFixedWidth(self._detail_size)
+            layout.addWidget(state)
+            self._cards[method] = card
+            self._card_status[method] = state
 
         footer = QHBoxLayout()
         self.status_label = QLabel()
@@ -278,122 +445,125 @@ class CompareDialog(QDialog):
         self.progress.setMaximumWidth(180)
         self.progress.hide()
         footer.addWidget(self.progress)
+        root.addLayout(footer)
+        actions = FlowPanel(h_spacing=8, v_spacing=4)
+        self.btn_verify = QPushButton(trans.t("compare_verify_full"))
+        self.btn_verify.clicked.connect(self._verify_full)
+        actions.add(self.btn_verify)
+        self.btn_retry = QPushButton(trans.t("compare_retry_method"))
+        self.btn_retry.clicked.connect(self._retry_method)
+        actions.add(self.btn_retry)
+        self.btn_adopt_params = QPushButton(trans.t("compare_adopt_params"))
+        self.btn_adopt_params.clicked.connect(self._adopt_params)
+        self.btn_adopt_params.setEnabled(False)
+        actions.add(self.btn_adopt_params)
+        self.btn_adopt_output = QPushButton(trans.t("compare_adopt_output"))
+        self.btn_adopt_output.setObjectName("primaryButton")
+        self.btn_adopt_output.clicked.connect(self._adopt_output)
+        self.btn_adopt_output.setEnabled(False)
+        actions.add(self.btn_adopt_output)
         close_button = QPushButton(trans.t("btn_close"))
         close_button.clicked.connect(self.reject)
-        footer.addWidget(close_button)
-        root.addLayout(footer)
+        actions.add(close_button)
+        outer.addWidget(actions)
         self._layout_timer.start(0)
 
     def _initial_params(self, method):
-        window = self.window_main
-        params = {}
-        for key, _label, lo, hi, _step, decimals, default in METHOD_PARAMS.get(method, ()):
-            value = default
-            if key == "kernel_size" and hasattr(window, "kernel_for_method"):
-                value = window.kernel_for_method(method)
-            elif key in ("blend_smoothing", "depth_smoothing") and hasattr(window, "smoothing_for_method"):
-                value = window.smoothing_for_method(method)
-            value = max(lo, min(hi, value))
-            params[key] = float(value) if decimals else int(value)
-            if key == "kernel_size":
-                params[key] = normalize_kernel_size(params[key])
-        if method == "stackmffv3":
-            params["mode"] = getattr(window, "ai_mode", "soft")
-        for option in ("exposure_match", "base_correct"):
-            if hasattr(window, "brightness_option_for"):
-                enabled = window.brightness_option_for(option, method)
-            else:
-                enabled = option == "exposure_match"
-            params["base_frame" if option == "base_correct" else option] = (
-                ("last" if enabled else "none") if option == "base_correct" else enabled)
-        return params
+        getter = getattr(self.window_main, 'fusion_parameters_for', None)
+        return (getter(method) if callable(getter)
+                else resolve_fusion_parameters(method))
 
     def _build_param_rows(self):
         for method in self._checks:
             params = self._initial_params(method)
             self._method_params[method] = params
+            specs = get_fusion(method).parameters
+            if not specs:
+                self.param_widgets[method] = {}
+                continue
             group = QFrame(self.param_host)
             group.setFrameShape(QFrame.Shape.StyledPanel)
             group.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             row = QHBoxLayout(group)
             row.setContentsMargins(8, 4, 8, 4)
             row.setSpacing(6)
-            title = QLabel(trans.t(METHOD_LABEL_KEYS[method]), group)
+            title = QLabel(_method_label(method), group)
             font = title.font()
             font.setBold(True)
             title.setFont(font)
-            row.addWidget(title)
-            self.param_widgets[method] = {}
-            for key, label_key, lo, hi, step, decimals, _default in METHOD_PARAMS.get(method, ()):
-                caption = QLabel(trans.t(label_key), group)
-                spin = StepperSpinBox(group, minimum=lo, maximum=hi, step=step,
-                                      decimals=decimals, value=params[key])
-                spin.setFixedWidth(110)
-                spin.setAccessibleName(f"{title.text()} — {caption.text()}")
-                spin.lineEdit().setAccessibleName(spin.accessibleName())
-                caption.setBuddy(spin.lineEdit())
-                spin.valueChanged.connect(
-                    lambda value, m=method, k=key: self._param_changed(m, k, value))
-                row.addWidget(caption)
-                row.addWidget(spin)
-                self.param_widgets[method][key] = spin
-            if method == "stackmffv3":
-                caption = QLabel(trans.t("label_ai_mode"), group)
-                mode = QComboBox(group)
-                mode.addItem(trans.t("radio_ai_soft"), "soft")
-                mode.addItem(trans.t("radio_ai_hard"), "hard")
-                mode.setCurrentIndex(max(0, mode.findData(params["mode"])))
-                mode.setAccessibleName(f"{title.text()} — {caption.text()}")
-                caption.setBuddy(mode)
-                mode.currentIndexChanged.connect(
-                    lambda _index, c=mode: self._param_changed("stackmffv3", "mode", c.currentData()))
-                row.addWidget(caption)
-                row.addWidget(mode)
-                self.param_widgets[method]["mode"] = mode
+            row.addWidget(title, 0, Qt.AlignmentFlag.AlignTop)
+            panel = AlgorithmParameterPanel(group)
+            panel.set_parameters(specs, params)
+            panel.valuesChanged.connect(lambda values, m=method: self._params_changed(m, values))
+            row.addWidget(panel, 0, Qt.AlignmentFlag.AlignTop)
+            self.param_widgets[method] = panel.editors
             self.param_host.add(group)
             self._param_rows[method] = group
             group.hide()
+        height = max((group.sizeHint().height() for group in self._param_rows.values()),
+                     default=0)
+        for group in self._param_rows.values():
+            group.setFixedHeight(height)
 
     def _selected_methods(self):
-        return [m for m in METHOD_ORDER if m in self._checks and self._checks[m].isChecked()]
+        return [m for m, check in self._checks.items() if check.isChecked()]
 
     def _methods_changed(self, _checked):
         selected = self._selected_methods()
         for method, group in self._param_rows.items():
             group.setVisible(method in selected)
-        self.param_scroll.setVisible(bool(selected))
+        self.param_scroll.setVisible(any(method in self._param_rows for method in selected))
         self.param_host.relayout()
         self._layout_timer.start(0)
         self._request_changed()
 
-    def _param_changed(self, method, key, value):
-        if key == "kernel_size":
-            value = normalize_kernel_size(int(value))
-            spin = self.param_widgets[method][key]
-            with QSignalBlocker(spin):
-                spin.setValue(value)
-        elif key == "N":
-            value = int(value)
-        if self._method_params[method].get(key) == value:
+    def _params_changed(self, method, values):
+        if self._method_params[method] == values:
             return
-        self._method_params[method][key] = value
+        self._method_params[method] = dict(values)
         self._results.pop(method, None)
+        self._stale_methods.add(method)
+        self._full_results.pop(method, None)
         self._errors.pop(method, None)
+        self._update_adopt_actions()
         self._request_changed()
 
+    def _sync_registration_parameters(self):
+        method = self.align_combo.currentData()
+        if method not in self._registration_drafts:
+            getter = getattr(self.window_main, 'registration_parameters_for', None)
+            self._registration_drafts[method] = (getter(method) if callable(getter)
+                else resolve_registration_parameters(method))
+        self._editing_alignment = method
+        specs = registration_parameter_specs(method)
+        self.registration_parameter_panel.set_parameters(specs, self._registration_drafts[method])
+        self.registration_parameter_panel.setVisible(bool(self.registration_parameter_panel.editors))
+        self._shared['registration_parameters'] = dict(self._registration_drafts[method])
+
+    def _registration_parameters_changed(self, values):
+        self._registration_drafts[self._editing_alignment] = dict(values)
+        self._alignment_changed(0)
+
     def _alignment_changed(self, _index):
+        self._sync_registration_parameters()
         self._epoch += 1
         self._aligned_frames = None
         self._frames = self._raw_frames
         self._results.clear()
+        self._full_results.clear()
         self._errors.clear()
         self._show_frame(self._ref_index)
+        self._update_adopt_actions()
         self._request_changed()
 
     def _mode_changed(self, _index):
-        self.preview_note.setVisible(bool(self.mode_combo.currentData()))
+        roi = bool(self.mode_combo.currentData())
+        self.preview_note.setVisible(roi)
+        self._stale_methods.update(self._results)
         self._results.clear()
+        self._full_results.clear()
         self._errors.clear()
+        self._update_adopt_actions()
         self._request_changed()
 
     def _show_frame(self, index):
@@ -401,9 +571,15 @@ class CompareDialog(QDialog):
             return
         self._ref_index = max(0, min(index, len(self._frames) - 1))
         with QSignalBlocker(self.ref_canvas):
-            self.ref_canvas.set_pixmap(cv2_to_pixmap(self._frames[self._ref_index]))
-        names = getattr(self.window_main, "image_filenames", None) or []
-        name = os.path.basename(str(names[self._ref_index])) if self._ref_index < len(names) else ""
+            image = self._frames[self._ref_index]
+            metadata = self._calibration["linear_dng_metadata"]
+            if metadata is not None:
+                from utils.linear_dng import develop_linear
+                image = develop_linear(image, metadata)
+            self.ref_canvas.set_pixmap(cv2_to_pixmap(image))
+        names = self._source_names
+        name = (os.path.basename(str(names[self._ref_index]))
+                if self._ref_index < len(names) else "")
         self.frame_label.setText(trans.t("compare_frame_of").format(
             i=self._ref_index + 1, n=len(self._frames), name=name))
         self.btn_prev_frame.setEnabled(self._ref_index > 0)
@@ -422,8 +598,17 @@ class CompareDialog(QDialog):
             self.preview_size_spin.setValue(size)
         for canvas in self._canvases.values():
             canvas.setFixedSize(size, size)
+        for label in self._card_status.values():
+            label.setFixedWidth(size)
         self.ref_canvas.set_detail_size(size)
         self._layout_timer.start(0)
+
+    def _view_changed(self, _index):
+        """Switch detail/overview without recomputing anything."""
+        mode = self.view_combo.currentData()
+        for canvas in self._canvases.values():
+            canvas.set_view_mode(mode)
+        self._refresh_panes()
 
     def _region_changed(self, _region):
         # A full render and stack registration do not depend on the selection.
@@ -442,11 +627,30 @@ class CompareDialog(QDialog):
         region = self.ref_canvas.region()
         for method in self._selected_methods():
             canvas = self._canvases[method]
+            if self._result_is_current(method):
+                status = trans.t("compare_state_current")
+            elif self._errors.get(method, (None,))[0] == self._result_key(method):
+                status = trans.t("msg_error") + ": " + self._errors[method][1]
+            elif self._worker is not None and self._active_revision != self._revision:
+                status = trans.t("compare_stopping")
+            elif self._worker is not None and method == self._active_method:
+                status = trans.t("render_stage_fuse")
+            elif self._auto_enabled:
+                status = trans.t("compare_state_queued")
+            elif method in self._cancelled_methods:
+                status = trans.t("compare_cancelled")
+            elif method in self._stale_methods:
+                status = trans.t("depth_stale")
+            else:
+                status = trans.t("compare_no_image")
+            self._card_status[method].setText(status)
+            self._card_status[method].setToolTip(status)
             canvas.set_region(region)
             result = self._results.get(method)
             key = self._result_key(method)
             if result is not None and result[0] == key:
                 canvas.set_result(result[1], result[2])
+                canvas.set_view_mode(self.view_combo.currentData())
                 canvas.set_status("")
             else:
                 canvas.set_result(None, None)
@@ -461,24 +665,30 @@ class CompareDialog(QDialog):
         if self._closing:
             return
         self._revision += 1  # Invalidate old work now, before the debounce expires.
-        self._auto_enabled = bool(self._raw_frames and self._selected_methods())
+        if len(self._raw_frames) < 2:
+            self.status_label.setText(trans.t("depth_need_two_frames").format(n=len(self._raw_frames)))
+        self._auto_enabled = len(self._raw_frames) >= 2 and bool(self._selected_methods())
         if self._worker is not None:
             self._worker.cancel()
         self._refresh_panes()
-        self.btn_run.setEnabled(bool(self._raw_frames and self._selected_methods()))
+        self.btn_run.setEnabled(len(self._raw_frames) >= 2 and bool(self._selected_methods()))
+        self._update_adopt_actions()
         self._preview_timer.start(180)
 
     def run_comparison(self):
         if self._worker is not None:
+            self._cancel_requested = True
             self._auto_enabled = False
             self._revision += 1
             self._preview_timer.stop()
             self._worker.cancel()
-            self.status_label.setText(trans.t("msg_render_cancelled"))
+            # The native step cannot stop instantly; say what is happening and
+            # only report "cancelled" when the worker actually finished.
+            self.status_label.setText(trans.t("compare_stopping"))
+            self.btn_run.setEnabled(False)
             self._refresh_panes()
             return
         for method in self._selected_methods():
-            self._results.pop(method, None)
             self._errors.pop(method, None)
         self._request_changed()
         self._preview_timer.start(0)
@@ -487,7 +697,7 @@ class CompareDialog(QDialog):
         if self._closing or not self._auto_enabled or self._worker is not None:
             return
         methods = self._selected_methods()
-        if not methods or not self._raw_frames:
+        if not methods or len(self._raw_frames) < 2:
             self._set_idle()
             return
         if self._aligned_frames is None:
@@ -533,6 +743,9 @@ class CompareDialog(QDialog):
         self._worker = worker
         self._worker_kind = kind
         self._active_revision = self._revision
+        self._active_method = ""
+        self._cancelled_methods.clear()
+        self._refresh_panes()
         worker.finished.connect(self._worker_finished)
         self.btn_run.setText(trans.t("compare_cancel"))
         self.progress.show()
@@ -558,18 +771,171 @@ class CompareDialog(QDialog):
         for method in self._selected_methods():
             self._canvases[method].set_status(message)
 
+    def _select_method(self, method: str) -> None:
+        """Mark one result as the adoption candidate."""
+        if method not in self._canvases:
+            return
+        if self._selected_method == method:
+            method = ""
+        self._selected_method = method
+        for name, canvas in self._canvases.items():
+            canvas.set_selected(name == method and bool(method))
+        self._update_adopt_actions()
+
+    def _update_adopt_actions(self) -> None:
+        method = self._selected_method
+        available = bool(method) and self._worker is None and not self._closing
+        self.btn_verify.setVisible(bool(method) and bool(self.mode_combo.currentData()))
+        self.btn_verify.setEnabled(available and self._result_is_current(method))
+        self.btn_retry.setVisible(bool(method) and method in self._errors)
+        self.btn_retry.setEnabled(available and method in self._errors)
+        overview = self.view_combo.model().item(self.view_combo.findData("full"))
+        if overview is not None:
+            overview.setEnabled(not bool(self.mode_combo.currentData()))
+        if self.mode_combo.currentData() and self.view_combo.currentData() == "full":
+            self.view_combo.setCurrentIndex(self.view_combo.findData("detail"))
+        eligible = (bool(method) and method in self._selected_methods()
+                    and self._result_is_current(method)
+                    and self._worker is None and not self._closing
+                    and not self._published and not self._publishing)
+        self.btn_adopt_params.setEnabled(eligible)
+        result = self._full_results.get(method) if method else None
+        self.btn_adopt_output.setEnabled(eligible and bool(result)
+                                        and result["key"] == self._result_key(method))
+
+    def _retry_method(self):
+        method = self._selected_method
+        if not method or self._worker is not None:
+            return
+        self._errors.pop(method, None)
+        self._request_changed()
+        self._preview_timer.start(0)
+
+    def _verify_full(self):
+        method = self._selected_method
+        if not method or self._worker is not None or not self._result_is_current(method):
+            return
+        for name, check in self._checks.items():
+            with QSignalBlocker(check):
+                check.setChecked(name == method)
+        self._methods_changed(True)
+        self.mode_combo.setCurrentIndex(self.mode_combo.findData(False))
+        self._preview_timer.start(0)
+
+    def _result_is_current(self, method: str) -> bool:
+        cached = self._results.get(method)
+        return bool(cached) and cached[0] == self._result_key(method)
+
+    def _adopt_params(self) -> None:
+        """Copy the candidate's parameters to the main window; no render."""
+        method = self._selected_method
+        if (not method or not self.btn_adopt_params.isEnabled()
+                or not self._result_is_current(method)):
+            return
+        window = self.window_main
+        params = dict(self._method_params.get(method, {}))
+        previous = window._capture_parameter_state()
+        try:
+            with window._restore_scope():
+                if hasattr(window, 'set_alignment_method'):
+                    window.set_alignment_method(self.align_combo.currentData())
+                if hasattr(window, 'chk_reverse_order'):
+                    window.chk_reverse_order.setChecked(self._shared['sort_mode'] == 'desc')
+                if hasattr(window, 'set_fusion_method'):
+                    window.set_fusion_method(method)
+                window.set_fusion_parameters(method, params)
+                window.set_registration_parameters(self.align_combo.currentData(),
+                    self.registration_parameter_panel.values())
+                if hasattr(window, 'set_brightness_option'):
+                    window.set_brightness_option('exposure_match', method,
+                        self._shared['method_options'][method]['exposure_match'])
+                    window.set_brightness_option('base_correct', method,
+                        self._shared['method_options'][method]['base_frame'] != 'none')
+            window.persist_settings()
+            if hasattr(window, "push_parameter_undo"):
+                window.push_parameter_undo(previous)
+        except Exception as exc:
+            if hasattr(window, "_restore_parameter_state"):
+                try:
+                    window._restore_parameter_state(previous)
+                except Exception as restore_error:
+                    self.status_label.setText(f"{exc}\n{restore_error}")
+                    return
+            self.status_label.setText(str(exc))
+            return
+        if hasattr(window, "statusBar"):
+            window.statusBar().showMessage(
+                trans.t("compare_params_adopted"), 6000)
+        self.accept()
+
+    def _adopt_output(self) -> None:
+        """Publish the selected full-frame result as a new output."""
+        method = self._selected_method
+        if not method or self._published or self._publishing or self._worker is not None:
+            return
+        entry = self._full_results.get(method)
+        if (not entry or entry["key"] != self._result_key(method)
+                or not self._result_is_current(method)):
+            return
+        image = entry["image"]
+        window = self.window_main
+        self._publishing = True
+        self._update_adopt_actions()
+        try:
+            from core.render_context import build_render_context
+            from controllers.output_manager import OutputRecord
+            label = f"{_method_label(method)} · {trans.t('compare_output_suffix')}"
+            alignment = self.align_combo.currentData()
+            context = build_render_context(
+                self._aligned_frames or self._raw_frames, image,
+                filenames=self._source_names, algorithm=method,
+                alignment_options=alignment_steps(alignment),
+                aligned=alignment != "none", source_indices=self._source_indices,
+                source_revision=self._source_revision, frame_ids=self._frame_ids,
+                parameters={**{key: value for key, value in self._shared.items() if key != 'method_options'},
+                    **self._shared['method_options'][method],
+                    'fusion_parameters': self._method_params[method]},
+                **self._calibration)
+            record = OutputRecord.create(
+                image, label, context=context, kind="compare",
+                exported=False)
+            window.output_manager.publish_compare_output(record)
+            self._published = True
+            self.accept()
+        except Exception as exc:
+            self.status_label.setText(f"{trans.t('msg_error')}: {exc}")
+        finally:
+            self._publishing = False
+            self._update_adopt_actions()
+
     def _preview_ready(self, method, image, bounds):
         if not self._current_worker() or method not in self._selected_methods():
             return
         key = self._active_keys.get(method)
         if key != self._result_key(method):
             return
-        pixmap = cv2_to_pixmap(image)
+        display = image
+        metadata = self._calibration["linear_dng_metadata"]
+        if metadata is not None:
+            from utils.linear_dng import develop_linear
+            display = develop_linear(image, metadata)
+        pixmap = cv2_to_pixmap(display)
         if pixmap.isNull():
             self._preview_failed(method, trans.t("msg_proc_error"))
             return
         self._results[method] = (key, pixmap, tuple(bounds))
+        # Keep the original array for adoption: only a full-frame result may
+        # become an output, and it must not round-trip through the pixmap.
+        x, y, width, height = tuple(bounds)
+        if (not key[1] and x == 0 and y == 0
+                and (height, width) == self._raw_frames[0].shape[:2]
+                and (height, width) == image.shape[:2]):
+            self._full_results[method] = {
+                "key": key, "image": image, "bounds": tuple(bounds)}
+        else:
+            self._full_results.pop(method, None)
         self._errors.pop(method, None)
+        self._update_adopt_actions()
         self._refresh_panes()
 
     def _preview_failed(self, method, message):
@@ -581,10 +947,12 @@ class CompareDialog(QDialog):
     def _progress_changed(self, done, total, method):
         if not self._current_worker():
             return
+        self._active_method = method
+        self._refresh_panes()
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(done)
         if method:
-            self.status_label.setText(f"{trans.t('render_stage_fuse')} {trans.t(METHOD_LABEL_KEYS[method])}")
+            self.status_label.setText(f"{trans.t('render_stage_fuse')} {_method_label(method)}")
 
     def _worker_finished(self):
         worker = self.sender()
@@ -596,6 +964,19 @@ class CompareDialog(QDialog):
         if self._closing:
             super().done(self._close_code)
             return
+        if self._cancel_requested:
+            self._cancelled_methods.update(m for m in self._selected_methods()
+                                           if not self._result_is_current(m))
+            self._cancel_requested = False
+            self.status_label.setText(trans.t("compare_cancelled"))
+            self._set_idle()
+            self.btn_run.setEnabled(len(self._raw_frames) >= 2
+                                    and bool(self._selected_methods()))
+            self._update_adopt_actions()
+            self._refresh_panes()
+            return
+        self.btn_run.setEnabled(len(self._raw_frames) >= 2
+                                and bool(self._selected_methods()))
         self._set_idle()
         if self._auto_enabled and not self._preview_timer.isActive():
             self._preview_timer.start(0)
@@ -603,14 +984,41 @@ class CompareDialog(QDialog):
     def _set_idle(self):
         self.btn_run.setText(trans.t("compare_run"))
         self.progress.hide()
-        if self._auto_enabled:
-            self.status_label.setText(trans.t("msg_error") if any(
-                self._errors.get(m, (None,))[0] == self._result_key(m)
-                for m in self._selected_methods()) else "")
+        if not self._auto_enabled:
+            return
+        methods = self._selected_methods()
+        failed = [m for m in methods
+                  if self._errors.get(m, (None,))[0] == self._result_key(m)]
+        done = [m for m in methods
+                if self._results.get(m, (None,))[0] == self._result_key(m)]
+        if failed:
+            self.status_label.setText(
+                trans.t("compare_done_summary").format(
+                    done=len(done), total=len(methods))
+                + " · " + trans.t("msg_error"))
+        elif done:
+            self.status_label.setText(
+                trans.t("compare_done_summary").format(
+                    done=len(done), total=len(methods)))
+        else:
+            self.status_label.setText("")
+        self._update_adopt_actions()
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Resize:
             self._layout_timer.start(0)
+        method = (watched.property("compare_method")
+                  if hasattr(watched, "property") else None)
+        if method and event.type() == QEvent.Type.MouseButtonPress:
+            self._select_method(str(method))
+            return True
+        if method and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                if not event.isAutoRepeat():
+                    self._select_method(str(method))
+                return True
+        if method and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+            watched.update()
         return super().eventFilter(watched, event)
 
     def _toggle_fullscreen(self):
@@ -667,8 +1075,9 @@ class CompareDialog(QDialog):
             self.grid.takeAt(0)
         for method, canvas in self._canvases.items():
             canvas.setVisible(method in selected)
+            self._cards[method].setVisible(method in selected)
         for index, method in enumerate(selected):
-            self.grid.addWidget(self._canvases[method], index // columns, index % columns)
+            self.grid.addWidget(self._cards[method], index // columns, index % columns)
 
     def done(self, result):
         get_settings().setValue("compare/preview_size", self._detail_size)

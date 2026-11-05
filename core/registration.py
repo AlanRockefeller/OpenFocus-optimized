@@ -22,132 +22,53 @@ python Registration.py --mode both
 
 import argparse
 import concurrent.futures
+from itertools import chain
+from collections import deque
+from contextlib import contextmanager
 import time
 import cv2
 import numpy as np
 import os
 import glob
 import sys
-import io
 from typing import Union, List, Optional
 
 from utils.sorting import natural_sort_key as _image_sort_key
+from core.image_loader import apply_exif_orientation
 
-# Windowed/Windows console mojibake fix — frozen builds only. Rebinding
-# sys.stdout at import time closes the ORIGINAL wrapper once it is collected
-# (TextIOWrapper.__del__ closes its buffer), which under pytest silently kills
-# the terminal output mid-session (the ubuntu CI job failed exactly there) and
-# made any redirected run lose its report tail.
-if getattr(sys, "frozen", False) and sys.stdout is not None and hasattr(sys.stdout, "buffer"):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
-
-# # ========== 缩放对齐算法实现（线性） ==========
-
-
-
-# def _align_zoom_impl(input_source, output_path=None, img_filenames=None):
-#     """
-#     Align images from directory path or image list
-#     Args:
-#         input_source: string (directory path) or list of images
-#         output_path: string, directory path to save results (optional, None means no saving)
-#     Returns:
-#         list of aligned images (always returns processed images regardless of output_path)
-#     """
-#     # Process input source
-#     if img_filenames is None and isinstance(input_source, str):
-#         # Pre-compile regular expression
-#         num_pattern = re.compile(r"\d+")
-#         # Use generator expression and list comprehension for optimized file filtering and sorting
-#         img_paths = sorted(
-#             (os.path.join(input_source, f) for f in os.listdir(input_source)
-#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}),
-#             key=lambda x: int(num_pattern.findall(os.path.basename(x))[-1])
-#         )
-#         # Use list comprehension to read all images at once
-#         images = [cv2.imread(path) for path in img_paths]
-#         # Store original filenames with extensions
-#         img_filenames = [os.path.basename(path) for path in img_paths]
-#     else:
-#         images = input_source
-
-#     # Cache image dimensions and feature detector
-#     img_first = images[0]
-#     img_last = images[-1]
-#     h_first, w_first = img_first.shape[:2]
-#     h_last, w_last = img_last.shape[:2]
-
-#     # SIFT feature detection and matching
-#     sift = cv2.SIFT_create()
-#     kp1, des1 = sift.detectAndCompute(img_first, None)
-#     kp2, des2 = sift.detectAndCompute(img_last, None)
-
-#     # Use BFMatcher for feature matching (SIFT uses L2 norm)
-#     bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
-#     matches = sorted(bf.match(des1, des2), key=lambda x: x.distance)
-
-#     # Find valid matching points
-#     min_distance_threshold = w_first / 2
-#     p1 = p2 = q1 = q2 = None
-
-#     # Use numpy array operations to optimize distance calculation
-#     for i in range(len(matches) - 1):
-#         p1 = np.array(kp1[matches[i].queryIdx].pt)
-#         p2 = np.array(kp1[matches[i + 1].queryIdx].pt)
-#         q1 = np.array(kp2[matches[i].trainIdx].pt)
-#         q2 = np.array(kp2[matches[i + 1].trainIdx].pt)
-
-#         if np.linalg.norm(p1 - p2) > min_distance_threshold:
-#             break
-#     else:
-#         raise ValueError("Unable to find matching point pairs that meet the criteria")
-
-#     # Calculate scaling factor
-#     dist = np.linalg.norm(p1 - p2)
-#     dist2 = np.linalg.norm(q1 - q2)
-#     c = max(dist2 / dist, dist / dist2)
-
-#     # Pre-calculate all scaling factors
-#     aug_list = np.linspace(1, c, len(images))
-#     is_forward = dist2 / dist > 1
-#     target_shape = (h_last, w_last) if is_forward else (h_first, w_first)
-#     aug_factors = aug_list[::-1] if is_forward else aug_list
-
-#     # Pre-create output directory
-#     if output_path:
-#         os.makedirs(output_path, exist_ok=True)
-
-#     # Process images
-#     aligned_images = []
-#     target_h, target_w = target_shape
-
-#     for idx, (img, aug_factor) in enumerate(zip(images, aug_factors)):
-#         # Use cv2.INTER_AREA for scaling
-#         img_resized = cv2.resize(img, None, fx=aug_factor, fy=aug_factor, interpolation=cv2.INTER_AREA)
-
-#         # Calculate crop position
-#         h, w = img_resized.shape[:2]
-#         x = (w - target_w) // 2
-#         y = (h - target_h) // 2
-
-#         # Crop image
-#         img_crop = img_resized[y:y + target_h, x:x + target_w]
-#         aligned_images.append(img_crop)
-
-#         # Save results
-#         if output_path:
-#             # Use original filename if available, otherwise use default naming
-#             if img_filenames:
-#                 output_file = os.path.join(output_path, img_filenames[idx])
-#             else:
-#                 output_file = os.path.join(output_path, f'frame_{idx:04d}.png')
-#             cv2.imwrite(output_file, img_crop)
-
-#     return aligned_images
 
 
 # ========== 基于变换矩阵的精确裁切函数 ==========
+
+from contextvars import ContextVar
+
+# Grouped fusion records crop offsets in the reference image's pixel grid.
+grouped_crop_offsets = ContextVar('grouped_crop_offsets', default=None)
+
+# Optional per-frame diagnostics, collected on the calling thread.
+alignment_report = ContextVar('alignment_report', default=None)
+
+
+def _report_alignment(frame_index, method, status, **details):
+    report = alignment_report.get()
+    if report is not None:
+        details = {key: value.tolist() if isinstance(value, np.ndarray) else value
+                   for key, value in details.items()}
+        report.append({'frame_index': frame_index, 'method': method,
+                       'status': status, **details})
+
+
+def _report_reference(method, index=0):
+    _report_alignment(index, method, 'reference', transform=np.eye(3).tolist())
+
+
+def _record_grouped_crop(top, bottom, left, right):
+    offsets = grouped_crop_offsets.get()
+    if offsets is not None:
+        if top >= bottom or left >= right:
+            raise ValueError('Registration has no common valid region; disable grouping or use better aligned inputs')
+        offsets.append((left, top, right, bottom))
+
 
 def _compute_valid_region_from_transforms(H_matrices, img_shape, margin=2):
     """
@@ -161,6 +82,30 @@ def _compute_valid_region_from_transforms(H_matrices, img_shape, margin=2):
     Returns:
         (top, bottom, left, right): 公共有效区域的边界
     """
+    if grouped_crop_offsets.get() is not None:
+        # Lanczos4 samples a radius of four source pixels. Transform an inset
+        # rectangle, then retain an axis-aligned rectangle inside every warp.
+        h, w = img_shape
+        if min(h, w) <= 8:
+            raise ValueError('Grouped registration requires images larger than 8 pixels in each dimension')
+        corners = np.array([[4, w - 4, w - 4, 4],
+                            [4, 4, h - 4, h - 4], [1, 1, 1, 1]], dtype=np.float64)
+        left, top, right, bottom = 0.0, 0.0, float(w), float(h)
+        for matrix in H_matrices:
+            transformed = np.asarray(matrix, dtype=np.float64) @ corners
+            denominator = transformed[2]
+            if (not np.all(np.isfinite(transformed)) or np.any(np.abs(denominator) < 1e-10)
+                    or not (np.all(denominator > 0) or np.all(denominator < 0))):
+                raise ValueError('Grouped registration cannot safely crop this projective transform; disable grouping')
+            x, y = transformed[:2] / denominator
+            if not (x[0] < x[1] and x[3] < x[2] and y[0] < y[3] and y[1] < y[2]):
+                raise ValueError('Grouped registration cannot safely crop this rotated or projective transform; disable grouping')
+            left = max(left, x[0], x[3])
+            right = min(right, x[1], x[2])
+            top = max(top, y[0], y[1])
+            bottom = min(bottom, y[2], y[3])
+        return int(np.ceil(top)), int(np.floor(bottom)), int(np.ceil(left)), int(np.floor(right))
+
     h, w = img_shape
     
     # 图像四个角点
@@ -232,43 +177,11 @@ def _compute_valid_region_from_transforms(H_matrices, img_shape, margin=2):
     return top, bottom, left, right
 
 
-def _crop_with_transforms(images, H_matrices):
-    """
-    基于变换矩阵精确裁切图像
-    
-    Args:
-        images: 图像列表
-        H_matrices: 变换矩阵列表
-    
-    Returns:
-        裁切后的图像列表
-    """
-    if not images or len(images) == 0:
-        return images
-    
-    h, w = images[0].shape[:2]
-    top, bottom, left, right = _compute_valid_region_from_transforms(H_matrices, (h, w))
-    
-    # 确保裁切区域有效
-    if top >= bottom or left >= right:
-        print("Warning: Invalid crop region, returning original images.")
-        return images
-    
-    # 裁切所有图像
-    cropped_images = []
-    for img in images:
-        cropped = img[top:bottom, left:right].copy()
-        cropped_images.append(cropped)
-    
-    print(f"Cropped by transform matrices: ({left}, {top}) to ({right}, {bottom}), new size: {right-left}x{bottom-top}")
-    
-    return cropped_images
-
 
 # ========== 单应性对齐算法实现（非线性） ==========
 
 
-def _align_homography_impl(input_source, output_path=None, img_filenames=None, downscale_width=1600, thread_count: int = 4, should_cancel=None):
+def _align_homography_impl(input_source, output_path=None, img_filenames=None, downscale_width=1600, thread_count: int = 4, should_cancel=None, failure_policy='continue'):
     """
     商业级图像对齐算法优化版
     特性：
@@ -297,6 +210,8 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
         images = input_source
 
     num_images = len(images)
+    if num_images:
+        _report_reference('homography')
     if num_images < 2:
         return images
 
@@ -356,66 +271,78 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
     except Exception:
         max_workers = min(8, os.cpu_count() or 1)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        features_list = list(executor.map(get_features_task, images))
-
-    # --- 3. 序列矩阵计算 (必须串行) ---
-    print("  - Step 2/3: Calculating transform matrices...")
-    
+    # Matching retains its last accepted reference, including failed frames.
     bf = cv2.BFMatcher(cv2.NORM_L2)
-    
-    # 获取第一帧特征
-    last_kps, last_des, last_scale = features_list[0]
+    with _bounded_registration_map(get_features_task, images, max_workers,
+                                   should_cancel) as features:
+        last_kps, last_des, last_scale = next(features)
+        last_index = 0
+        trajectory_failed = False
+        for idx, (curr_kps, curr_des, curr_scale) in enumerate(features, 1):
+            _check_cancel(should_cancel)
+            if curr_des is None or len(curr_kps) < 4 or last_des is None:
+                print(f"Warning: Frame {idx} features insufficient. Keeping original position.")
+                if failure_policy == 'fail':
+                    _report_alignment(idx, 'homography', 'failed', reason='insufficient features', reference_index=last_index)
+                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: insufficient features')
+                _report_alignment(idx, 'homography', 'fallback', reason='insufficient features',
+                                  reference_index=last_index, transform=H_global)
+                H_matrices.append(H_global.copy())
+                continue
 
-    for idx in range(1, num_images):
-        curr_kps, curr_des, curr_scale = features_list[idx]
+            matches = bf.knnMatch(curr_des, last_des, k=2)
+            good_matches = []
+            for match_pair in matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.70 * n.distance:
+                        good_matches.append(m)
+            if len(good_matches) < 6:
+                print(f"Warning: Frame {idx} poor matches ({len(good_matches)}). Keeping previous trajectory.")
+                if failure_policy == 'fail':
+                    _report_alignment(idx, 'homography', 'failed', reason='insufficient matches', reference_index=last_index, match_count=len(good_matches))
+                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: insufficient matches')
+                _report_alignment(idx, 'homography', 'fallback', reason='insufficient matches',
+                                  reference_index=last_index, transform=H_global,
+                                  match_count=len(good_matches))
+                H_matrices.append(H_global.copy())
+                continue
 
-        # 异常处理：特征不足
-        if curr_des is None or len(curr_kps) < 4 or last_des is None:
-            print(f"Warning: Frame {idx} features insufficient. Keeping original position.")
+            pts_curr = np.float32([curr_kps[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2) / curr_scale
+            pts_last = np.float32([last_kps[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2) / last_scale
+            H_local, mask = cv2.findHomography(pts_curr, pts_last, cv2.RANSAC, 5.0)
+            _check_cancel(should_cancel)
+            estimated = H_local is not None
+            if H_local is None:
+                print(f"Frame {idx} alignment failed.")
+                if failure_policy == 'fail':
+                    _report_alignment(idx, 'homography', 'failed', reason='homography estimation failed', reference_index=last_index, match_count=len(good_matches))
+                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: homography estimation failed')
+                _report_alignment(idx, 'homography', 'fallback', reason='homography estimation failed',
+                                  reference_index=last_index, transform=H_global,
+                                  match_count=len(good_matches))
+                trajectory_failed = True
+                H_local = np.eye(3)
+            H_global = np.matmul(H_global, H_local)
             H_matrices.append(H_global.copy())
-            continue
-
-        # 特征匹配 (Current vs Last)
-        matches = bf.knnMatch(curr_des, last_des, k=2)
-
-        good_matches = []
-        for match_pair in matches:
-            if len(match_pair) == 2:
-                m, n = match_pair
-                if m.distance < 0.70 * n.distance:
-                    good_matches.append(m)
-
-        if len(good_matches) < 6:
-            print(f"Warning: Frame {idx} poor matches ({len(good_matches)}). Keeping previous trajectory.")
-            H_matrices.append(H_global.copy())
-            continue
-
-        # 提取坐标
-        pts_curr = np.float32([curr_kps[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2) / curr_scale
-        pts_last = np.float32([last_kps[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2) / last_scale
-
-        # RANSAC 计算单应性矩阵
-        H_local, mask = cv2.findHomography(pts_curr, pts_last, cv2.RANSAC, 5.0)
-
-        if H_local is None:
-            print(f"Frame {idx} alignment failed.")
-            H_local = np.eye(3)
-
-        # 矩阵链乘
-        H_global = np.matmul(H_global, H_local)
-        H_matrices.append(H_global.copy())
-
-        # 更新引用
-        last_kps = curr_kps
-        last_des = curr_des
-        last_scale = curr_scale
+            if estimated:
+                details = {'match_count': len(good_matches)}
+                if mask is not None:
+                    details['inlier_count'] = int(np.count_nonzero(mask))
+                if trajectory_failed:
+                    details['reason'] = 'reference alignment fell back'
+                _report_alignment(idx, 'homography', 'fallback' if trajectory_failed else 'aligned',
+                                  reference_index=last_index, transform=H_global, **details)
+            last_kps, last_des, last_scale = curr_kps, curr_des, curr_scale
+            last_index = idx
+    del last_kps, last_des, curr_kps, curr_des
 
     # --- 4. 并行应用变换与裁切 ---
     print("  - Step 3/3: Warping images concurrently...")
     
     # 预先计算裁切区域，直接变换到目标区域，避免先变换后裁切的浪费
     top, bottom, left, right = _compute_valid_region_from_transforms(H_matrices, (h_orig, w_orig))
+    _record_grouped_crop(top, bottom, left, right)
     
     do_crop = True
     if top >= bottom or left >= right:
@@ -444,26 +371,10 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
         return cv2.warpPerspective(img, H_final, (target_w, target_h),
                                  flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
 
-    # 准备参数
-    warp_args = list(zip(images, H_matrices))
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(warp_task, args): k for k, args in enumerate(warp_args)}
-        aligned_images = [None] * len(warp_args)
-        for fut in concurrent.futures.as_completed(futures):
-            aligned_images[futures[fut]] = fut.result()
-            if should_cancel is not None and should_cancel():
-                for f in futures:
-                    f.cancel()
-                raise RegistrationCancelled()
-
-    # 如果有输出路径，保存图像
-    if output_path:
-        os.makedirs(output_path, exist_ok=True)
-        print("  - Saving results...")
-        for idx, img in enumerate(aligned_images):
-            fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
-            cv2.imwrite(os.path.join(output_path, fname), img)
+    with _bounded_registration_map(warp_task, zip(images, H_matrices),
+                                   max_workers, should_cancel) as results:
+        aligned_images = list(results)
+    _save_registration(aligned_images, output_path, img_filenames, should_cancel)
 
     return aligned_images
 
@@ -471,18 +382,104 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
 class RegistrationCancelled(Exception):
     """Raised when a render cancellation flag fires mid-registration."""
 
+def _check_cancel(should_cancel):
+    if should_cancel is not None and should_cancel():
+        raise RegistrationCancelled()
+
+
+@contextmanager
+def _bounded_registration_map(function, values, workers, should_cancel=None):
+    """Ordered results with at most one task per worker retained or running.
+
+    Leaving the scope cancels queued work and waits for native calls before
+    the enclosing heavy-job lease can be released.
+    """
+    _check_cancel(should_cancel)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    pending = deque()
+    source = iter(values)
+
+    def submit_one():
+        _check_cancel(should_cancel)
+        try:
+            value = next(source)
+        except StopIteration:
+            return
+        pending.append(pool.submit(run, value))
+
+    def run(value):
+        _check_cancel(should_cancel)
+        result = function(value)
+        _check_cancel(should_cancel)
+        return result
+
+    def consume():
+        for _ in range(workers):
+            submit_one()
+        while pending:
+            _check_cancel(should_cancel)
+            # A later failure must stop replenishment even when an earlier
+            # native call is still running.
+            for future in pending:
+                if future.done() and future.exception() is not None:
+                    future.result()
+            future = pending[0]
+            done, _ = concurrent.futures.wait((future,), timeout=0.05)
+            if not done:
+                continue
+            result = future.result()
+            del done
+            pending.popleft()
+            del future
+            _check_cancel(should_cancel)
+            yield result
+            del result
+            submit_one()
+
+    results = consume()
+    try:
+        yield results
+    finally:
+        results.close()
+        for future in pending:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        pending.clear()
+
+
+def _save_registration(images, output_path, filenames, should_cancel):
+    """Publish only after all transforms succeed; each file commits atomically."""
+    _check_cancel(should_cancel)
+    if not output_path:
+        return
+    import tempfile
+    from utils.image_utils import imwrite_auto
+    os.makedirs(output_path, exist_ok=True)
+    for index, image in enumerate(images):
+        _check_cancel(should_cancel)
+        name = filenames[index] if filenames else f'frame_{index:04d}.png'
+        destination = os.path.join(output_path, name)
+        fd, temporary = tempfile.mkstemp(prefix='.align-',
+                                         suffix=os.path.splitext(name)[1],
+                                         dir=output_path)
+        os.close(fd)
+        try:
+            if not imwrite_auto(temporary, image):
+                raise OSError(f"Could not save aligned frame: {name}")
+            _check_cancel(should_cancel)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    _check_cancel(should_cancel)
+
+
 
 # ========== OpenFocus 对齐：有界相似变换（平移+旋转+缩放） ==========
 
-_OF_EST_WIDTH = 480  # 估计阶段长边上限（旋转/缩放网格在低分辨率上搜索）
-# 位移上限（帧尺寸比例）：较大的位移估计不可靠，强行校正会得到半错位
-# 并让有效区交集被裁掉一大块（25% 上限 = 单边最多丢 1/4 画面）。取 8%——
-# 本对齐器有 NCC 置信门限，可用 ImageRegistration(max_shift_ratio=) /
-# CLI --align-shift-limit 按需放宽。
+_OF_EST_WIDTH = 480  # Maximum long edge used for transform estimation.
 _OF_MAX_SHIFT_RATIO = 0.08
-# 旋转/放大率容差：Helicon 把它们与位移分开暴露为独立参数，我们的实现
-# 此前只有位移上限，旋转和缩放可以取到搜索边界（8° / ±5%）而不被拒——
-# 一帧被误估出 5° 旋转会以角点错位 0.087·对角线的方式污染整幅画面。
+# Independent bounds for rotation and magnification.
 _OF_MAX_ROTATION_DEG = 8.0
 _OF_MAX_SCALE_DELTA = 0.05
 
@@ -502,9 +499,9 @@ def _of_gray_est(img, est_width):
         if take == 1:
             g = img[:, :, 0].astype(np.float32)
         else:
-            m = np.array([0.114, 0.587, 0.299], np.float32)
+            weights = np.array([0.114, 0.587, 0.299], np.float32)[:take]
             g = cv2.transform(img[:, :, :take].astype(np.float32),
-                              m.reshape(1, -1))
+                              weights.reshape(1, -1))
             g = g if g.ndim == 2 else g[:, :, 0]
     h, w = g.shape[:2]
     if max(h, w) > est_width:
@@ -515,140 +512,28 @@ def _of_gray_est(img, est_width):
     return np.ascontiguousarray(g, np.float32)
 
 
-def _of_translation_ncc(ref_est, cur_est, patch_frac=0.7):
-    """Translation cur→ref by normalized cross-correlation.
+def _of_estimate_similarity(ref_est, cur_est, shift_ratio=0.08,
+                            rot_bound=8.0, scale_range=(0.95, 1.05),
+                            should_cancel=None):
+    """Estimate a bounded similarity transform with the sampled detector."""
+    from core.openfocus_align import estimate
 
-    Phase correlation silently fails on "sharp vs defocused" pairs: measured
-    on a synthetic stack with a true 16 px shift it reported 145 px, while
-    NCC found 15.93 px. Focus stacking always compares differently blurred
-    frames, so the translation estimate must not rely on the phase peak.
-
-    A central patch of `cur_est` is matched inside `ref_est`; the returned
-    shift is where the patch content moved. Sub-pixel peak by parabola.
-
-    Take the global peak as-is (no tie-breaking): a defocused frame smears
-    the correlation peak into a broad plateau, and preferring the smallest
-    displacement among near-ties then walks off the true peak (σ9 blur:
-    peak 0.805 at the correct −16 px, but shifts within 0.01 of it span
-    several pixels, and "smallest" picked +5 px). Restricting the search
-    window is just as harmful: when the true shift lies outside it, the
-    best remaining in-window peak is a spurious match that silently
-    translates the frame. The caller owns the acceptance range instead.
-    """
-    h, w = ref_est.shape[:2]
-    ph = max(16, int(h * patch_frac))
-    pw = max(16, int(w * patch_frac))
-    y0, x0 = (h - ph) // 2, (w - pw) // 2
-    patch = np.ascontiguousarray(cur_est[y0:y0 + ph, x0:x0 + pw])
-    # 平坦块（全黑/全白的边框帧、无纹理区域）：NCC 无定义，模板匹配会
-    # 在角落给出 1.0 的假峰。报告无对应关系，由调用方回退到恒等。
-    if float(patch.std()) < 1e-3 or float(ref_est.std()) < 1e-3:
-        return -1.0, 0.0, 0.0
-    try:
-        res = cv2.matchTemplate(ref_est, patch, cv2.TM_CCOEFF_NORMED)
-    except cv2.error:
-        return -1.0, 0.0, 0.0
-    px = int(np.argmax(res.max(axis=0)))
-    py = int(np.argmax(res[:, px]))
-
-    def _parabola(v0, v1, v2):
-        den = v0 - 2.0 * v1 + v2
-        return 0.0 if abs(den) < 1e-9 else 0.5 * (v0 - v2) / den
-
-    sx = sy = 0.0
-    if 0 < px < res.shape[1] - 1:
-        sx = float(np.clip(_parabola(res[py, px - 1], res[py, px],
-                                     res[py, px + 1]), -1.0, 1.0))
-    if 0 < py < res.shape[0] - 1:
-        sy = float(np.clip(_parabola(res[py - 1, px], res[py, px],
-                                     res[py + 1, px]), -1.0, 1.0))
-    # Content moved from (x0, y0) in cur to (px, py) in ref.
-    dx = (x0 + sx) - px
-    dy = (y0 + sy) - py
-    return float(res[py, px]), dx, dy
-
-
-def _of_ncc_score(ref_est, fixed, patch_frac=0.7):
-    """重叠区归一化互相关：旋转/缩放候选的判别评分。
-
-    平移用 NCC 模板搜索（相位相关在清晰/失焦帧对上有假峰，见
-    `_of_translation_ncc`）；NCC 在正确校正时 →1，旋转错 0.5° 以上
-    急剧下降。返回 (ncc, dx, dy)。
-    """
-    ncc, dx, dy = _of_translation_ncc(ref_est, fixed, patch_frac=patch_frac)
-    if not np.isfinite(ncc):
-        return -1.0, 0.0, 0.0
-    return ncc, dx, dy
-
-
-def _of_estimate_similarity(ref_est, cur_est, patch_frac=0.7,
-                            rot_bound=8.0, scale_range=(0.95, 1.05)):
-    """有界网格搜索 cur→ref 的相似变换（旋转+缩放），NCC 评分。
-
-    返回 (ncc, theta_deg, scale, dx, dy)：
-    theta/scale 满足 warpAffine(cur, getRotationMatrix2D(center, theta,
-    scale)) ≈ ref（内容层面），(dx, dy) 是残差平移（内容仍需移动的量，
-    由 `_of_translation_ncc` 的 NCC 峰给出）。
-    """
-    h, w = ref_est.shape[:2]
-    cy, cx = h / 2.0, w / 2.0
-
-    def _eval(theta, scale):
-        M = cv2.getRotationMatrix2D((cx, cy), theta, scale)
-        fixed = cv2.warpAffine(cur_est, M, (w, h))
-        return _of_ncc_score(ref_est, fixed, patch_frac=patch_frac)
-
-    best = (-1.0, 0.0, 1.0, 0.0, 0.0)
-    # 平移-only 基准：模糊与缩放在 NCC 上天然相似，无显著增益时坚持
-    # s=1 的简约解（否则失焦帧会被误判出假旋转/假缩放）
-    base_ncc, base_dx, base_dy = _eval(0.0, 1.0)
-    best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
-    for th in np.arange(-rot_bound, rot_bound + 1e-6, 1.0):
-        for sc in (0.95, 1.0, 1.05):
-            if not (scale_range[0] - 1e-9 <= sc <= scale_range[1] + 1e-9):
-                continue
-            ncc, dx, dy = _eval(th, sc)
-            if ncc > best[0]:
-                best = (ncc, th, sc, dx, dy)
-    # 非平凡 (θ, s) 必须显著优于平移-only 基准（≥0.05 NCC）才采纳
-    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
-        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
-    if best[1] == 0.0 and best[2] == 1.0 and best[0] >= 0.97:
-        # 常见情形：纯平移已高度吻合——跳过两级精修（省一半耗时）
-        return best
-    # 两级精修：角度 0.25°、缩放 0.01
-    for _ in range(2):
-        th0, sc0 = best[1], best[2]
-        improved = False
-        for th in np.arange(max(-rot_bound, th0 - 1.0),
-                            min(rot_bound, th0 + 1.0) + 1e-9, 0.25):
-            for sc in np.arange(max(scale_range[0], sc0 - 0.02),
-                                min(scale_range[1], sc0 + 0.02) + 1e-9, 0.01):
-                ncc, dx, dy = _eval(th, sc)
-                if ncc > best[0] + 1e-6:
-                    best = (ncc, th, sc, dx, dy)
-                    improved = True
-        if not improved:
-            break
-    # 精修后复检：非平凡解仍须显著优于平移-only 基准
-    if (best[1] != 0.0 or best[2] != 1.0) and best[0] < base_ncc + 0.05:
-        best = (base_ncc, 0.0, 1.0, base_dx, base_dy)
-    return best
+    return estimate(ref_est, cur_est, shift_ratio, rot_bound, scale_range,
+                    lambda: _check_cancel(should_cancel))
 
 
 def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                           downscale_width=None, thread_count: int = 4,
                           should_cancel=None, equalize_brightness=True,
                           max_shift_ratio=None, brightness_reference="first",
-                          max_rotation_deg=None, max_scale_delta=None):
+                          max_rotation_deg=None, max_scale_delta=None,
+                          failure_policy='continue', reference_frame=1):
     """
     OpenFocus 快速对齐：有界相似变换（平移+旋转+缩放）+ 亮度均衡 + 自动裁边。
 
-    几何参考帧是**首帧**（固定锚点）。旋转/缩放用有界
-    网格搜索（NCC 判别评分），平移用 NCC 模板搜索的亚像素峰（相位相关
-    在清晰/失焦帧对上有假峰）；低置信帧放弃该帧对齐；位移超过
-    max_shift_ratio 时也放弃（强行钳制会得到一半错位 + 污染有效区），
-    最后按有效区交集自动裁边。
+    Geometry uses the selected frame as its anchor. A bounded sampled-difference
+    grid estimates translation, rotation and scale; the common valid region
+    is cropped after brightness equalization and warping.
     """
     if max_shift_ratio is None:
         max_shift_ratio = _OF_MAX_SHIFT_RATIO
@@ -663,16 +548,24 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
              if os.path.splitext(f)[1].lower() in valid_exts),
             key=_image_sort_key
         )
-        images = [cv2.imread(path) for path in img_paths]
+        images = []
+        for path in img_paths:
+            img = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+            images.append(apply_exif_orientation(path, img) if img is not None else None)
         img_filenames = [os.path.basename(path) for path in img_paths]
     else:
         images = input_source
-    if images is None or len(images) < 2:
+    if images is None or not len(images):
         return images if images is not None else []
+    if not 1 <= reference_frame <= len(images):
+        raise ValueError(f'OpenFocus reference frame {reference_frame} is outside the stack of {len(images)} frames')
+    if len(images) < 2:
+        _report_reference('openfocus')
+        return images
 
     n = len(images)
     h, w = images[0].shape[:2]
-    max_shift = (int(w * max_shift_ratio), int(h * max_shift_ratio))
+    max_shift = (w * max_shift_ratio, h * max_shift_ratio)
     est_width = min(_OF_EST_WIDTH, max(320, w))
 
     def _gray_float(img):
@@ -682,6 +575,8 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
             take = min(img.shape[2], 3)
             if take == 1:
                 g = img[:, :, 0]
+            elif take == 2:
+                g = img[:, :, :2].astype(np.float32).mean(axis=2)
             else:
                 m = np.array([0.114, 0.587, 0.299], np.float32)
                 g = cv2.transform(img[:, :, :take].astype(np.float32),
@@ -689,29 +584,42 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                 g = g if g.ndim == 2 else g[:, :, 0]
         return g.astype(np.float32)
 
-    # Geometry is always estimated against the FIRST frame: one fixed anchor
-    # keeps the valid-region crop minimal and the per-frame shift budget
-    # independent of the exposure target. The brightness target is separate
-    # (the fusion pipeline calibrates to the LAST frame by default), so a
-    # stack is not pulled toward two different ends.
-    ref_idx = 0
+    # Brightness and geometry have independent reference frames.
+    ref_idx = reference_frame - 1
     bright_gray = (_gray_float(images[-1])
                    if brightness_reference == "last" else _gray_float(images[0]))
     ref_low = cv2.GaussianBlur(bright_gray, (0, 0), 32.0)
     ref_low_mean = float(ref_low.mean()) or 1.0
+    del bright_gray, ref_low
     gains = [1.0] * n
 
     ref_est = _of_gray_est(images[ref_idx], est_width)
     eh, ew = ref_est.shape[:2]
-    patch_frac = min(0.7, max(0.34, 1.0 - 2.0 * float(max_shift_ratio) - 0.02))
+
+    def _prepare(i):
+        """Everything about frame i that does not depend on the state machine.
+
+        Greyscale, the σ32 brightness low-pass and the estimation-resolution
+        grey are per-frame and read-only, so they are computed for a bounded
+        window in parallel. The acceptance logic below still consumes the
+        results strictly in frame order.
+        """
+        gain = 1.0
+        if equalize_brightness:
+            cur_gray = _gray_float(images[i])
+            cur_low = cv2.GaussianBlur(cur_gray, (0, 0), 32.0)
+            cur_mean = float(cur_low.mean())
+            if cur_mean > 1e-3:
+                gain = float(np.clip(ref_low_mean / cur_mean, 0.5, 2.0))
+        return i, gain, _of_gray_est(images[i], est_width)
 
     def _compose_full(ncc_pack):
         """估计分辨率下的校正参数 → 全分辨率 3x3（warpAffine 直接可用）。
 
         warpAffine 的 M 是内容正向变换（实测：[I|+10] 把内容右移 10px；
         getRotationMatrix2D(θ,s) 的搜索语义已在网格中验证）。完整校正 =
-        先施加旋转/缩放 Rs，再把内容平移 −d（d 为 NCC 峰给出的残差内容
-        位移）。矩阵复合：M_total = [I|−d]·Rs_full；d 从估计分辨率按
+        先施加旋转/缩放 Rs，再把内容平移 −d（d 为估计器的残差位移）。
+        矩阵复合：M_total = [I|−d]·Rs_full；d 从估计分辨率按
         比例换算回全分辨率。
         """
         _ncc, theta, scale, dx, dy = ncc_pack
@@ -721,91 +629,141 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
         d_full = np.array([-dx / sx, -dy / sy])
         M = np.eye(3)
         M[:2, :2] = Rs[:2, :2]
-        M[:2, 2] = Rs[:2, :2] @ d_full + Rs[:2, 2]
+        M[:2, 2] = d_full + Rs[:2, 2]
         return M
 
     # 死区：低于这些分量视为无运动（固定机位栈的噪声保护）
     dead_t, dead_rot, dead_scale = 0.15, 0.05, 1e-3
     min_ncc = 0.06          # 低于此视为无可靠对应关系
     chain_ncc = 0.10        # 对参考帧置信不足 → 链到上一帧重估
+    # Keep the fine search narrow; probe a wider range when its score is weak
+    # or rotation touches the bound, so out-of-range motion can be rejected.
+    search_shift = min(3.0 * max_shift_ratio, max(0.5, max_shift_ratio))
+    search_rotation = 1.5 * max_rotation_deg
+
+    def _estimate(reference, current):
+        scale_range = (1.0 - max_scale_delta, 1.0 + max_scale_delta)
+        estimate = _of_estimate_similarity(
+            reference, current, shift_ratio=max_shift_ratio,
+            rot_bound=max_rotation_deg, scale_range=scale_range,
+            should_cancel=should_cancel)
+        at_rotation_limit = (max_rotation_deg > 0 and
+                             abs(estimate[1]) >= 0.95 * max_rotation_deg)
+        if estimate[0] < 0.9 or at_rotation_limit:
+            wider = _of_estimate_similarity(
+                reference, current, shift_ratio=search_shift,
+                rot_bound=search_rotation, scale_range=scale_range,
+                should_cancel=should_cancel)
+            if wider[0] > estimate[0] + 0.05:
+                estimate = wider
+        return estimate
 
     corrections = [None] * n  # cur→ref 的校正矩阵；参考帧为 None
     corrections[ref_idx] = np.eye(3, dtype=np.float64)
+    report_entries = {} if alignment_report.get() is not None else None
+    if report_entries is not None:
+        report_entries[ref_idx] = ('reference', {'transform': corrections[ref_idx]})
+
+    def flush_report():
+        if report_entries is not None:
+            for frame_index in sorted(report_entries):
+                status, details = report_entries[frame_index]
+                _report_alignment(frame_index, 'openfocus', status, **details)
     prev_est = ref_est
-    print("Aligning %d images using OpenFocus (reference: first frame)..." % n)
-    for i in range(n):
-        if should_cancel is not None and should_cancel():
-            raise RegistrationCancelled()
-        # 亮度标定对参考帧同样生效：几何锚点在前，曝光锚点可以在另一端
-        # （融合默认标定到末帧），参考帧的 gain 不是恒等。
-        gain = 1.0
-        if equalize_brightness:
-            cur_gray = _gray_float(images[i])
-            cur_low = cv2.GaussianBlur(cur_gray, (0, 0), 32.0)
-            cur_mean = float(cur_low.mean())
-            if cur_mean > 1e-3:
-                gain = float(np.clip(ref_low_mean / cur_mean, 0.5, 2.0))
-        gains[i] = gain
-        if i == ref_idx:
-            continue
+    print("Aligning %d images using OpenFocus (reference: frame %d)..." % (n, reference_frame))
+    order = chain((ref_idx,), range(ref_idx - 1, -1, -1), range(ref_idx + 1, n))
+    with _bounded_registration_map(_prepare, order, max(1, int(thread_count)),
+                                   should_cancel) as prepared:
+        for i, gain, cur_est in prepared:
+            _check_cancel(should_cancel)
+            # Brightness calibration also applies to the geometric reference.
+            gains[i] = gain
+            if i == ref_idx:
+                continue
+            if i == ref_idx + 1:
+                prev_est = ref_est
 
-        cur_est = _of_gray_est(images[i], est_width)
-        # 模板必须给可接受的位移留出搜索余量：patch_frac=0.7 最多覆盖
-        # 单边 15% 的位移；用户把上限放宽到 25% 时若不缩小模板，真位移
-        # 落在搜索窗外，估计器只能返回窗内的伪峰（并真的平移该帧）。
-        est = _of_estimate_similarity(ref_est, cur_est,
-                                      patch_frac=patch_frac)
-        chained = False
-        if est[0] < chain_ncc and i >= 2:
-            # 失焦/弱纹理帧：与相邻帧（模糊程度接近）更相关——链式估计
-            est2 = _of_estimate_similarity(prev_est, cur_est,
-                                           patch_frac=patch_frac)
-            if est2[0] > est[0] + 0.02:
-                M = corrections[i - 1] @ _compose_full(est2)
-                chained = True
-                est = (est2[0],) + est[1:]
-        if not chained:
-            M = _compose_full(est)
+            est = _estimate(ref_est, cur_est)
+            chained = False
+            if est[0] < chain_ncc and abs(i - ref_idx) >= 2:
+                # Retry against the adjacent frame in the direction of the anchor.
+                est2 = _estimate(prev_est, cur_est)
+                if est2[0] > est[0] + 0.02:
+                    previous_index = i + 1 if i < ref_idx else i - 1
+                    M = corrections[previous_index] @ _compose_full(est2)
+                    chained = True
+                    est = (est2[0],) + est[1:]
+            if not chained:
+                M = _compose_full(est)
 
-        ncc = est[0]
-        if ncc < min_ncc:
-            M = np.eye(3)
-        # 平移分量取“画面中心的净位移”：矩阵的 M[:,2] 还包含绕中心旋转/缩放
-        # 诱导的项（480×360 上 2.5° 就有 ~8-11px），直接拿它判上限会把合法
-        # 的旋转校正误杀成“位移超限”。t_c = b + (A − I)·c。
-        A2 = M[:2, :2]
-        tc = M[:2, 2] + A2 @ np.array([w / 2.0, h / 2.0]) - np.array(
-            [w / 2.0, h / 2.0])
-        tx = float(tc[0])
-        ty = float(tc[1])
-        # 位移上限：超限**放弃该帧对齐**——较大的位移估计不可靠，
-        # 旧的"钳制到上限"会把大位移校正成半错位，还让有效区交集被裁掉
-        # 一大块（25% 上限意味着单边最多裁 1/4 画面）。
-        over = (abs(tx) > max_shift[0] or abs(ty) > max_shift[1])
-        # 旋转/放大率各自独立设限（Helicon 的 Rotation / Magnification
-        # adjustment）：搜索范围本身就是这两个值，超出即说明估计不可信，
-        # 与位移超限同样放弃整帧而不是半校正。
-        rot_deg = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
-        scale_now = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
-        if (abs(rot_deg) > max_rotation_deg + 1e-6
-                or abs(scale_now - 1.0) > max_scale_delta + 1e-6):
-            over = True
-        if over:
-            M = np.eye(3)
-            tx = ty = 0.0
-            rot_deg, scale_now = 0.0, 1.0
-        # 死区：整体运动可忽略 → 恒等（不产生裁边/插值损失）
-        if (abs(tx) < dead_t and abs(ty) < dead_t
-                and abs(rot_deg) < dead_rot
-                and abs(scale_now - 1.0) < dead_scale):
-            M = np.eye(3)
-        corrections[i] = M
-        prev_est = cur_est
-        print("  frame %d/%d: rot %+.2f° scale %.3f shift (%+.2f, %+.2f)"
-              " ncc %.2f%s%s" % (i + 1, n, rot_deg, scale_now, tx, ty, ncc,
-                                 " (chained)" if chained else "",
-                                 " (DROPPED: shift over %.0f%% of frame)"
-                                 % (100.0 * max_shift_ratio) if over else ""))
+            ncc = est[0]
+            if ncc < min_ncc:
+                M = np.eye(3)
+            # 平移分量取“画面中心的净位移”：矩阵的 M[:,2] 还包含绕中心旋转/缩放
+            # 诱导的项（480×360 上 2.5° 就有 ~8-11px），直接拿它判上限会把合法
+            # 的旋转校正误杀成“位移超限”。t_c = b + (A − I)·c。
+            A2 = M[:2, :2]
+            tc = M[:2, 2] + A2 @ np.array([w / 2.0, h / 2.0]) - np.array(
+                [w / 2.0, h / 2.0])
+            tx = float(tc[0])
+            ty = float(tc[1])
+            # 位移上限：超限**放弃该帧对齐**——较大的位移估计不可靠，
+            # 旧的"钳制到上限"会把大位移校正成半错位，还让有效区交集被裁掉
+            # 一大块（25% 上限意味着单边最多裁 1/4 画面）。
+            over = (abs(tx) > max_shift[0] or abs(ty) > max_shift[1])
+            # 旋转和放大率各自独立设限，超出时放弃整帧而不是半校正。
+            rot_deg = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
+            scale_now = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
+            if (abs(rot_deg) > max_rotation_deg + 1e-6
+                    or abs(scale_now - 1.0) > max_scale_delta + 1e-6):
+                over = True
+            if failure_policy == 'fail' and (ncc < min_ncc or over):
+                reason = 'low detector quality' if ncc < min_ncc else 'motion outside limits'
+                if report_entries is not None:
+                    report_entries[i] = ('failed', {'reason': reason, 'quality': float(ncc),
+                                                   'reference_index': previous_index if chained else ref_idx,
+                                                   'chained': chained})
+                flush_report()
+                raise ValueError(f'OpenFocus alignment failed at frame {i + 1}: {reason} (detector quality {ncc:.2f})')
+            if over:
+                M = np.eye(3)
+                tx = ty = 0.0
+                rot_deg, scale_now = 0.0, 1.0
+            # 死区：整体运动可忽略 → 恒等（不产生裁边/插值损失）
+            if (abs(tx) < dead_t and abs(ty) < dead_t
+                    and abs(rot_deg) < dead_rot
+                    and abs(scale_now - 1.0) < dead_scale):
+                M = np.eye(3)
+            if report_entries is not None:
+                reason = ('low detector quality' if ncc < min_ncc else
+                          'motion outside limits' if over else None)
+                if chained and reason is None and report_entries[previous_index][0] == 'fallback':
+                    reason = 'reference alignment fell back'
+                details = {'quality': float(ncc), 'transform': M,
+                           'reference_index': previous_index if chained else ref_idx,
+                           'chained': chained}
+                if reason is not None:
+                    details['reason'] = reason
+                report_entries[i] = ('fallback' if reason else 'aligned', details)
+            corrections[i] = M
+            prev_est = cur_est
+            print("  frame %d/%d: rot %+.2f° scale %.3f shift (%+.2f, %+.2f)"
+                  " detector quality %.2f%s%s" % (i + 1, n, rot_deg, scale_now, tx, ty, ncc,
+                                     " (chained)" if chained else "",
+                                     " (DROPPED: outside limits)" if over else
+                                     " (DROPPED: low detector quality)" if ncc < min_ncc else ""))
+    flush_report()
+
+    def _apply_gain(img, gain):
+        if gain == 1.0:
+            return img
+        limit = 65535 if img.dtype == np.uint16 else 255
+        if img.ndim == 3 and img.shape[2] == 4:
+            result = img.copy()
+            result[:, :, :3] = np.clip(img[:, :, :3].astype(np.float32) * gain,
+                                        0, limit).astype(img.dtype)
+            return result
+        return np.clip(img.astype(np.float32) * gain, 0, limit).astype(img.dtype)
 
     def _warp(args):
         idx, img, M, gain = args
@@ -813,53 +771,34 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None,
                                 flags=cv2.INTER_LANCZOS4
                                 | cv2.WARP_FILL_OUTLIERS,
                                 borderMode=cv2.BORDER_REFLECT)
-        if gain != 1.0:
-            # 亮度均衡同步应用到输出帧：均衡后的帧进入融合，消除曝光漂移
-            warped = np.clip(warped.astype(np.float32) * gain, 0,
-                             255 if img.dtype == np.uint8 else 65535)
-            warped = warped.astype(img.dtype)
+        if img.ndim == 3 and img.shape[2] == 1 and warped.ndim == 2:
+            warped = warped[:, :, None]
+        warped = _apply_gain(warped, gain)
         return idx, warped
 
     aligned = [None] * n
-    if gains[ref_idx] == 1.0:
-        aligned[ref_idx] = images[ref_idx]
-    else:
-        ref = images[ref_idx]
-        scaled = np.clip(ref.astype(np.float32) * gains[ref_idx], 0,
-                         255 if ref.dtype == np.uint8 else 65535)
-        aligned[ref_idx] = scaled.astype(ref.dtype)
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max(1, int(thread_count or 4))) as pool:
-        futures = [pool.submit(_warp, (i, images[i], corrections[i], gains[i]))
-                   for i in range(n) if i != ref_idx]
-        for future in concurrent.futures.as_completed(futures):
-            if should_cancel is not None and should_cancel():
-                for pending in futures:
-                    pending.cancel()
-                raise RegistrationCancelled()
-            idx, warped = future.result()
+    aligned[ref_idx] = _apply_gain(images[ref_idx], gains[ref_idx])
+    warp_args = ((i, images[i], corrections[i], gains[i])
+                 for i in range(n) if i != ref_idx)
+    with _bounded_registration_map(_warp, warp_args, max(1, int(thread_count)),
+                                   should_cancel) as results:
+        for idx, warped in results:
             aligned[idx] = warped
 
-    # 有效区 = 各帧"正向映射矩形"（corrections 的逆）的交集内接框：
-    # dst(x) = cur(A·x) 有效 ⟺ A·x ∈ 源图 ⟺ x ∈ A⁻¹(源图矩形)
-    fwd = [np.linalg.inv(M) if M is not None else None for M in corrections]
+    # corrections map source coordinates into the output canvas.
     top, bottom, left, right = _compute_valid_region_from_transforms(
-        fwd, (h, w))
+        corrections, (h, w), margin=0 if min(h, w) <= 4 else 2)
+    _record_grouped_crop(top, bottom, left, right)
     if top >= bottom or left >= right:
-        top, bottom, left, right = 0, h, 0, w
+        raise ValueError("Registration transforms have no common valid crop")
     aligned = [img[top:bottom, left:right] for img in aligned]
 
-    if output_path:
-        os.makedirs(output_path, exist_ok=True)
-        print("  - Saving results...")
-        for idx, img in enumerate(aligned):
-            fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
-            cv2.imwrite(os.path.join(output_path, fname), img)
+    _save_registration(aligned, output_path, img_filenames, should_cancel)
     return aligned
 
 # ========== ECC对齐算法实现（高精度） ==========
 
-def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscale_width=1000, thread_count: int = 4, should_cancel=None):
+def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscale_width=1000, thread_count: int = 4, should_cancel=None, use_gpu: bool = False, failure_policy='continue'):
     """
     基于 ECC (增强相关系数) 的高精度图像栈对齐算法
     适用于：显微摄影、微距摄影中伴随呼吸效应的图像栈
@@ -879,6 +818,8 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
         img_filenames = [os.path.basename(path) for path in img_paths]
     else:
         images = input_source
+    if len(images):
+        _report_reference('ecc')
 
     if len(images) < 2:
         return images
@@ -934,16 +875,13 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
     except Exception:
         max_workers = min(8, os.cpu_count() or 1)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # map 保证结果顺序与输入一致
-        preprocessed_data = list(executor.map(preprocess, images))
+    with _bounded_registration_map(preprocess, images, max_workers,
+                                   should_cancel) as results:
+        preprocessed_data = list(results)
 
     # 所有帧同尺寸，缩放比例一致
     scale_factor = preprocessed_data[0][1]
 
-    # 预先创建输出目录
-    if output_path:
-        os.makedirs(output_path, exist_ok=True)
 
     # --- 4. 计算矩阵 (相邻帧对彼此独立 -> 并行计算, 串行累积) ---
     # print("  - Step 2/3: Calculating ECC matrices...")
@@ -979,26 +917,27 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
                 warp_matrix[0, 2] /= scale_factor
                 warp_matrix[1, 2] /= scale_factor
         except cv2.error:
+            cc = None
             print(f"Warning: ECC failed to converge at frame {idx}. Assuming no motion.")
             if warp_mode == cv2.MOTION_HOMOGRAPHY:
                 warp_matrix = np.eye(3, dtype=np.float32)
             else:
                 warp_matrix = np.eye(2, 3, dtype=np.float32)
-        return warp_matrix
+        return warp_matrix, cc
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # as_completed lets a render cancellation interrupt mid-stage; the
-        # result list is filled back into submission order.
-        futures = {executor.submit(_compute_pair_transform, i): i for i in range(1, len(images))}
-        pair_transforms = [None] * len(futures)
-        for fut in concurrent.futures.as_completed(futures):
-            pair_transforms[futures[fut] - 1] = fut.result()
-            if should_cancel is not None and should_cancel():
-                for f in futures:
-                    f.cancel()
-                raise RegistrationCancelled()
+    with _bounded_registration_map(_compute_pair_transform,
+                                   range(1, len(images)), max_workers,
+                                   should_cancel) as results:
+        pair_transforms = list(results)
+    del preprocessed_data
 
-    for idx, warp_matrix in enumerate(pair_transforms, start=1):
+    trajectory_failed = False
+    for idx, (warp_matrix, cc) in enumerate(pair_transforms, start=1):
+        _check_cancel(should_cancel)
+        if cc is None and failure_policy == 'fail':
+            _report_alignment(idx, 'ecc', 'failed', reason='ECC failed to converge',
+                              reference_index=idx - 1)
+            raise ValueError(f'ECC alignment failed at frame {idx + 1}: ECC failed to converge')
         # 矩阵累积：warp_matrix maps frame k-1 -> frame k, so the map
         # frame0 -> frame_k is Wk @ ... @ W1 — compose on the LEFT.
         # (The old right-side product W1 @ W2 @ ... left frame 3+ misaligned
@@ -1013,12 +952,22 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
         # 记录变换矩阵（使用逆矩阵）
         H_inv = np.linalg.inv(H_global)
         H_matrices.append(H_inv.copy())
+        reason = ('ECC failed to converge' if cc is None else
+                  'reference alignment fell back' if trajectory_failed else None)
+        trajectory_failed = trajectory_failed or cc is None
+        details = {'reference_index': idx - 1, 'transform': H_inv}
+        if cc is not None:
+            details['quality'] = float(cc)
+        if reason is not None:
+            details['reason'] = reason
+        _report_alignment(idx, 'ecc', 'fallback' if reason else 'aligned', **details)
 
     # --- 5. 并行应用变换与裁切 ---
     # print("  - Step 3/3: Warping and saving concurrently...")
 
     # 计算公共有效区域
     top, bottom, left, right = _compute_valid_region_from_transforms(H_matrices, (h_orig, w_orig))
+    _record_grouped_crop(top, bottom, left, right)
     
     do_crop = True
     if top >= bottom or left >= right:
@@ -1036,15 +985,32 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
     # 构造裁切平移矩阵
     T_crop = np.array([[1, 0, offset_x], [0, 1, offset_y], [0, 0, 1]], dtype=np.float32)
 
-    # 尝试导入 cupy
-    try:
-        import cupy as cp
-        import cupyx.scipy.ndimage
-        HAS_CUPY = True
-        print("    [Info] Cupy detected. GPU acceleration enabled for warping.")
-    except ImportError:
-        HAS_CUPY = False
-        print("    [Info] Cupy not found. Using CPU for warping.")
+    # 尝试导入 cupy。仅当调用方显式要求 GPU 时才使用——以前只要机器上
+    # 装了 CuPy 就静默切到 GPU，`use_gpu=False` / CLI `--cpu` 无法关闭它，
+    # 而且这条路径用双线性插值、CPU 路径用 Lanczos4，两者本来就不等价。
+    HAS_CUPY = False
+    cp = None
+    if use_gpu:
+        try:
+            import cupy as cp
+            import cupyx.scipy.ndimage
+            from core.resource_policy import ResourceLimitError, ResourceSnapshot, vram_budget
+            free, total = cp.cuda.runtime.memGetInfo()
+            budget = vram_budget(ResourceSnapshot(free_vram=int(free),
+                                                  total_vram=int(total),
+                                                  device_kind="CUDA"))
+            # Float64 grids, homogeneous coordinates, channel output and
+            # interpolation workspace coexist in this legacy backend.
+            required = (target_h * target_w * 192
+                        + max(image.nbytes for image in images))
+            if required > budget:
+                raise ResourceLimitError("Insufficient VRAM for explicit CuPy alignment")
+            HAS_CUPY = True
+            print("    [Info] Explicit CuPy alignment uses linear interpolation.")
+        except ImportError as error:
+            raise RuntimeError("Explicit CuPy alignment backend is unavailable") from error
+    else:
+        print("    [Info] GPU warping disabled. Using CPU for warping.")
 
     def warp_task(args):
         idx, img, H = args
@@ -1125,35 +1091,15 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
                 borderMode=cv2.BORDER_CONSTANT
             )
         
-        # 如果有输出路径，直接在线程中保存
-        if output_path:
-            fname = img_filenames[idx] if img_filenames else f'frame_{idx:04d}.png'
-            cv2.imwrite(os.path.join(output_path, fname), aligned_img)
-            
         return aligned_img
 
-    # 准备参数
-    task_args = []
-    for i in range(len(images)):
-        task_args.append((i, images[i], H_matrices[i]))
-
-    # 如果有 Cupy，不使用多线程，因为 GPU 操作本身是并行的且受限于 PCIe 带宽
-    # 多线程同时向 GPU 传输数据可能会导致争用
-    if HAS_CUPY:
-        aligned_images = []
-        for args in task_args:
-            aligned_images.append(warp_task(args))
-    else:
-        # CPU 模式下继续使用多线程
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(warp_task, args): args[0] for args in task_args}
-            aligned_images = [None] * len(task_args)
-            for fut in concurrent.futures.as_completed(futures):
-                aligned_images[futures[fut]] = fut.result()
-                if should_cancel is not None and should_cancel():
-                    for f in futures:
-                        f.cancel()
-                    raise RegistrationCancelled()
+    task_args = ((i, image, H_matrices[i]) for i, image in enumerate(images))
+    # The explicit legacy GPU backend is serialized; never mix CPU/GPU frames.
+    with _bounded_registration_map(warp_task, task_args,
+                                   1 if HAS_CUPY else max_workers,
+                                   should_cancel) as results:
+        aligned_images = list(results)
+    _save_registration(aligned_images, output_path, img_filenames, should_cancel)
 
     return aligned_images
 
@@ -1278,37 +1224,6 @@ def _stabilisation_impl(input_source, output_path=None, filenames=None):
     return stabilized_images
 
 
-# # ========== 组合配准算法实现 ==========
-
-# def _registration_impl(input_source, output_path=None):
-#     """
-#     组合配准算法内部实现
-#     Args:
-#         input_source: string (directory path) or list of images
-#         output_path: string, directory path to save results (optional, None means no saving)
-#     Returns:
-#         list of registered images (always returns processed images regardless of output_path)
-#     """
-#     # Store original filenames if input is a directory
-#     img_filenames = None
-#     if isinstance(input_source, str):
-#         num_pattern = re.compile(r"\d+")
-#         img_paths = sorted(
-#             (os.path.join(input_source, f) for f in os.listdir(input_source)
-#              if os.path.splitext(f)[1].lower() in {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.bmp', '.tif', '.tiff', '.webp'}),
-#             key=lambda x: int(num_pattern.findall(os.path.basename(x))[-1])
-#         )
-#         img_filenames = [os.path.basename(path) for path in img_paths]
-    
-#     # Step 1: Coarse alignment using zoom
-#     zoom_aligned_images = _align_zoom_impl(input_source)
-    
-#     # Step 2: Fine registration using stabilisation
-#     final_images = _stabilisation_impl(zoom_aligned_images, output_path, img_filenames)
-    
-#     return final_images
-
-
 # ========== 统一接口类 ==========
 
 class ImageRegistration:
@@ -1334,41 +1249,29 @@ class ImageRegistration:
         result = registration.process(image_list, './output')
     """
     
-    SUPPORTED_METHODS = ['homography', 'ecc', 'both', 'openfocus']
-    
-    def __init__(self, method: str = 'homography', downscale_width: int = 1024,
-                 max_shift_ratio: Optional[float] = None,
-                 brightness_reference: str = "first"):
-        """
-        初始化配准器
-        
-        Args:
-            method (str): 配准方法名称，可选 'homography', 'ecc', 'both'
-            downscale_width (int): 特征/估计阶段的下采样宽度
-            max_shift_ratio (float): 仅 'openfocus' 生效——位移上限（帧尺寸
-                比例，0–1）。None 用 _OF_MAX_SHIFT_RATIO（8%）。
-        """
-        if method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"不支持的配准方法: {method}. "
-                f"支持的方法: {', '.join(self.SUPPORTED_METHODS)}"
-            )
-        
+    def __init__(self, method='homography', downscale_width=1024,
+                 max_shift_ratio=None, brightness_reference='first',
+                 use_gpu=False, parameters=None):
+        from core.algorithms import (alignment_steps, registration_parameter_specs,
+                                     resolve_registration_parameters)
         self.method = method
-        # 用户可配置的下采样宽度，用于特征提取等预处理阶段
+        self.steps = alignment_steps(method)
+        values = resolve_registration_parameters(method, parameters)
+        if max_shift_ratio is not None:
+            # Historical constructor argument: only the OpenFocus aligner
+            # consumes it, and it used to be ignored for other methods.
+            if 'max_shift_ratio' in {item.key for item in registration_parameter_specs(method)}:
+                values['max_shift_ratio'] = max_shift_ratio
+        self.parameters = resolve_registration_parameters(method, values)
         self.downscale_width = int(downscale_width) if downscale_width is not None else 1024
-        self.max_shift_ratio = (float(max_shift_ratio)
-                                if max_shift_ratio is not None else None)
-        # 'first' (reference frame) or 'last' (fusion base reference).
-        self.brightness_reference = (brightness_reference
-                                     if brightness_reference in ("first", "last")
-                                     else "first")
+        self.brightness_reference = brightness_reference if brightness_reference in ('first', 'last') else 'first'
+        self.use_gpu = bool(use_gpu)
     
     def process(self, 
                 input_source: Union[str, List[np.ndarray]], 
                 output_path: Optional[str] = None,
                 thread_count: int = 4,
-                should_cancel=None) -> List[np.ndarray]:
+                should_cancel=None, resource_preference="balanced") -> List[np.ndarray]:
         """
         执行图像配准
         
@@ -1381,28 +1284,124 @@ class ImageRegistration:
         Returns:
             list: 配准后的图像列表（始终返回，无论是否保存到磁盘）
         """
-        if self.method == 'homography':
-            return self._process_homography(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
-        elif self.method == 'ecc':
-            return self._process_ecc(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
-        elif self.method == 'openfocus':
-            return self._process_openfocus(input_source, output_path, thread_count=thread_count, should_cancel=should_cancel)
-        elif self.method == 'both':
-            # 组合模式：先 Homography，后 ECC
-            # 第一步：Homography (不保存中间结果，除非只做这一步)
-            print("=== Step 1: Homography Alignment ===")
-            # 如果是 both 模式，第一步不需要保存到 output_path，只在内存中传递
-            homography_result = self._process_homography(input_source, output_path=None, thread_count=thread_count, should_cancel=should_cancel)
-            
-            print("\n=== Step 2: ECC Alignment ===")
-            # 第二步：ECC (保存最终结果)
-            return self._process_ecc(homography_result, output_path, thread_count=thread_count, should_cancel=should_cancel)
+        from core.resource_policy import Workload, heavy_job, plan_execution, require_memory
+
+        with heavy_job(should_cancel):
+            _check_cancel(should_cancel)
+            filenames = None
+            images = input_source
+            if isinstance(input_source, str):
+                # Admit the decoded stack before allocation. OpenFocus keeps
+                # the original depth and channels for its alignment output.
+                from PIL import Image
+                extensions = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png',
+                              '.bmp', '.tif', '.tiff', '.webp'}
+                paths = sorted((os.path.join(input_source, name)
+                                for name in os.listdir(input_source)
+                                if os.path.splitext(name)[1].lower() in extensions),
+                               key=_image_sort_key)
+                decoded_bytes = 0
+                largest_frame = 0
+                for path in paths:
+                    _check_cancel(should_cancel)
+                    with Image.open(path) as header:
+                        # Bound unchanged decoding by four uint16 channels.
+                        frame_bytes = header.width * header.height * (8 if self.method == 'openfocus' else 3)
+                    decoded_bytes += frame_bytes
+                    largest_frame = max(largest_frame, frame_bytes)
+                if paths:
+                    require_memory(decoded_bytes + largest_frame * 2)
+                images = []
+                for path in paths:
+                    _check_cancel(should_cancel)
+                    from core.image_loader import _has_transparency, UnsupportedTransparency
+                    data = np.fromfile(path, dtype=np.uint8)
+                    multipage = False
+                    if os.path.splitext(path)[1].lower() in ('.tif', '.tiff'):
+                        with Image.open(path) as header:
+                            multipage = getattr(header, 'n_frames', 1) > 1
+                    if multipage:
+                        ok, pages = cv2.imdecodemulti(data, flags=cv2.IMREAD_UNCHANGED)
+                        if not ok or not pages:
+                            raise ValueError(f"Could not decode registration frame: {path}")
+                        if any(_has_transparency(page) for page in pages):
+                            raise UnsupportedTransparency(f"Transparent TIFF pages are unsupported: {path}")
+                        image = pages[0]
+                    else:
+                        image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED) if data.size else None
+                        if image is not None and _has_transparency(image):
+                            raise UnsupportedTransparency(f"Registration of transparent images is unsupported: {path}")
+                    _check_cancel(should_cancel)
+                    if image is None:
+                        raise ValueError(f"Could not decode registration frame: {path}")
+                    if self.method != 'openfocus':
+                        if image.dtype == np.uint16:
+                            image = (image >> 8).astype(np.uint8)
+                        if image.ndim == 2:
+                            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                        elif image.shape[2] == 4:
+                            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+                    image = apply_exif_orientation(path, image)
+                    images.append(image)
+                filenames = [os.path.basename(path) for path in paths]
+            if images is not None and len(images) and 'openfocus' in self.steps and self.parameters['reference_frame'] > len(images):
+                raise ValueError(f"OpenFocus reference frame {self.parameters['reference_frame']} is outside the stack of {len(images)} frames")
+
+            from core.image_loader import _has_transparency, UnsupportedTransparency
+            for image in images or ():
+                _check_cancel(should_cancel)
+                if _has_transparency(image):
+                    raise UnsupportedTransparency("Registration of transparent images is unsupported")
+
+            if images is None or len(images) < 2:
+                _check_cancel(should_cancel)
+                if images:
+                    for step in self.steps:
+                        _report_reference(step)
+                return images if images is not None else []
+            if not self.steps:
+                _save_registration(images, output_path, filenames, should_cancel)
+                return images
+            height, width = images[0].shape[:2]
+            channels = images[0].shape[2] if images[0].ndim == 3 else 1
+            output_bytes = sum(image.nbytes for image in images)
+            # ECC retains downsampled grayscale planes, not full-resolution
+            # planes. Its large-image path fixes the width at 1024.
+            if self.steps == ['ecc'] or self.steps == ('ecc',):
+                import math
+                downscale = 1024 if max(height, width) >= 2048 else self.downscale_width
+                gray_bytes = 0
+                for image in images:
+                    h, w = image.shape[:2]
+                    scale = min(1.0, downscale / float(w))
+                    gray_bytes += max(1, math.ceil(h * scale)) * max(1, math.ceil(w * scale)) * 4
+            else:
+                gray_bytes = sum(image.shape[0] * image.shape[1] * 4 for image in images)
+            plan = plan_execution(Workload(
+                algorithm='registration', frames=len(images), height=height,
+                width=width, channels=channels, itemsize=images[0].dtype.itemsize,
+                fixed_bytes=output_bytes * min(2, len(self.steps)) + gray_bytes,
+                per_worker_bytes=max(image.size for image in images) * 4 * 16,
+                outer_tasks=len(images), parallel_layer='outer'),
+                preference=resource_preference, user_threads=thread_count)
+            workers = min(plan.workers, plan.max_in_flight)
+            from core.algorithms import get_registration, resolve_runner
+            result = images
+            for step in self.steps:
+                _check_cancel(should_cancel)
+                spec = get_registration(step)
+                parameters = {item.key: self.parameters[item.key] for item in spec.parameters}
+                result = resolve_runner(spec.runner)(self, result,
+                    thread_count=workers, should_cancel=should_cancel, **parameters)
+                _check_cancel(should_cancel)
+            _save_registration(result, output_path, filenames, should_cancel)
+            return result
     
     def _process_homography(self, 
                            input_source: Union[str, List[np.ndarray]], 
                            output_path: Optional[str] = None,
                            thread_count: int = 4,
-                           should_cancel=None) -> List[np.ndarray]:
+                           should_cancel=None, failure_policy='continue') -> List[np.ndarray]:
         """
         单应性对齐配准（非线性）
         
@@ -1413,13 +1412,13 @@ class ImageRegistration:
         Returns:
             配准后的图像列表
         """
-        return _align_homography_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel)
+        return _align_homography_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel, failure_policy=failure_policy)
     
     def _process_ecc(self, 
                     input_source: Union[str, List[np.ndarray]], 
                     output_path: Optional[str] = None,
                     thread_count: int = 4,
-                    should_cancel=None) -> List[np.ndarray]:
+                    should_cancel=None, failure_policy='continue') -> List[np.ndarray]:
         """
         ECC对齐配准（高精度、亚像素级）
         
@@ -1430,37 +1429,16 @@ class ImageRegistration:
         Returns:
             配准后的图像列表
         """
-        return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel)
+        return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel, use_gpu=self.use_gpu, failure_policy=failure_policy)
 
-    def _process_openfocus(self,
-                           input_source: Union[str, List[np.ndarray]],
-                           output_path: Optional[str] = None,
-                           thread_count: int = 4,
-                           should_cancel=None) -> List[np.ndarray]:
-        """
-        OpenFocus 快速对齐（有界相似变换）
-        """
-        return _align_openfocus_impl(input_source, output_path,
-                                     downscale_width=self.downscale_width,
-                                     thread_count=thread_count,
-                                     should_cancel=should_cancel,
-                                     max_shift_ratio=self.max_shift_ratio,
-                                     brightness_reference=self.brightness_reference)
 
-    def set_method(self, method: str):
-        """
-        切换配准方法
-        
-        Args:
-            method (str): 新的配准方法名称
-        """
-        if method not in self.SUPPORTED_METHODS:
-            raise ValueError(
-                f"不支持的配准方法: {method}. "
-                f"支持的方法: {', '.join(self.SUPPORTED_METHODS)}"
-            )
-        
+    def set_method(self, method):
+        from core.algorithms import alignment_steps, resolve_registration_parameters
+        steps = alignment_steps(method)
+        parameters = resolve_registration_parameters(method)
         self.method = method
+        self.steps = steps
+        self.parameters = parameters
     
     def get_info(self) -> dict:
         """
@@ -1508,24 +1486,6 @@ def register_images(input_source: Union[str, List[np.ndarray]],
     return registration.process(input_source, output_path=output_path)
 
 
-# ========== 向后兼容的函数别名 ==========
-
-# def image_stack_align_zoom(input_source, output_path=None):
-#     """向后兼容的函数别名"""
-#     return _align_zoom_impl(input_source, output_path)
-
-# def image_stack_stabilisation(input_source, output_path=None, filenames=None):
-#     """向后兼容的函数别名"""
-#     return _stabilisation_impl(input_source, output_path, filenames)
-
-# def image_stack_registration(input_source, output_path=None):
-#     """向后兼容的函数别名"""
-#     return _registration_impl(input_source, output_path)
-
-# def process_image_stack(input_path, output_path=None):
-#     """向后兼容的函数别名"""
-#     return _registration_impl(input_path, output_path)
-
 def main():
     """
     Command line interface
@@ -1533,8 +1493,10 @@ def main():
     parser = argparse.ArgumentParser(description='Image Stack Registration Tool')
     parser.add_argument('--input_path', default='./coral_best_zoom', help='Input image directory path')
     parser.add_argument('--output', default=r'E:\FinishedProjects\XuChuang\regi_test', help='Output directory path')
-    parser.add_argument('--mode', default='homography', choices=['homography', 'ecc', 'both'],
-                        help='Processing mode: homography, ecc, both (homography + ecc)')
+    from core.algorithms import registration_algorithms
+    parser.add_argument('--mode', default='homography',
+                        choices=[spec.id for spec in registration_algorithms()],
+                        help='Registered alignment method')
     
     args = parser.parse_args()
     

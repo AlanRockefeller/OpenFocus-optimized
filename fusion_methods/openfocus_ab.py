@@ -1,38 +1,26 @@
-"""OpenFocus A/B/C —— 三条互补的融合管线。
-
-- 清晰度度量 = 窗口局部方差（blur(x²) − blur(x)²）。
-- Method B（深度图选择）：argmax(var) → 深度图平滑 → 按图硬拾取；
-  硬拾取优于软混合，平局取首帧。
-- Method A（加权平均）：w = gauss(var)，分母带 +1 的末帧先验
-  （平坦区权重全零时精确退化为末帧）。
-- Method C（金字塔）：7 层拉普拉斯金字塔逐带 max-pick 硬拾取
-  （|带|高斯 σ3 权重取 argmax；max-pick 优于软归一混合），
-  bicubic ×2 + σ0.6 展开，最粗带（基带）整带取末帧
-  （低频来自参考帧 + 高频按频段独立决策）。
-
-约定：输入为 0-255 域的 BGR 帧列表（uint8 或 float32），
-输出经 fuse_output_dtype 归一（与 gff/dct 相同的位深契约）。
-"""
+"""Shared input preparation and frame-order helpers for OpenFocus fusion."""
 import os
-from typing import List, Optional, Tuple
+from typing import List
 
 import cv2
 import numpy as np
 
-from utils.image_utils import fuse_output_dtype
 from utils.sorting import natural_sort_key
 
 
-def _collect_images(input_source) -> List[np.ndarray]:
-    """接受帧列表或目录路径，返回 0-255 域 BGR 帧列表。"""
+def _collect_images(input_source, *, normalize=True, should_cancel=None) -> List[np.ndarray]:
+    """Load frames; public callers retain the historical 0–255 normalization."""
+    _check_cancel(should_cancel)
     if isinstance(input_source, (list, tuple)):
         frames = [f for f in input_source if f is not None]
         if len(frames) < 2:
             raise ValueError("OpenFocus A/B fusion needs at least 2 frames")
         # Same 0-255 domain as the directory loader: a uint16 list used to
         # stay in 0-65535 and saturate on the final np.clip(..., 0, 255).
-        return [f.astype(np.float32) * (255.0 / 65535.0)
-                if f.dtype == np.uint16 else f for f in frames]
+        if not normalize:
+            return frames
+        return [_prepare_frame(f, None, should_cancel) if f.dtype == np.uint16
+                else f for f in frames]
 
     if isinstance(input_source, str) and os.path.isdir(input_source):
         exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
@@ -44,11 +32,12 @@ def _collect_images(input_source) -> List[np.ndarray]:
                 f"OpenFocus A/B fusion needs at least 2 images in {input_source}")
         frames = []
         for name in files:
+            _check_cancel(should_cancel)
             data = np.fromfile(os.path.join(input_source, name), dtype=np.uint8)
             img = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
             if img is None:
                 raise RuntimeError(f"Unable to read image: {name}")
-            if img.dtype == np.uint16:
+            if normalize and img.dtype == np.uint16:
                 img = (img.astype(np.float32) * (255.0 / 65535.0))
             frames.append(img)
         return frames
@@ -56,12 +45,21 @@ def _collect_images(input_source) -> List[np.ndarray]:
     raise ValueError("input_source must be a list of frames or a directory")
 
 
-def _as_float(frames) -> List[np.ndarray]:
-    out = []
-    for f in frames:
-        arr = f if f.dtype == np.float32 else f.astype(np.float32)
-        out.append(arr)
-    return out
+def _check_cancel(should_cancel):
+    if should_cancel is not None and should_cancel():
+        from core.registration import RegistrationCancelled
+        raise RegistrationCancelled()
+
+
+def _prepare_frame(frame, img_resize, should_cancel):
+    """Keep the baseline conversion/resize order without retaining a float stack."""
+    _check_cancel(should_cancel)
+    if frame.dtype == np.uint16:
+        frame = frame.astype(np.float32) * (255.0 / 65535.0)
+    if img_resize is not None:
+        w, h = img_resize
+        frame = cv2.resize(frame, (int(w), int(h)), interpolation=cv2.INTER_AREA)
+    return frame if frame.dtype == np.float32 else frame.astype(np.float32)
 
 
 def _luminance(img: np.ndarray) -> np.ndarray:
@@ -82,210 +80,6 @@ def _window_variance(gray: np.ndarray, radius: int) -> np.ndarray:
     mean = cv2.blur(g, (k, k))
     mean_sq = cv2.blur(g * g, (k, k))
     return np.maximum(mean_sq - mean * mean, 0.0)
-
-
-def _variance_stack(frames_f: List[np.ndarray], radius: int) -> np.ndarray:
-    """逐帧方差堆栈 (N, H, W) float32。"""
-    return np.stack([
-        _window_variance(_luminance(f), radius) for f in frames_f
-    ], axis=0)
-
-
-def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 11,
-                     thread_count: int = None, blend_smoothing: float = 2.0):
-    """OpenFocus - A（方差加权平均，末帧先验）。
-
-    w_i = gauss(var_i, σ=blend_smoothing) ；
-    out = (Σ w_i·I_i + I_last) / (Σ w_i + 1)。
-    +1 的末帧先验保证平坦区（权重全零）精确退化为末帧——这正是
-    Method A 平局行为（输出恒等于末帧）的成因。
-
-    `blend_smoothing` 是 Helicon 的 "Smoothing"：权重图的平滑尺度，
-    决定清晰区之间的过渡宽度（大 = 更柔、细节更软）。
-    """
-    frames = _collect_images(input_source)
-    if img_resize is not None:
-        w, h = img_resize
-        frames = [cv2.resize(f, (int(w), int(h)),
-                             interpolation=cv2.INTER_AREA) for f in frames]
-    frames_f = _as_float(frames)
-
-    radius = max(1, int(kernel_size) // 2) if kernel_size else 3
-    var = _variance_stack(frames_f, radius)
-    # Smoothing：对权重图做轻度高斯（深度过渡平滑参数）
-    sigma = max(0.0, float(2.0 if blend_smoothing is None
-                          else blend_smoothing))
-    weights = np.stack([
-        cv2.GaussianBlur(v, (0, 0), sigmaX=sigma) if sigma > 1e-3 else v
-        for v in var
-    ], axis=0)
-
-    h, w = frames_f[0].shape[:2]
-    channels = frames_f[0].shape[2] if frames_f[0].ndim == 3 else 1
-    acc = np.zeros((h, w, channels), dtype=np.float32)
-    wsum = np.zeros((h, w, 1), dtype=np.float32)
-    for i, frame in enumerate(frames_f):
-        w2d = weights[i][:, :, np.newaxis]
-        # 2D 灰度帧统一到 (h, w, 1)：直接 (h,w)*(h,w,1) 会广播成 (h,w,w)
-        f3 = frame[:, :, np.newaxis] if frame.ndim == 2 else frame
-        acc += f3 * w2d
-        wsum += w2d
-    # 末帧先验（+1）：平坦区权重全零时输出精确等于末帧
-    last = frames_f[-1]
-    acc += last[:, :, np.newaxis] if last.ndim == 2 else last
-    wsum += 1.0
-    fused = acc / wsum
-    if last.ndim == 2:
-        fused = fused[:, :, 0]
-    return np.clip(fused, 0, 255).astype(fuse_output_dtype(frames))
-
-
-DEPTH_SMOOTHING_DEFAULT = 1.2  # σ of the depth-map transition (default)
-
-
-def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 11,
-                     thread_count: int = None,
-                     depth_smoothing: float = DEPTH_SMOOTHING_DEFAULT):
-    """OpenFocus - B（方差深度图选择）。
-
-    两遍结构：argmax(var) → 深度图平滑（边界 ±3 帧线性过渡）→ 硬拾取。
-    np.argmax 天然平局取首帧。
-    """
-    frames = _collect_images(input_source)
-    if img_resize is not None:
-        w, h = img_resize
-        frames = [cv2.resize(f, (int(w), int(h)),
-                             interpolation=cv2.INTER_AREA) for f in frames]
-    frames_f = _as_float(frames)
-
-    radius = max(1, int(kernel_size) // 2) if kernel_size else 3
-    var = _variance_stack(frames_f, radius)
-    n = len(frames_f)
-
-    depth = np.argmax(var, axis=0).astype(np.float32)
-    # 深度图平滑：先中值去噪点，再高斯做边界过渡（约 ±3 帧），
-    # 最后取整——硬拾取（软混合会降低局部对比度）。
-    # 注意用 float32 做中值：转 uint8 会在帧数 >256 时截断深度索引
-    # （显微深栈可达数百帧）；对整数输入两者结果逐位一致。
-    depth = cv2.medianBlur(np.ascontiguousarray(depth, np.float32), 3)
-    # depth_smoothing = 过渡带高斯 σ（过渡宽度随其近线性增宽）。
-    # 默认 1.2；
-    # 0 = 只做中值去噪点（细节最锐，真值基准上 +0.5 dB），调大可压制
-    # 噪声栈在深度跳变处的斑点/光晕。
-    sigma = max(0.0, float(depth_smoothing if depth_smoothing is not None
-                           else DEPTH_SMOOTHING_DEFAULT))
-    if sigma > 0.05:
-        depth = cv2.GaussianBlur(depth, (0, 0), sigmaX=sigma)
-    idx = np.clip(np.rint(depth), 0, n - 1).astype(np.int32)
-
-    h, w = frames_f[0].shape[:2]
-    # 按深度图逐像素硬拾取（含彩色/灰度）
-    stack = np.stack(
-        [f if f.ndim == 3 else f[:, :, np.newaxis] for f in frames_f], axis=0)
-    fused = np.take_along_axis(stack, idx[np.newaxis, :, :, np.newaxis], axis=0)[0]
-    if frames_f[0].ndim == 2:
-        fused = fused[:, :, 0]
-    return np.clip(fused, 0, 255).astype(fuse_output_dtype(frames))
-
-
-# ------------------------------------------------------------------
-# OpenFocus - C（拉普拉斯金字塔融合）
-# ------------------------------------------------------------------
-
-def _pyramid_gauss(img: np.ndarray, levels: int) -> List[np.ndarray]:
-    """高斯金字塔：σ=1 模糊 + 2× 抽点（与复现管线一致的 Burt 型分解）。"""
-    g = [img.astype(np.float32)]
-    for _ in range(levels - 1):
-        b = cv2.GaussianBlur(g[-1], (0, 0), 1.0)
-        g.append(b[::2, ::2])
-    return g
-
-
-def _pyramid_expand(band: np.ndarray, shape) -> np.ndarray:
-    """2× 上采样（bicubic 插值 + σ=0.6 模糊），裁到目标形状。
-
-    最终验证配方（reproduce_and_compare.repro_C）：PIL BICUBIC + gauss
-    σ0.6；此处用 cv2.INTER_CUBIC 等价实现（审计实测三栈 MAE 与 PIL 版
-    逐点一致），避免融合热路径依赖 Pillow。
-    band 可以是 (h, w) 或 (h, w, C)。
-    """
-    up = cv2.resize(band, (band.shape[1] * 2, band.shape[0] * 2),
-                    interpolation=cv2.INTER_CUBIC)
-    return cv2.GaussianBlur(up[:shape[0], :shape[1]], (0, 0), 0.6)
-
-
-def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 7,
-                     thread_count: int = None, levels: int = 7,
-                     blend_smoothing: float = 3.0):
-    """OpenFocus - C：拉普拉斯金字塔融合。
-
-    每个带通层的权重 = |亮度带| 的高斯平滑（σ=blend_smoothing），逐像素
-    取 argmax 硬拾取（max-pick）——实测 max-pick 明显优于软归一混合
-    （stackA 上 0.51% vs 1.35% MAE）；最粗的基带整带取末帧（亮度基准）。
-    层数自适应：min(levels, log2(min(H,W))-1)，小图不产生退化带。
-
-    `blend_smoothing` 是 Helicon 的 "Smoothing"（Method C 唯一的可调
-    参数）：决定各帧带通在多宽的尺度上被比较/过渡。σ 越大过渡越柔、
-    细节越软；σ→0 等价于逐像素裸 argmax（最锐、最易斑点）。`kernel_size`
-    仅为兼容 A/B 的签名保留，C 不使用空间窗口。
-    """
-    frames = _collect_images(input_source)
-    if img_resize is not None:
-        w, h = img_resize
-        frames = [cv2.resize(f, (int(w), int(h)),
-                             interpolation=cv2.INTER_AREA) for f in frames]
-    frames_f = _as_float(frames)
-
-    h, w = frames_f[0].shape[:2]
-    # 小图保护：每层减半，至少留 2px；levels 至少 2（一层带通 + 基带）
-    usable = max(2, min(levels, int(np.log2(max(2, min(h, w)))) - 1))
-    pyrs = [_pyramid_gauss(f, usable) for f in frames_f]
-
-    out_bands = []
-    for k in range(usable):
-        # band: (N, hk, wk[, C]) —— 各帧第 k 层的带通/基带
-        if k < usable - 1:
-            bands = []
-            for p in pyrs:
-                up = _pyramid_expand(p[k + 1], p[k].shape[:2])
-                bands.append(p[k] - up)
-        else:
-            bands = [p[k] for p in pyrs]
-        band = np.stack(bands, axis=0).astype(np.float32)
-
-        if k == usable - 1:
-            # 基带：整带取末帧（低频来自参考帧）
-            out_bands.append(band[-1].copy())
-            continue
-
-        # 权重：亮度域带通幅值，σ=3 平滑（opacity 平滑）。
-        # 注意：cv2.GaussianBlur 会把 (N,h,w) 当成多通道图跨 N 轴混合，
-        # 必须逐帧模糊。
-        if band.ndim == 4:
-            lum = (band * np.array([0.114, 0.587, 0.299],
-                                   np.float32)).sum(axis=3)
-        else:
-            lum = band
-        sigma = max(0.0, float(3.0 if blend_smoothing is None
-                              else blend_smoothing))
-        W = np.stack([cv2.GaussianBlur(np.abs(w), (0, 0), sigma)
-                      if sigma > 1e-3 else np.abs(w) for w in lum], axis=0)
-        # max-pick 硬拾取：逐像素选能量最大帧（无除法，平坦带贡献≈0，
-        # 无需除零回退）
-        idx = W.argmax(axis=0)
-        if band.ndim == 4:
-            mixed = np.take_along_axis(
-                band, idx[np.newaxis, :, :, np.newaxis], axis=0)[0]
-        else:
-            mixed = np.take_along_axis(band, idx[np.newaxis], axis=0)[0]
-        out_bands.append(mixed.astype(np.float32))
-
-    # 自顶向下重建：expand + 累加
-    img = out_bands[-1]
-    for k in range(usable - 2, -1, -1):
-        img = _pyramid_expand(img, out_bands[k].shape[:2]) + out_bands[k]
-
-    return np.clip(img, 0, 255).astype(fuse_output_dtype(frames))
 
 
 # ------------------------------------------------------------------

@@ -1,14 +1,16 @@
 import os
 import re
 import uuid
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, replace
+from copy import deepcopy
 from typing import Any, Optional
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import QPoint, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QAction, QActionGroup, QIcon, QPixmap, QImage
-from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox, QProgressDialog
 
 from controllers.export_manager import get_imwrite_params
 from utils import (show_error_box, show_message_box, show_success_box,
@@ -19,11 +21,94 @@ from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
 from utils.image_utils import to_display_uint8, cv2_to_pixmap
 from utils.image_utils import imwrite_auto
 from locales import trans
+from utils.export_paths import unique_path
 
 # Item-data roles: the folder of an align-only result, and the stable
 # provenance record of every output (identity, source context, export state).
 ALIGNED_DIR_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 OUTPUT_RECORD_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+
+_ACTIVE_LINEAR_DNG_WORKERS = set()
+
+def _linear_dng_annotated_image(record, labels, state, should_cancel=None):
+    """Render annotations in display space, then map only changed pixels back.
+
+    Annotations outside the camera gamut cannot be represented faithfully in
+    this DNG; fail instead of silently changing their color or clipping RAW.
+    """
+    from core.registration import RegistrationCancelled
+    from core.resource_policy import require_memory
+    from utils.linear_dng import _RGB_TO_XYZ, develop_linear
+
+    def check_cancel():
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+
+    image = record.image
+    metadata = record.linear_dng_metadata
+    check_cancel()
+    require_memory(image.nbytes * 4 + min(128, image.shape[0]) * image.shape[1] * 100)
+    display = develop_linear(image, metadata)
+    check_cancel()
+    annotated = labels.prepare_bgr_image('output', display, 0, output_id=record.output_id)
+    annotated = scalebar.burn(annotated, state['scale'])
+    check_cancel()
+    result = image.copy()
+    matrix = np.asarray(metadata.color_matrix, dtype=np.float64) @ _RGB_TO_XYZ
+    matrix /= matrix.sum(axis=1)[:, None]
+    wb = 1.0 / np.asarray(metadata.as_shot_neutral, dtype=np.float64)
+    wb /= wb.min()
+    for start in range(0, image.shape[0], 128):
+        check_cancel()
+        stop = min(start + 128, image.shape[0])
+        original = develop_linear(image[start:stop], metadata)
+        painted = annotated[start:stop]
+        changed = np.any(painted != original, axis=2)
+        if not np.any(changed):
+            continue
+        rgb = painted[changed, ::-1].astype(np.float64) / 65535.0
+        rgb = np.where(rgb < 0.081, rgb / 4.5, ((rgb + 0.099) / 1.099) ** (1 / 0.45))
+        camera = (rgb @ matrix.T) / wb
+        if np.any(camera < -1e-7) or np.any(camera > 1.0 + 1e-7):
+            raise ValueError(trans.t('linear_dng_gamut_error'))
+        result[start:stop][changed] = np.rint(np.clip(camera[:, ::-1], 0, 1) * 65535).astype(np.uint16)
+    return result
+
+
+class LinearDngExportWorker(QThread):
+    completed = pyqtSignal(bool, str)
+
+    def __init__(self, path, record, labels, annotation_state, *, px_size_um=None):
+        super().__init__()
+        self.path = path
+        self.record = record
+        self.labels = labels
+        self.annotation_state = annotation_state
+        self.px_size_um = px_size_um
+        self._cancelled = threading.Event()
+
+    def cancel(self):
+        self._cancelled.set()
+
+    def run(self):
+        try:
+            image = self.record.image
+            if self.annotation_state['labels'] or self.annotation_state['scale']:
+                try:
+                    image = _linear_dng_annotated_image(
+                        self.record, self.labels, self.annotation_state, self._cancelled.is_set)
+                except Exception as exc:
+                    raise ValueError(f"{trans.t('linear_dng_annotations')}: {exc}") from exc
+            from utils.linear_dng import write_linear_dng
+            write_linear_dng(self.path, image, self.record.linear_dng_metadata,
+                             should_cancel=self._cancelled.is_set,
+                             px_size_um=self.px_size_um)
+        except Exception as exc:
+            self.completed.emit(False, '' if self._cancelled.is_set() else str(exc))
+        else:
+            self.completed.emit(True, self.path)
+
+
 
 
 @dataclass
@@ -43,25 +128,62 @@ class OutputRecord:
     context: Any = None
     kind: str = "fusion"
     parent_id: Optional[str] = None
-    exported: bool = True
+    exported: bool = False
+    # Identity of the pixels that were last written. Comparing it with the
+    # current image detects "changed since export" without hashing megapixels.
+    exported_image: Any = None
+    export_path: str = ""
+    scale_bar_config: Optional[dict] = None
+    scale_bar_initialized: bool = False
+    annotations_baked: bool = False
+    aligned_frames: tuple = ()
+    aligned_names: tuple = ()
+    aligned_source_frames: tuple = ()
+    aligned_source_indices: tuple = ()
+    aligned_source_revision: int = 0
+    exported_annotations: Optional[dict] = None
+    annotations_changed: bool = False
+    icc_profile: bytes = b""
+    linear_dng_metadata: Any = None
+    source_paths: tuple = ()
 
     @classmethod
     def create(cls, image, label: str, *, context=None, kind: str = "fusion",
-               parent_id: Optional[str] = None, exported: bool = True):
+               parent_id: Optional[str] = None, exported: bool = False):
         return cls(output_id=uuid.uuid4().hex, image=image, label=label,
                    context=context, kind=kind, parent_id=parent_id,
-                   exported=exported)
+                   exported=exported,
+                   linear_dng_metadata=deepcopy(getattr(context, 'linear_dng_metadata', None)),
+                   source_paths=tuple(getattr(context, 'source_paths', ()) or ()))
 
     @property
     def retouchable(self) -> bool:
         return (self.context is not None
                 and int(getattr(self.context, "source_count", 0)) > 0
-                and self.image is not None)
+                and self.image is not None
+                and not (self.image.ndim == 3 and self.image.shape[2] == 4))
+
+    #: Outputs that exist only in this session and must not be discarded
+    #: silently: retouched buffers and results adopted from the compare view.
+    PROTECTED_KINDS = ("retouch", "compare")
 
     @property
     def protected(self) -> bool:
-        """A retouched output whose pixels have not been written to disk."""
-        return self.kind == "retouch" and not self.exported
+        """An output whose pixels have not been written to disk yet."""
+        return self.kind in self.PROTECTED_KINDS and (not self.exported or self.changed_since_export)
+
+    @property
+    def changed_since_export(self) -> bool:
+        """True when the image differs from the one written to disk.
+
+        Fusion results are immutable, so identity is enough and costs nothing;
+        a retouched result whose buffer was replaced after export is the case
+        this reports.
+        """
+        if not self.exported:
+            return False
+        return self.annotations_changed or (self.exported_image is not None
+                                            and self.exported_image is not self.image)
 
 
 def _thumbnail_bgr(image, size: int):
@@ -71,6 +193,9 @@ def _thumbnail_bgr(image, size: int):
     proportional to the icon instead of to the full-resolution frame.
     """
     display = to_display_uint8(image)
+    if display.ndim == 3 and display.shape[2] == 4:
+        from utils.image_utils import composite_transparent_for_display
+        display = composite_transparent_for_display(display)
     if display.ndim == 2:
         display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
     h, w = display.shape[:2]
@@ -91,6 +216,8 @@ class OutputManager:
 
     def __init__(self, window: Any):
         self.window = window
+        self.linear_dng_worker = None
+        self.linear_dng_progress = None
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -112,23 +239,83 @@ class OutputManager:
         if row < 0:
             return None
         return self.record_for_item(self.window.output_list.item(row))
+    def record_for_image(self, image) -> Optional[OutputRecord]:
+        for row in range(self.window.output_list.count()):
+            record = self.record_for_row(row)
+            if record is not None and record.image is image:
+                return record
+        return None
+
 
     def update_record_label(self, row: int, label: str) -> None:
         record = self.record_for_row(row)
         if record is not None:
             record.label = label
 
-    def mark_exported(self, row: Optional[int] = None) -> None:
+    def mark_exported(self, row: Optional[int] = None,
+                      path: str = "") -> None:
         """Record that the output at `row` was written to a file."""
         if row is None:
             row = self.window.output_list.currentRow()
         record = self.record_for_row(row)
         if record is not None:
-            record.exported = True
+            self._mark_record_exported(record, record.image, path or record.export_path)
 
-    def mark_selected_exported(self) -> None:
+    def mark_selected_exported(self, path: str = "") -> None:
         row = self.window.output_list.currentRow()
-        self.mark_exported(row if row >= 0 else 0)
+        self.mark_exported(row if row >= 0 else 0, path=path)
+
+    def _refresh_output_tooltip(self, row: int) -> None:
+        """Keep the tooltip in step with the record's export state."""
+        window = self.window
+        item = window.output_list.item(row) if row >= 0 else None
+        record = self.record_for_row(row) if row >= 0 else None
+        if item is None or record is None:
+            return
+        lines = []
+        if record.export_path:
+            lines.append(record.export_path)
+        if not record.exported:
+            lines.append(trans.t("retouch_unexported"))
+        elif record.changed_since_export:
+            lines.append(trans.t("msg_export_after_change"))
+        if lines:
+            item.setToolTip("\n".join(lines))
+
+    def _annotation_state(self, record, labels=None):
+        """Only annotation settings capable of changing this artifact's pixels."""
+        if record.annotations_baked:
+            return {'labels': [], 'scale': None}
+        from utils.validators import parse_label_range
+        labels = labels or getattr(self.window, 'label_manager', None)
+        target = 'registered' if record.kind == 'aligned' else 'output'
+        applicable = []
+        for label in getattr(labels, 'labels', ()):
+            config = label.config
+            if not label.enabled or label.target != target:
+                continue
+            if target == 'output':
+                if config.output_id and config.output_id != record.output_id:
+                    continue
+                if not parse_label_range(config.range).matches(0):
+                    continue
+            data = label.to_dict()
+            for key in ('label_id', 'target_stack', 'output_id'):
+                data.pop(key, None)
+            applicable.append(data)
+        return deepcopy({'labels': applicable,
+                         'scale': scalebar.export_cfg(self.window, target=target, record=record)})
+
+    def refresh_annotation_export_state(self):
+        """Undo back to the exported settings clears the annotation delta."""
+        for row in range(self.window.output_list.count()):
+            record = self.record_for_row(row)
+            if record is None:
+                continue
+            record.annotations_changed = bool(record.exported_annotations is not None and
+                record.exported_annotations != self._annotation_state(record))
+            self._refresh_output_tooltip(row)
+
 
     def protected_records(self) -> list[OutputRecord]:
         records = []
@@ -139,13 +326,21 @@ class OutputManager:
         return records
 
     def _insert_output(self, image, label: str, record: Optional[OutputRecord],
-                       tooltip: str = "") -> QListWidgetItem:
-        """Insert one entry at row 0, keeping pixels, item and record aligned."""
+                       tooltip: str = "", trim: bool = True) -> QListWidgetItem:
+        """Insert one entry at row 0, keeping pixels, item and record aligned.
+
+        `trim=False` lets a caller finish its own commit (for example a
+        publication that must restore the previous history exactly if the
+        display step fails) before older entries are evicted.
+        """
         window = self.window
-        if image is not None:
-            window.fusion_results.insert(0, image)
+        window.fusion_results.insert(0, image)
         if record is not None:
             record.label = label
+            if not record.scale_bar_initialized:
+                cfg = scalebar.export_cfg(window, target='registered' if record.kind == 'aligned' else 'output', record=record)
+                record.scale_bar_config = dict(cfg) if cfg else None
+                record.scale_bar_initialized = True
         item = QListWidgetItem(label)
         if record is not None:
             item.setData(OUTPUT_RECORD_ROLE, record)
@@ -156,7 +351,15 @@ class OutputManager:
                 # Thumbnail from a 40 px resample, not from the full frame:
                 # converting 12 MP just to fill a 40x40 icon cost ~35 ms of
                 # copy + colour convert + pixmap upload per render.
-                icon = QIcon(cv2_to_pixmap(_thumbnail_bgr(image, 40)))
+                thumbnail = image
+                if record is not None and record.linear_dng_metadata is not None:
+                    from utils.linear_dng import develop_linear
+                    h, w = image.shape[:2]
+                    factor = min(1.0, 40 / max(h, w))
+                    thumbnail = cv2.resize(image, (max(1, int(w * factor)), max(1, int(h * factor))),
+                                           interpolation=cv2.INTER_AREA) if factor < 1 else image
+                    thumbnail = develop_linear(thumbnail, record.linear_dng_metadata)
+                icon = QIcon(cv2_to_pixmap(_thumbnail_bgr(thumbnail, 40)))
                 item.setIcon(icon)
             except Exception:
                 pass
@@ -166,8 +369,10 @@ class OutputManager:
         # disabled the single-item actions — Save As, Retouch).
         window.output_list.clearSelection()
         window.output_list.setCurrentRow(0)
-        self._trim_history()
+        if trim:
+            self._trim_history()
         self.update_output_count()
+        self._refresh_output_tooltip(0)
         return item
 
     def _remove_row(self, row: int) -> None:
@@ -200,7 +405,8 @@ class OutputManager:
             if 0 <= row < len(window.fusion_results):
                 window.fusion_results.pop(row)
 
-    def update_output_list_for_fusion(self, context=None) -> None:
+    def update_output_list_for_fusion(self, context=None, linear_dng_metadata=None,
+                                      source_paths=()) -> None:
         window = self.window
 
         fusion_filename = window.export_manager.generate_default_filename()
@@ -208,9 +414,13 @@ class OutputManager:
         image = None
         record = None
         if window.fusion_result is not None:
-            image = window.fusion_result.copy()
+            image = window.fusion_result
             record = OutputRecord.create(image, fusion_filename,
                                          context=context, kind="fusion")
+            if linear_dng_metadata is not None:
+                record.linear_dng_metadata = deepcopy(linear_dng_metadata)
+            if source_paths:
+                record.source_paths = tuple(source_paths)
         self._insert_output(image, fusion_filename, record)
 
     def add_batch_outputs(self, paths) -> int:
@@ -243,6 +453,9 @@ class OutputManager:
                 # provenance; mark them as such instead of guessing frames.
                 record = OutputRecord.create(image, label, kind="batch",
                                              exported=True)
+                record.annotations_baked = True
+                record.export_path = path
+                record.exported_image = image
                 self._insert_output(image, label, record, tooltip=path)
                 added += 1
             except Exception:
@@ -250,6 +463,27 @@ class OutputManager:
         if added:
             self.update_output_count()
             self.display_specific_fusion_result(window.fusion_results[0])
+        return added
+
+    def add_batch_aligned_stacks(self, stacks) -> int:
+        added = 0
+        for stack in stacks:
+            folder = stack["path"]
+            if not os.path.isdir(folder):
+                continue
+            names = tuple(os.path.basename(p) for p in stack.get("files", ()))
+            # The entry names the directory the user will open, not the source
+            # stack: `stack_aligned` on disk must not read as `stack` in the
+            # list, or two runs of the same folder become indistinguishable.
+            label = os.path.basename(os.path.normpath(folder)) or stack.get("name") or folder
+            record = OutputRecord.create(None, label, kind='aligned', exported=True)
+            record.aligned_names = names
+            record.annotations_baked = True
+            record.export_path = folder
+            item = self._insert_output(None, label, record, tooltip=folder)
+            item.setData(ALIGNED_DIR_ROLE, folder)
+            item.setIcon(QIcon.fromTheme("folder"))
+            added += 1
         return added
 
     # ------------------------------------------------------------------
@@ -290,6 +524,25 @@ class OutputManager:
         except (KeyError, ValueError, IndexError):
             return f"{root} {n}"
 
+    def _capture_result_view(self):
+        window = self.window
+        view = getattr(window, 'lbl_result_img', None)
+        return (getattr(view, '_base_pixmap', None),
+                list(window.output_list.selectedItems()),
+                window.output_list.currentItem())
+
+    def _restore_result_view(self, state):
+        pixmap, selected, current = state
+        window = self.window
+        window.output_list.clearSelection()
+        if current is not None:
+            window.output_list.setCurrentItem(current)
+        for item in selected:
+            item.setSelected(True)
+        view = getattr(window, 'lbl_result_img', None)
+        if view is not None and hasattr(view, 'set_display_pixmap'):
+            view.set_display_pixmap(pixmap)
+
     def add_retouched_output(self, base_record: OutputRecord,
                              image) -> OutputRecord:
         """Publish a retouch buffer as a new output, leaving the base intact."""
@@ -300,73 +553,194 @@ class OutputManager:
         record = OutputRecord.create(
             image, label, context=base_record.context, kind="retouch",
             parent_id=base_record.output_id, exported=False)
-        previous = getattr(self.window, "fusion_result", None)
+        record.scale_bar_config = (dict(base_record.scale_bar_config)
+                                   if base_record.scale_bar_config else None)
+        record.scale_bar_initialized = True
+        record.annotations_baked = base_record.annotations_baked
+        record.linear_dng_metadata = deepcopy(base_record.linear_dng_metadata)
+        record.source_paths = base_record.source_paths
+        window = self.window
+        previous = getattr(window, "fusion_result", None)
+        previous_row = window.output_list.currentRow()
+        previous_view = self._capture_result_view()
         item = None
         try:
-            self.window.fusion_result = image
+            window.fusion_result = image
+            # trim=False: history eviction happens only after the new result
+            # is committed. Evicting first meant a failed display could still
+            # have dropped an older output permanently.
             item = self._insert_output(
-                image, label, record, tooltip=trans.t("retouch_unexported"))
+                image, label, record, tooltip=trans.t("retouch_unexported"),
+                trim=False)
             if self.display_specific_fusion_result(image) is False:
                 raise RuntimeError(trans.t("msg_display_fusion_failed_text"))
         except Exception:
             # Publication is atomic: a failed display must not leave a
-            # half-created entry or a switched result view.
+            # half-created entry, a switched view, or a changed selection.
             if item is not None:
-                row = self.window.output_list.row(item)
+                row = window.output_list.row(item)
                 if row >= 0:
                     self._remove_row(row)
-            self.window.fusion_result = previous
+            window.fusion_result = previous
+            if previous_row >= 0:
+                window.output_list.setCurrentRow(previous_row)
+            self._restore_result_view(previous_view)
+            self.update_output_count()
             raise
+        self._trim_history()
+        self.update_output_count()
+        return record
+
+    def publish_compare_output(self, record: OutputRecord) -> OutputRecord:
+        """Add a full-frame result adopted from the method comparison.
+
+        Uses the same transactional insert as a retouch publication: the entry
+        and the view commit together, and history eviction happens only after
+        both succeeded.
+        """
+        if record is None or record.image is None:
+            raise ValueError("a result image is required")
+        window = self.window
+        previous = getattr(window, "fusion_result", None)
+        previous_row = window.output_list.currentRow()
+        previous_view = self._capture_result_view()
+        item = None
+        try:
+            window.fusion_result = record.image
+            item = self._insert_output(
+                record.image, record.label, record,
+                tooltip=trans.t("retouch_unexported"), trim=False)
+            if self.display_specific_fusion_result(record.image) is False:
+                raise RuntimeError(trans.t("msg_display_fusion_failed_text"))
+        except Exception:
+            if item is not None:
+                row = window.output_list.row(item)
+                if row >= 0:
+                    self._remove_row(row)
+            window.fusion_result = previous
+            if previous_row >= 0:
+                window.output_list.setCurrentRow(previous_row)
+            self._restore_result_view(previous_view)
+            self.update_output_count()
+            raise
+        self._trim_history()
+        self.update_output_count()
         return record
 
     # ------------------------------------------------------------------
     # Export protection for unexported retouched outputs
     # ------------------------------------------------------------------
     def export_records(self, records) -> bool:
-        """Write each record to a chosen folder; True only if all succeeded."""
-        records = [r for r in records if r is not None and r.image is not None]
+        """Export a frozen selection; preserve existing targets and all failures."""
+        records = [record for record in records if record is not None]
         if not records:
             return True
         window = self.window
+        snapshots = [(record, replace(record, scale_bar_config=deepcopy(record.scale_bar_config))) for record in records]
+        labels = window.label_manager.snapshot()
         folder = QFileDialog.getExistingDirectory(
-            window, trans.t("action_save"), get_last_dialog_dir(),
-            QFileDialog.Option.ShowDirsOnly)
+            window, trans.t('action_save'), get_last_dialog_dir(), QFileDialog.Option.ShowDirsOnly)
         if not folder:
             return False
         set_last_dialog_dir(folder)
-        used = set()
-        ok = True
-        for record in records:
+        written, failed = [], []
+        for original, record in snapshots:
             name = window.export_manager.filename_from_label(record.label)
-            stem, ext = os.path.splitext(name)
-            ext = ext or ".png"
-            candidate = f"{stem}{ext}"
-            counter = 2
-            while candidate in used:
-                candidate = f"{stem}_{counter}{ext}"
-                counter += 1
-            path = os.path.join(folder, candidate)
+            path = unique_path(os.path.join(folder, os.path.splitext(name)[0] + '.png'))
             try:
-                image = window.label_manager.prepare_bgr_image(
-                    "registered", record.image, 0)
-                image = scalebar.burn(image, scalebar.export_cfg(window))
-                success = imwrite_auto(path, image, get_imwrite_params(ext))
-            except Exception:
-                success = False
-            if success:
-                used.add(candidate)
-                record.exported = True
-            else:
-                ok = False
-        if ok:
-            window.statusBar().showMessage(
-                trans.t("msg_image_saved_info").format(path=folder).replace("\n", " "),
-                8000)
+                if record.kind == 'aligned':
+                    path = self._export_aligned_record(record, destination=folder, labels_snapshot=labels)
+                    if not path:
+                        raise OSError(trans.t('msg_save_failed_info_write'))
+                else:
+                    self._write_record(record, path, labels)
+                self._mark_record_exported(original, record.image, path, self._annotation_state(record, labels))
+                written.append(path)
+            except Exception as exc:
+                failed.append((path or record.label, str(exc)))
+        self._report_export_result(written, failed, folder)
+        return not failed
+
+    def _write_record(self, record, path, labels):
+        source_paths = record.source_paths
+        if source_paths:
+            self.window.export_manager._safe_export_path(path, source_paths)
         else:
-            show_error_box(window, trans.t("msg_save_failed_title"),
-                           trans.t("msg_save_failed_text"),
-                           trans.t("msg_save_failed_info_write"))
-        return ok
+            self.window.export_manager._safe_export_path(path)
+        image = record.image
+        if image is None:
+            raise ValueError(trans.t('msg_no_valid_image_text'))
+        metadata = record.linear_dng_metadata
+        if os.path.splitext(path)[1].lower() == '.dng':
+            if metadata is None or record.annotations_baked:
+                raise ValueError(trans.t('linear_dng_export_failed'))
+            state = self._annotation_state(record, labels)
+            if state['labels'] or state['scale']:
+                try:
+                    image = _linear_dng_annotated_image(record, labels, state)
+                except Exception as exc:
+                    raise ValueError(f"{trans.t('linear_dng_annotations')}: {exc}") from exc
+            try:
+                from utils.linear_dng import write_linear_dng
+                write_linear_dng(path, image, metadata,
+                                 px_size_um=scalebar.calibration_px_um(self.window, record))
+            except Exception as exc:
+                raise OSError(f"{trans.t('linear_dng_export_failed')}: {exc}") from exc
+            return
+        if metadata is not None:
+            from utils.linear_dng import develop_linear
+            image = develop_linear(image, metadata)
+        if image.ndim == 3 and image.shape[2] == 4 and os.path.splitext(path)[1].lower() != '.png':
+            raise ValueError(trans.t('transparent_desktop_unsupported').format(path=path))
+        if not record.annotations_baked:
+            image = labels.prepare_bgr_image('output', image, 0, output_id=record.output_id)
+            image = scalebar.burn(image, scalebar.export_cfg(self.window, record=record))
+        from core.image_loader import _read_exif_bytes, _read_icc_profile
+        baked_path = record.export_path if record.annotations_baked else ""
+        exif = _read_exif_bytes(baked_path) if baked_path else b''
+        profile = (_read_icc_profile(baked_path) if baked_path else
+                   getattr(record.context, 'icc_profile', record.icc_profile))
+        if not imwrite_auto(path, image, get_imwrite_params(os.path.splitext(path)[1]),
+                            exif=exif, icc_profile=profile):
+            raise OSError(trans.t('msg_save_failed_info_write'))
+
+    def _mark_record_exported(self, record, image, path, annotations=None):
+        record.exported = True
+        record.exported_image = image
+        record.export_path = path
+        record.exported_annotations = deepcopy(annotations if annotations is not None else self._annotation_state(record))
+        record.annotations_changed = record.exported_annotations != self._annotation_state(record)
+        for row in range(self.window.output_list.count()):
+            if self.record_for_row(row) is record:
+                self._refresh_output_tooltip(row)
+                break
+
+    def _export_aligned_record(self, record, *, destination=None, labels_snapshot=None):
+        exporter = self.window.export_manager
+        if record.aligned_frames:
+            return exporter.save_aligned_frames_as(record.aligned_frames, record.aligned_names,
+                                                    record.label, destination=destination, record=record,
+                                                    labels_snapshot=labels_snapshot)
+        if not record.export_path or not os.path.isdir(record.export_path):
+            raise OSError(record.export_path or record.label)
+        return exporter.save_aligned_stack_as(record.export_path, record.label, destination=destination)
+
+    def _report_export_result(self, written, failed, folder) -> None:
+        """One summary for a multi-file export, with the failing paths."""
+        window = self.window
+        if not failed:
+            window.statusBar().showMessage(
+                trans.t("msg_export_count_done").format(
+                    n=len(written), path=folder).replace("\n", " "), 8000)
+            return
+        detail = "\n".join(
+            f"{path}: {error or trans.t('msg_save_failed_info_write')}"
+            for path, error in failed)
+        show_error_box(
+            window, trans.t("msg_save_failed_title"),
+            trans.t("msg_export_partial_text").format(
+                ok=len(written), failed=len(failed)),
+            detail)
 
     def _confirm_protected_removal(self, records) -> bool:
         """Ask what to do with unexported retouched outputs before discarding."""
@@ -404,6 +778,14 @@ class OutputManager:
         if row >= 0:
             self.window.result_slider.setValue(row)
 
+    def display_current_output_row(self, row: int) -> None:
+        """Show the row selected with the keyboard, as a click already does."""
+        if row < 0:
+            return
+        item = self.window.output_list.item(row)
+        if item is not None:
+            self.display_output_image_in_result_view(item)
+
     # ------------------------------------------------------------------
     # Context menu & list operations
     # ------------------------------------------------------------------
@@ -434,8 +816,15 @@ class OutputManager:
         retouch_action = QAction(trans.t("action_retouch"), window)
         retouch_action.triggered.connect(
             lambda: window.show_retouch_dialog(target_item))
-        retouch_action.setEnabled(target_item is not None)
+        record = self.record_for_item(target_item)
+        retouch_action.setEnabled(record is not None and record.retouchable)
         menu.addAction(retouch_action)
+
+        layered_action = QAction(trans.t("action_export_layered_tiff"), window)
+        layered_action.triggered.connect(
+            lambda: window.export_manager.export_layered_tiff(target_item))
+        layered_action.setEnabled(target_item is not None)
+        menu.addAction(layered_action)
 
         # Drag-out export format submenu (persisted per user)
         drag_menu = menu.addMenu(trans.t("menu_drag_format"))
@@ -469,9 +858,8 @@ class OutputManager:
 
         if window.fusion_results:
             new_index = min(row, len(window.fusion_results) - 1)
-            window.fusion_result = window.fusion_results[new_index]
             window.output_list.setCurrentRow(new_index)
-            self.display_specific_fusion_result(window.fusion_result)
+            self.display_output_image_in_result_view(window.output_list.item(new_index))
         else:
             window.fusion_result = None
             window.lbl_result_img.clear()
@@ -479,132 +867,112 @@ class OutputManager:
             window.result_control_bar.setVisible(False)
 
     def export_all_results(self) -> None:
-        """Save every result in the output history to a user-chosen folder."""
-        window = self.window
-        if window.fusion_result is None and not window.fusion_results:
-            show_warning_box(window, trans.t("msg_warning"), trans.t("msg_export_all_none"))
+        records = [self.record_for_row(row) for row in range(self.window.output_list.count())]
+        if not any(records):
+            show_warning_box(self.window, trans.t('msg_warning'), trans.t('msg_export_all_none'))
             return
+        self.export_records(records)
 
-        folder = QFileDialog.getExistingDirectory(
-            window, trans.t("menu_export_all"),
-            get_last_dialog_dir(), QFileDialog.Option.ShowDirsOnly)
-        if not folder:
-            return
-        set_last_dialog_dir(folder)
+    def start_linear_dng_export(self, record, original, path, labels, *,
+                                completion=None, show_progress=True,
+                                px_size_um=None):
+        if self.linear_dng_worker is not None:
+            raise ValueError(trans.t('linear_dng_export_failed'))
+        if record.image is None or record.linear_dng_metadata is None or record.annotations_baked:
+            raise ValueError(trans.t('linear_dng_export_failed'))
+        if record.source_paths:
+            self.window.export_manager._safe_export_path(path, record.source_paths)
+        else:
+            self.window.export_manager._safe_export_path(path)
+        if px_size_um is None:
+            px_size_um = scalebar.calibration_px_um(self.window, record)
+        state = self._annotation_state(record, labels)
+        worker = LinearDngExportWorker(path, record, labels, state,
+                                       px_size_um=px_size_um)
+        progress = None
+        if show_progress:
+            progress = QProgressDialog(trans.t('action_save'), trans.t('btn_cancel'), 0, 0, self.window)
+            progress.setWindowTitle(trans.t('linear_dng_filter'))
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setMinimumDuration(0)
+        self.linear_dng_worker = worker
+        self.linear_dng_progress = progress
+        _ACTIVE_LINEAR_DNG_WORKERS.add(worker)
+        if progress is not None:
+            progress.canceled.connect(worker.cancel)
+        self.window.destroyed.connect(worker.cancel)
 
-        base = window.export_manager.generate_default_filename()
-        base = os.path.splitext(os.path.basename(base))[0] or "OpenFocus"
-        count = 0
-        results = list(window.fusion_results)  # newest first
-        total = len(results)
-        for i, image in enumerate(results):
-            labeled = window.label_manager.prepare_bgr_image("registered", image, i)
-            name = f"{base}_{total - i:02d}.png"
-            from utils.image_utils import imwrite_auto
-            if imwrite_auto(os.path.join(folder, name), scalebar.burn(labeled, scalebar.export_cfg(window))):
-                self.mark_exported(i)
-                count += 1
+        def completed(success, message):
+            from PyQt6 import sip
+            if sip.isdeleted(self.window):
+                return
+            if success:
+                if original is not None:
+                    self._mark_record_exported(original, record.image, path, state)
+                if show_progress:
+                    self.window.statusBar().showMessage(
+                        trans.t('msg_image_saved_info').format(path=path).replace('\n', ' '), 8000)
+            elif message and show_progress:
+                show_error_box(self.window, trans.t('msg_save_failed_title'),
+                               trans.t('linear_dng_export_failed'), message)
+            if completion is not None:
+                completion(success, message)
 
-        show_success_box(
-            window, trans.t("msg_success"),
-            trans.t("msg_export_all_done_text").format(count=count, folder=folder))
+        def finished():
+            from PyQt6 import sip
+            _ACTIVE_LINEAR_DNG_WORKERS.discard(worker)
+            if progress is not None and not sip.isdeleted(progress):
+                progress.close()
+            self.linear_dng_worker = None
+            self.linear_dng_progress = None
+            worker.deleteLater()
+
+        worker.completed.connect(completed)
+        worker.finished.connect(finished)
+        if progress is not None:
+            progress.show()
+        worker.start()
+        return worker
 
     def save_output_image_as(self, item: QListWidgetItem | None) -> None:
         window = self.window
         if item is None:
             return
-
-        # An align-only entry stages a FOLDER: "Save as" must copy the whole
-        # stack. It used to fall through to the single-image path and offered
-        # a name like "已对齐图像栈（13 帧）.png".
-        folder = item.data(ALIGNED_DIR_ROLE)
-        if folder and os.path.isdir(folder):
-            window.export_manager.save_aligned_stack_as(folder, item.text())
-            return
-
-        row = window.output_list.row(item)
-        if row < 0:
-            return
-
-        default_filename = window.export_manager.filename_from_label(item.text())
-        file_path, _selected_filter = QFileDialog.getSaveFileName(
-            window,
-            trans.t("action_save"),
-            default_filename,
-            "PNG Files (*.png);;JPG Files (*.jpg);;WebP Files (*.webp);;Bitmap Files (*.bmp);;TIFF Files (*.tif *.tiff);;All Files (*)",
-        )
-
-        if not file_path:
-            return
-
-        fallback_ext = os.path.splitext(default_filename)[1]
-        file_path = window.export_manager.normalize_export_path(
-            file_path,
-            fallback_extension=fallback_ext if fallback_ext else None,
-        )
-
+        original = self.record_for_item(item)
+        if original is None:
+            row = window.output_list.row(item)
+            image = window.fusion_results[row] if 0 <= row < len(window.fusion_results) else None
+            original = OutputRecord.create(image, item.text())
+            item.setData(OUTPUT_RECORD_ROLE, original)
+        record = replace(original, scale_bar_config=deepcopy(original.scale_bar_config))
         try:
-            if row < len(window.fusion_results):
-                image_to_save = window.label_manager.prepare_bgr_image(
-                    "registered", window.fusion_results[row], 0
-                )
-
-                ext = os.path.splitext(file_path)[1].lower()
-                params = get_imwrite_params(ext)
-                success = imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params)
-                if success:
-                    self.mark_exported(row)
-                    window.statusBar().showMessage(
-                        trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
-                        8000)
-                else:
-                    show_error_box(
-                        window,
-                        trans.t("msg_save_failed_title"),
-                        trans.t("msg_save_failed_text"),
-                        trans.t("msg_save_failed_info_write"),
-                    )
-            elif window.fusion_result is not None and row == 0:
-                image_to_save = window.label_manager.prepare_bgr_image(
-                    "registered", window.fusion_result, 0
-                )
-
-                ext = os.path.splitext(file_path)[1].lower()
-                params = get_imwrite_params(ext)
-                success = imwrite_auto(file_path, scalebar.burn(image_to_save, scalebar.export_cfg(window)), params)
-                if success:
-                    self.mark_exported(row)
-                    window.statusBar().showMessage(
-                        trans.t("msg_image_saved_info").format(path=file_path).replace("\n", " "),
-                        8000)
-                else:
-                    show_error_box(
-                        window,
-                        trans.t("msg_save_failed_title"),
-                        trans.t("msg_save_failed_text"),
-                        trans.t("msg_save_failed_info_write"),
-                    )
-            else:
-                show_warning_box(
-                    window,
-                    trans.t("msg_warning"),
-                    trans.t("msg_no_valid_image_text"),
-                    trans.t("msg_no_valid_image_info"),
-                )
-        except cv2.error as exc:
-            show_error_box(
-                window,
-                trans.t("msg_save_failed_title"),
-                trans.t("msg_save_failed_text"),
-                trans.t("msg_save_failed_info_opencv").format(error=str(exc)),
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            show_error_box(
-                window,
-                trans.t("msg_save_failed_title"),
-                trans.t("msg_save_failed_text"),
-                trans.t("msg_save_failed_info_unexpected").format(error=str(exc)),
-            )
+            labels = window.label_manager.snapshot()
+            if record.kind == 'aligned':
+                path = self._export_aligned_record(record, labels_snapshot=labels)
+                if path:
+                    self._mark_record_exported(original, record.image, path, self._annotation_state(record, labels))
+                    item.setData(ALIGNED_DIR_ROLE, path)
+                return
+            default_filename = window.export_manager.filename_from_label(record.label)
+            filters = ('PNG 8/16-bit (*.png);;TIFF 8/16-bit (*.tif *.tiff);;JPG 8-bit (*.jpg);;'
+                       'WebP 8-bit (*.webp);;BMP 8-bit (*.bmp)')
+            if record.linear_dng_metadata is not None and not record.annotations_baked:
+                filters += ';;' + trans.t('linear_dng_filter')
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                window, trans.t('action_save'), default_filename, filters)
+            if not file_path:
+                return
+            file_path = window.export_manager.normalize_export_path(file_path, selected_filter=selected_filter)
+            if os.path.splitext(file_path)[1].lower() == '.dng':
+                self.start_linear_dng_export(record, original, file_path, labels)
+                return
+            self._write_record(record, file_path, labels)
+            self._mark_record_exported(original, record.image, file_path, self._annotation_state(record, labels))
+            window.statusBar().showMessage(
+                trans.t('msg_image_saved_info').format(path=file_path).replace('\n', ' '), 8000)
+        except Exception as exc:
+            show_error_box(window, trans.t('msg_save_failed_title'),
+                           trans.t('msg_save_failed_text'), str(exc))
 
     def delete_selected_output_images(self) -> None:
         window = self.window
@@ -635,9 +1003,8 @@ class OutputManager:
         if window.fusion_results:
             min_row = min(rows) if rows else 0
             new_index = min(min_row, len(window.fusion_results) - 1)
-            window.fusion_result = window.fusion_results[new_index]
             window.output_list.setCurrentRow(new_index)
-            self.display_specific_fusion_result(window.fusion_result)
+            self.display_output_image_in_result_view(window.output_list.item(new_index))
         else:
             window.fusion_result = None
             window.lbl_result_img.clear()
@@ -647,17 +1014,32 @@ class OutputManager:
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
-    def display_specific_fusion_result(self, fusion_image) -> bool:
+    def display_specific_fusion_result(self, fusion_image, linear_dng_metadata=None) -> bool:
         if fusion_image is None:
             return False
 
         window = self.window
 
         try:
-            display_image = to_display_uint8(
-                window.label_manager.display_bgr_image(
-                    "registered", fusion_image, 0,
-                    scale_cfg=scalebar.export_cfg(window)))
+            record = self.record_for_image(fusion_image)
+            image = fusion_image
+            metadata = record.linear_dng_metadata if record is not None else linear_dng_metadata
+            if metadata is None and record is None:
+                preview_record = getattr(window, '_wipe_preview_record', None)
+                if preview_record is not None and preview_record.image is fusion_image:
+                    metadata = preview_record.linear_dng_metadata
+            if metadata is None and record is None and fusion_image is window.fusion_result:
+                context = getattr(getattr(window, 'render_manager', None), '_render_context', None) or {}
+                metadata = context.get('linear_dng_metadata')
+            if metadata is not None:
+                from utils.linear_dng import develop_linear
+                image = develop_linear(image, metadata)
+            if record is None or not record.annotations_baked:
+                image = window.label_manager.display_bgr_image(
+                    "output", image, 0,
+                    output_id=record.output_id if record else None,
+                    scale_cfg=scalebar.export_cfg(window, record=record))
+            display_image = to_display_uint8(image)
             window.lbl_result_img.set_display_pixmap(cv2_to_pixmap(display_image))
             window.result_control_bar.setVisible(False)
             window.lbl_result_info.setText("-- / --")
@@ -682,8 +1064,34 @@ class OutputManager:
         if row < 0:
             return
 
+        record = self.record_for_item(item)
+        if record is not None and record.kind == 'aligned':
+            window.fusion_result = None
+            window.registration_results = []
+            try:
+                if record.aligned_frames:
+                    images = record.aligned_frames
+                else:
+                    from controllers.export_manager import _read_image_any
+                    images = []
+                    for name in record.aligned_names:
+                        path = os.path.join(record.export_path, name)
+                        image = _read_image_any(path)
+                        if image is None:
+                            raise OSError(path)
+                        images.append(image)
+                window.registration_results = list(images)
+                window.registration_filenames = list(record.aligned_names)
+                window.result_slider.setRange(0, max(0, len(images) - 1))
+                window.result_control_bar.setVisible(bool(images))
+                self.show_registration_result(0)
+            except Exception as exc:
+                show_error_box(window, trans.t('msg_display_error_title'),
+                               trans.t('msg_display_registration_failed_text'), str(exc))
+            return
         if row < len(window.fusion_results):
-            self.display_specific_fusion_result(window.fusion_results[row])
+            window.fusion_result = window.fusion_results[row]
+            self.display_specific_fusion_result(window.fusion_result)
         elif window.fusion_result is not None:
             self.show_fusion_result()
 
@@ -708,11 +1116,22 @@ class OutputManager:
 
         try:
             image = window.registration_results[index]
-            image = to_display_uint8(
-                window.label_manager.apply_labels_to_registered_image(image, index))
+            record = self.record_for_item(window.output_list.currentItem())
+            metadata = (record.linear_dng_metadata if record is not None and record.kind == 'aligned'
+                        else getattr(window, 'linear_dng_metadata', None))
+            if metadata is not None:
+                from utils.linear_dng import develop_linear
+                image = develop_linear(image, metadata)
+            if record is None or not record.annotations_baked:
+                image = window.label_manager.display_bgr_image(
+                    "registered", image, index,
+                    scale_cfg=scalebar.export_cfg(window, target='registered', record=record))
+            image = to_display_uint8(image)
 
             window.lbl_result_img.set_display_pixmap(cv2_to_pixmap(image))
             window.lbl_result_info.setText(f"{index + 1} / {len(window.registration_results)}")
+            if getattr(window, "wipe_active", False):
+                window._update_wipe_images()
         except Exception as exc:  # pylint: disable=broad-except
             show_message_box(
                 window,
@@ -722,85 +1141,30 @@ class OutputManager:
                 QMessageBox.Icon.Critical,
             )
 
-def publish_aligned_stack(window, frames) -> None:
-    """Stage aligned frames in a dated folder and list it as one entry.
-
-    An align-only render produces no fused image, so the output panel stayed
-    empty even though the aligned stack IS the result. The frames are written
-    once with labels and the scale bar burned in, exactly as a manual export
-    would; the folder name carries the stack, the alignment method and the
-    time, following the same convention as the fused-image names.
-
-    The first frame is also inserted into `fusion_results` so the existing
-    output actions keep working on it, and the entry carries the folder path
-    so "Save As" copies the whole stack.
-    """
-    import datetime
-    import os
-    import tempfile
-
-    import cv2
-
-    from utils import scalebar
-    from utils.image_utils import imwrite_auto
-
+def publish_aligned_stack(window, frames, *, filenames=None, icc_profile=None,
+                          source_frames=None, source_indices=None, source_revision=0,
+                          linear_dng_metadata=None) -> None:
+    """List an aligned stack once; write its folder only on explicit export."""
     if not frames:
         return
+    indices = list(getattr(window, 'registered_source_indices', ()) or range(len(frames)))
+    if filenames is None:
+        source_names = list(getattr(window, 'image_filenames', ()) or ())
+        filenames = [source_names[i] if i < len(source_names) else f'frame_{i + 1:04d}.png' for i in indices]
+    names = tuple(filenames)
+    label = trans.t('output_aligned_stack').format(n=len(frames))
+    record = OutputRecord.create(None, label, kind='aligned', exported=False)
+    record.aligned_frames = tuple(frames)
+    record.aligned_names = names
+    record.linear_dng_metadata = deepcopy(linear_dng_metadata)
+    if source_frames is not None and len(source_frames) == len(frames):
+        record.aligned_source_frames = tuple(source_frames)
+        record.aligned_source_indices = tuple(source_indices or range(len(frames)))
+        record.aligned_source_revision = source_revision
+    from core.image_loader import stack_icc_profile
+    record.icc_profile = stack_icc_profile(window, indices) if icc_profile is None else icc_profile
+    item = window.output_manager._insert_output(None, label, record)
+    item.setIcon(QIcon.fromTheme("folder"))
+    window.aligned_stack_dir = None
 
-    label_manager = getattr(window, "label_manager", None)
-    names = list(getattr(window, "image_filenames", []) or [])
 
-    # Same naming convention as the fused-image folders:
-    # <stack>_<timestamp>_<fusion>_<alignment>
-    stack_name = "Stack"
-    src = getattr(window, "current_folder_path", None)
-    if src:
-        stack_name = os.path.basename(src.rstrip("/\\")) or "Stack"
-    align = getattr(window, "current_alignment_method", lambda: "none")()
-    align_tag = {"homography": "Homo", "ecc": "ECC",
-                 "openfocus": "OF"}.get(align, "NoAlign")
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Name carries everything the user asked to identify a staged stack:
-    # frame count, source stack, alignment method, time. The output entry
-    # shows this exact name, and "Save As" creates a sub-folder with it.
-    folder_name = (f"OpenFocus_{stack_name}_{align_tag}_"
-                   f"{len(frames):03d}frames_{stamp}")
-    folder = os.path.join(tempfile.gettempdir(), folder_name)
-    os.makedirs(folder, exist_ok=True)
-
-    saved = 0
-    for index, frame in enumerate(frames):
-        image = frame
-        if label_manager is not None:
-            image = label_manager.prepare_bgr_image("input", image, index)
-        image = scalebar.burn(image, scalebar.export_cfg(window))
-        name = (names[index] if index < len(names)
-                else f"aligned_{index + 1:04d}.png")
-        if imwrite_auto(os.path.join(folder, name), image):
-            saved += 1
-    if not saved:
-        return
-
-    # The entry text IS the staged folder name: the UI label and the
-    # "Save As" sub-folder match exactly, which the user asked for.
-    item = QListWidgetItem(folder_name)
-    item.setToolTip(trans.t("output_aligned_stack").format(n=saved)
-                    + "\n" + folder)
-    item.setData(ALIGNED_DIR_ROLE, folder)
-    item.setData(OUTPUT_RECORD_ROLE, OutputRecord.create(
-        frames[0], folder_name, kind="aligned", exported=True))
-    try:
-        icon = QIcon(cv2_to_pixmap(_thumbnail_bgr(frames[0], 40)))
-        item.setIcon(icon)
-    except Exception:
-        pass
-    window.output_list.insertItem(0, item)
-    window.fusion_results.insert(0, frames[0])
-    window.output_list.clearSelection()
-    window.output_list.setCurrentRow(0)
-    # The "输出 (N)" header must count align-only results too, or the counter
-    # stayed at 0 while entries appeared.
-    window.output_manager.update_output_count()
-    window.aligned_stack_dir = folder
-    window.statusBar().showMessage(
-        trans.t("output_aligned_staged").format(path=folder), 8000)

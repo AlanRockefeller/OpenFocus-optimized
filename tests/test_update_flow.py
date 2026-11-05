@@ -147,7 +147,7 @@ class TestReleaseNotes:
 
         def fake(url, timeout=None):
             calls.append(url)
-            return payload
+            return {"releases": payload}
         monkeypatch.setattr(updater, "_api_get", fake)
         return calls
 
@@ -157,9 +157,7 @@ class TestReleaseNotes:
         assert "1.49" in notes and "1.48" in notes
         assert "1.47" not in notes          # installed version itself excluded
         assert "OLD" not in notes           # older versions excluded
-        # the LIST endpoint (not /latest), otherwise the body would be a
-        # single release dict and nothing would aggregate
-        assert calls and "/releases?" in calls[0]
+        assert calls == [updater.RELEASES_API_URL]
 
     def test_markdown_is_rendered_plain(self, monkeypatch):
         self._fake_api(monkeypatch, self.ITEMS)
@@ -183,10 +181,10 @@ class TestReleaseNotes:
 
         def fake_latest():
             return True, "v1.49", "http://page", None, {
-                "url": "http://zip", "digest": "sha256:ab"}
+                "url": "http://zip", "digest": "sha256:ab"}, []
         monkeypatch.setattr(updater, "fetch_latest_release", fake_latest)
         monkeypatch.setattr(updater, "fetch_release_notes",
-                            lambda cur, latest: "NOTES-TEXT")
+                            lambda cur, latest, **kwargs: "NOTES-TEXT")
         updater.check_async("1.47",
                             lambda *a: seen.__setitem__("r", a))
         for _ in range(200):
@@ -312,17 +310,20 @@ class TestPendingRestore:
         recovery.clear_pending_restore()
         assert recovery.pending_restore() is None
 
-    def test_project_path_is_remembered(self, tmp_path, monkeypatch):
+    def test_empty_workspace_does_not_restore_previous_project(self, tmp_path, monkeypatch):
         from utils import recovery
         monkeypatch.setattr(recovery, "recovery_dir", lambda: str(tmp_path))
         target = str(tmp_path / "my project.ofproj")
+        snapshot = tmp_path / recovery.SESSION_FILE
+        snapshot.write_text("previous snapshot", encoding="utf-8")
 
         class _Window:
             project_path = target
             raw_images = []
 
-        recovery.mark_pending_restore(_Window())
-        assert recovery.pending_restore() == target
+        assert recovery.mark_pending_restore(_Window()) is True
+        assert recovery.pending_restore() == ""
+        assert not snapshot.exists()
 
 
 class _StubSettings:
@@ -415,7 +416,7 @@ class TestUpdateManagerState:
         manager = um.UpdateManager(_Host())
         monkeypatch.setattr(manager, "is_busy", lambda: True)
         assert manager.download_and_apply("v9.9", "https://x/p.zip") is False
-        assert manager._apply_when_ready is False
+        assert manager.state == um.STATE_IDLE
 
     def test_already_staged_click_applies_immediately(self, tmp_path, monkeypatch, qapp):
         """The first click must restart the app, not silently flip to 'ready'."""
@@ -468,27 +469,45 @@ class TestUpdateManagerState:
         assert started == []
         assert manager._idle_timer.isActive()
 
-    def test_empty_cancel_label_renders_a_blank_button(self, qapp):
-        """Why the dialog must not be built with cancelButtonText="".
+    def test_download_dialog_has_a_working_cancel_button(self, qapp, monkeypatch):
+        import threading
+        import time
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QMainWindow, QPushButton
+        from locales import trans
+        from main import OpenFocus
 
-        Qt isNull()-checks that argument: an explicit empty string creates a
-        QPushButton with no text — the empty grey box users saw in the
-        download dialog — while None creates no button at all.
-        """
-        from PyQt6.QtWidgets import QProgressDialog, QPushButton
-        blank = QProgressDialog("working", "", 0, 100)
-        assert [b.text() for b in blank.findChildren(QPushButton)] == [""]
-        blank.close()
-        none = QProgressDialog("working", None, 0, 100)
-        assert [b.text() for b in none.findChildren(QPushButton)] == []
-        none.close()
+        started = threading.Event()
 
-    def test_update_dialogs_pass_a_labelled_cancel_button(self):
-        from pathlib import Path
-        src = Path("main.py").read_text(encoding="utf-8")
-        assert "QProgressDialog(" in src
-        assert ', "", ' not in src, "empty cancel label => blank grey button"
-        assert "trans.t('btn_cancel_download')" in src
+        def download(_url, _dest, *, on_progress, should_cancel):
+            started.set()
+            on_progress(0, 100)
+            while not should_cancel():
+                time.sleep(0.01)
+            raise RuntimeError("download cancelled")
+
+        monkeypatch.setattr(updater, "download_to_file", download)
+        window = QMainWindow()
+        OpenFocus._download_and_launch_update(window, "https://example.test/setup.exe", "v9.9")
+        worker = window._update_download_worker
+        try:
+            assert started.wait(5)
+            dialog = window._update_progress
+            dialog.show()
+            qapp.processEvents()
+            buttons = dialog.findChildren(QPushButton)
+            assert len(buttons) == 1
+            assert buttons[0].text() == trans.t('btn_cancel_download')
+            QTest.mouseClick(buttons[0], Qt.MouseButton.LeftButton)
+            assert worker.wait(5000)
+            qapp.processEvents()
+        finally:
+            worker.cancel()
+            worker.wait(5000)
+            window.close()
+            window.deleteLater()
+
 
 
 
@@ -572,3 +591,52 @@ class TestStartupUpdateBanner:
         assert palette("light")["accentSoft"] in host.update_banner.styleSheet()
         host.update_banner.apply_theme("dark")
         assert palette("dark")["accentSoft"] in host.update_banner.styleSheet()
+
+
+def test_hidden_version_stays_hidden_when_ready(qapp):
+    """Dismissing a version is a decision about that version, not a state."""
+    import main as main_module
+
+    class _Banner:
+        tag = "v9.9"
+        shown = []
+
+        def show_for(self, tag, current, ready=False):
+            self.shown.append((tag, ready))
+
+    host = type("H", (), {})()
+    host.update_banner = _Banner()
+    host._banner_dismissed_tag = lambda: "v9.9"
+    main_module.OpenFocus._show_update_banner(host, "v9.9", ready=True)
+    assert host.update_banner.shown == [], "READY bypassed the hidden version"
+
+    main_module.OpenFocus._show_update_banner(host, "v10.0", ready=True)
+    assert host.update_banner.shown == [("v10.0", True)]
+
+
+def test_staged_build_must_be_newer_than_current(monkeypatch):
+    """A stale staged build must not be offered as a downgrade."""
+    from constants import APP_VERSION
+    from controllers.update_manager import UpdateManager
+
+    assert UpdateManager._is_newer_than_current("v999.0") is True
+    assert UpdateManager._is_newer_than_current(APP_VERSION) is False
+    assert UpdateManager._is_newer_than_current("v0.0.1") is False
+
+
+def test_restart_preparation_refuses_without_a_snapshot(qapp, monkeypatch):
+    """No snapshot means no hand-off: the app keeps running."""
+    import main as main_module
+    from utils import recovery
+
+    host = type("H", (), {})()
+    host._has_work_in_flight = lambda: False
+    host._project_dirty = False
+    host.persist_settings = lambda: None
+    warnings = []
+    monkeypatch.setattr(main_module, "show_warning_box",
+                        lambda *a, **k: warnings.append(a))
+    monkeypatch.setattr(recovery, "write_snapshot", lambda _w: False)
+
+    assert main_module.OpenFocus.prepare_for_update_restart(host) is False
+    assert warnings, "the user must be told why the restart stopped"
