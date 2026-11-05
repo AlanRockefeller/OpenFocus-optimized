@@ -29,7 +29,8 @@ from PyQt6.QtWidgets import (
 from locales import trans
 from utils.image_utils import thumbnail_bgr, to_display_uint8
 from utils.path_identity import same_path
-from utils.retouch import RetouchDocument, adjust_tones
+from utils.retouch import (RetouchDocument, adjust_tones,
+                           clear_auto_background_cache)
 from widgets.flow_layout import FlowPanel
 
 _SHARPNESS_WORKERS = set()
@@ -817,6 +818,7 @@ class RetouchDialog(QDialog):
         self._focus_signal.connect(self._on_focus_changed)
         self.finished.connect(lambda _result: self._save_geometry())
         self.finished.connect(self._shutdown_sharpness)
+        self.finished.connect(lambda _result: clear_auto_background_cache())
         self.finished.connect(self.deleteLater)
         self.destroyed.connect(
             lambda _object=None, ref=weakref.ref(self): _release_dialog_buffers(ref))
@@ -1764,6 +1766,19 @@ class RetouchDialog(QDialog):
         outputs = [(path, missing_data_overlay(self.doc.working, fill.missing))]
         outputs += [(f"{stem}-{name}.png", layer) for name, layer, _c in fill.missing.layers()]
         try:
+            sources = self._checkpoint_sources()
+            for target, _image in outputs:
+                if any(same_path(target, source) for source in sources):
+                    raise ValueError(trans.t("retouch_missing_input"))
+            existing_siblings = [target for target, _image in outputs[1:]
+                                 if os.path.exists(target)]
+            if existing_siblings and QMessageBox.question(
+                    self, trans.t("retouch_missing_save"),
+                    trans.t("retouch_missing_replace").format(
+                        files="\n".join(existing_siblings)),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+                return
             for target, image in outputs:
                 if not imwrite_auto(target, image):
                     raise OSError(target)
@@ -1801,6 +1816,8 @@ class RetouchDialog(QDialog):
     def _checkpoint_sources(self):
         window = self.window_main
         paths = list(self.input_paths)
+        paths.extend(getattr(self.record, "source_paths", ()) or ())
+        paths.extend(getattr(getattr(self.record, "context", None), "source_paths", ()) or ())
         paths.extend(getattr(window, "image_source_paths", ()) or ())
         paths.extend(getattr(getattr(window, "image_loader", None), "image_paths", ()) or ())
         paths.extend(getattr(window, "_standalone_retouch_paths", ()) or ())
