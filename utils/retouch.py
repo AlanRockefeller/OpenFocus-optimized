@@ -11,7 +11,9 @@ owns the pixel math, the per-stroke coverage map and tile-based history.
 from __future__ import annotations
 
 from collections import OrderedDict
+import dataclasses
 import threading
+import weakref
 from typing import Optional, Tuple
 
 import cv2
@@ -430,6 +432,77 @@ class TileHistory:
             self.evicted = True
 
 
+# Cached auto-background results, newest last.  Saving a checkpoint replays
+# every operation to verify it; recomputing a background there would cost as
+# much as the original run, and a recomputation is not guaranteed to round
+# every pixel the same way (OpenCV threading), which would fail the exact
+# replay check.  One entry per run in the session, bounded by count and bytes
+# (the newest entry is always kept).  Weak frame references preserve the
+# identity check without making this cache the owner of a released stack.
+_AUTO_BG_CACHE: dict = {}
+_AUTO_BG_LOCK = threading.Lock()
+_AUTO_BG_CACHE_ENTRIES = 4
+_AUTO_BG_CACHE_BYTES = 2 << 30
+
+
+def clear_auto_background_cache():
+    """Release the cached results and masks at the end of a retouch session."""
+    with _AUTO_BG_LOCK:
+        _AUTO_BG_CACHE.clear()
+
+
+def _auto_background_bytes(result) -> int:
+    total = result.image.nbytes if result.image is not None else 0
+    return total + sum(layer.nbytes for _name, layer, _colour in result.missing.layers())
+
+
+def _auto_background_key(image, frames, preset, clean, keep_soft_parts=False):
+    import hashlib
+    digest = hashlib.sha256()
+    for row in image:
+        digest.update(memoryview(np.ascontiguousarray(row)).cast("B"))
+    return (digest.hexdigest(), image.shape, image.dtype.str, str(preset), bool(clean),
+            bool(keep_soft_parts)), \
+        tuple(frame.image for frame in frames)
+
+
+def compute_auto_background(image, frames, preset="auto", clean=True,
+                            cancelled=None, progress=None, keep_soft_parts=False):
+    """Run `core.background_fill.replace_background` on a retouch image.
+
+    Admits the working set with the resource policy and serializes with
+    other heavy jobs.  Returns a `BackgroundFillResult`."""
+    from core.background_fill import replace_background
+    from core.resource_policy import heavy_job, require_memory
+    key, arrays = _auto_background_key(image, frames, preset, clean, keep_soft_parts)
+    with _AUTO_BG_LOCK:
+        entries = _AUTO_BG_CACHE.setdefault("entries", [])
+        for index, (cached_key, references, result) in enumerate(entries):
+            if cached_key == key and len(references) == len(arrays) and all(
+                    reference() is array for reference, array in zip(references, arrays)):
+                entries.append(entries.pop(index))          # most recently used last
+                return result
+    h, w = image.shape[:2]
+    valid_masks = [frame.valid_mask() for frame in frames]
+    # Measured peak: ~160 B/px plus a half-resolution float copy per frame.
+    required = int(h * w * (170 + len(arrays))) + sum(
+        mask.nbytes for mask in valid_masks if mask is not None)
+    with heavy_job(cancelled):
+        require_memory(required)
+        result = replace_background([frame.image for frame in frames], image, preset=preset,
+                                    valid_masks=valid_masks,
+                                    clean=clean, keep_soft_parts=keep_soft_parts,
+                                    progress=progress, cancelled=cancelled)
+    with _AUTO_BG_LOCK:
+        entries = _AUTO_BG_CACHE.setdefault("entries", [])
+        entries.append((key, tuple(weakref.ref(array) for array in arrays), result))
+        total = sum(_auto_background_bytes(entry[2]) for entry in entries)
+        while len(entries) > 1 and (len(entries) > _AUTO_BG_CACHE_ENTRIES
+                                    or total > _AUTO_BG_CACHE_BYTES):
+            total -= _auto_background_bytes(entries.pop(0)[2])
+    return result
+
+
 class RetouchDocument:
     """One retouch session: base image, source frames, brush and history."""
 
@@ -470,6 +543,8 @@ class RetouchDocument:
         self._point_count = 0
         self._record_overflow = False
         self.last_status = ""
+        # Missing-data maps per committed auto_background operation index.
+        self._background_fills = {}
 
     @property
     def checkpoint_ready(self):
@@ -561,6 +636,72 @@ class RetouchDocument:
             if status == "committed":
                 self._record_operation({"type": "tones", "exposure": float(exposure),
                                         "contrast": float(contrast)})
+            return status
+        except BaseException:
+            self.history.abort()
+            raise
+
+    def auto_background_supported(self) -> bool:
+        """Every frame must cover the whole result (not an ROI paste)."""
+        return len(self.frames) >= 2 and all(
+            frame.image is not None and frame.offset_x == 0 and frame.offset_y == 0
+            and frame.image.shape[:2] == (self.height, self.width)
+            for frame in self.frames)
+
+    def auto_background(self, preset: str = "auto", clean: bool = True,
+                        cancelled=None, progress=None, keep_soft_parts: bool = False) -> str:
+        """Replace the background of the current result with one source
+        frame (see core.background_fill) as one history transaction.
+
+        Strokes already painted on the subject survive; the background is
+        rebuilt from the frames.  Returns "committed", "empty" (nothing to
+        replace, e.g. a ground-level scene), "cancelled", "busy",
+        "unsupported", "oversize" or "record_limit".  Input problems raise
+        `core.background_fill.BackgroundFillError`.
+        """
+        from core.background_fill import BackgroundFillCancelled
+        from core.registration import RegistrationCancelled   # heavy_job's cancel
+        if self.stroke_active:
+            return "busy"
+        if self._cursor >= 100000:
+            self.last_status = "record_limit"
+            return "record_limit"
+        if not self.auto_background_supported():
+            return "unsupported"
+        if self.working.nbytes > self.history.max_bytes:
+            return "oversize"
+        try:
+            result = compute_auto_background(self.working, self.frames, preset, clean,
+                                             cancelled=cancelled, progress=progress,
+                                             keep_soft_parts=keep_soft_parts)
+        except (BackgroundFillCancelled, RegistrationCancelled):
+            return "cancelled"
+        image = result.image
+        self.history.begin()
+        try:
+            for key in self.history._tile_keys(0, 0, self.width, self.height):
+                if cancelled is not None and cancelled():
+                    self.history.abort()
+                    return "cancelled"
+                sl = self.history._tile_slice(key)
+                tile = self.working[sl]
+                new = image[sl]
+                if not np.array_equal(tile, new):
+                    self.history.remember_tile(key)
+                    tile[...] = new
+            if cancelled is not None and cancelled():
+                self.history.abort()
+                return "cancelled"
+            status = self.history.end(cancelled=cancelled)
+            if status == "committed":
+                operation = {"type": "auto_background", "preset": str(preset),
+                             "clean": bool(clean)}
+                if keep_soft_parts:
+                    operation["keep_soft_parts"] = True
+                self._record_operation(operation)
+                # The maps describe this step's result; the image itself is
+                # in the history, so it is not kept a second time here.
+                self._background_fills[self._cursor - 1] = dataclasses.replace(result, image=None)
             return status
         except BaseException:
             self.history.abort()
@@ -750,14 +891,31 @@ class RetouchDocument:
             self._record_operation({"type": "restore_all"})
         return changed
 
+    @property
+    def background_fill(self):
+        """The auto-background result behind the current image, or None.
+
+        Follows undo/redo: the latest auto_background step at or before the
+        history cursor, unless a later Restore all returned to the base."""
+        earlier = [index for index in self._background_fills if index < self._cursor]
+        if not earlier:
+            return None
+        index = max(earlier)
+        if any(op.get("type") == "restore_all" for op in self._operations[index + 1:self._cursor]):
+            return None
+        return self._background_fills[index]
+
+    def _drop_operations_from(self, start):
+        self._point_count -= sum(len(op.get("points", ())) for op in self._operations[start:])
+        del self._operations[start:]
+        for index in [index for index in self._background_fills if index >= start]:
+            del self._background_fills[index]
+
     def _trim_redo(self):
-        end = self._cursor + len(self.history._redo)
-        self._point_count -= sum(len(op.get("points", ())) for op in self._operations[end:])
-        del self._operations[end:]
+        self._drop_operations_from(self._cursor + len(self.history._redo))
 
     def _record_operation(self, operation):
-        self._point_count -= sum(len(op.get("points", ())) for op in self._operations[self._cursor:])
-        del self._operations[self._cursor:]
+        self._drop_operations_from(self._cursor)
         self._operations.append(operation)
         self._cursor += 1
         self._point_count += len(operation.get("points", ()))

@@ -32,6 +32,10 @@ class RenderManager:
         self._compare_queue: List[str] = []
         self._compare_total = 0
         self._compare_current: Optional[str] = None
+        # Methods a comparison run skipped, with the reason: one method that
+        # cannot run (StackMFF V2 needs ~115 GB on a 20 MP stack) must not
+        # cancel every method after it.
+        self._compare_failures: List[tuple] = []
         self._preview_mode = False
         # What the *running* render was launched with; see start_render().
         self._render_context: Optional[dict] = None
@@ -42,6 +46,10 @@ class RenderManager:
         self._render_interactive = True
         self._control_progress: Optional[tuple] = None
         self.alignment_diagnostics = None
+        # An interactive request made while source frames are loading.  Keep
+        # the forced algorithm and comparison ownership, not just a Boolean,
+        # so the deferred render cannot be mislabeled or outlive cancellation.
+        self._render_after_load: Optional[dict] = None
 
     def show_alignment_report(self, *, parent=None) -> None:
         dialog = QDialog(parent or self.window)
@@ -309,6 +317,7 @@ class RenderManager:
         if getattr(self, '_compare_mode', False):
             self._compare_mode = False
             self._compare_queue = []
+            self._compare_current = None
             self._restore_ui_controls()
 
     def _restore_ui_controls(self) -> None:
@@ -363,6 +372,9 @@ class RenderManager:
             self._compare_mode = False
             self._compare_queue = []
             self._compare_current = None
+            queued = self._render_after_load
+            if queued is not None and queued.get("compare", False):
+                self._render_after_load = None
             running = self.worker is not None and self.worker.isRunning()
             if running:
                 # Keep the truth visible until the worker acknowledges the
@@ -393,6 +405,7 @@ class RenderManager:
 
         self._compare_queue = list(methods)
         self._compare_total = len(methods)
+        self._compare_failures = []
         self._compare_cancelling = False
         self._compare_mode = True
         self._set_compare_button("cancel")
@@ -459,6 +472,28 @@ class RenderManager:
                 window.btn_render.setEnabled(False)
                 window.btn_render.setText(trans.t('depth_cancelling'))
                 QApplication.processEvents()
+            return
+        # Frames are still loading (a render clicked right after opening a
+        # stack used to say "load at least 2 images"): queue the render and
+        # start it when the load finishes.  A second click cancels the queue.
+        source = getattr(window, "source_manager", None)
+        if getattr(source, "_load_worker", None) is not None:
+            self._start_status = "loading"
+            if interactive:
+                if self._render_after_load is not None:
+                    queued = self._render_after_load
+                    self._render_after_load = None
+                    if queued.get("compare", False):
+                        # The queued request was the comparison's next method:
+                        # without it nothing would ever advance the run.
+                        self._abort_compare_run()
+                    window.statusBar().showMessage(trans.t("msg_render_queue_cancelled"), 5000)
+                else:
+                    self._render_after_load = {
+                        "force_algorithm": force_algorithm,
+                        "compare": bool(self._compare_mode),
+                    }
+                    window.statusBar().showMessage(trans.t("msg_render_queued_after_load"))
             return
         # A previous render may have aborted without clearing this; it decides
         # whether the result is treated as a throwaway draft.
@@ -845,6 +880,22 @@ class RenderManager:
         self._show_progress_bar(trans.t('render_progress'))
         self.worker.start()
 
+    def _stack_changed_since(self, context) -> bool:
+        """True when the stack (or the settings it was rendered with) is no
+        longer the one a render context was started for."""
+        window = self.window
+        return (
+            context is not None
+            and (window.raw_images is not context.get("source_ref")
+                 or window.included_indices() != context.get("included")
+                 or getattr(window, "source_revision", 0) != context.get("source_revision", 0)
+                 or list(window.image_filenames or []) != context.get("full_filenames", context["filenames"])
+                 or ("alignment_key" in context and self._alignment_key(
+                     context["included"], context["algorithm"]) != context["alignment_key"])
+                 or ("parameters" in context and self._processing_parameters(
+                     context["algorithm"]) != context["parameters"]))
+        )
+
     def on_render_finished(
         self,
         processed_images: List[Any],
@@ -873,17 +924,7 @@ class RenderManager:
         # — and export — frames of the previous stack under the new stack's
         # filenames, so drop it instead. The alignment cache has its own,
         # stricter guard below.
-        stack_changed = (
-            context is not None
-            and (window.raw_images is not context.get("source_ref")
-                 or window.included_indices() != context.get("included")
-                 or getattr(window, "source_revision", 0) != context.get("source_revision", 0)
-                 or list(window.image_filenames or []) != context.get("full_filenames", context["filenames"])
-                 or ("alignment_key" in context and self._alignment_key(
-                     context["included"], context["algorithm"]) != context["alignment_key"])
-                 or ("parameters" in context and self._processing_parameters(
-                     context["algorithm"]) != context["parameters"]))
-        )
+        stack_changed = self._stack_changed_since(context)
         if stack_changed:
             import logging as _logging
             message = trans.t('msg_render_stack_changed')
@@ -1220,12 +1261,7 @@ class RenderManager:
                     self._compare_chain_timer.timeout.connect(self._start_next_compare)
                     self._compare_chain_timer.start(400)
                 else:
-                    self._compare_mode = False
-                    self._restore_ui_controls()
-                    window.statusBar().showMessage(
-                        trans.t('msg_compare_done').format(count=self._compare_total),
-                        10000)
-                    QApplication.alert(window)
+                    self._finish_compare_run()
             else:
                 # 恢复 UI 控件
                 self._restore_ui_controls()
@@ -1357,8 +1393,32 @@ class RenderManager:
             window.statusBar().showMessage(
                 f"{trans.t('render_progress')} {pct}% ({done}/{total}){eta}", 5000)
 
+    def _finish_compare_run(self) -> None:
+        """End a comparison run: unlock the UI and report skipped methods."""
+        window = self.window
+        self._compare_mode = False
+        self._restore_ui_controls()
+        failures = list(getattr(self, "_compare_failures", []))
+        done = self._compare_total - len(failures)
+        window.statusBar().showMessage(
+            trans.t('msg_compare_done').format(count=done), 10000)
+        from PyQt6.QtWidgets import QWidget
+        if isinstance(window, QWidget):
+            QApplication.alert(window)
+        if failures and getattr(self, "_render_interactive", True):
+            details = "\n".join(f"{self.algo_display_name(method)}: {reason}"
+                                 for method, reason in failures)
+            show_message_box(window, trans.t("msg_warning"),
+                             trans.t("msg_compare_skipped").format(
+                                 done=done, total=self._compare_total),
+                             details, QMessageBox.Icon.Warning)
+
     def on_render_error(self, error_message: str) -> None:
         window = self.window
+        try:
+            stack_changed = self._stack_changed_since(self._render_context)
+        except Exception:      # a partial window (tests, early startup): cannot tell
+            stack_changed = False
         context = self._render_context or {}
         self.alignment_diagnostics = (
             list(getattr(self.worker, 'alignment_report', None) or [])
@@ -1372,8 +1432,45 @@ class RenderManager:
         self._dispose_worker()
         self._hide_progress_bar()
 
+        if (getattr(self, '_compare_mode', False)
+                and not error_message.startswith("CANCELLED") and stack_changed):
+            # The stack changed under the run: the remaining methods would
+            # render a different stack than the results already published.
+            self._compare_mode = False
+            self._compare_queue = []
+            self._compare_current = None
+            self.last_state = "discarded"
+            self.last_error = trans.t('msg_render_stack_changed')
+            self.last_result = None
+            self._control_progress = None
+            self._restore_ui_controls()
+            window.statusBar().showMessage(self.last_error, 8000)
+            return
+        if (getattr(self, '_compare_mode', False)
+                and not error_message.startswith("CANCELLED")):
+            # One method that cannot run (not enough memory for a whole-frame
+            # network, a missing model...) is skipped; the rest still render
+            # and the skipped ones are listed once at the end.
+            import logging
+            method = self._compare_current or "?"
+            logging.getLogger("openfocus").warning(
+                "compare run: %s failed, continuing: %s", method, error_message)
+            self._compare_failures.append((method, str(error_message)))
+            self.last_error = str(error_message)
+            self._control_progress = None
+            if self._compare_queue:
+                from PyQt6.QtCore import QObject
+                self._compare_chain_timer = QTimer(window if isinstance(window, QObject) else None)
+                self._compare_chain_timer.setSingleShot(True)
+                self._compare_chain_timer.timeout.connect(self._start_next_compare)
+                self._compare_chain_timer.start(400)
+            else:
+                self.last_state = "error"
+                self.last_result = None
+                self._finish_compare_run()
+            return
         if getattr(self, '_compare_mode', False):
-            # A failed method aborts the whole comparison run
+            # Cancelled: stop the whole comparison run
             self._compare_mode = False
             self._compare_queue = []
 

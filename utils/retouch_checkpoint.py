@@ -242,6 +242,19 @@ def _replay_checkpoint(doc, path, cancelled=None):
                 contrast = _number(op['contrast'], -1, 1)
                 if replay.adjust_tones(exposure, contrast, cancelled) != 'committed':
                     raise ValueError('Tone adjustment could not be replayed')
+            elif kind == 'auto_background':
+                preset = op['preset']
+                clean = op['clean']
+                soft_parts = op.get('keep_soft_parts', False)
+                if (preset not in ('auto', 'soft', 'sharp') or type(clean) is not bool
+                        or type(soft_parts) is not bool):
+                    raise ValueError('Invalid auto background operation')
+                status = replay.auto_background(preset, clean, cancelled,
+                                                keep_soft_parts=soft_parts)
+                if status == 'cancelled':
+                    raise ValueError('Retouch replay cancelled')
+                if status != 'committed':
+                    raise ValueError('Auto background could not be replayed')
             elif kind == 'restore_all':
                 if not replay.restore_all():
                     raise ValueError('Restore could not be replayed')
@@ -271,4 +284,7 @@ def load_checkpoint(doc, path, cancelled=None):
     doc.history = replay.history
     doc._operations = replay._operations
     doc._cursor = replay._cursor
+    # The replayed Auto background steps carry their missing-data maps; maps
+    # from this session's earlier runs no longer describe the loaded image.
+    doc._background_fills = replay._background_fills
     doc._point_count = replay._point_count
