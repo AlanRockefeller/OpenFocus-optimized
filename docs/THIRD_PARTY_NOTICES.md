@@ -3,6 +3,17 @@
 OpenFocus ships code and model weights from other projects. This file records
 the origin, the license, and the changes made here.
 
+## Numba and llvmlite — CPU depth-filter compilation
+
+- **Upstream**: https://github.com/numba/numba and
+  https://github.com/numba/llvmlite
+- **Versions**: Numba 0.61.2 or later with its compatible llvmlite runtime.
+- **Copyright**: Numba (c) 2012, Anaconda, Inc.; llvmlite (c) 2014, Anaconda Inc.
+- **License**: BSD 2-Clause; used without modification to compile the Q12
+  integer recurrence on the CPU. The frozen build retains the complete original
+  `numba-*.dist-info` and `llvmlite-*.dist-info` license files, including their
+  third-party and LLVM notices.
+
 ## threadpoolctl — native thread limits
 
 - **Upstream**: https://github.com/joblib/threadpoolctl
@@ -77,6 +88,46 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+```
+
+## faststack — EXIF focus ordering
+
+- **Upstream**: https://github.com/AlanRockefeller/faststack
+- **License**: MIT, Copyright © 2025 Alan Rockefeller.
+- **Adapted code**: `core/focus_order.py`, which reads OM SYSTEM focus-step
+  maker notes and orders folder inputs near to far. The maker-note IFD
+  parsing, direction detection and ExifTool fallback follow
+  `faststack/io/focus_order.py`.
+- **Changes**: rewritten for this package (plain path strings, a 1 MiB
+  bounded header read, OpenFocus logging, optional ExifTool lookup with a
+  60 s timeout); the public entry point returns paths plus an evidence
+  label.
+
+```
+MIT License
+
+Copyright © 2025 Alan Rockefeller
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the “Software”), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## StackMFF V3 — neural fusion model
