@@ -1180,8 +1180,9 @@ def _run_retouch_command(argv: List[str]) -> int:
         document = RetouchDocument(base, context)
         if args.stacked:
             stacked = _load_images([args.stacked])
-            if len(stacked) != 1 or stacked[0].shape != base.shape:
-                raise ValueError("--stacked must be one image the size of --base")
+            if (len(stacked) != 1 or stacked[0].shape != base.shape
+                    or stacked[0].dtype != base.dtype):
+                raise ValueError("--stacked must be one image with the size and bit depth of --base")
             document.stacked_image = stacked[0]
         document.initialize_checkpoint()
         document.load_checkpoint(args.checkpoint)
