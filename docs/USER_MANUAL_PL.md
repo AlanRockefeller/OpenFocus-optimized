@@ -855,7 +855,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # uruchom aplikację desk
 openfocus ctl <command> [flags]          # steruj działającym oknem (patrz AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # odtwórz zapisany przepis headless
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` uruchamia aplikację w tle; `--control` czeka na kanał sterowania i wypisuje JSON połączenia. `openfocus describe` i `version` nie wymagają danych wejściowych. Przepływ pracy dla agenta opisano w [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) oraz `skills/openfocus-control/SKILL.md`.
@@ -1007,6 +1007,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Użyj rzeczywistych klatek używanych do retuszu, po wyrównaniu i dowolnym przycięciu ROI lub innym przetwarzaniu, z oryginalnymi wartościami pikseli i głębią. Punkt kontrolny zapisuje edycje i odciski, a nie piksele obrazów. Odtwarzanie rekonstruuje zapisane przesunięcia klatek i zachowanie wyrównania oraz weryfikuje bazę, uporządkowane klatki i maski ważności; niezgodne piksele, geometria lub maski są odrzucane. Każda ścieżka musi zawierać jeden obraz. Wyjście musi być PNG lub TIFF i zachowuje głębię bazy. Punkt kontrolny i obrazy wejściowe nie mogą być użyte jako wyjście.
+
+Jeśli punkt kontrolny zawiera krok automatycznego tła wykonany na wyniku, który
+był już retuszowany, podaj też wynik stacku, z którego pochodzi, przez
+`--stacked stacked.png`.
 
 Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd użycia. Uruchomienie `python main.py --help` wypisuje wszystkie opcje; uruchomienie z prostą ścieżką (`python main.py C:\stack`) nadal otwiera interfejs graficzny z wczytanym folderem.
 

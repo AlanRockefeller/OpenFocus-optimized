@@ -874,7 +874,7 @@ openfocus gui [--control] [--socket NAAM] [paden…]   # desktopapp starten
 openfocus ctl <command> [flags]          # een draaiend venster besturen (zie AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [verwerkingsopties]
 openfocus recipe run FILE [--dry-run]    # een opgeslagen headless recept afspelen
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` start de app losgekoppeld; `--control` wacht op het besturingskanaal en drukt de verbindings-JSON af. `openfocus describe` en `version` hebben geen invoer nodig. De agentworkflow staat in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) en `skills/openfocus-control/SKILL.md`.
@@ -1009,6 +1009,10 @@ openfocus retouch replay edits.json --base fused.png --sources processed1.png pr
 ```
 
 Gebruik de frames die daadwerkelijk voor het retoucheren zijn gebruikt — na uitlijning en een eventuele ROI-bijsnijding of andere verwerking — met hun oorspronkelijke pixelwaarden en bitdiepte. Het controlepunt legt bewerkingen en vingerafdrukken vast, niet de beeldpixels. Afspelen reconstrueert de vastgelegde frame-offsets en het uitlijningsgedrag en controleert de basis, de geordende frames en geldigheidsmaskers; onverenigbare pixels, geometrie of maskers worden geweigerd. Elk pad moet één afbeelding bevatten. De uitvoer moet PNG of TIFF zijn en behoudt de bitdiepte van de basis. Het controlepunt en de invoerbeelden mogen niet als uitvoer worden gebruikt.
+
+Bevat het controlepunt een stap Automatische achtergrond op een resultaat dat al
+geretoucheerd was, geef dan ook het gestapelde resultaat waar het van komt op
+met `--stacked stacked.png`.
 
 Exitcodes: `0` succes, `1` verwerkingsfout, `2` gebruiksfout. `python main.py --help` toont alle opties; starten met een gewoon pad (`python main.py C:\stack`) opent nog steeds de GUI met die map geladen.
 

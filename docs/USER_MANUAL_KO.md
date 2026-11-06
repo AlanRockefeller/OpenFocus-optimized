@@ -850,6 +850,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 하고 출력은 PNG 또는 TIFF로 베이스 비트 깊이를 유지하며 체크포인트와 입력 이미지를 출력으로
 쓸 수 없습니다.
 
+체크포인트에 이미 리터치한 결과에서 실행한 자동 배경 단계가 있으면, 그 원본인 스택 결과도 `--stacked stacked.png` 로 지정하십시오.
+
 ### 배경 바꾸기 (자동 배경)
 
 스택을 하면 피사체와 함께 배경도 선명해집니다. 그래서 스택 이미지의 배경은 흐림 정도가 다른 조각들이 이어 붙은 모습이 되기 쉽고, 피사체 주위에 헤일로가 생깁니다. 리터치 작업 공간의 **자동 배경…** 은 배경을 같은 스택의 실제 프레임 하나로 바꿉니다. 피사체는 스택 결과 그대로입니다. 배경은 프레임 하나와 스택 결과로 만들어지며, 처리 과정에서 픽셀이 재구성, 조정, 혼합될 수 있습니다.
@@ -1283,7 +1285,7 @@ openfocus gui [--control] [--socket NAME] [경로…]   # 데스크톱 앱 시�
 openfocus ctl <command> [flags]          # 실행 중인 창 제어(AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [처리 옵션]
 openfocus recipe run FILE [--dry-run]    # 저장된 헤드리스 레시피 재생
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui`는 분리되어 시작합니다. `--control`은 제어 채널이 준비될 때까지 기다린 뒤
@@ -1389,6 +1391,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 깊이로 지정하세요. 체크포인트는 편집과 지문을 기록하며 픽셀은 기록하지 않습니다. 각
 경로에는 이미지 하나만 있어야 하고 출력은 PNG 또는 TIFF로 베이스 비트 깊이를 유지하며
 체크포인트나 입력을 덮어쓸 수 없습니다.
+
+체크포인트에 이미 리터치한 결과에서 실행한 자동 배경 단계가 있으면, 그 원본인 스택 결과도 `--stacked stacked.png` 로 지정하십시오.
 
 | 옵션 | 설명 |
 |--------|-------------|

@@ -832,7 +832,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # avvia l'app desktop
 openfocus ctl <command> [flags]          # controlla una finestra in esecuzione (vedi AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # riproduce una ricetta headless salvata
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` si avvia in background; `--control` attende il canale di controllo e stampa il suo JSON di connessione. `openfocus describe` e `version` non richiedono input. Il flusso di lavoro per agenti è documentato in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -962,6 +962,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Usa i fotogrammi effettivamente usati per il ritocco, dopo allineamento e qualsiasi ritaglio ROI o altra elaborazione, con i valori di pixel e la profondità di bit originali. Il punto di controllo registra modifiche e impronte, non i pixel. La riproduzione ricostruisce gli offset dei fotogrammi e il comportamento di allineamento registrati e verifica base, fotogrammi ordinati e maschere di validità; pixel, geometria o maschere incompatibili vengono rifiutati. Ogni percorso deve contenere un'immagine. L'output deve essere PNG o TIFF e conserva la profondità di bit della base. Il punto di controllo e le immagini di input non possono essere usati come output.
+
+Se il checkpoint contiene un passaggio di sfondo automatico eseguito su un
+risultato già ritoccato, indica anche il risultato impilato di origine con
+`--stacked stacked.png`.
 
 Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `python main.py --help` mostra tutte le opzioni; avviare con un semplice percorso (`python main.py C:\stack`) apre comunque la GUI con quella cartella caricata.
 

@@ -1418,7 +1418,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # start the desktop app
 openfocus ctl <command> [flags]          # drive a running window (see AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # replay a saved headless recipe
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` launches detached; `--control` waits for the control channel and
@@ -1616,6 +1616,10 @@ recorded frame offsets and alignment behavior and verifies the base, ordered
 frames and validity masks; incompatible pixels, geometry or masks are rejected.
 Each path must contain one image. Output must be PNG or TIFF and preserves the
 base bit depth. The checkpoint and input images cannot be used as the output.
+
+If the checkpoint contains an Auto background step run on an output that was
+already retouched, also give the stacked result it came from with
+`--stacked stacked.png`.
 
 Exit codes: `0` success, `1` processing error, `2` usage error. Running
 `python main.py --help` prints all options; launching with a plain path

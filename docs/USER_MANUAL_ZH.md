@@ -768,6 +768,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 蒙版不兼容会被拒绝。每个路径只能包含一张图，输出必须是 PNG 或 TIFF 并保留底图位深，
 检查点和输入图像不能作为输出。
 
+如果检查点包含在已修饰结果上运行的自动背景步骤，还需用 `--stacked stacked.png` 指定它所来自的堆栈结果。
+
 **编辑 → 修饰图像文件…** 可单独选择已有结果和已对齐源图。只接受单页 PNG、TIFF、
 JPEG 和 BMP，正立尺寸、通道及 8 位/16 位深度必须一致，加载时会应用 EXIF 方向；
 不支持 alpha 和多页图像。所选帧由用户提供，不是渲染记录的来源。尺寸相同并不能证明
@@ -1125,7 +1127,7 @@ openfocus gui [--control] [--socket NAME] [路径…]   # 启动桌面应用
 openfocus ctl <command> [flags]          # 操作运行中的窗口（见 AGENT_CONTROL_SPEC.md）
 openfocus recipe create FILE --input … --output … [处理参数]
 openfocus recipe run FILE [--dry-run]    # 重放保存的无头配方
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` 会分离启动；`--control` 会等待控制通道建立并打印连接 JSON。
@@ -1224,6 +1226,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 请使用修饰时实际使用的、已配准和 ROI 裁剪后的源帧，保持原像素值和位深。检查点记录编辑
 和指纹，不记录像素。每个路径只能包含一张图，输出必须是 PNG 或 TIFF、保留底图位深，
 且不能覆盖检查点或输入图像。
+
+如果检查点包含在已修饰结果上运行的自动背景步骤，还需用 `--stacked stacked.png` 指定它所来自的堆栈结果。
 
 | 参数 | 说明 |
 |------|------|

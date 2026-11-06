@@ -858,7 +858,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # запустить на
 openfocus ctl <command> [flags]          # управлять работающим окном (см. AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # воспроизвести сохранённый headless-рецепт
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` запускает приложение отдельно; `--control` ждёт появления канала управления и печатает JSON подключения. `openfocus describe` и `version` не требуют входных данных. Рабочий процесс для агента описан в [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) и `skills/openfocus-control/SKILL.md`.
@@ -1010,6 +1010,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Используйте фактические кадры, применявшиеся для ретуши, после совмещения и любой обрезки ROI или другой обработки, с исходными значениями пикселей и битностью. Точка сохранения записывает правки и отпечатки, а не пиксели изображений. Воспроизведение реконструирует записанные смещения кадров и поведение совмещения и проверяет базу, упорядоченные кадры и маски валидности; несовместимые пиксели, геометрия или маски отклоняются. Каждый путь должен содержать одно изображение. Выход должен быть PNG или TIFF и сохраняет битность базы. Точка сохранения и входные изображения не могут использоваться как выход.
+
+Если контрольная точка содержит шаг автофона, выполненный на уже
+отретушированном результате, укажите также исходный результат стекинга через
+`--stacked stacked.png`.
 
 Коды возврата: `0` — успех, `1` — ошибка обработки, `2` — ошибка использования. Запуск `python main.py --help` печатает все параметры; запуск с простым путём (`python main.py C:\stack`) по-прежнему открывает графический интерфейс с загруженной папкой.
 

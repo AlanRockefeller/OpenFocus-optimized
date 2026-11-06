@@ -830,7 +830,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # inicia o aplicativo des
 openfocus ctl <command> [flags]          # controla uma janela em execução (ver AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # reproduz uma receita headless salva
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` inicia em segundo plano; `--control` aguarda o canal de controle e imprime seu JSON de conexão. `openfocus describe` e `version` não exigem entrada. O fluxo de trabalho para agentes está documentado em [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -960,6 +960,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Use os quadros realmente usados para o retoque, após alinhamento e qualquer corte de ROI ou outro processamento, com seus valores de pixel e profundidade de bits originais. O checkpoint registra edições e impressões digitais, não os pixels. A reprodução reconstrói os deslocamentos de quadro e o comportamento de alinhamento registrados e verifica a base, os quadros ordenados e as máscaras de validade; pixels, geometrias ou máscaras incompatíveis são rejeitados. Cada caminho deve conter uma imagem. A saída deve ser PNG ou TIFF e preserva a profundidade de bits da base. O checkpoint e as imagens de entrada não podem ser usados como saída.
+
+Se o ponto de controlo contiver um passo de fundo automático executado num
+resultado já retocado, indique também o resultado empilhado de origem com
+`--stacked stacked.png`.
 
 Códigos de saída: `0` sucesso, `1` erro de processamento, `2` erro de uso. Executar `python main.py --help` mostra todas as opções; iniciar com um caminho simples (`python main.py C:\stack`) ainda abre a interface com essa pasta carregada.
 

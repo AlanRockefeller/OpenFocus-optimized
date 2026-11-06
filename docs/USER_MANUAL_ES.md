@@ -833,7 +833,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # inicia la aplicación d
 openfocus ctl <command> [flags]          # controla una ventana en ejecución (ver AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # reproduce una receta guardada sin interfaz
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` se inicia en segundo plano; `--control` espera el canal de control e imprime su JSON de conexión. `openfocus describe` y `version` no necesitan entrada. El flujo de trabajo para agentes está documentado en [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) y `skills/openfocus-control/SKILL.md`.
@@ -963,6 +963,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Usa los fotogramas reales empleados para el retoque, tras la alineación y cualquier recorte de ROI u otro procesamiento, con sus valores de píxel y profundidad de bits originales. El punto de control registra ediciones y huellas, no los píxeles de imagen. La reproducción reconstruye los desplazamientos de fotograma y el comportamiento de alineación registrados y verifica la base, los fotogramas ordenados y las máscaras de validez; se rechazan píxeles, geometría o máscaras incompatibles. Cada ruta debe contener una imagen. La salida debe ser PNG o TIFF y conserva la profundidad de bits de la base. El punto de control y las imágenes de entrada no pueden usarse como salida.
+
+Si el punto de control contiene un paso de fondo automático hecho sobre un
+resultado ya retocado, indica también el resultado apilado de origen con
+`--stacked stacked.png`.
 
 Códigos de salida: `0` éxito, `1` error de procesamiento, `2` error de uso. Ejecutar `python main.py --help` muestra todas las opciones; iniciar con una ruta simple (`python main.py C:\stack`) sigue abriendo la interfaz con esa carpeta cargada.
 

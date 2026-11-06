@@ -835,7 +835,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # démarre l'application 
 openfocus ctl <command> [flags]          # pilote une fenêtre en cours (voir AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # rejoue une recette headless enregistrée
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` démarre en arrière-plan ; `--control` attend le canal de contrôle et imprime son JSON de connexion. `openfocus describe` et `version` ne nécessitent aucune entrée. Le workflow destiné aux agents est documenté dans [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) et `skills/openfocus-control/SKILL.md`.
@@ -965,6 +965,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Utilisez les images réellement utilisées pour la retouche, après recalage et tout recadrage ROI ou autre traitement, avec leurs valeurs de pixel et profondeur de bits d'origine. Le point de contrôle consigne les modifications et les empreintes, pas les pixels. Le rejeu reconstruit les décalages d'image et le comportement d'alignement enregistrés et vérifie la base, les images ordonnées et les masques de validité ; les pixels, géométries ou masques incompatibles sont refusés. Chaque chemin doit contenir une image. La sortie doit être PNG ou TIFF et conserve la profondeur de bits de la base. Le point de contrôle et les images d'entrée ne peuvent pas servir de sortie.
+
+Si le point de contrôle contient une étape d'arrière-plan automatique lancée sur
+un résultat déjà retouché, indiquez aussi le résultat empilé d'origine avec
+`--stacked stacked.png`.
 
 Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisation. `python main.py --help` affiche toutes les options ; lancer avec un simple chemin (`python main.py C:\stack`) ouvre toujours l'interface avec ce dossier chargé.
 

@@ -874,6 +874,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 パスには 1 枚の画像だけを指定でき、出力は PNG または TIFF でベースのビット深度を保ちます。
 チェックポイントと入力画像を出力には指定できません。
 
+チェックポイントに、すでにレタッチした結果で実行した自動背景の手順が含まれる場合は、元になったスタック結果も `--stacked stacked.png` で指定してください。
+
 ### 背景の置き換え（自動背景）
 
 スタックすると、被写体と一緒に背景もシャープになります。そのためスタック画像の背景は、ぼけ方の異なる部分の寄せ集めになり、被写体の周りにハローが出がちです。レタッチ作業領域の **自動背景…** は、背景を同じスタックの実際の1フレームに置き換えます。被写体はスタック結果のままです。背景は1枚のフレームとスタック結果から作られ、処理の過程で画素が再構成、調整、合成されることがあります。
@@ -1318,7 +1320,7 @@ openfocus gui [--control] [--socket NAME] [パス…]   # デスクトップア�
 openfocus ctl <command> [flags]          # 実行中のウィンドウを操作（AGENT_CONTROL_SPEC.md）
 openfocus recipe create FILE --input … --output … [処理オプション]
 openfocus recipe run FILE [--dry-run]    # 保存済みヘッドレスレシピを再生
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` は切り離して起動します。`--control` は制御チャネルの確立を待ち、
@@ -1427,6 +1429,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ビット深度のまま指定してください。チェックポイントは編集と指紋を記録し、画素は記録しません。
 各パスには 1 枚の画像だけを指定でき、出力は PNG または TIFF でベースのビット深度を保ちます。
 チェックポイントと入力画像を出力には指定できません。
+
+チェックポイントに、すでにレタッチした結果で実行した自動背景の手順が含まれる場合は、元になったスタック結果も `--stacked stacked.png` で指定してください。
 
 | オプション | 説明 |
 |--------|-------------|

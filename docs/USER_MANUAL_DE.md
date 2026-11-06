@@ -874,7 +874,7 @@ openfocus gui [--control] [--socket NAME] [Pfade…]   # Desktop-App starten
 openfocus ctl <command> [flags]          # ein laufendes Fenster steuern (siehe AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [Verarbeitungsoptionen]
 openfocus recipe run FILE [--dry-run]    # ein gespeichertes Headless-Rezept wiedergeben
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` startet die App abgekoppelt; `--control` wartet auf den Steuerkanal und gibt dessen Verbindungs-JSON aus. `openfocus describe` und `version` benötigen keine Eingabe. Der Agent-Workflow ist in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) und `skills/openfocus-control/SKILL.md` dokumentiert.
@@ -1009,6 +1009,10 @@ openfocus retouch replay edits.json --base fused.png --sources processed1.png pr
 ```
 
 Verwenden Sie die tatsächlich für die Retusche verwendeten Bilder – nach Ausrichtung und einem etwaigen ROI-Zuschnitt oder anderer Verarbeitung – mit ihren ursprünglichen Pixelwerten und ihrer Bittiefe. Der Kontrollpunkt zeichnet Bearbeitungen und Fingerabdrücke auf, nicht die Bildpixel. Die Wiedergabe rekonstruiert die aufgezeichneten Bildversätze und das Ausrichtungsverhalten und prüft Basis, geordnete Bilder und Gültigkeitsmasken; unvereinbare Pixel, Geometrie oder Masken werden abgelehnt. Jeder Pfad muss genau ein Bild enthalten. Die Ausgabe muss PNG oder TIFF sein und behält die Bittiefe der Basis. Kontrollpunkt und Eingabebilder dürfen nicht als Ausgabe dienen.
+
+Enthält der Checkpoint einen Schritt Automatischer Hintergrund auf einem bereits
+retuschierten Ergebnis, geben Sie zusätzlich das gestackte Ergebnis, aus dem es
+stammt, mit `--stacked stacked.png` an.
 
 Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler, `2` Nutzungsfehler. Der Aufruf `python main.py --help` gibt alle Optionen aus; ein Start mit einem reinen Pfad (`python main.py C:\stack`) öffnet weiterhin die GUI mit diesem Ordner.
 

@@ -323,12 +323,21 @@ def protect_missed_subject(sub_half, G, k_far, min_area, near=6, sigma=4.0):
     in front of it.  Frames only, so fusion seams in the result cannot
     trigger it.  Pieces the focus mask does not already cover (within
     `near` half-res px) are added back."""
-    E = []
-    for g in G:
+    # Only the strongest energy and the far frame's are needed: keep a running
+    # maximum instead of a second (and, while stacking, third) copy of the
+    # whole frame stack.  max is exact, so R is unchanged.
+    e_max = e_far = None
+    for k, g in enumerate(G):
         L = cv2.Laplacian(cv2.GaussianBlur(g, (0, 0), 1.0), cv2.CV_32F, ksize=3)
-        E.append(cv2.GaussianBlur(L * L, (0, 0), sigma))
-    E = np.stack(E)
-    R = np.log10((E.max(0) + 1e-9) / (E[k_far] + 1e-9))
+        e = cv2.GaussianBlur(L * L, (0, 0), sigma)
+        if k == k_far:
+            e_far = e
+        if e_max is None:
+            e_max = e.copy()
+        else:
+            np.maximum(e_max, e, out=e_max)
+    R = np.log10((e_max + 1e-9) / (e_far + 1e-9))
+    del e_max, e_far
     d = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
     bg_noise = np.percentile(R[d > 30], 99.9) if (d > 30).any() else 0.8
     t = min(otsu_threshold(R), max(0.8, bg_noise + 0.05))
@@ -1304,12 +1313,12 @@ def _u16(img: np.ndarray) -> np.ndarray:
 def working_set_bytes(frames: Sequence[np.ndarray], height: int, width: int) -> int:
     """New memory `replace_background` may take, for admission control.
 
-    Measured peak RSS growth on 20 MP stacks: ~50 B/px plus one byte per
-    frame (the half-resolution gray stack) until the outline is settled,
-    then ~105 B/px in the full-resolution phase; ~10% headroom on both.
-    Frames that are not uint16 are converted on use, which adds a transient
-    16-bit copy plus its float source (~18 B/px)."""
-    per_px = max(120, 60 + len(frames))
+    Measured peak RSS growth on a 20 MP stack (frames already in memory):
+    108 B/px with 15 frames and 127 B/px with 40, so about 96 B/px plus
+    0.8 B/px per frame (the half-resolution gray stack and per-frame
+    scratch); ~10% headroom.  Frames that are not uint16 are converted on
+    use, which adds a transient 16-bit copy plus its float source (~18 B/px)."""
+    per_px = max(120, 100 + len(frames))
     if any(f.dtype != np.uint16 for f in frames):
         per_px += 18
     return int(height) * int(width) * per_px
