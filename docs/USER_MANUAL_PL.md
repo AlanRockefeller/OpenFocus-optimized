@@ -63,11 +63,13 @@ Odpowiednik w CLI: `python main.py --input ./png-stack --output ./result.png --m
 
 ### Obsługiwane formaty wyjściowe
 
+W oknie **Zapisz jako** zwykły TIFF zapisuje wynik jako jeden obraz, a TIFF z warstwami zawiera klatki źródłowe jako warstwy. Linear DNG jest zawsze widoczny, ale jego zapis wymaga liniowego wyniku kamery bez utrwalonych zmian, pochodzącego z **Otwórz natywny RAW** i mającego kalibrację kamery.
+
 - Pojedyncze obrazy: JPG, PNG, BMP, TIFF, WebP
 - Sekwencje obrazów: zapisywane w folderach
 - Animacje: GIF
 - Wielostronicowy TIFF: cały stos w jednym `.tif`
-- TIFF z warstwami: wynik retuszu razem z klatkami źródłowymi (z menu kontekstowego wyniku)
+- TIFF z warstwami: wynik retuszu razem z klatkami źródłowymi (wybierany w oknie Zapisz jako)
 
 ---
 
@@ -394,28 +396,30 @@ OpenFocus oferuje dziesięć algorytmów fuzji plus tryb tylko wyrównania. W no
 
 ### StackMFF V3 (domyślnie, uczenie głębokie)
 
-- **Algorytm**: klasyfikacja źródła dla każdego piksela (wymaga PyTorch). Sieć przewiduje dla każdego piksela, z której klatki wejściowej pochodzi, a następnie albo miesza klatki według tych prawdopodobieństw, albo wybiera jedną klatkę
+- **Algorytm**: ONNX Runtime i dołączony model ONNX.
 - **Tryb wyjścia AI** (prawy panel, tylko dla tej metody):
   - **Miękkie mieszanie (ważone)** — domyślnie; każdy piksel to ważona prawdopodobieństwami mieszanka klatek. Płynne przejścia, bez twardych szwów; odpowiada konfiguracji z artykułu
   - **Twardy wybór (jedna klatka)** — każdy piksel jest kopiowany z najbardziej prawdopodobnej klatki. Ostrzejszy wybór bez interpolacji między klatkami; na granicy dwóch równie prawdopodobnych klatek może pojawić się szew
 - **Najlepsza do**: najwyższej jakości, gdy dostępny jest GPU
-- **Zalety**: niezależna od kolejności klatek, obsługuje stos o dowolnej długości, nie wymaga strojenia parametrów, optymalizuje się automatycznie
-- **Wymagania**: zainstalowany PyTorch, opcjonalny GPU CUDA (torchvision nie jest potrzebny)
-- **Uwaga**: może być niedostępna, jeśli PyTorch nie jest zainstalowany
+- **Zalety**: niezależna od kolejności klatek, obsługuje stos w granicach dostępnych zasobów, nie wymaga strojenia parametrów, optymalizuje się automatycznie
+- **Wymagania**: ONNX Runtime i dołączony model ONNX.
+
+Każdy kafelek sieci używa wszystkich klatek. Klatki źródłowe i dane tymczasowe wyrównania mogą być przechowywane na dysku; wolne miejsce i dostępna pamięć ograniczają wielkość stosu. Kafelkowanie przestrzenne V2 przybliża wnioskowanie dla całego obrazu.
+
 
 ### StackMFF V2 (uczenie głębokie)
 
-- **Algorytm**: oszacowanie ostrości warstwa po warstwie, udokładniane dwukierunkową warstwą rekurencyjną; sieć regresuje indeks płaszczyzny ogniskowej i próbkuje stos. **Klatki muszą zachować oryginalną kolejność ogniskowania** — odwrócenie jest dla tej metody wyłączone
+- **Algorytm**: jednoskalowa sieć uwagi normalizuje oczekiwaną głębię ostrości i próbkuje najbliższą klatkę źródłową. Indeksy głębi zależą od kolejności stosu. **Klatki muszą zachować oryginalną kolejność ogniskowania** — odwrócenie jest dla tej metody wyłączone
 - **Mapy głębi**: obsługiwane; podają próbkowaną warstwę ogniskową
 - **Najlepsza do**: ciągłych serii ogniskowania, gdzie liczy się bardzo mały, szybki model
-- **Wymagania**: PyTorch; około 0,05 mln parametrów; bez parametrów użytkownika
+- **Wymagania**: ONNX Runtime i dołączony model ONNX.
 
 ### StackMFF (V1, uczenie głębokie)
 
-- **Algorytm**: 3D U-Net przewiduje jasność połączonego obrazu dla całego stosu w jednym przebiegu; Cb/Cr są brane z najbliższej klatki źródłowej
+- **Algorytm**: jednoskalowa sieć uwagi miesza luminancję klatek źródłowych przy użyciu wag softmax; Cb/Cr pochodzą z klatki o luminancji najbliższej wynikowej
 - **Najlepsza do**: neuronowej fuzji całego stosu ostrości
-- **Zalety**: bez parametrów, kolor pozostaje w gamucie; kolejność klatek może wpływać na wynik
-- **Uwaga**: 6 mln parametrów; większym stosom pomaga GPU
+- **Zalety**: bez parametrów, kolor pozostaje w gamucie; wynikowa luminancja nie zależy od kolejności klatek, ale chrominancja może się różnić przy równych odległościach luminancji
+- **Uwaga**: około 156 172 parametrów; większym stosom pomaga GPU
 
 ### Filtr sterowany
 
@@ -492,7 +496,7 @@ Wybierz **Tylko wyrównanie (bez fuzji)**, aby zarejestrować stos i dodać do l
 | DCT | Średnio | Dobra | Tekstur |
 | DTCWT | Średnio | Bardzo dobra | Złożonych scen |
 | GFG-FGF | Szybko | Dobra | Obszarów ostrości |
-| StackMFF (V1) | Wolno (GPU) | Nie badano tutaj | Neuronowa fuzja stosu; kolejność może wpływać na wynik |
+| StackMFF (V1) | Wolno (GPU) | Nie badano tutaj | Luminancja niezależna od kolejności; chrominancja może się różnić przy równych odległościach luminancji |
 | StackMFF V2 | Szybko (GPU) | Nie badano tutaj | Ciągłych serii z bardzo małym modelem |
 | StackMFF V3 | Wolno (GPU) | Doskonała | Najwyższej jakości |
 | OpenFocus A | Zależy od stosu | Zależy od stosu | Wyboru ostrych pikseli według odpowiedzi wieloskalowej |
@@ -559,7 +563,7 @@ Fuzja może pozostawić lokalną wadę — obwódkę przy kontrastowej krawędzi
 5. Przytrzymaj `Tab`, aby zobaczyć wynik sprzed tej sesji, i `Alt`, aby podejrzeć klatkę źródłową. Opcjonalne odniesienie ostrości obejmuje tylko płótno źródła i używa jednej wspólnej skali dla wszystkich klatek.
 6. `Ctrl+Z` / `Ctrl+Y` cofają i ponawiają całe pociągnięcia. **Przywróć wszystko…** to jedna operacja do cofnięcia. **Zastosuj jako nowy wynik** dodaje pozycję `<nazwa> · Retusz N` i wybiera ją; oryginalny wynik pozostaje nietknięty. Nowa pozycja jest oznaczona jako *Nie wyeksportowano*, dopóki nie wyeksportujesz jej z głównego okna; OpenFocus chroni ją przed automatycznym usunięciem z historii i przed wyjściem bez decyzji.
 
-Zastosuj retusz jako nowy wynik, a następnie kliknij ten wynik prawym przyciskiem w głównym oknie i wybierz **Eksportuj TIFF z warstwami…**, aby zapisać go razem z klatkami źródłowymi. Etykiety na żywo i paski skali nie są dołączane; niezapisane zmiany adnotacji pozostają chronione. Geometria źródeł i maski ważności są zachowane. Wynik i źródła muszą być nieprzezroczystymi obrazami RGB lub w odcieniach szarości o tej samej głębi 8 lub 16 bitów, a każdy prostokąt źródła musi mieścić się w wyniku. Eksport obsługuje do 128 źródeł; nazwy źródeł są ograniczone do 255 znaków i nie mogą zawierać NUL ani znaków spoza Basic Multilingual Plane, na przykład wielu emoji. Niebezpieczne konteksty i zadania szacowane na więcej niż 512 MiB pamięci roboczej lub dostępnego budżetu RAM są odrzucane z komunikatem o błędzie zamiast zapisywania niekompletnego eksportu. GIMP 3.2.6 w systemie Windows importuje warstwy 8- i 16-bitowe, w tym ich przesunięcia i przezroczyste wypełnienie rejestracji. Wynik jest widoczny, warstwy źródeł ukryte; GIMP dodaje też widoczną warstwę Background. Inne edytory nie były testowane.
+Zastosuj retusz jako nowy wynik, zaznacz go i otwórz **Zapisz jako**. Wybierz TIFF z warstwami z listy formatów, aby zapisać wynik razem z klatkami źródłowymi. Etykiety na żywo i paski skali nie są dołączane; niezapisane zmiany adnotacji pozostają chronione. Geometria źródeł i maski ważności są zachowane. Wynik i źródła muszą być nieprzezroczystymi obrazami RGB lub w odcieniach szarości o tej samej głębi 8 lub 16 bitów, a każdy prostokąt źródła musi mieścić się w wyniku. Eksport obsługuje do 128 źródeł; nazwy źródeł są ograniczone do 255 znaków i nie mogą zawierać NUL ani znaków spoza Basic Multilingual Plane, na przykład wielu emoji. Niebezpieczne konteksty i zadania szacowane na więcej niż 512 MiB pamięci roboczej lub dostępnego budżetu RAM są odrzucane z komunikatem o błędzie zamiast zapisywania niekompletnego eksportu. GIMP 3.2.6 w systemie Windows importuje warstwy 8- i 16-bitowe, w tym ich przesunięcia i przezroczyste wypełnienie rejestracji. Wynik jest widoczny, warstwy źródeł ukryte; GIMP dodaje też widoczną warstwę Background. Inne edytory nie były testowane.
 
 Do lokalnej korekty tonalnej wybierz **Pędzel ekspozycji**, ustaw wartość w setnych stopnia (100 podwaja wartości pikseli, −100 zmniejsza je o połowę) i maluj po wyniku. Podgląd aktualizuje się podczas malowania. Każde pociągnięcie dostosowuje bieżący wynik raz, nawet gdy ślady pędzla się nakładają; kolejne pociągnięcie buduje na nim. Krycie i twardość pędzla kontrolują mieszanie. Przy rozjaśnianiu światła mogą się obciąć. Przytrzymaj **Przed**, aby porównać z wynikiem z chwili otwarcia; naciśnij Escape podczas pociągnięcia, aby je anulować, albo użyj cofania i ponawiania po pociągnięciu. To edycje pikseli, a nie regulowane warstwy. Zastosuj jako nowy wynik i wyeksportuj nową pozycję, aby zapisać edytowane piksele; projekt nie przechowuje tych pikseli.
 
@@ -591,7 +595,7 @@ i mieszać jego piksele.
    leżą tuż poza głębią ostrości, na przykład główka na końcu kolca. Obiekty tła
    obok obiektu też mogą wtedy zostać jak po stackowaniu, więc sprawdź wynik.
 5. Kliknij **Zastąp tło**. Stack 15 klatek po 20 megapikseli trwa około minuty i
-   potrzebuje około 2,5 GB wolnej pamięci. **Anuluj** przerywa.
+   potrzebuje około 3,5 GB wolnej pamięci. **Anuluj** przerywa.
 
 Zmiana to jeden krok, który można cofnąć, a pociągnięcia namalowane wcześniej na
 obiekcie zostają. **Pędzlem przywracania** przywrócisz piksele ze stacku tam,
@@ -615,8 +619,8 @@ uchwyciła wyraźnie. To miejsca do sprawdzenia lub ręcznego retuszu:
 
 **Zapisz mapę brakujących danych…** zapisuje zabarwiony podgląd i jedną
 czarno-białą maskę na kolor. Automatyczne tło potrzebuje klatek, z których
-powstał wynik, i nie jest dostępne dla wyników obszaru (ROI). Punkty kontrolne
-retuszu zapisują wybór i obliczają go ponownie przy wczytaniu.
+powstał wynik, i nie jest dostępne dla wyników obszaru (ROI). Nowe punkty kontrolne
+tła dokładnie przywracają obraz, dostępną historię i diagnostykę bez ponownego obliczania tła.
 
 ### Zarządzanie etykietami
 
@@ -710,7 +714,7 @@ Planista uwzględnia fizyczne rdzenie, powinowactwo CPU i limity oraz uruchamia 
 
 ### Akceleracja GPU
 
-OpenFocus używa GPU (CUDA/MPS) dla modeli neuronowych AI (StackMFF V1/V2/V3); algorytmy klasyczne i rejestracja aplikacji działają na CPU. Jawne niskopoziomowe wyrównanie CuPy jest osobnym backendem numerycznym.
+StackMFF V1/V2/V3 używają ONNX Runtime. DirectML w Windows i CoreML w macOS mogą przyspieszać wnioskowanie; w przeciwnym razie używany jest CPU. Dostępność dostawcy nie dowodzi wykonania na GPU. Obsługa innych GPU wymaga weryfikacji.
 
 - Przełącznik znajduje się w **Ustawienia → Akceleracja GPU**
 - Odznaczenie wymusza metody neuronowe na CPU — przydatne, gdy sterowniki GPU działają niepoprawnie
@@ -837,7 +841,7 @@ Przeciąganie wyników z listy wyników zapisuje pliki obrazów w formacie wybra
 - **TIFF**: zachowuje dane 8- i 16-bitowe; eksport wielostronicowy trzyma cały stos w jednym pliku
 - **GIF**: animacja z 8-bitową paletą; anulowanie pozostawia istniejący plik docelowy nietknięty
 
-Dla wyniku retuszu menu kontekstowe oferuje też **Eksportuj TIFF z warstwami…** z klatkami źródłowymi (patrz rozdział 10).
+Dla wyniku retuszu wybierz TIFF z warstwami z listy formatów **Zapisz jako**, aby dołączyć klatki źródłowe (patrz rozdział 10).
 
 ---
 
@@ -855,7 +859,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # uruchom aplikację desk
 openfocus ctl <command> [flags]          # steruj działającym oknem (patrz AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # odtwórz zapisany przepis headless
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` uruchamia aplikację w tle; `--control` czeka na kanał sterowania i wypisuje JSON połączenia. `openfocus describe` i `version` nie wymagają danych wejściowych. Przepływ pracy dla agenta opisano w [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) oraz `skills/openfocus-control/SKILL.md`.
@@ -903,6 +907,7 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--exposure-match` | Dopasowuje średnią każdej klatki do ostatniej klatki przed fuzją (domyślnie włączone; `--no-exposure-match` wyłącza). Wzmocnienia wspólne dla całego stosu, więc wynik kafelkowy pozostaje bezszwowy; dotyczy każdej metody i odniesienia jasności wyrównywacza OpenFocus |
 | `--base-frame` | Opcjonalny krok po fuzji: dopasowuje niskie częstotliwości wyniku do klatki `last`/`first` (domyślnie `none`) |
 | `--sort` | Kolejność klatek dla `openfocus_a/b/c`: `asc` (domyślnie, kolejność plików), `desc` (odwrócenie przemiatania od dalekich do bliskich), `off` |
+| `--frame-order` | Folder na wejściu: `auto` (domyślnie) porządkuje klatki od bliskich do dalekich według kroków ostrości z EXIF, gdy mają je wszystkie klatki (bracketing ostrości OM SYSTEM zaczyna się w połowie głębi), w przeciwnym razie według nazwy; `name` zawsze według nazwy pliku. Pliki podane jawnie zachowują swoją kolejność |
 | `--sharpen-output` | Stosuje łagodne wyostrzanie do wyniku fuzji (domyślnie wyłączone) |
 | `--dust-map WHITE` | Korekcja pola płaskiego (mapa pyłu) z rozogniskowanego zdjęcia białego pola |
 | `--defect-mask-path MASK` | Maska defektów we współrzędnych matrycy, naprawiana przed rejestracją |
@@ -931,7 +936,6 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--keep-soft-parts` | Automatyczne tło: zachowuje miękkie części połączone z obiektem, na które ostrzyła któraś klatka |
 | `--save-stacked [path]` | Z `--auto-background` zapisuje też wynik sprzed zastąpienia (domyślnie `<output>_stacked<ext>`). W trybie wsadowym tylko ścieżka domyślna |
 | `--missing-data-map [path]` | Z `--auto-background` zapisuje też mapę brakujących danych i jedną 8-bitową maskę na klasę (domyślnie `<output>_missing.png`). W trybie wsadowym tylko ścieżka domyślna |
-| `--frame-order` | Folder na wejściu: `auto` (domyślnie) porządkuje klatki od bliskich do dalekich według kroków ostrości z EXIF, gdy mają je wszystkie klatki (bracketing ostrości OM SYSTEM zaczyna się w połowie głębi), w przeciwnym razie według nazwy; `name` zawsze według nazwy pliku. Pliki podane jawnie zachowują swoją kolejność |
 | `--json FILE` | Zapisuje czytelny maszynowo raport wyników do FILE po zakończeniu |
 | `--json-progress` | Wypisuje jeden obiekt JSON postępu na krok do stdout (NDJSON); komunikaty tekstowe trafiają do stderr |
 | `--dry-run` | Sprawdza wejście i wypisuje plan bez wykonywania fuzji |
@@ -996,21 +1000,19 @@ zachowaj zainstalowane oprogramowanie oraz dane wejściowe.
 
 ### Odtwarzanie punktu kontrolnego retuszu
 
-Pierwszy zapis lub wczytanie weryfikuje bazę i przetworzone źródła w anulowalnej operacji w tle. Zapis odtwarza też zapisane edycje i sprawdza bieżący obraz oraz stan cofania/ponawiania przed opublikowaniem punktu kontrolnego. Jeśli źródło się zmieniło i odtwarzanie już nie pasuje, zapis kończy się błędem i zachowuje edycje. Anulowanie zapisu lub wczytania również pozostawia bieżące edycje dostępne. Jeśli pamięć jest niewystarczająca do weryfikacji lub odtwarzania, operacja zatrzymuje się i pozostawia bez zmian zarówno bieżące edycje, jak i istniejący punkt kontrolny.
+Użyj przycisków zapisu/wczytywania punktów kontrolnych w przestrzeni retuszu z oryginalną bazą i przetworzonymi źródłami. Sesje z automatycznym tłem, w tym udane analizy bez zmian pikseli, zapisują bezstratne migawki ZIP v2 `.ofretouch` z metadanymi JSON i danymi NumPy: dokładny obraz roboczy, dostępne kafelki cofania/ponawiania, stany diagnostyczne i pochodzenie źródeł. Wczytanie v2 nie oblicza ponownie tła. Sesje obejmujące tylko pędzel/tony mogą używać zwartego JSON v1; starsze punkty kontrolne tła w JSON v1 nadal można odtwarzać.
+
+Weryfikacja źródeł odbywa się w anulowalnej operacji w tle. Przed zastąpieniem pliku docelowego zapis ponownie wczytuje przygotowany plik i sprawdza dokładną równość bieżącego obrazu, dostępnych kafelków cofania/ponawiania i stanów diagnostycznych. Niezgodne źródło, nieudana weryfikacja, anulowanie lub brak pamięci pozostawiają bieżące edycje i istniejący punkt kontrolny bez zmian.
 
 Jeśli limit zapisu punktów kontrolnych uniemożliwia kolejną edycję, zastosuj bieżące edycje i rozpocznij nową sesję retuszu.
 
 Zapisz punkt kontrolny retuszu w przestrzeni retuszu, a następnie podaj oryginalny obraz bazowy i każdą przetworzoną klatkę źródłową w tej samej kolejności co w sesji:
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Użyj rzeczywistych klatek używanych do retuszu, po wyrównaniu i dowolnym przycięciu ROI lub innym przetwarzaniu, z oryginalnymi wartościami pikseli i głębią. Punkt kontrolny zapisuje edycje i odciski, a nie piksele obrazów. Odtwarzanie rekonstruuje zapisane przesunięcia klatek i zachowanie wyrównania oraz weryfikuje bazę, uporządkowane klatki i maski ważności; niezgodne piksele, geometria lub maski są odrzucane. Każda ścieżka musi zawierać jeden obraz. Wyjście musi być PNG lub TIFF i zachowuje głębię bazy. Punkt kontrolny i obrazy wejściowe nie mogą być użyte jako wyjście.
-
-Jeśli punkt kontrolny zawiera krok automatycznego tła wykonany na wyniku, który
-był już retuszowany, podaj też wynik stacku, z którego pochodzi, przez
-`--stacked stacked.png`.
+Oba formaty nadal wymagają oryginalnej bazy i wszystkich klatek rzeczywiście użytych do retuszu, w kolejności sesji, po wyrównaniu i dowolnym przycięciu ROI lub innym przetwarzaniu, z oryginalnymi wartościami pikseli i głębią bitową. Wczytanie rekonstruuje zapisane przesunięcia klatek i zachowanie wyrównania oraz weryfikuje bazę, uporządkowane klatki i maski ważności; niezgodne piksele, geometria lub maski są odrzucane. Każda ścieżka musi zawierać jeden obraz. Wyjście musi być PNG lub TIFF i zachowuje głębię bazy. Punkt kontrolny i obrazy wejściowe nie mogą być użyte jako wyjście.
 
 Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd użycia. Uruchomienie `python main.py --help` wypisuje wszystkie opcje; uruchomienie z prostą ścieżką (`python main.py C:\stack`) nadal otwiera interfejs graficzny z wczytanym folderem.
 
@@ -1075,8 +1077,7 @@ Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd uży
 
 #### AI niedostępne
 
-- Zainstaluj PyTorch: `pip install torch`
-- Dla pracy na GPU zainstaluj kompilację PyTorch z CUDA
+- Sprawdź ONNX Runtime i dołączony model.
 - Sprawdź przez **Pomoc → Informacje o środowisku**
 - StackMFF V3 nie wymaga torchvision
 

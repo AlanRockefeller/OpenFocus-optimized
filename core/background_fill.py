@@ -19,19 +19,18 @@ Principles:
   a halo can physically cause (darkening, or a shift toward the subject's
   own colour), and never leaves the range the frames recorded at that pixel.
   Faithful (``clean=False``) keeps the stack's own edge look.
-* The missing-data maps say where the result is not backed by any frame:
-  a retouching aid, and the only place a future generative fill may go.
+* The missing-data maps mark estimates of unreliable observations for
+  inspection and source-frame retouching.
 
 The module is UI-free.  `replace_background` takes the render's aligned
 frames and its fused result (any project dtype) and returns a
 `BackgroundFillResult`; it reports progress and honours cancellation
-through optional callbacks.  Peak memory is about 2 GB for 15 frames of
-20 MP, independent of how the frames are stored.
+through optional callbacks.  `background_working_set_bytes` estimates the
+incremental peak before any analysis arrays are allocated.
 """
 from __future__ import annotations
 
 import logging
-import sys
 import contextvars
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
@@ -92,6 +91,26 @@ class BackgroundFillError(ValueError):
     """The inputs cannot be used (too few frames, mismatched sizes...)."""
 
 
+def background_working_set_bytes(height: int, width: int, frame_count: int) -> int:
+    """Conservative incremental peak for ``replace_background``, in bytes.
+
+    Existing source/fused images and caller-created validity masks are excluded.
+    The returned image/maps, conversion buffers, NumPy/OpenCV scratch and
+    per-frame metadata are included. Callers must add validity-mask storage and
+    admit this estimate *before* materializing those masks or starting analysis.
+    """
+    pixels = int(height) * int(width)
+    frames = int(frame_count)
+    half_stack = (int(height) // 2) * (int(width) // 2) * frames * 4
+    # Focus protection retains G, a list of energies, and its stacked copy.
+    # Later stages retain G alongside full-resolution colour/maps and scratch.
+    # The scratch allowances include conversion, reductions, native workspaces
+    # and expression temporaries; use the larger phase, not just retained G.
+    focus_peak = 3 * half_stack + 64 * pixels
+    composite_peak = half_stack + 256 * pixels
+    return max(focus_peak, composite_peak) + 4096 * frames + 1024 * 1024
+
+
 @dataclass
 class MissingData:
     """Where the result is not backed by a clean observation, uint8 0-255
@@ -128,34 +147,35 @@ def _to16f(img: np.ndarray) -> np.ndarray:
 
     8-bit is x257 (as uint16 would store it); float images in this project
     are 0-255 scaled."""
+    dtype = img.dtype
     if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        img = cv2.cvtColor(np.asarray(img, np.float32), cv2.COLOR_GRAY2BGR)
     elif img.shape[2] == 4:
         img = img[..., :3]
-    if img.dtype == np.uint16:
-        return img.astype(np.float32)
-    if img.dtype == np.uint8:
-        return img.astype(np.float32) * 257.0
+    if dtype == np.uint16:
+        return np.asarray(img, np.float32)
+    if dtype == np.uint8:
+        return np.asarray(img, np.float32) * 257.0
     return np.asarray(img, np.float32) * 257.0
 
 
 def _from16f(img16: np.ndarray, like: np.ndarray) -> np.ndarray:
     """Back to the fused input's dtype (and channel count)."""
+    if like.ndim == 2:
+        img16 = cv2.cvtColor(np.asarray(img16, np.float32), cv2.COLOR_BGR2GRAY)
     if like.dtype == np.uint16:
         out = np.clip(img16, 0, 65535).astype(np.uint16)
     elif like.dtype == np.uint8:
         out = np.clip(np.round(img16 / 257.0), 0, 255).astype(np.uint8)
     else:
         out = (img16 / 257.0).astype(like.dtype)
-    if like.ndim == 2:
-        out = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
-    elif like.shape[2] == 4:
+    if like.ndim == 3 and like.shape[2] == 4:
         out = np.dstack([out, like[..., 3]])
     return out
 
 
 # ---------------------------------------------------------------------- helpers
-def focus_measures(G, sigma=None):
+def focus_measures(G, sigma=None, *, cancelled=None):
     """Per-pixel focus measures from smoothed Laplacian energy E across the stack.
 
     ratio = log10(max E / median E): how much the best frame stands out.
@@ -164,18 +184,27 @@ def focus_measures(G, sigma=None):
     peak  = log10(max E): is there real structure in *any* frame, compared
             with the empty-background noise floor.
     """
+    if cancelled is not None and cancelled():
+        raise BackgroundFillCancelled()
     sigma = _sigma(6.0) if sigma is None else sigma
     E = np.empty_like(G)
     for i in range(len(G)):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         L = cv2.Laplacian(G[i], cv2.CV_32F, ksize=3)
         E[i] = cv2.GaussianBlur(L * L, (0, 0), sigma)
+    if cancelled is not None and cancelled():
+        raise BackgroundFillCancelled()
     eps = 1e-10
     peak = E.max(0)
-    ratio = np.log10((peak + eps) / (np.median(E, 0) + eps))
-    # uint8 is enough for ordinary stacks, while uint16 preserves frame 256+
-    # instead of wrapping it back to zero.
+    # Capture frame order before the destructive median partitions E.
     index_dtype = np.uint8 if len(G) <= 256 else np.uint16
-    return {"ratio": ratio, "peak": np.log10(peak + eps)}, E.argmax(0).astype(index_dtype)
+    indices = E.argmax(0).astype(index_dtype)
+    if cancelled is not None and cancelled():
+        raise BackgroundFillCancelled()
+    median = np.median(E, 0, overwrite_input=True)
+    ratio = np.log10((peak + eps) / (median + eps))
+    return {"ratio": ratio, "peak": np.log10(peak + eps)}, indices
 
 
 def otsu_threshold(m):
@@ -253,7 +282,7 @@ def _outline_band_and_ring():
 
 
 def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_ring=None, step=2.5 / 255,
-                 wall_k=None):
+                 wall_k=None, *, cancelled=None):
     """Re-decide the outer `band` half-res px of the subject at fine scale.
 
     The coarse measures are blurred (sigma 6) to beat noise, which pushes the
@@ -268,6 +297,8 @@ def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_
     wall_k = _ksize(5) if wall_k is None else wall_k
     peak = None
     for g in G:
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         L = cv2.Laplacian(g, cv2.CV_32F, ksize=3)
         e = cv2.GaussianBlur(L * L, (0, 0), sigma)
         peak = e if peak is None else np.maximum(peak, e)
@@ -287,31 +318,16 @@ def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_
         # also lacks fine texture; only peel what looks like the background
         # just outside rather than the subject just inside.
         d_out = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
-        # Only the peel candidates' estimates are ever read: the wider (and
-        # much slower) scales run only while some candidate is unresolved.
-        unread = peel == 0
         def local_mean(region, sigma=_sigma(12)):
             reg = region.astype(np.float32)
             est = np.zeros_like(color)
-            done = unread.copy()
-            hh, ww = reg.shape
+            done = np.zeros(region.shape, bool)
             for sg in (sigma, 3 * sigma, 9 * sigma):
-                if done.all():
-                    break
-                # Blur only the window the open pixels can see: their
-                # bounding box plus the kernel radius (cv2's float32 kernel
-                # spans round(8 * sigma + 1) px).  Inside that the result is
-                # exactly the whole-image blur.
-                ys, xs = np.nonzero(~done)
-                m = (int(round(8 * sg + 1)) | 1) // 2 + 1
-                y0, y1 = max(0, int(ys.min()) - m), min(hh, int(ys.max()) + m + 1)
-                x0, x1 = max(0, int(xs.min()) - m), min(ww, int(xs.max()) + m + 1)
-                win = (slice(y0, y1), slice(x0, x1))
-                num = cv2.GaussianBlur(color[win] * reg[win][..., None], (0, 0), sg)
-                den = cv2.GaussianBlur(reg[win], (0, 0), sg)
-                ok = ~done[win] & (den > 0.02)
-                est[win][ok] = num[ok] / den[ok][..., None]
-                done[win] |= ok
+                num = cv2.GaussianBlur(color * reg[..., None], (0, 0), sg)
+                den = cv2.GaussianBlur(reg, (0, 0), sg)
+                ok = ~done & (den > 0.02)
+                est[ok] = num[ok] / den[ok][..., None]
+                done |= ok
             return est
         bg_col = local_mean((~sub_half) & (d_out > bg_ring[0]) & (d_out < bg_ring[1]))
         sub_col = local_mean(sub_half & (d_in > band))
@@ -360,7 +376,7 @@ def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_
     return sub.astype(bool)
 
 
-def protect_missed_subject(sub_half, G, k_far, min_area, near=None, sigma=None):
+def protect_missed_subject(sub_half, G, k_far, min_area, near=None, sigma=None, *, cancelled=None):
     """Add back subject the focus measures missed.
 
     Smooth, untextured parts (bare bristle segments, a stalk that swayed
@@ -374,21 +390,14 @@ def protect_missed_subject(sub_half, G, k_far, min_area, near=None, sigma=None):
     `near` half-res px) are added back."""
     near = int(round(_px(6))) if near is None else near
     sigma = _sigma(4.0) if sigma is None else sigma
-    # Only the strongest energy and the far frame's are needed: keep a running
-    # maximum instead of a second (and, while stacking, third) copy of the
-    # whole frame stack.  max is exact, so R is unchanged.
-    e_max = e_far = None
-    for k, g in enumerate(G):
+    E = []
+    for g in G:
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         L = cv2.Laplacian(cv2.GaussianBlur(g, (0, 0), 1.0), cv2.CV_32F, ksize=3)
-        e = cv2.GaussianBlur(L * L, (0, 0), sigma)
-        if k == k_far:
-            e_far = e
-        if e_max is None:
-            e_max = e.copy()
-        else:
-            np.maximum(e_max, e, out=e_max)
-    R = np.log10((e_max + 1e-9) / (e_far + 1e-9))
-    del e_max, e_far
+        E.append(cv2.GaussianBlur(L * L, (0, 0), sigma))
+    E = np.stack(E)
+    R = np.log10((E.max(0) + 1e-9) / (E[k_far] + 1e-9))
     d = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
     away = d > _px(30)
     bg_noise = np.percentile(R[away], 99.9) if away.any() else 0.8
@@ -471,8 +480,7 @@ def fill_halo_zone(bg, dist, sub, width, scale=4):
     extend the smooth background from beyond the zone inward (normalized
     Gaussian convolution, widening until every pixel is reached), then add back
     the frame's own fine grain, clamped to its noise level so edge structure
-    cannot ride along.  `bg` (float32) is overwritten with the result, which
-    is returned with the smooth estimate."""
+    cannot ride along."""
     H, W = dist.shape
     h, w = H // scale, W // scale
     bs = cv2.resize(bg, (w, h), interpolation=cv2.INTER_AREA)
@@ -496,72 +504,48 @@ def fill_halo_zone(bg, dist, sub, width, scale=4):
     est = normconv(bs, known, (r / 2, r, 2 * r, 4 * r, 8 * r, 16 * r))
     est = cv2.resize(est, (W, H), interpolation=cv2.INTER_LINEAR)
 
-    grain = cv2.GaussianBlur(bg, (0, 0), 1.5)
-    np.subtract(bg, grain, out=grain)
+    grain = bg - cv2.GaussianBlur(bg, (0, 0), 1.5)
     far = dist > 2 * width
     if not far.any():
         far = dist > np.percentile(dist, 75)
     lim = 3 * 1.4826 * np.median(np.abs(grain[far]), axis=0)        # per channel
-    np.clip(grain, -lim, lim, out=grain)
+    grain = np.clip(grain, -lim, lim)
 
     t = np.clip((dist - 0.6 * width) / (0.4 * width), 0, 1).astype(np.float32)
     keep = (t * t * (3 - 2 * t))[..., None]                           # 0 near edge -> 1 at width
-    del t
-    # bg * keep + (est + grain) * (1 - keep), without full-size temporaries.
-    grain += est
-    grain *= 1 - keep
-    bg *= keep
-    bg += grain
-    return bg, est
+    return bg * keep + (est + grain) * (1 - keep), est
 
 
-def edge_width_map(fz, est_lum, sub, dist, lo=None, hi=None):
+def edge_width_map(fz, est, sub, dist, lo=None, hi=None):
     """Per-pixel blend width matching how soft the nearest subject edge is.
 
     A blurred edge ramps from subject to background over a width of about
     contrast / steepest slope.  Soft pegs fade over 10-15 px; cutting the
     blend at a fixed 6 px ended that fade abruptly against the rebuilt
-    background and drew a light outline.  Sharp edges keep the minimum.
-    `est_lum` is `_lum` of the clean background estimate."""
+    background and drew a light outline.  Sharp edges keep the minimum."""
     lo = _px(6.0) if lo is None else lo
     hi = _px(48.0) if hi is None else hi
-    lum = _lum
-    # Full-size single-channel maps: each is freed once used, which keeps
-    # this step from setting the run's peak memory.
-    lf = lum(fz)
+    lum = lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY) / 257.0
+    lf, le = lum(fz), lum(est)
     g = cv2.GaussianBlur(lf, (0, 0), 1.0)
-    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3)
-    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
-    del g
-    grad = np.hypot(gx, gy)
-    del gx, gy
-    grad /= 8.0
+    grad = np.hypot(cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3), cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)) / 8.0
     d_in = cv2.distanceTransform(sub.astype(np.uint8), cv2.DIST_L2, 5)
     inner = (sub & (d_in > _px(3)) & (d_in < _px(15))).astype(np.float32)
     sg = _sigma(8)
     sub_lvl = cv2.GaussianBlur(lf * inner, (0, 0), sg) / np.maximum(cv2.GaussianBlur(inner, (0, 0), sg), 1e-3)
-    del lf, inner
     band = (dist < _px(12)) & ((~sub) | (d_in < _px(6)))        # straddles the outline
     slope = cv2.dilate(np.where(band, grad, 0).astype(np.float32), np.ones((_ksize(13), _ksize(13)), np.uint8))
-    del band, grad
-    contrast = np.abs(sub_lvl - est_lum)
-    del sub_lvl
+    contrast = np.abs(sub_lvl - le)
     width = np.clip(contrast / np.maximum(slope, 0.05), lo, hi)
-    del contrast, slope
     ring = sub & (d_in <= max(_px(2), 1.0))                    # read the width at the outline
-    del d_in
     src = np.where(ring, 0, 1).astype(np.uint8)
     _, labels = cv2.distanceTransformWithLabels(src, cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
-    del src
     vals = width[ring]
-    del width, ring
-    labels -= 1
-    wmap = vals[labels].astype(np.float32)
-    del labels
+    wmap = vals[labels - 1].astype(np.float32)
     return cv2.GaussianBlur(wmap, (0, 0), _sigma(6))
 
 
-def occlusion_width(G, sub_half, k_edge):
+def occlusion_width(G, sub_half, k_edge, *, cancelled=None):
     """How far (full-res px) the background stays darkened/tinted beside an
     edge in the frame where that edge is sharp: the edge blocks part of the
     lens's view of the out-of-focus background.  Weighted median over edge
@@ -570,6 +554,8 @@ def occlusion_width(G, sub_half, k_edge):
     edges = [_px(e) for e in (0, 8, 16, 24, 32, 48, 64, 96, 128, 160, 320)]
     widths, weights, table = [], [], {}
     for k in np.unique(k_edge[~sub_half]):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         sel = (~sub_half) & (k_edge == k)
         if sel.sum() < _area(3000):
             continue
@@ -600,7 +586,8 @@ def occlusion_width(G, sub_half, k_edge):
     return float(np.array(widths)[o][np.searchsorted(cw, cw[-1] / 2)]), table
 
 
-def missing_data_map(sub, dist, k_edge_full, peak_half, peak_t, N, k_far, c_raw, w_occ, k_occ, size_cap=None):
+def missing_data_map(sub, dist, k_edge_full, peak_half, peak_t, N, k_far, c_raw, w_occ, k_occ, size_cap=None,
+                     *, cancelled=None):
     """Where no frame shows the scene cleanly (0 = observed, 1 = missing).
 
     Background: an edge sharp in frame k_e blurs over c*|k - k_e| px in frame
@@ -615,6 +602,8 @@ def missing_data_map(sub, dist, k_edge_full, peak_half, peak_t, N, k_far, c_raw,
     ks = np.arange(N, dtype=np.float32)
     W_by_ke = {}
     for ke in range(N):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         w = np.maximum(c_raw * np.abs(ks - ke), c_raw * np.abs(ks - k_B) / 2.0)
         W_by_ke[ke] = float(w.min())
     width_lookup = np.fromiter((W_by_ke[ke] for ke in range(N)), np.float32, count=N)
@@ -653,20 +642,15 @@ def natural_near_background(bgf, fz, sub, dist, reach, sigma=None, scale=4):
     h, w = H // scale, W // scale
     bgmask = ((~sub) & (dist > _px(2))).astype(np.float32)
     ms = cv2.resize(bgmask, (w, h), interpolation=cv2.INTER_AREA)
-    del bgmask
     sg = sigma / scale
     def lp_masked(img):
         im = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
         out = normconv(im, ms, (sg, 3 * sg, 9 * sg, 27 * sg))
         return cv2.resize(out, (W, H), interpolation=cv2.INTER_LINEAR)
-    shift = lp_masked(fz)
-    shift -= lp_masked(bgf)
+    shift = lp_masked(fz) - lp_masked(bgf)
     t = np.clip(dist / np.maximum(reach, 1.0), 0, 1).astype(np.float32)
     wnear = 1.0 - t * t * (3 - 2 * t)
-    del t
-    shift *= wnear[..., None]
-    shift += bgf                     # bgf + shift * wnear
-    return shift
+    return bgf + shift * wnear[..., None]
 
 
 def blur(x, sigma):
@@ -716,7 +700,7 @@ def normconv(img, mask, sigmas, eps=0.03):
 
 
 def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio=3.0, spread=None,
-                           keep_share=0.25, frame_medians=None):
+                           keep_share=0.25, frame_medians=None, *, cancelled=None):
     """Never replace what the stacked image clearly shows.
 
     Fine detail well above the noise floor in the stacked image that the
@@ -739,6 +723,8 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
     eb = energy(G[k_bg])
     ef = None
     for k in range(len(G)):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         if k == k_bg:
             continue
         g = G[k] * (medians[k_bg] / max(float(medians[k]), 1e-6))
@@ -782,7 +768,7 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
 
 
 def protect_focused_objects(sub_half, G, k_bg, fused_half, ratio=6.0, factor=4.0, keep_share=0.25,
-                            ring=None, min_area=2e-4, frame_medians=None):
+                            ring=None, min_area=2e-4, frame_medians=None, *, cancelled=None):
     """Keep soft objects that some frame focused on and the stack kept.
 
     A peg's knob, a leaf or a twig just outside the depth of field is never
@@ -813,6 +799,8 @@ def protect_focused_objects(sub_half, G, k_bg, fused_half, ratio=6.0, factor=4.0
         mb = band(G[k_bg])
         mx = None
         for k in range(len(G)):
+            if cancelled is not None and cancelled():
+                raise BackgroundFillCancelled()
             if k == k_bg:
                 continue
             m = band(G[k] * (ref / max(float(medians[k]), 1e-6)))
@@ -882,7 +870,7 @@ def lp_background(img, bgmask, sigma, scale=4):
 
 
 def recorded_range(count, load_matched, shape, sigma=None, scale=4,
-                   valid_masks=None):
+                   valid_masks=None, *, cancelled=None):
     """Per-pixel min and max (quarter res, low-passed, exposure-matched) over
     every frame: the span of what the camera actually recorded at each spot.
     Near an edge the frame where it is sharp records the darkened view and
@@ -892,6 +880,8 @@ def recorded_range(count, load_matched, shape, sigma=None, scale=4,
     lo = hi = None
     seen = None
     for k in range(count):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         f = load_matched(k)[0]
         mask = None if valid_masks is None else valid_masks[k]
         if mask is None:
@@ -1057,19 +1047,19 @@ def halo_directions(prof, bg, img_q, sub_q, ring=None):
     return (c1[..., None] * u1 + c2[..., None] * u2).astype(np.float32)
 
 
-def clean_edges(fz, bgf, est_q, sub, dist, Wq, lo_q, hi_q, strength, scale=4):
+def clean_edges(fz, bgf, est, sub, dist, Wmap, lo_q, hi_q, strength, scale=4):
     """'Clean' mode: remove the outline-following part of the fused image's
     near-edge deviation from the clean background estimate, never going
     outside what some frame recorded there.  Background only, fading out by
-    the clean distance W.  `est_q` and `Wq` are the clean background
-    estimate and the clean distance at 1/`scale` resolution (INTER_AREA and
-    INTER_LINEAR reductions).  Corrects `bgf` in place and returns it with
-    the applied shift (full res)."""
+    the clean distance W.  Returns the corrected background and the applied
+    shift (full res)."""
     H, W = dist.shape
     bgmask = (~sub) & (dist > _px(2))
     lpf = lp_background(fz, bgmask, _px(6.0), scale)
-    D = lpf - est_q
+    T = cv2.resize(est, (W // scale, H // scale), interpolation=cv2.INTER_AREA)
+    D = lpf - T
     dq = cv2.resize(dist, (W // scale, H // scale), interpolation=cv2.INTER_NEAREST)
+    Wq = cv2.resize(Wmap, (W // scale, H // scale), interpolation=cv2.INTER_LINEAR)
     sub_q = cv2.resize(sub.astype(np.uint8), (W // scale, H // scale), interpolation=cv2.INTER_NEAREST) > 0
     # Analyse a little beyond the clean distance, so each stretch's
     # outermost bins are background the halo no longer reaches.
@@ -1099,10 +1089,8 @@ def clean_edges(fz, bgf, est_q, sub, dist, Wq, lo_q, hi_q, strength, scale=4):
     # stair-stepped edge that showed in the blend strip (Panaeolus stem).
     if (~sub_q).any():
         shift_q = normconv(shift_q, ~sub_q, tuple(_sigma(v) for v in (1.0, 2.0, 4.0)))
-    shift = cv2.resize(shift_q, (W, H), interpolation=cv2.INTER_LINEAR)
-    shift *= (~sub)[..., None]
-    bgf += shift
-    return bgf, shift
+    shift = cv2.resize(shift_q, (W, H), interpolation=cv2.INTER_LINEAR) * (~sub)[..., None]
+    return bgf + shift, shift
 
 
 def classify_never_sharp(sub, peak_half, peak_t, idx_half, N, fused, dist):
@@ -1152,22 +1140,15 @@ def match_noise(bgf, fz, dist):
     far = dist > _px(150)
     if far.sum() < _area(10000):
         return bgf, 1.0
-    def hp(x):
-        out = cv2.GaussianBlur(x, (0, 0), 1.5)
-        np.subtract(x, out, out=out)
-        return out
+    hp = lambda x: x - cv2.GaussianBlur(x, (0, 0), 1.5)
     hb = hp(bgf)
     n_b = np.median(np.abs(hb[far]))
-    hf = hp(fz)
-    n_f = np.median(np.abs(hf[far]))
-    del hf
+    n_f = np.median(np.abs(hp(fz)[far]))
     ratio = float(np.clip(n_f / max(n_b, 1e-6), 0.3, 1.0))
-    hb *= 1 - ratio
-    np.subtract(bgf, hb, out=hb)     # bgf - hb * (1 - ratio)
-    return hb, ratio
+    return bgf - hb * (1 - ratio), ratio
 
 
-def soft_object_mask(fz, est_lum, dist, sub, width):
+def soft_object_mask(fz, est, dist, sub, width):
     """Objects the fused result clearly shows inside the rebuilt zone.
 
     A peg or stalk that is soft in every frame is missed by the focus
@@ -1178,7 +1159,8 @@ def soft_object_mask(fz, est_lum, dist, sub, width):
     (OpenFocus A) leave patches up to ~70% off it, so anything differing by
     more than the level itself (and at least 10 of 255) is an object: keep
     the fused pixels there.  Only ever adds protection."""
-    lf, le = _lum(fz), est_lum      # est_lum: _lum of the clean estimate
+    lum = lambda x: cv2.cvtColor(x, cv2.COLOR_BGR2GRAY) / 257.0
+    lf, le = lum(fz), lum(est)
     obj = (dist > 0) & (dist < 1.5 * width) & (np.abs(lf - le) > np.maximum(1.0 * le, 10.0))
     obj = cv2.morphologyEx(obj.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     near = cv2.dilate(sub.astype(np.uint8), np.ones((_ksize(5), _ksize(5)), np.uint8))
@@ -1190,7 +1172,7 @@ def soft_object_mask(fz, est_lum, dist, sub, width):
     return cv2.GaussianBlur(obj, (0, 0), 1.5)
 
 
-def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=None, map_targets=None):
+def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=None, map_targets=None, *, cancelled=None):
     """Measure spill radii for one or more background frames in one pass.
 
     The subject geometry, edge selections and low-pass image for each source
@@ -1221,6 +1203,8 @@ def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=None, map_targets=N
     ratios = {k: [] for k in targets}
     weights = {k: [] for k in targets}
     for frame in np.unique(k_edge[background]):
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         frame = int(frame)
         sel = background & (k_edge == frame)
         weight = int(sel.sum())
@@ -1290,84 +1274,19 @@ def spill_radius_map(G, sub_half, k_edge, k_far, floor=None):
     return _spill_radius_results(G, sub_half, k_edge, (k_far,), floor)[int(k_far)]
 
 
-def background_curve(G, bgmask):
+def background_curve(G, bgmask, *, cancelled=None):
     """Coarse-scale background detail per frame (rises toward the far end)."""
     h, w = G.shape[1:]
     m = cv2.resize(bgmask.astype(np.uint8), (w // 4, h // 4),
                    interpolation=cv2.INTER_NEAREST) > 0
     out = []
     for g in G:
+        if cancelled is not None and cancelled():
+            raise BackgroundFillCancelled()
         s = cv2.resize(g, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
         lap = cv2.Laplacian(s, cv2.CV_32F, ksize=3)
         out.append(float((lap[m] ** 2).mean()))
     return np.array(out)
-
-
-def _channel_medians(img16: np.ndarray, index: np.ndarray) -> list:
-    """Per-channel median of a uint16 BGR image over flat pixel `index`.
-
-    Exactly ``np.median(img16.astype(np.float32)[..., c].ravel()[index])``
-    (the values are whole numbers, so a histogram finds the same middle
-    elements and float32 averages them the same way), without the full-size
-    float copy and partial sort per channel."""
-    n = int(index.size)
-    if n == 0:
-        return [np.float32(np.nan)] * 3
-    px = img16.reshape(-1, img16.shape[-1])[index]
-    out = []
-    for c in range(3):
-        cs = np.cumsum(np.bincount(px[:, c], minlength=65536))
-        hi = np.float32(np.searchsorted(cs, n // 2, side="right"))
-        if n % 2:
-            out.append(hi)
-        else:
-            lo = np.float32(np.searchsorted(cs, n // 2 - 1, side="right"))
-            out.append(np.float32((lo + hi) / np.float32(2)))
-    return out
-
-
-def _half_gray(frame: np.ndarray, rows: int = 256) -> np.ndarray:
-    """Half-resolution float gray (0-1) of a frame, converted in row strips
-    so no full-size float copy of the frame is allocated."""
-    h, w = frame.shape[:2]
-    gray = np.empty((h, w), np.float32)
-    for r0 in range(0, h, rows):
-        strip = _u16(frame[r0:r0 + rows]).astype(np.float32)
-        strip /= 65535.0
-        gray[r0:r0 + rows] = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
-    return cv2.resize(gray, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
-
-
-def _load_malloc_trim():
-    try:
-        import ctypes
-        import ctypes.util
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
-        trim = libc.malloc_trim
-    except (OSError, AttributeError):      # not glibc (macOS, Windows, musl)
-        return None
-    trim.argtypes = [ctypes.c_size_t]
-    trim.restype = ctypes.c_int
-    return trim
-
-
-_MALLOC_TRIM = _load_malloc_trim() if sys.platform.startswith("linux") else None
-
-
-def _release_free_memory() -> None:
-    """Hand freed heap pages back to the OS (glibc only).
-
-    Full-size masks (one byte per pixel, ~20 MB) fall under glibc's mmap
-    threshold, so they live on the heap; once freed they stay part of the
-    process instead of becoming available again, and each step's peak
-    stacked on the previous steps' leftovers."""
-    if _MALLOC_TRIM is not None:
-        _MALLOC_TRIM(0)
-
-
-def _lum(img: np.ndarray) -> np.ndarray:
-    """Gray level of a 0-65535 float BGR image on the 0-255 scale."""
-    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) / 257.0
 
 
 def _u16(img: np.ndarray) -> np.ndarray:
@@ -1379,23 +1298,7 @@ def _u16(img: np.ndarray) -> np.ndarray:
             return np.ascontiguousarray(img)
         if img.dtype == np.uint8:
             return np.ascontiguousarray(img, dtype=np.uint16) * np.uint16(257)
-    f = _to16f(img)                  # always a new array: clip it in place
-    np.clip(f, 0, 65535, out=f)
-    return f.astype(np.uint16)
-
-
-def working_set_bytes(frames: Sequence[np.ndarray], height: int, width: int) -> int:
-    """New memory `replace_background` may take, for admission control.
-
-    Measured peak RSS growth on a 20 MP stack (frames already in memory):
-    108 B/px with 15 frames and 127 B/px with 40, so about 96 B/px plus
-    0.8 B/px per frame (the half-resolution gray stack and per-frame
-    scratch); ~10% headroom.  Frames that are not uint16 are converted on
-    use, which adds a transient 16-bit copy plus its float source (~18 B/px)."""
-    per_px = max(120, 100 + len(frames))
-    if any(f.dtype != np.uint16 for f in frames):
-        per_px += 18
-    return int(height) * int(width) * per_px
+    return np.clip(_to16f(img), 0, 65535).astype(np.uint16)
 
 
 def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, **kwargs) -> BackgroundFillResult:
@@ -1476,7 +1379,6 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     total = 14
 
     def step(msg: str) -> None:
-        _release_free_memory()
         if cancelled is not None and cancelled():
             raise BackgroundFillCancelled()
         if progress is not None:
@@ -1488,24 +1390,27 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
 
     step("analysing focus")
     G = np.empty((N, H // 2, W // 2), np.float32)
+    frame_medians = []
     for k, f in enumerate(frames):
-        G[k] = _half_gray(f)
         if cancelled is not None and cancelled():
             raise BackgroundFillCancelled()
-    frame_medians = [np.median(g) for g in G]
-    measures, idx = focus_measures(G)
+        g = cv2.cvtColor(_u16(f).astype(np.float32) / 65535.0, cv2.COLOR_BGR2GRAY)
+        G[k] = cv2.resize(g, (W // 2, H // 2), interpolation=cv2.INTER_AREA)
+        frame_medians.append(np.median(G[k]))
+    del g
+    measures, idx = focus_measures(G, cancelled=cancelled)
     sub_half, thresh = subject_mask(measures, ["ratio", "peak"], None, min_island)
     fused16 = _u16(fused)
     color_half = cv2.resize(fused16, (G.shape[2], G.shape[1]), interpolation=cv2.INTER_AREA).astype(np.float32) / 65535.0
 
     step("finding the subject's outline")
-    sub_half = fine_outline(sub_half, G, color_half)
+    sub_half = fine_outline(sub_half, G, color_half, cancelled=cancelled)
     # Skip the strip next to the subject: blurred subject edges there would
     # count as background detail and skew which end looks like the background.
     away = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5) > _px(20)
     if away.sum() < _area(64):
         raise BackgroundFillError("no background found: the whole frame looks like subject")
-    curve = background_curve(G, away)
+    curve = background_curve(G, away, cancelled=cancelled)
     far_end = N - 1 if curve[-1] >= curve[0] else 0
     # Blurriest background: least coarse-scale detail away from the
     # subject.  Frames within 3% of that look equally blurry; of those take
@@ -1524,14 +1429,15 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
         k_bg, used = k_soft, "soft"
 
     step("protecting smooth subject")
-    sub_half, _t, _n, _pct = protect_missed_subject(sub_half, G, far_end, min_island * sub_half.size)
+    sub_half, _t, _n, _pct = protect_missed_subject(
+        sub_half, G, far_end, min_island * sub_half.size, cancelled=cancelled)
     gray_fused = cv2.cvtColor(color_half, cv2.COLOR_BGR2GRAY)
     gray_fused_median = np.median(gray_fused)
 
     def protect(k, gray, gray_median):
         fused_half = gray * (frame_medians[k] / max(float(gray_median), 1e-6))
         return protect_visible_detail(
-            sub_half, G, k, fused_half, frame_medians=frame_medians)[0]
+            sub_half, G, k, fused_half, frame_medians=frame_medians, cancelled=cancelled)[0]
 
     protected = protect(k_bg, gray_fused, gray_fused_median)
     # Share of the background that is detail some frame recorded in focus
@@ -1546,28 +1452,11 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     fused_bg = gray_fused * (frame_medians[k_bg] / max(float(gray_fused_median), 1e-6))
     if keep_soft_parts:
         protected = protect_focused_objects(
-            protected, G, k_bg, fused_bg, frame_medians=frame_medians)
+            protected, G, k_bg, fused_bg, frame_medians=frame_medians, cancelled=cancelled)
     sub_half = protected
     del protected, gray_fused, fused_bg
     log.info("background frame %d (preset %s -> %s, far end %d, recorded detail %.1f%% of background)",
              k_bg, preset, used, far_end, recorded_share * 100)
-    k_edge = edge_frame_map(sub_half, idx)
-    # Next to the subject no single frame has a clean background: the frame
-    # where an edge is sharp is darkened by partial occlusion, the background
-    # frame carries the subject's glow out to the measured radius.  Rebuild
-    # from the background frame beyond max(halo_fill, 1.25 x glow radius).
-    spill_results = _spill_radius_results(
-        G, sub_half, k_edge, (k_bg, far_end), map_targets=(k_bg,))
-    rmap, _table = spill_results[k_bg]
-    _, table_far = spill_results[far_end]
-    del spill_results
-    w_occ, _occ = occlusion_width(G, sub_half, k_edge)
-    # That was the last use of the half-resolution stack (one float per
-    # frame per full-res pixel): release it before the full-resolution work.
-    del G
-    peak_half = measures["peak"]
-    peak_t = thresh.get("peak", otsu_threshold(peak_half))
-    del measures
 
     step("refining the outline")
     matte = refine_subject(sub_half, fused16, band=_px(6), r=max(1, int(round(_px(4)))))
@@ -1595,32 +1484,33 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     del lum_f
     if band.sum() < _area(10000):
         band = dist > margin + feather
-    band_index = np.flatnonzero(band)
-    del band
-    match_target = _channel_medians(fused16, band_index)
+    match_target = [np.median(fz[..., c][band]) for c in range(3)]
 
     def load_matched(k):
-        f16 = _u16(frames[k])
-        if valid_masks[k] is None:
-            index, target = band_index, match_target
-        else:
-            sample = np.zeros(H * W, bool)
-            sample[band_index] = True
-            sample = sample.reshape(H, W) & valid_masks[k]
-            if sample.sum() < _area(64):
-                sample = (~sub) & valid_masks[k]
-            index = np.flatnonzero(sample)
-            target = _channel_medians(fused16, index)
-        if not index.size:
+        f = _u16(frames[k]).astype(np.float32)
+        sample = band if valid_masks[k] is None else band & valid_masks[k]
+        if sample.sum() < _area(64) and valid_masks[k] is not None:
+            sample = (~sub) & valid_masks[k]
+        if not sample.any():
             raise BackgroundFillError(f"frame {k + 1} has no valid background pixels")
-        medians = _channel_medians(f16, index)
-        g = np.array([target[c] / max(medians[c], 1e-3) for c in range(3)], np.float32)
-        f = f16.astype(np.float32)
-        f *= g
-        return f, g
+        target = match_target if valid_masks[k] is None else [
+            np.median(fz[..., c][sample]) for c in range(3)]
+        g = np.array([target[c] / max(np.median(f[..., c][sample]), 1e-3)
+                      for c in range(3)], np.float32)
+        return f * g, g
 
     step("matching the background frame")
     bgf, gains = load_matched(k_bg)
+    k_edge = edge_frame_map(sub_half, idx)
+    # Next to the subject no single frame has a clean background: the frame
+    # where an edge is sharp is darkened by partial occlusion, the background
+    # frame carries the subject's glow out to the measured radius.  Rebuild
+    # from the background frame beyond max(halo_fill, 1.25 x glow radius).
+    spill_results = _spill_radius_results(
+        G, sub_half, k_edge, (k_bg, far_end), map_targets=(k_bg,), cancelled=cancelled)
+    rmap, _table = spill_results[k_bg]
+    _, table_far = spill_results[far_end]
+    del spill_results
     size_cap = object_size_cap(sub_half, (H, W))
     fill_width = np.maximum(np.float32(halo_fill),
                             np.minimum(1.25 * cv2.resize(rmap, (W, H), interpolation=cv2.INTER_LINEAR), size_cap))
@@ -1633,12 +1523,7 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
 
     step("rebuilding the background beside the subject")
     bgf, est = fill_halo_zone(bgf, dist, sub, fill_width)
-    # From here on only the estimate's gray level (and, for Clean, a
-    # quarter-resolution copy) are read: drop the full-size colour version.
-    est_lum = _lum(est)
-    est_q = cv2.resize(est, (W // 4, H // 4), interpolation=cv2.INTER_AREA) if clean else None
-    del est
-    wmap = edge_width_map(fz, est_lum, sub, dist, lo=feather)
+    wmap = edge_width_map(fz, est, sub, dist, lo=feather)
     soft_a = np.clip((dist - margin) / wmap, 0, 1).astype(np.float32)
     soft_a = soft_a * soft_a * (3 - 2 * soft_a)
     alpha = np.minimum(alpha, soft_a)
@@ -1652,42 +1537,42 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     big = 0.08 * float(np.hypot(H, W))
     bgm = (~sub) & (dist > _px(2))
     vlf = lp_background(fz, bgm, big) - lp_background(bgf, bgm, big)
-    bgf += cv2.resize(blur(vlf, big / 16), (W, H), interpolation=cv2.INTER_LINEAR)
+    bgf = bgf + cv2.resize(blur(vlf, big / 16), (W, H), interpolation=cv2.INTER_LINEAR)
     del vlf, bgm
     reach = np.clip(2.5 * np.asarray(fill_width, np.float32), _px(48), _px(400))
     bgf = natural_near_background(bgf, fz, sub, dist, reach)
     del reach
-    keep_obj = soft_object_mask(fz, est_lum, dist, sub, fill_width)
+    keep_obj = soft_object_mask(fz, est, dist, sub, fill_width)
     alpha = np.minimum(alpha, 1 - keep_obj)
-    del keep_obj, fill_width, est_lum
+    del keep_obj
 
     step("mapping missing data")
     c_raw = table_far["per_step_raw"]
+    w_occ, _occ = occlusion_width(G, sub_half, k_edge, cancelled=cancelled)
     ks_sub = idx[sub_half]
     k_occ = int(np.median(ks_sub)) if ks_sub.size else N // 2
     k_edge_full = cv2.resize(k_edge, (W, H), interpolation=cv2.INTER_NEAREST)
-    bg_miss, _soft, _w_by_ke, _k_B, Wmap = missing_data_map(sub, dist, k_edge_full, peak_half, peak_t,
+    peak_t = thresh.get("peak", otsu_threshold(measures["peak"]))
+    bg_miss, _soft, _w_by_ke, _k_B, Wmap = missing_data_map(sub, dist, k_edge_full, measures["peak"], peak_t,
                                                          N, far_end, c_raw, w_occ, k_occ,
-                                                         size_cap)
-    del k_edge_full, size_cap, _soft
-    to8 = lambda m: (np.clip(m, 0, 1) * 255).astype(np.uint8)
-    bg_miss = to8(bg_miss)
-    Wq = cv2.resize(Wmap, (W // 4, H // 4), interpolation=cv2.INTER_LINEAR) if clean else None
-    del Wmap
+                                                         size_cap, cancelled=cancelled)
+    del k_edge_full, size_cap
     step("classifying unseen subject")
-    hidden, out_range, featureless = classify_never_sharp(sub, peak_half, peak_t, idx, N, fused16, dist)
-    missing = MissingData(bg_miss, to8(hidden), to8(out_range), to8(featureless))
+    hidden, out_range, featureless = classify_never_sharp(sub, measures["peak"], peak_t, idx, N, fused16, dist)
+    to8 = lambda m: (np.clip(m, 0, 1) * 255).astype(np.uint8)
+    missing = MissingData(to8(bg_miss), to8(hidden), to8(out_range), to8(featureless))
     del bg_miss, hidden, out_range, featureless
 
     shift = None
     if clean:
         step("cleaning edge flaws")
-        lo_q, hi_q = recorded_range(N, load_matched, (H, W), valid_masks=valid_masks)
+        lo_q, hi_q = recorded_range(N, load_matched, (H, W), valid_masks=valid_masks,
+                                   cancelled=cancelled)
         if cancelled is not None and cancelled():
             raise BackgroundFillCancelled()
-        bgf, shift = clean_edges(fz, bgf, est_q, sub, dist, Wq, lo_q, hi_q, 1.0)
+        bgf, shift = clean_edges(fz, bgf, est, sub, dist, Wmap, lo_q, hi_q, 1.0)
         del lo_q, hi_q
-    del est_q, Wq
+    del est, Wmap
 
     step("compositing")
     valid_bg = valid_masks[k_bg]
@@ -1696,38 +1581,30 @@ def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     subject_fraction = float(sub.mean())
     changed = subject_fraction <= max_subject
     if changed:
-        if composite_onto is not None:
-            del fz
-            comp = _u16(composite_onto).astype(np.float32)
-            comp *= (1 - alpha)[..., None]
-        else:
-            comp = fz * (1 - alpha[..., None])
-            del fz
-        bgf *= alpha[..., None]
-        comp += bgf
-        del bgf
+        base = fz if composite_onto is None else _u16(composite_onto).astype(np.float32)
+        comp = base * (1 - alpha[..., None]) + bgf * alpha[..., None]
         if shift is not None:
             # The blend strip at the edge keeps stacked pixels; correct their
             # background side too, or a thin line is left along the edge.
             shift_region = (~sub) if valid_bg is None else ((~sub) & valid_bg)
-            shift *= ((1 - alpha) * shift_region)[..., None]
-            comp += shift
-            del shift
-        np.clip(comp, 0, 65535, out=comp)
-        out16 = comp.astype(np.uint16)
+            comp += shift * ((1 - alpha) * shift_region)[..., None]
+        # The analysis uses uint16 colour, but untouched source pixels must
+        # bypass that conversion (especially fractional floats and grayscale).
+        unchanged = np.all(comp == fz, axis=2)
+        if np.issubdtype(fused.dtype, np.floating):
+            image = _from16f(comp, fused)
+        else:
+            out16 = np.clip(comp, 0, 65535).astype(np.uint16)
+            image = out16 if fused.dtype == np.uint16 and fused.ndim == 3 and fused.shape[2] == 3 \
+                else _from16f(out16.astype(np.float32), fused)
+        image[unchanged] = fused[unchanged]
         del comp
     else:
         # A ground-level scene: nearly everything is scene the stack
         # recorded, and the few percent left are far-range objects the
         # background frame would only blur.
         log.info("subject covers %.1f%% of the frame: background left as stacked", subject_fraction * 100)
-        # ``_u16`` may return an already-uint16 input without copying.  Keep
-        # result ownership independent from the caller as it was before the
-        # integer fast path.
-        out16 = fused16.copy() if composite_onto is None else _u16(composite_onto).copy()
-    like = fused if composite_onto is None else composite_onto
-    image = _from16f(out16.astype(np.float32), like) if like.dtype != np.uint16 or like.ndim != 3 \
-        or like.shape[2] != 3 else out16
+        image = (fused if composite_onto is None else composite_onto).copy()
     step("done")
     return BackgroundFillResult(
         image=image, changed=changed, background_frame=k_bg, far_end=far_end,

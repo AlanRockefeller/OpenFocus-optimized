@@ -24,7 +24,7 @@ import shutil
 import struct
 import subprocess
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from utils.logging_setup import get_logger
 

@@ -14,6 +14,7 @@
 10. [Retouching, Labels and Annotations](#10-retouching-labels-and-annotations)
 11. [Settings and Configuration](#11-settings-and-configuration)
 12. [Batch Processing](#12-batch-processing)
+   - [Batch image conversion](#batch-image-conversion)
 13. [Exporting Results](#13-exporting-results)
 14. [Command Line Interface](#14-command-line-interface)
 15. [Keyboard Shortcuts](#15-keyboard-shortcuts)
@@ -82,6 +83,8 @@ For example, the CLI equivalent is `python main.py --input ./png-stack
 --output ./result.png --method guided_filter --align none`.
 
 ### Supported Output Formats
+
+In **Save As**, ordinary TIFF saves the result as a single image; layered TIFF includes the source frames as layers. Linear DNG is always listed, but saving it requires an unbaked camera-linear result from **Open native RAW** with camera calibration.
 
 - Individual images: JPG, PNG, BMP, TIFF, WebP
 - Image sequences: Saved as folders
@@ -156,9 +159,44 @@ The top menu bar provides access to all functions:
 
 - **File**: import/export operations, projects, processing templates and the recent-files list
 - **Edit**: Undo/redo, reset the current stack, image transformations and retouching
-- **Tools**: Batch processing, method comparison, depth map, flat-field correction, scale bar and labels
+- **Tools**: Image stitching, batch processing and conversion, method comparison, depth map, flat-field correction, scale bar and labels
 - **Settings**: Advanced Settings (performance, registration and alignment diagnostics, sensor cleanup, output naming, AI, startup), GPU acceleration, theme and language
 - **Help**: Environment info, contact information, update check, and the log folder
+
+Image stitching is experimental and unfinished. Inspect its placement and
+seams before using an exported result.
+
+**Tools → Stitch Images…** opens a separate workspace for already-fused
+microscope regions. Add image files or select existing output results, choose
+**Auto-align**, then inspect each overlap. Drag an image or enter X/Y in pixels
+to correct its placement; the opacity slider changes only the preview. Images
+without reliable shared features stay marked unmatched and can be positioned
+manually, including with known stage coordinates expressed in pixels. No
+image-only method can infer the position of a featureless, non-overlapping
+region. Automatic matching estimates planar rotation, scale and translation;
+verify repeated patterns and specimen motion before saving.
+
+Drop image files or folders onto the list or canvas to import them. Folder
+imports include supported files directly inside the folder; subfolders are not
+scanned. Imports use natural filename order and ignore duplicates. Select an
+image in the list or canvas and press Delete or Backspace to remove that item.
+
+For a declared stage grid, set rows, columns, capture order, direction, start
+corner and estimated overlap, then choose **Apply grid positions**. The cell
+count must match the image count. Changing controls preserves manual placement
+until Apply is pressed; applying replaces the positions. Inspect overlaps and
+adjust X/Y afterward. Preview opacity survives imports and layout changes and
+does not alter the exported blend.
+
+Save as TIFF or PNG. TIFF uses disk-backed tiled composition and strip-based
+writing, including BigTIFF for large files; allow enough temporary and output
+disk space. TIFF strip buffers target 4 MiB per strip, but one full output row
+is the minimum. PNG encoding needs additional memory. Overlaps use edge
+feathering, so differences in exposure or specimen content can remain visible.
+Eight-bit inputs remain 8-bit, while 16-bit or mixed-depth inputs produce
+16-bit output. Preview opacity is not baked into the image. The mosaic does
+not infer physical scale or carry individual image EXIF/ICC metadata into a
+combined image.
 
 **Edit → Reset Current Stack…** restores the imported images, their original
 order and import scale, including frames later removed or excluded. It clears
@@ -406,21 +444,37 @@ automatically during import, so portrait shots load upright.
 fusion runs at full depth and results can be saved back as 16-bit PNG/TIFF
 (JPG/BMP exports are converted to 8-bit, as those formats cannot store 16 bits).
 
-Camera RAW files are developed to 16-bit (camera white balance, sRGB color space and LibRaw's default gamma)
+Camera RAW files are developed to 16-bit (camera white balance and the sRGB color space and transfer curve)
 with auto-brightening disabled, so every frame of a stack gets the same
 exposure mapping; per-frame auto exposure would make brightness flicker
 between frames. Save as TIFF or PNG to keep the 16-bit data.
 
 For a camera-linear workflow, choose **File → Open native RAW stack…** and
-select the camera RAW frames. The frames must share camera calibration and
-white balance; unsupported or incompatible files are rejected. OpenFocus keeps
-the 16-bit camera-linear pixels through alignment, fusion and retouching while
-showing developed previews. Save a result as **Linear DNG** to continue editing
-its color and white balance in a compatible RAW editor. TIFF, PNG and other
-ordinary exports use the developed appearance. DNG annotations are burned into
-the exported pixels. If an annotation color cannot be represented in the
-camera color space, DNG export fails; choose a different color or export a
-developed TIFF or PNG. The regular RAW import continues to produce developed sRGB.
+select the original camera RAW frames. DNG files are also accepted, including
+DNG files named `.tif` or `.tiff`; ordinary TIFF images are not camera RAW.
+Support for a particular camera depends on the installed LibRaw decoder. All
+frames must share camera calibration and white balance; unsupported or
+incompatible files are rejected. There is no need to convert vendor RAW files
+to DNG before importing them.
+
+Align and fuse the stack as usual, then select the result and choose **Save As →
+Linear DNG** to continue editing its color and white balance in a compatible RAW
+editor. The fused Linear DNG contains demosaiced camera-linear RGB pixels, not
+the original sensor mosaic. OpenFocus retains 16-bit camera-linear pixels during
+alignment, fusion and retouching and displays developed previews. To save the
+developed appearance at 16 bits, choose ordinary **TIFF** in Save As. PNG and
+other ordinary exports also use the developed appearance. When the camera profile
+allows it, DNG annotations are burned into the exported pixels. If an annotation color cannot be represented
+in the camera color space, DNG export fails; choose a different color or export
+a developed TIFF or PNG. Regular RAW import continues to produce developed sRGB.
+For DNG inputs with complex camera profiles, the saved Linear DNG retains the
+supported color profile metadata for a DNG-aware editor. OpenFocus uses a simplified D65 matrix
+for its preview and developed TIFF/PNG; it does not apply DNG profile transforms
+or baseline exposure. Their appearance may therefore differ from that editor.
+For a complex profile, annotations and scale bars cannot be baked into Linear
+DNG because their colors could be incorrect in a RAW editor. Remove them to
+save the image as DNG, or export TIFF/PNG with the annotations instead.
+
 RAW decoding still requires full-resolution working memory even when the stack
 is loaded at a reduced scale.
 If the camera model cannot be identified, only a single RAW can be opened;
@@ -434,8 +488,9 @@ every source frame has the same embedded profile. Mixed or untagged stacks are e
 without an ICC profile. OpenFocus preserves the profile; it does not convert
 source pixels into a common color space or color-manage the preview. Convert
 mixed-profile images to a common color space before loading them. Regular RAW
-import is developed to sRGB and does not inherit a camera profile. Native RAW
-mode uses camera calibration for its developed preview and Linear DNG export.
+import is developed to sRGB and uses a generated sRGB profile rather than a
+camera ICC profile. Native RAW mode uses camera calibration for its developed
+preview and Linear DNG export.
 
 For a multi-page TIFF, all pages in the file must have the same valid RGB
 profile; otherwise its frames are treated as untagged. Video frames are also
@@ -473,10 +528,12 @@ are included; changing a checkbox updates the displayed suggestions.
 
 ### Zooming and Panning
 
-- **Zoom In/Out**: Mouse wheel over the image
-- **Fine Zoom**: Hold `Ctrl` + mouse wheel for smaller increments
-- **Fit to Window**: Double-click the image to toggle between fit and 100% view
-- **Pan**: Click and drag to move the image within the panel
+- **Zoom In/Out**: Mouse wheel over the source or result image, including with `Ctrl` held
+- **Magnifier**: Hold the left mouse button over either image. While holding it,
+  use the wheel to change magnification or `Ctrl` + wheel to resize the square.
+  The size is retained between presses, independently for each panel.
+- **Fit to Window**: Middle-click the image
+- **Pan**: Right-drag or hold Space and left-drag
 
 ### Synchronized Navigation
 
@@ -673,24 +730,21 @@ various image types.
 
 ### StackMFF (V1, deep learning)
 
-- **Algorithm**: a 3D U-Net that predicts the fused luma for the whole stack
-  in one pass; Cb/Cr are taken from the source frame closest to that luma
+- **Algorithm**: a single-scale attention network blends source luma with softmax weights; Cb/Cr come from the source frame closest to the fused luma
 - **Best for**: neural fusion of a complete focus stack
-- **Advantages**: no parameters; colour stays in gamut. Frame order can affect the result.
-- **Note**: 6M parameters; larger stacks benefit from GPU acceleration
+- **Advantages**: no parameters; colour stays in gamut. Fused luma is invariant to frame order; chroma may differ when source luma distances tie.
+- **Note**: about 156,172 parameters; larger stacks benefit from GPU acceleration
 
 ### StackMFF V2 (deep learning)
 
-- **Algorithm**: per-layer focus estimation refined by a bidirectional
-  recurrent layer; the network regresses the focal-plane index and samples the
-  stack. **The frames must stay in their original focus order** — reversing is
-  disabled for this method
+- **Algorithm**: a single-scale attention network normalizes the expected focus depth and samples the nearest source frame. Depth indices depend on stack order. **The frames must stay in their original focus order** — reversing is disabled for this method
 - **Depth maps**: supported; reports the sampled focal layer
 - **Best for**: continuous focus sweeps where a very small, fast model matters
-- **Requirements**: PyTorch; about 0.05M parameters; no settings
+- **Requirements**: ONNX Runtime and the bundled ONNX model.
+
 ### StackMFF V3 (Deep Learning)
 
-- **Algorithm**: Pixel-wise source classification (requires PyTorch). The
+- **Algorithm**: Pixel-wise source classification (ONNX Runtime). The
   network predicts, for every pixel, which input frame it comes from, then
   either blends the frames by those probabilities or picks one frame
 - **AI output mode** (right panel, only for this method):
@@ -704,9 +758,19 @@ various image types.
     region and use retouching to repair local defects.
 - **Best for**: Per-pixel selection or blending of focus frames
 - **Advantages**: Order-invariant (frame order never changes the result),
-  handles any stack length, no per-method tuning, automatic optimization
-- **Requirements**: PyTorch installation, optional CUDA GPU (no torchvision)
-- **Note**: May be unavailable if PyTorch is not installed
+  handles stack lengths within available resources, no per-method tuning, automatic optimization
+- **Requirements**: ONNX Runtime and the bundled ONNX model.
+
+
+For large stacks, leave space in the temporary directory for source frames and
+any additional aligned or corrected frames. Choose an existing folder under
+**Settings → Advanced Settings → Performance → Temporary directory**; leave it
+empty for the system default. Changes apply immediately to newly created data;
+already loaded frames stay in their original directory until released. OpenFocus
+checks free space before creating mappings and estimates whole-stack needs when
+possible. This is not a reservation; other programs may use the space later.
+
+Each neural tile uses every frame. Source frames and alignment scratch can be disk-backed, but free disk space and available memory still limit stack size. V2 spatial tiling approximates whole-image inference.
 
 ### OpenFocus A / B / C
 
@@ -773,7 +837,7 @@ filename stems are retained, with the extension of the format you select.
 | DCT | Medium | Good | Textures |
 | DTCWT | Medium | Very Good | Complex scenes |
 | GFG-FGF | Fast | Good | Focus regions |
-| StackMFF (V1) | Slow (GPU) | Not benchmarked here | Whole-stack neural fusion; order can affect results |
+| StackMFF (V1) | Slow (GPU) | Not benchmarked here | Luma is order-invariant; chroma may differ on luma-distance ties |
 | StackMFF V2 | Fast (GPU) | Not benchmarked here | Continuous sweeps with a tiny model |
 | StackMFF V3 | Slow (GPU) | Excellent | Best quality |
 | OpenFocus A | Depends on stack | Depends on stack | Multiscale focused-pixel selection |
@@ -888,8 +952,7 @@ copies pixels from the exact frames that produced the selected result:
    window, and OpenFocus protects it from automatic history eviction and
    from quitting without a decision.
 
-Apply the retouch as a new output, then right-click that output in the main
-window and choose **Export layered TIFF** to save it with its source frames.
+Apply the retouch as a new output, then select it and choose **Save As**. Select layered TIFF in the format list to save the result with its source frames.
 Live labels and scale bars are not included; unsaved annotation changes remain
 protected. Source geometry and validity masks are retained. The result and
 sources must be opaque RGB or grayscale images with matching 8-bit or 16-bit
@@ -966,7 +1029,7 @@ adjust, and blend its pixels.
    It can also keep background objects next to the subject as stacked, so check
    the result.
 5. Click **Replace background**. A 20-megapixel stack of 15 frames takes about
-   a minute and needs about 2.5 GB of free memory. **Cancel** stops it.
+   a minute and needs about 3.5 GB of free memory. **Cancel** stops it.
 
 The change is one undoable step, and strokes you painted on the subject before
 are kept. Use the **Restore Brush** to bring back stacked pixels wherever you
@@ -990,8 +1053,8 @@ are the places to check or retouch by hand:
 
 **Save missing-data map…** writes the tinted preview and one black-and-white
 mask per colour. Auto background needs the frames that made the result and is
-not available for region (ROI) results. Retouch checkpoints record the choice
-and recompute it when loaded.
+not available for region (ROI) results. New background checkpoints restore the
+exact image, reachable history and diagnostics without recomputing the background.
 
 The command line does the same without the GUI: add `--auto-background` to a
 fusion run (see [Command Line Interface](#14-command-line-interface)). It uses
@@ -1040,6 +1103,26 @@ size immediately updates the visible overlap limit to half a tile. The AI
 section's saved batch limit is retained, but inference currently submits one
 tile per call; registration width can change alignment accuracy.
 Alignment-diagnostic collection is a checkbox in the Registration section.
+
+**Settings → Advanced Settings → Share usage statistics** is enabled by
+default when no preference exists; an explicit previous opt-out is preserved.
+OpenFocus sends only a random installation ID, application version and operating
+system to openfocus.top, at most once per day after a successful send. No images,
+paths, hardware details or logs are sent. The ID is pseudonymous: reports with
+the same ID can be linked. Turn the switch off and choose **OK** to stop future
+reports and delete the local ID and send timestamp; enabling it again creates
+a new ID. Cancel, Esc and closing discard the draft without changing reporting.
+There is no onboarding choice or extra consent dialog. Closing the application
+cancels future reports; an already dispatched request may still complete.
+
+An active installation count for approximately 30 days means distinct IDs
+that reported during that period, optionally grouped by version. It is an
+estimate, not a count of people or all users: offline installations and users
+who disable reporting are missing. Failed sends retry while the application stays
+open or on a future startup. Updates retain the ID with your settings. Copying
+portable settings copies the ID, so
+copies may count as one installation; reinstalling retains it only if the
+existing settings are kept.
 
 Automatic update downloads run while idle and never install automatically. A completed download remains ready until you explicitly choose **Restart and Update**. Restart protects active edits and unsaved work, then writes recovery data before launching replacement. Cancelling a download or preparation waits for the current safe boundary. An existing complete, newer staged build can be installed offline.
 
@@ -1184,12 +1267,8 @@ unchanged; choosing smaller tiles yourself can change output pixels.
 
 ### GPU Acceleration Toggle
 
-OpenFocus uses the GPU (CUDA/MPS) for the AI neural models (StackMFF V1/V2/V3); classical algorithms and application registration run on CPU. Explicit low-level CuPy registration is a separate numerical backend.
+StackMFF V1/V2/V3 use ONNX Runtime. DirectML on Windows and CoreML on macOS may accelerate inference; otherwise it runs on CPU. Provider availability alone does not prove GPU execution. Wider GPU support requires validation.
 
-Windows release builds bundle CUDA-enabled PyTorch for NVIDIA GPUs with a
-compatible driver; Apple Silicon uses MPS. The current Windows package does not
-provide an AMD or Intel GPU inference backend. GPU memory does not replace the
-system RAM used by registration and the image stack.
 
 - Toggle via **Settings → GPU Acceleration**
 - Unchecking forces neural methods onto the CPU — useful when GPU drivers misbehave
@@ -1351,6 +1430,75 @@ The batch dialog shows real-time progress. You can cancel processing at any time
 - Cancellation waits for the worker to stop. Committed files remain available;
   partial, failed, cancelled and unstarted tasks are counted separately.
 
+### Batch image conversion
+
+Open **Tools → Batch Image Converter** independently of the current stack. Add files or all supported images in a folder, choose an existing output folder and a format, then select **Convert**. The list shows output paths and errors per source; the summary reports successful and failed sources. Cancel stops between operations; already completed files remain available. Closing during conversion requests cancellation and closes the window when processing stops.
+
+Drag local image files or folders onto the queue or dialog to add them. Folder
+imports include direct children only. Files are naturally sorted and deduplicated;
+the import summary reports added and skipped entries. Convert becomes available
+when the queue contains images and the output field resolves to an existing
+folder. Quoted paths and environment variables are supported.
+
+The fixed 96×72 thumbnail sits to the left of each row. Select multiple rows and
+press **Delete** or **Backspace**, or choose **Remove**. These keys edit text
+normally when the output field has focus. Import and removal remain disabled
+until conversion or cancellation actually finishes. Thumbnails run in a separate,
+bounded queue and
+use JPEG decoder scaling or small raster pages. Large RAW files use bounded
+embedded JPEG ranges from TIFF-based RAW or RAF containers; a format without a
+safe preview, including some CR3 files, shows a placeholder instead of unpacking
+the sensor. Missing thumbnails do not prevent conversion.
+Thumbnail memory admission includes the original JPEG geometry: progressive
+JPEG still needs full-image DCT coefficient storage even when decoder scaling
+reduces the displayed pixels. A preview exceeding the resource budget shows
+the same placeholder before pixel decoding.
+
+Choose **DNG** for RAW-to-DNG conversion without installing Adobe DNG Converter.
+Supported three-color Bayer and X-Trans sensors retain the exact active CFA
+samples, their black levels, white level, as-shot white balance, D65 camera
+matrix, crop and orientation. Masked optical borders are omitted; active pixels
+are neither resized nor developed. Samples use a 16-bit TIFF container while
+retaining the original 12/14/16-bit white level. Existing DNG files are copied
+byte-for-byte, preserving their profiles, processing opcodes and proprietary
+metadata. Non-CFA three-color sensors use **LinearRaw**, containing camera-linear
+RGB rather than a sensor mosaic. Ordinary JPEG/PNG/TIFF inputs cannot become
+camera RAW by choosing DNG and are reported as errors.
+
+LibRaw supplies the camera calibration for vendor RAW. Its Python API does not
+expose every proprietary correction, spatial black table or manufacturer profile;
+conversion does not promise identical rendering to the manufacturer's software.
+Unknown CFA layouts, four-color sensors, non-square/diagonal layouts, missing
+calibration, unequal channel saturation levels and CFA payloads exceeding standard
+TIFF's 4 GiB limit fail explicitly. No Adobe SDK or converter is required at runtime.
+Synthetic Bayer, X-Trans and LinearRaw samples are covered by independent LibRaw
+decoding tests; support for individual real cameras depends on LibRaw.
+
+The seven small synthetic files (Bayer and X-Trans at 12/14/16-bit sensor ranges,
+plus one 16-bit LinearRaw) also completed **Adobe DNG SDK 1.6 dng_validate**
+with exit code 0. That validator build disabled XMP and external lossy-JPEG
+support; the generated files contain neither. The six CFA samples emit the SDK's
+"Too little padding (possible interpolation artifacts)" warnings at their four
+edges because masked borders were removed and ActiveArea covers the stored
+pixels. Border interpolation may therefore differ between consumers. Pixels
+are not fabricated or padded to hide this warning. This is validation of these
+synthetic files, not certification of every camera or Adobe product.
+
+Parallel conversion shares the application's resource budget, reserves memory
+for each job's largest TIFF page, and bounds pending jobs to the worker count.
+TIFF admission walks page headers once with one open file and checks cancellation
+before reading or estimating each page; cancellation also interrupts this preflight.
+Each job runs native codecs with one thread. Cancellation stops new admissions
+and checks between pages, decode/write stages and DNG strips; native codec calls
+finish cooperatively. Completed files remain available and incomplete temporary
+files are removed. Output-name reservation is atomic across concurrent jobs.
+
+For ordinary image output, camera RAW is developed with LibRaw using camera white balance and without automatic brightening. Available RAW support depends on the installed LibRaw version. Multipage TIFF is exported as separately numbered images. JPEG is lossy, and JPEG, BMP and WebP reduce 16-bit pixels to 8-bit; PNG and TIFF retain 16-bit pixels. Transparent images require PNG. LZW TIFF pages with alpha, unsupported TIFF color layouts and sample types are reported as errors. Existing files and inputs are never replaced: name conflicts receive numbered suffixes. Every image still requires enough free memory and disk space for its decoder and encoder. Safe camera EXIF and compatible RGB profiles are retained where supported; some formats or pages cannot carry all metadata.
+
+RAW conversions to ordinary image formats use the sRGB transfer curve and embed an sRGB profile where
+the output format supports it. For a multi-page TIFF, the converter preserves
+each page's own valid RGB profile independently.
+
 ---
 
 ## 13. Exporting Results
@@ -1418,7 +1566,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # start the desktop app
 openfocus ctl <command> [flags]          # drive a running window (see AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # replay a saved headless recipe
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` launches detached; `--control` waits for the control channel and
@@ -1489,6 +1637,7 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--exposure-match` | Match every frame's mean to the last frame before fusion (default: on; `--no-exposure-match` disables). Whole-stack gains, so tiled output stays seamless; applies to every method and to the OpenFocus aligner's brightness reference |
 | `--base-frame` | Optional post-fusion step: match the output's low frequencies to the `last`/`first` frame (`none` default) |
 | `--sort` | Frame order for `openfocus_a/b/c`: `asc` (default, file order), `desc` (reverse a far-to-near sweep), `off` |
+| `--frame-order` | Folder input: `auto` (default) orders frames near to far by EXIF focus steps when every frame has them (OM SYSTEM focus bracketing starts mid-depth), otherwise by name; `name` always sorts by filename. Explicit file lists keep their order |
 | `--sharpen-output` | Apply mild unsharp masking to the fused output (off by default) |
 | `--dust-map WHITE` | Flat-field (dust map) correction from a defocused white-field shot |
 | `--defect-mask-path MASK` | Sensor-coordinate defect mask repaired before registration |
@@ -1517,7 +1666,6 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--keep-soft-parts` | Auto background: keep soft parts attached to the subject that some frame focused on |
 | `--save-stacked [path]` | With `--auto-background`, also save the result before the replacement (default `<output>_stacked<ext>`). In batch mode only the default path is allowed |
 | `--missing-data-map [path]` | With `--auto-background`, also save the missing-data map and one 8-bit mask per class (default `<output>_missing.png`). In batch mode only the default path is allowed |
-| `--frame-order` | Folder input: `auto` (default) orders frames near to far by EXIF focus steps when every frame has them (OM SYSTEM focus bracketing starts mid-depth), otherwise by name; `name` always sorts by filename. Explicit file lists keep their order |
 | `--json FILE` | Write a machine-readable result summary to FILE when done |
 | `--json-progress` | Print one JSON progress object per step to stdout (NDJSON); prose goes to stderr |
 | `--dry-run` | Validate inputs and print the plan without fusing |
@@ -1591,13 +1739,19 @@ when a CPU execution is required, and retain the installed software and inputs.
 
 ### Replay a retouch checkpoint
 
-The first save or load verifies the base and processed sources in a cancellable
-background operation. Saving also replays the recorded edits and checks the
-current image and undo/redo state before publishing the checkpoint. If a source
-has changed and replay no longer matches, saving fails and keeps your edits.
-Canceling a save or load also keeps your current edits available.
-If memory is insufficient for verification or replay, the operation stops and
-keeps both your current edits and any existing checkpoint unchanged.
+Use the retouch workspace's checkpoint save/load controls with the original base
+and processed sources. Auto-background sessions, including successful analyses
+that change no pixels, save lossless v2 `.ofretouch` ZIP snapshots with JSON
+metadata and NumPy payloads: the exact working image, reachable undo/redo tiles,
+diagnostic states and source provenance. Loading v2 does not recompute the
+background. Ordinary brush/tone sessions may use compact JSON v1; older JSON v1
+background checkpoints remain replayable.
+
+Source verification runs in a cancellable background operation. Before replacing
+the destination, saving reloads the candidate file and checks exact equality of
+the current image, reachable undo/redo tiles and diagnostic states. A source
+mismatch, failed verification, cancellation or insufficient memory leaves your
+current edits and any existing checkpoint unchanged.
 
 If the checkpoint recording limit prevents another edit, apply the current
 edits and start a new retouch session to continue.
@@ -1606,20 +1760,16 @@ Save a retouch checkpoint from the retouch workspace, then supply the original
 base image and every processed source frame in the same order as the session:
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Use the actual frames used for retouching, after alignment and any ROI crop or
-other processing, with their original pixel values and bit depth. The checkpoint
-records edits and fingerprints, not the image pixels. Replay reconstructs the
-recorded frame offsets and alignment behavior and verifies the base, ordered
+Both formats still require the original base and every actual source frame used
+for retouching, in session order, after alignment and any ROI crop or other
+processing, with their original pixel values and bit depth. Loading reconstructs
+the recorded frame offsets and alignment behavior and verifies the base, ordered
 frames and validity masks; incompatible pixels, geometry or masks are rejected.
 Each path must contain one image. Output must be PNG or TIFF and preserves the
 base bit depth. The checkpoint and input images cannot be used as the output.
-
-If the checkpoint contains an Auto background step run on an output that was
-already retouched, also give the stacked result it came from with
-`--stacked stacked.png`.
 
 Exit codes: `0` success, `1` processing error, `2` usage error. Running
 `python main.py --help` prints all options; launching with a plain path
@@ -1654,9 +1804,9 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 | Shortcut | Action |
 |----------|--------|
 | `Up` / `Down` (source list focused) | Previous / next frame |
-| `Mouse Wheel` | Zoom in/out |
-| `Ctrl + Wheel` | Fine zoom |
-| `Double-click` | Toggle fit/100% view |
+| `Mouse Wheel` | Zoom the view; while holding the left button, change magnifier zoom |
+| `Ctrl + Wheel` while holding the left button | Resize the magnifier |
+| `Middle-click` | Fit the image to the window |
 
 ### General
 
@@ -1685,8 +1835,7 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 
 #### AI Unavailable
 
-- Install PyTorch: `pip install torch` (torchvision is not used)
-- For GPU support, install a CUDA-enabled PyTorch build
+- Check that ONNX Runtime and the bundled model are installed.
 - Check via **Help → Environment Info**
 
 #### Out of Memory Errors

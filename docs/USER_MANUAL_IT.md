@@ -60,6 +60,8 @@ Ad esempio, l'equivalente CLI è `python main.py --input ./png-stack --output ./
 
 ### Formati di output supportati
 
+In **Salva con nome**, il TIFF normale salva il risultato come immagine singola; il TIFF a livelli include i fotogrammi sorgente come livelli. Linear DNG è sempre elencato, ma per salvarlo serve un risultato lineare della fotocamera senza modifiche incorporate, ottenuto con **Apri RAW nativo** e dotato della calibrazione della fotocamera.
+
 - Immagini singole: JPG, PNG, BMP, TIFF, WebP
 - Sequenze di immagini: salvate come cartelle
 - Animazioni: formato GIF
@@ -404,30 +406,32 @@ OpenFocus offre dieci algoritmi di fusione (più una modalità solo allineamento
 
 ### StackMFF (V1, apprendimento profondo)
 
-- **Algoritmo**: una U-Net 3D che predice la luminanza fusa dell'intero stack in una passata; Cb/Cr provengono dal fotogramma sorgente più vicino a quella luminanza
+- **Algoritmo**: una rete di attenzione a singola scala miscela la luminanza delle sorgenti con pesi softmax; Cb/Cr provengono dal fotogramma sorgente con luminanza più vicina a quella fusa
 - **Ideale per**: fusione neurale di un intero stack di messa a fuoco
-- **Vantaggi**: nessun parametro e colori entro la gamma; l'ordine dei fotogrammi può influire sul risultato
-- **Nota**: 6 M di parametri; gli stack grandi traggono vantaggio dalla GPU
+- **Vantaggi**: nessun parametro e colori entro la gamma; la luminanza fusa è indipendente dall'ordine dei fotogrammi, ma la crominanza può variare in caso di parità delle distanze di luminanza
+- **Nota**: circa 156.172 parametri; gli stack grandi traggono vantaggio dalla GPU
 
 ### StackMFF V2 (apprendimento profondo)
 
-- **Algoritmo**: stima del fuoco per livello affinata da uno strato ricorrente bidirezionale; la rete regredisce l'indice del piano focale e campiona lo stack. **I fotogrammi devono mantenere il loro ordine di fuoco originale** — l'inversione è disattivata per questo metodo
+- **Algoritmo**: una rete di attenzione a singola scala normalizza la profondità di fuoco attesa e campiona il fotogramma sorgente più vicino. Gli indici di profondità dipendono dall'ordine dello stack. **I fotogrammi devono mantenere il loro ordine di fuoco originale** — l'inversione è disattivata per questo metodo
 - **Mappe di profondità**: supportate; riporta lo strato focale campionato
 - **Ideale per**: scansioni di fuoco continue in cui conta un modello molto piccolo e veloce
-- **Requisiti**: PyTorch; circa 0,05 M di parametri; nessuna impostazione
+- **Requisiti**: ONNX Runtime e il modello ONNX incluso.
 
 ### StackMFF V3 (apprendimento profondo)
 
 È il metodo preselezionato in una nuova installazione.
 
-- **Algoritmo**: classificazione della sorgente pixel per pixel (richiede PyTorch). La rete predice, per ogni pixel, da quale immagine di input proviene, poi miscela le immagini in base a quelle probabilità o ne sceglie una
+- **Algoritmo**: classificazione della sorgente pixel per pixel (ONNX Runtime). La rete predice, per ogni pixel, da quale immagine di input proviene, poi miscela le immagini in base a quelle probabilità o ne sceglie una
 - **Modalità di output IA** (pannello destro, solo per questo metodo):
   - **Miscelazione soft (pesata)** — predefinito; ogni pixel è una miscela delle immagini ponderata per probabilità. Transizioni morbide, senza cuciture nette; corrisponde alla configurazione riportata nell'articolo
   - **Scelta netta (frame singolo)** — ogni pixel è copiato dal fotogramma più probabile. Selezione più nitida senza interpolazione tra fotogrammi; può comparire una cucitura a livello di pixel dove due fotogrammi sono in parità
 - **Ideale per**: massima qualità quando è disponibile una GPU
-- **Vantaggi**: invariante all'ordine (l'ordine dei fotogrammi non cambia mai il risultato), gestisce stack di qualsiasi lunghezza, nessuna regolazione per metodo, ottimizzazione automatica
-- **Requisiti**: PyTorch installato, GPU CUDA facoltativa (senza torchvision)
-- **Nota**: può essere non disponibile se PyTorch non è installato
+- **Vantaggi**: invariante all'ordine (l'ordine dei fotogrammi non cambia mai il risultato), gestisce stack entro le risorse disponibili, nessuna regolazione per metodo, ottimizzazione automatica
+- **Requisiti**: ONNX Runtime e il modello ONNX incluso.
+
+Ogni tile neurale usa tutti i fotogrammi. I fotogrammi e i dati temporanei di allineamento possono usare il disco; spazio libero e memoria disponibile limitano lo stack. La suddivisione spaziale V2 approssima l’inferenza sull’intera immagine.
+
 
 ### OpenFocus A / B / C
 
@@ -473,7 +477,7 @@ Seleziona **Solo allineamento (nessuna fusione)** per registrare lo stack e aggi
 | DCT | Media | Buona | Texture |
 | DTCWT | Media | Molto buona | Scene complesse |
 | GFG-FGF | Veloce | Buona | Regioni a fuoco |
-| StackMFF (V1) | Lenta (GPU) | Non valutata qui | Fusione neurale dello stack; l'ordine può influire sul risultato |
+| StackMFF (V1) | Lenta (GPU) | Non valutata qui | Luminanza indipendente dall'ordine; crominanza variabile in caso di parità delle distanze di luminanza |
 | StackMFF V2 | Veloce (GPU) | Non valutata qui | Scansioni continue con un modello minuscolo |
 | StackMFF V3 | Lenta (GPU) | Eccellente | Massima qualità |
 | OpenFocus A | Dipende dallo stack | Dipende dallo stack | Selezione multi-scala dei pixel a fuoco |
@@ -540,7 +544,7 @@ La fusione può ancora lasciare un difetto locale — un alone attorno a un bord
 5. Tieni premuto `Tab` per vedere il risultato prima di questa sessione e `Alt` per sbirciare il fotogramma sorgente. Il riferimento di nitidezza è facoltativo, copre solo la tela sorgente e usa una scala condivisa per tutti i fotogrammi.
 6. `Ctrl+Z` / `Ctrl+Y` annullano e ripristinano interi tratti. **Ripristina tutto…** è un'unica operazione annullabile. **Applica come nuovo output** aggiunge una voce chiamata `<nome> · Ritoccato N` e la seleziona; l'originale resta intatto. La nuova voce è contrassegnata come *Non esportata* finché non la esporti dalla finestra principale, e OpenFocus la protegge dall'eliminazione automatica dalla cronologia e dalla chiusura senza decisione.
 
-Applica il ritocco come nuovo output, poi fai clic destro su quell'output nella finestra principale e scegli **Esporta TIFF a livelli** per salvarlo con i fotogrammi sorgente. Etichette e barre di scala attive non sono incluse; le modifiche alle annotazioni non salvate restano protette. Geometria sorgente e maschere di validità vengono conservate. Risultato e sorgenti devono essere immagini RGB o in scala di grigi opache con la stessa profondità a 8 o 16 bit, e ogni rettangolo sorgente deve rientrare nel risultato. L'esportazione supporta fino a 128 sorgenti; i nomi delle sorgenti sono limitati a 255 caratteri e non possono contenere NUL né caratteri fuori dal piano multilingue di base, come molte emoji. Rifiuta contesti non sicuri e lavori stimati oltre 512 MiB di memoria di lavoro o oltre il budget di RAM disponibile, segnalando l'errore invece di scrivere un'esportazione incompleta. GIMP 3.2.6 su Windows importa i livelli a 8 e 16 bit, inclusi i loro offset e il riempimento trasparente di registrazione. Il risultato è visibile e i livelli sorgente nascosti; GIMP aggiunge anche un livello Sfondo visibile. Altri editor non sono stati testati.
+Applica il ritocco come nuovo output, selezionalo e apri **Salva con nome**. Scegli TIFF a livelli nella lista dei formati per salvare il risultato con i fotogrammi sorgente. Etichette e barre di scala attive non sono incluse; le modifiche alle annotazioni non salvate restano protette. Geometria sorgente e maschere di validità vengono conservate. Risultato e sorgenti devono essere immagini RGB o in scala di grigi opache con la stessa profondità a 8 o 16 bit, e ogni rettangolo sorgente deve rientrare nel risultato. L'esportazione supporta fino a 128 sorgenti; i nomi delle sorgenti sono limitati a 255 caratteri e non possono contenere NUL né caratteri fuori dal piano multilingue di base, come molte emoji. Rifiuta contesti non sicuri e lavori stimati oltre 512 MiB di memoria di lavoro o oltre il budget di RAM disponibile, segnalando l'errore invece di scrivere un'esportazione incompleta. GIMP 3.2.6 su Windows importa i livelli a 8 e 16 bit, inclusi i loro offset e il riempimento trasparente di registrazione. Il risultato è visibile e i livelli sorgente nascosti; GIMP aggiunge anche un livello Sfondo visibile. Altri editor non sono stati testati.
 
 Per una correzione tonale locale, seleziona **Pennello esposizione**, imposta la quantità in centesimi di stop (100 raddoppia i valori dei pixel, -100 li dimezza) e dipingi sul risultato. L'anteprima si aggiorna mentre dipingi. Ogni tratto regola il risultato corrente una volta, anche dove le pennellate si sovrappongono; un altro tratto si accumula. Usa opacità e durezza del pennello per controllare la miscelazione. Le alte luci possono bruciarsi schiarendo. Tieni premuto **Prima** per confrontare con il risultato all'apertura, premi Esc durante un tratto per annullarlo, oppure usa annulla/ripristina dopo il tratto. Sono modifiche ai pixel, non livelli regolabili. Applica come nuovo output ed esporta la nuova voce per salvare i pixel modificati; un progetto non memorizza quei pixel.
 
@@ -574,7 +578,7 @@ ricostruire, correggere e fondere i suoi pixel.
    arrotondata di una spina. Può mantenere come impilati anche oggetti di sfondo
    accanto al soggetto, quindi controlla il risultato.
 5. Fai clic su **Sostituisci sfondo**. Una pila di 15 fotogrammi da 20 megapixel
-   richiede circa un minuto e circa 2,5 GB di memoria libera. **Annulla** la
+   richiede circa un minuto e circa 3,5 GB di memoria libera. **Annulla** la
    interrompe.
 
 La modifica è un solo passaggio annullabile, e i tratti già dipinti sul soggetto
@@ -601,7 +605,8 @@ mano:
 **Salva mappa dei dati mancanti…** salva l'anteprima colorata e una maschera in
 bianco e nero per ogni colore. Lo sfondo automatico richiede i fotogrammi che
 hanno prodotto il risultato e non è disponibile per i risultati di area (ROI).
-I checkpoint di ritocco salvano la scelta e la ricalcolano al caricamento.
+I nuovi checkpoint dello sfondo ripristinano esattamente immagine, cronologia
+raggiungibile e diagnostica senza ricalcolare lo sfondo.
 
 ### Gestione delle etichette
 
@@ -694,7 +699,7 @@ Il pianificatore considera core fisici, affinità e quote CPU, ed esegue un solo
 
 ### Accelerazione GPU
 
-OpenFocus usa la GPU (CUDA/MPS) per i modelli neurali IA (StackMFF V1/V2/V3); gli algoritmi classici e la registrazione dell'applicazione girano su CPU. La registrazione di basso livello opzionale con CuPy è un backend numerico separato.
+StackMFF V1/V2/V3 usano ONNX Runtime. DirectML su Windows e CoreML su macOS possono accelerare l’inferenza; altrimenti si usa la CPU. La disponibilità del provider non dimostra l’esecuzione sulla GPU. Il supporto di altre GPU richiede verifica.
 
 - Attiva o disattiva in **Impostazioni → Accelerazione GPU**
 - Deselezionandola si forzano i metodi neurali sulla CPU — utile quando i driver GPU danno problemi
@@ -832,7 +837,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # avvia l'app desktop
 openfocus ctl <command> [flags]          # controlla una finestra in esecuzione (vedi AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # riproduce una ricetta headless salvata
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` si avvia in background; `--control` attende il canale di controllo e stampa il suo JSON di connessione. `openfocus describe` e `version` non richiedono input. Il flusso di lavoro per agenti è documentato in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -880,6 +885,7 @@ Ad esempio, aggiungi `--align openfocus --alignment-report alignment.json` a un 
 | `--exposure-match` | Abbina la media di ogni fotogramma a quella dell'ultimo prima della fusione (attivo per impostazione predefinita; `--no-exposure-match` lo disattiva). Guadagni sull'intero stack, quindi l'output a tasselli resta senza cuciture; si applica a ogni metodo e al riferimento di luminosità dell'allineatore OpenFocus |
 | `--base-frame` | Passo facoltativo post-fusione: abbina le basse frequenze dell'output al fotogramma `last`/`first` (`none` predefinito) |
 | `--sort` | Ordine fotogrammi per `openfocus_a/b/c`: `asc` (predefinito, ordine file), `desc` (inverte una scansione da lontano a vicino), `off` |
+| `--frame-order` | Cartella in ingresso: `auto` (predefinito) ordina i fotogrammi da vicino a lontano secondo i passi di messa a fuoco EXIF quando tutti li hanno (il bracketing di fuoco OM SYSTEM parte da metà profondità), altrimenti per nome; `name` ordina sempre per nome file. I file elencati esplicitamente mantengono il loro ordine |
 | `--sharpen-output` | Applica una leggera maschera di contrasto all'output fuso (disattivata per impostazione predefinita) |
 | `--dust-map WHITE` | Correzione di campo piatto (mappa polvere) da uno scatto di campo bianco sfocato |
 | `--defect-mask-path MASK` | Maschera difetti in coordinate sensore riparata prima della registrazione |
@@ -908,7 +914,6 @@ Ad esempio, aggiungi `--align openfocus --alignment-report alignment.json` a un 
 | `--keep-soft-parts` | Sfondo automatico: mantiene le parti morbide attaccate al soggetto su cui un fotogramma ha messo a fuoco |
 | `--save-stacked [path]` | Con `--auto-background`, salva anche il risultato prima della sostituzione (predefinito `<output>_stacked<ext>`). In modalità batch è ammesso solo il percorso predefinito |
 | `--missing-data-map [path]` | Con `--auto-background`, salva anche la mappa dei dati mancanti e una maschera a 8 bit per classe (predefinito `<output>_missing.png`). In modalità batch è ammesso solo il percorso predefinito |
-| `--frame-order` | Cartella in ingresso: `auto` (predefinito) ordina i fotogrammi da vicino a lontano secondo i passi di messa a fuoco EXIF quando tutti li hanno (il bracketing di fuoco OM SYSTEM parte da metà profondità), altrimenti per nome; `name` ordina sempre per nome file. I file elencati esplicitamente mantengono il loro ordine |
 | `--json FILE` | Scrive un riepilogo del risultato leggibile dalla macchina in FILE al termine |
 | `--json-progress` | Stampa un oggetto JSON di avanzamento per passo su stdout (NDJSON); il testo va su stderr |
 | `--dry-run` | Valida gli input e stampa il piano senza fondere |
@@ -951,21 +956,19 @@ exit_code = run_recipe("workflow.json", dry_run=True)  # usa False per elaborare
 
 ### Riproduzione di un punto di controllo di ritocco
 
-Il primo salvataggio o caricamento verifica la base e le sorgenti elaborate in un'operazione in background annullabile. Il salvataggio riproduce anche le modifiche registrate e controlla l'immagine corrente e lo stato annulla/ripristina prima di pubblicare il punto di controllo. Se una sorgente è cambiata e la riproduzione non corrisponde più, il salvataggio fallisce e conserva le modifiche. Annullare un salvataggio o un caricamento conserva comunque le modifiche correnti. Se la memoria non basta per verifica o riproduzione, l'operazione si ferma e lascia invariati sia le modifiche correnti sia qualsiasi punto di controllo esistente.
+Usa i comandi di salvataggio/caricamento dei checkpoint nello spazio di ritocco con la base originale e le sorgenti elaborate. Le sessioni con sfondo automatico, comprese le analisi riuscite senza cambiamenti ai pixel, salvano istantanee ZIP v2 `.ofretouch` senza perdita con metadati JSON e dati NumPy: l'immagine di lavoro esatta, i tasselli raggiungibili di annulla/ripristina, gli stati diagnostici e la provenienza delle sorgenti. Il caricamento v2 non ricalcola lo sfondo. Le sessioni con soli pennelli/toni possono usare JSON v1 compatto; i vecchi checkpoint dello sfondo in JSON v1 restano riproducibili.
+
+La verifica delle sorgenti avviene in background ed è annullabile. Prima di sostituire la destinazione, il salvataggio ricarica il file preparato e controlla l'uguaglianza esatta dell'immagine corrente, dei tasselli raggiungibili di annulla/ripristina e degli stati diagnostici. Sorgenti incompatibili, verifica fallita, annullamento o memoria insufficiente lasciano invariati le modifiche correnti e qualsiasi checkpoint esistente.
 
 Se il limite di registrazione del punto di controllo impedisce un'altra modifica, applica le modifiche correnti e avvia una nuova sessione di ritocco per continuare.
 
 Salva un punto di controllo di ritocco dallo spazio di ritocco, poi fornisci l'immagine base originale e ogni fotogramma sorgente elaborato nello stesso ordine della sessione:
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Usa i fotogrammi effettivamente usati per il ritocco, dopo allineamento e qualsiasi ritaglio ROI o altra elaborazione, con i valori di pixel e la profondità di bit originali. Il punto di controllo registra modifiche e impronte, non i pixel. La riproduzione ricostruisce gli offset dei fotogrammi e il comportamento di allineamento registrati e verifica base, fotogrammi ordinati e maschere di validità; pixel, geometria o maschere incompatibili vengono rifiutati. Ogni percorso deve contenere un'immagine. L'output deve essere PNG o TIFF e conserva la profondità di bit della base. Il punto di controllo e le immagini di input non possono essere usati come output.
-
-Se il checkpoint contiene un passaggio di sfondo automatico eseguito su un
-risultato già ritoccato, indica anche il risultato impilato di origine con
-`--stacked stacked.png`.
+Entrambi i formati richiedono ancora la base originale e tutti i fotogrammi effettivamente usati per il ritocco, nell'ordine della sessione, dopo allineamento e qualsiasi ritaglio ROI o altra elaborazione, con i valori di pixel e la profondità di bit originali. Il caricamento ricostruisce gli offset dei fotogrammi e il comportamento di allineamento registrati e verifica base, fotogrammi ordinati e maschere di validità; pixel, geometria o maschere incompatibili vengono rifiutati. Ogni percorso deve contenere un'immagine. L'output deve essere PNG o TIFF e conserva la profondità di bit della base. Il punto di controllo e le immagini di input non possono essere usati come output.
 
 Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `python main.py --help` mostra tutte le opzioni; avviare con un semplice percorso (`python main.py C:\stack`) apre comunque la GUI con quella cartella caricata.
 
@@ -1029,8 +1032,7 @@ Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `p
 
 #### IA non disponibile
 
-- Installa PyTorch: `pip install torch` (torchvision non viene usato)
-- Per il supporto GPU, installa PyTorch con CUDA
+- Controlla ONNX Runtime e il modello incluso.
 - Controlla in **Aiuto → Informazioni sull'ambiente**
 
 #### Errori di memoria esaurita

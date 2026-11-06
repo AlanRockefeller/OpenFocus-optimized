@@ -60,6 +60,8 @@ Por exemplo, o equivalente na CLI é `python main.py --input ./png-stack --outpu
 
 ### Formatos de saída compatíveis
 
+Em **Salvar como**, TIFF comum salva o resultado como uma única imagem; TIFF em camadas inclui os quadros de origem como camadas. Linear DNG aparece sempre, mas salvá-lo exige um resultado linear da câmera sem ajustes incorporados, obtido com **Abrir RAW nativo** e com calibração da câmera.
+
 - Imagens individuais: JPG, PNG, BMP, TIFF, WebP
 - Sequências de imagens: salvas como pastas
 - Animações: formato GIF
@@ -404,30 +406,32 @@ O OpenFocus oferece dez algoritmos de fusão (além de um modo somente alinhamen
 
 ### StackMFF (V1, aprendizado profundo)
 
-- **Algoritmo**: uma U-Net 3D que prediz a luminância fundida de toda a pilha em uma passada; Cb/Cr vêm do quadro de origem mais próximo dessa luminância
+- **Algoritmo**: uma rede de atenção de escala única mistura a luminância das fontes com pesos softmax; Cb/Cr vêm do quadro cuja luminância é mais próxima da luminância fundida
 - **Ideal para**: fusão neural de uma pilha de foco completa
-- **Vantagens**: sem parâmetros e cor dentro da gama; a ordem dos quadros pode afetar o resultado
-- **Nota**: 6 M de parâmetros; pilhas maiores se beneficiam da GPU
+- **Vantagens**: sem parâmetros e cor dentro da gama; a luminância fundida independe da ordem dos quadros, mas a crominância pode variar em caso de empate nas distâncias de luminância
+- **Nota**: cerca de 156.172 parâmetros; pilhas maiores se beneficiam da GPU
 
 ### StackMFF V2 (aprendizado profundo)
 
-- **Algoritmo**: estimativa de foco por camada refinada por uma camada recorrente bidirecional; a rede regride o índice do plano focal e amostra a pilha. **Os quadros devem manter sua ordem original de foco** — a inversão é desativada para este método
+- **Algoritmo**: uma rede de atenção de escala única normaliza a profundidade de foco esperada e amostra o quadro de origem mais próximo. Os índices de profundidade dependem da ordem da pilha. **Os quadros devem manter sua ordem original de foco** — a inversão é desativada para este método
 - **Mapas de profundidade**: suportados; informa a camada focal amostrada
 - **Ideal para**: varreduras de foco contínuas em que um modelo muito pequeno e rápido importa
-- **Requisitos**: PyTorch; cerca de 0,05 M de parâmetros; sem configurações
+- **Requisitos**: ONNX Runtime e o modelo ONNX incluído.
 
 ### StackMFF V3 (aprendizado profundo)
 
 É o método pré-selecionado em uma nova instalação.
 
-- **Algoritmo**: classificação de origem pixel a pixel (requer PyTorch). A rede prediz, para cada pixel, de qual imagem de entrada ele vem, e então mistura as imagens por essas probabilidades ou escolhe uma imagem
+- **Algoritmo**: classificação de origem pixel a pixel (ONNX Runtime). A rede prediz, para cada pixel, de qual imagem de entrada ele vem, e então mistura as imagens por essas probabilidades ou escolhe uma imagem
 - **Modo de saída de IA** (painel direito, apenas para este método):
   - **Mistura suave (ponderada)** — padrão; cada pixel é uma mistura das imagens ponderada por probabilidade. Transições suaves, sem emendas duras; corresponde à configuração relatada no artigo
   - **Escolha rígida (quadro único)** — cada pixel é copiado do quadro mais provável. Seleção mais nítida, sem interpolação entre quadros; uma emenda no nível do pixel pode aparecer onde dois quadros empatam
 - **Ideal para**: qualidade máxima quando há GPU disponível
-- **Vantagens**: invariante à ordem (a ordem dos quadros nunca muda o resultado), lida com qualquer comprimento de pilha, sem ajuste por método, otimização automática
-- **Requisitos**: PyTorch instalado, GPU CUDA opcional (sem torchvision)
-- **Nota**: pode ficar indisponível se o PyTorch não estiver instalado
+- **Vantagens**: invariante à ordem (a ordem dos quadros nunca muda o resultado), aceita pilhas dentro dos recursos disponíveis, sem ajuste por método, otimização automática
+- **Requisitos**: ONNX Runtime e o modelo ONNX incluído.
+
+Cada bloco neural usa todos os quadros. Quadros de origem e dados temporários de alinhamento podem usar o disco; espaço livre e memória disponível limitam o tamanho da pilha. Os blocos espaciais de V2 aproximam a inferência da imagem inteira.
+
 
 ### OpenFocus A / B / C
 
@@ -473,7 +477,7 @@ Selecione **Somente alinhamento (sem fusão)** para registrar a pilha e adiciona
 | DCT | Média | Boa | Texturas |
 | DTCWT | Média | Muito boa | Cenas complexas |
 | GFG-FGF | Rápida | Boa | Regiões de foco |
-| StackMFF (V1) | Lenta (GPU) | Não avaliada aqui | Fusão neural da pilha; a ordem pode afetar o resultado |
+| StackMFF (V1) | Lenta (GPU) | Não avaliada aqui | Luminância independente da ordem; crominância pode variar em caso de empate nas distâncias de luminância |
 | StackMFF V2 | Rápida (GPU) | Não avaliada aqui | Varreduras contínuas com um modelo minúsculo |
 | StackMFF V3 | Lenta (GPU) | Excelente | Qualidade máxima |
 | OpenFocus A | Depende da pilha | Depende da pilha | Seleção multiescala de pixels em foco |
@@ -540,7 +544,7 @@ A fusão ainda pode deixar um defeito local — um halo ao redor de uma borda de
 5. Mantenha `Tab` para ver o resultado antes desta sessão e `Alt` para espiar o quadro de origem. A referência de nitidez é opcional, cobre apenas a tela de origem e usa uma escala compartilhada por todos os quadros.
 6. `Ctrl+Z` / `Ctrl+Y` desfazem e refazem traços inteiros. **Restaurar tudo…** é uma única etapa desfazível. **Aplicar como nova saída** adiciona uma entrada chamada `<nome> · Retocado N` e a seleciona; o original permanece intacto. A nova entrada é marcada como *Não exportada* até você exportá-la pela janela principal, e o OpenFocus a protege da remoção automática do histórico e de fechar sem uma decisão.
 
-Aplique o retoque como nova saída, depois clique com o botão direito nessa saída na janela principal e escolha **Exportar TIFF em camadas** para salvá-la com seus quadros de origem. Rótulos e barras de escala ativos não são incluídos; mudanças de anotação não salvas permanecem protegidas. Geometria de origem e máscaras de validade são mantidas. O resultado e as origens devem ser imagens RGB ou em escala de cinza opacas com a mesma profundidade de 8 ou 16 bits, e cada retângulo de origem deve caber no resultado. A exportação suporta até 128 origens; nomes de origem são limitados a 255 caracteres e não podem conter NUL nem caracteres fora do Plano Multilíngue Básico, como muitos emojis. Ela recusa contextos inseguros e trabalhos estimados em mais de 512 MiB de memória de trabalho ou acima do orçamento de RAM disponível, relatando a falha em vez de escrever uma exportação incompleta. O GIMP 3.2.6 no Windows importa as camadas de 8 e 16 bits, incluindo seus deslocamentos e o preenchimento transparente de registro. O resultado fica visível e as camadas de origem ocultas; o GIMP também adiciona uma camada de fundo visível. Outros editores não foram testados.
+Aplique o retoque como nova saída, selecione-a e abra **Salvar como**. Escolha TIFF em camadas na lista de formatos para salvar o resultado com seus quadros de origem. Rótulos e barras de escala ativos não são incluídos; mudanças de anotação não salvas permanecem protegidas. Geometria de origem e máscaras de validade são mantidas. O resultado e as origens devem ser imagens RGB ou em escala de cinza opacas com a mesma profundidade de 8 ou 16 bits, e cada retângulo de origem deve caber no resultado. A exportação suporta até 128 origens; nomes de origem são limitados a 255 caracteres e não podem conter NUL nem caracteres fora do Plano Multilíngue Básico, como muitos emojis. Ela recusa contextos inseguros e trabalhos estimados em mais de 512 MiB de memória de trabalho ou acima do orçamento de RAM disponível, relatando a falha em vez de escrever uma exportação incompleta. O GIMP 3.2.6 no Windows importa as camadas de 8 e 16 bits, incluindo seus deslocamentos e o preenchimento transparente de registro. O resultado fica visível e as camadas de origem ocultas; o GIMP também adiciona uma camada de fundo visível. Outros editores não foram testados.
 
 Para uma correção tonal local, selecione **Pincel de exposição**, ajuste sua quantidade em centésimos de stop (100 dobra os valores dos pixels, -100 os divide pela metade) e pinte no resultado. A prévia é atualizada enquanto você pinta. Cada traço ajusta o resultado atual uma vez, mesmo onde as pinceladas se sobrepõem; outro traço se acumula. Use a opacidade e a dureza do pincel para controlar a mistura. Altas luzes podem estourar ao clarear. Mantenha **Antes** para comparar com o resultado como foi aberto, pressione Esc durante um traço para cancelá-lo, ou use desfazer/refazer depois do traço. São edições de pixels, não camadas ajustáveis. Aplique como nova saída e exporte a nova entrada para salvar os pixels editados; um projeto não armazena esses pixels.
 
@@ -573,7 +577,7 @@ e mesclar seus pixels.
    espinho. Também pode manter objetos de fundo junto ao motivo tal como foram
    empilhados, por isso verifique o resultado.
 5. Clique em **Substituir fundo**. Uma pilha de 15 quadros de 20 megapixels
-   demora cerca de um minuto e precisa de cerca de 2,5 GB de memória livre.
+   demora cerca de um minuto e precisa de cerca de 3,5 GB de memória livre.
    **Cancelar** interrompe.
 
 A alteração é um único passo que pode ser anulado, e os traços já pintados no
@@ -598,8 +602,8 @@ quadro mostrou com nitidez. São os locais que devem ser verificados ou retocado
 **Salvar mapa de dados ausentes…** grava a prévia colorida e uma
 máscara em preto e branco por cor. O fundo automático precisa dos quadros que
 produziram o resultado e não está disponível para resultados de região (ROI).
-Os pontos de controle de retoque salvam a escolha e voltam a calculá-la ao
-carregar.
+Os novos pontos de controle de fundo restauram exatamente a imagem, o histórico
+acessível e os diagnósticos sem recalcular o fundo.
 
 ### Gerenciamento de rótulos
 
@@ -692,7 +696,7 @@ O planejador considera núcleos físicos, afinidade e cotas de CPU, e executa um
 
 ### Aceleração por GPU
 
-O OpenFocus usa a GPU (CUDA/MPS) para os modelos neurais de IA (StackMFF V1/V2/V3); algoritmos clássicos e o registro do aplicativo rodam na CPU. O registro de baixo nível opcional com CuPy é um backend numérico separado.
+StackMFF V1/V2/V3 usam ONNX Runtime. DirectML no Windows e CoreML no macOS podem acelerar a inferência; caso contrário, usa-se a CPU. A disponibilidade do provedor não comprova execução na GPU. O suporte a outras GPUs requer validação.
 
 - Alterne em **Configurações → Aceleração por GPU**
 - Desmarcar força os métodos neurais na CPU — útil quando drivers de GPU dão problema
@@ -830,7 +834,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # inicia o aplicativo des
 openfocus ctl <command> [flags]          # controla uma janela em execução (ver AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # reproduz uma receita headless salva
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` inicia em segundo plano; `--control` aguarda o canal de controle e imprime seu JSON de conexão. `openfocus describe` e `version` não exigem entrada. O fluxo de trabalho para agentes está documentado em [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -878,6 +882,7 @@ Por exemplo, adicione `--align openfocus --alignment-report alignment.json` a um
 | `--exposure-match` | Iguala a média de cada quadro à do último antes da fusão (ativado por padrão; `--no-exposure-match` desativa). Ganhos para toda a pilha, então a saída em blocos permanece sem emendas; aplica-se a todos os métodos e à referência de brilho do alinhador OpenFocus |
 | `--base-frame` | Etapa opcional pós-fusão: iguala as baixas frequências da saída ao quadro `last`/`first` (`none` padrão) |
 | `--sort` | Ordem de quadros para `openfocus_a/b/c`: `asc` (padrão, ordem de arquivo), `desc` (inverte uma varredura de longe para perto), `off` |
+| `--frame-order` | Pasta de entrada: `auto` (padrão) ordena os quadros de perto para longe pelos passos de foco EXIF quando todos os têm (o bracketing de foco da OM SYSTEM começa no meio da profundidade); senão, por nome; `name` sempre pelo nome do arquivo. Arquivos listados explicitamente mantêm sua ordem |
 | `--sharpen-output` | Aplica uma máscara de nitidez suave à saída fundida (desativada por padrão) |
 | `--dust-map WHITE` | Correção de campo plano (mapa de poeira) a partir de uma tomada de campo branco desfocada |
 | `--defect-mask-path MASK` | Máscara de defeitos em coordenadas do sensor reparada antes do registro |
@@ -906,7 +911,6 @@ Por exemplo, adicione `--align openfocus --alignment-report alignment.json` a um
 | `--keep-soft-parts` | Fundo automático: mantém as partes suaves presas ao objeto em que algum quadro focou |
 | `--save-stacked [path]` | Com `--auto-background`, também salva o resultado antes da substituição (padrão `<output>_stacked<ext>`). No modo em lote só o caminho padrão é permitido |
 | `--missing-data-map [path]` | Com `--auto-background`, também salva o mapa de dados ausentes e uma máscara de 8 bits por classe (padrão `<output>_missing.png`). No modo em lote só o caminho padrão é permitido |
-| `--frame-order` | Pasta de entrada: `auto` (padrão) ordena os quadros de perto para longe pelos passos de foco EXIF quando todos os têm (o bracketing de foco da OM SYSTEM começa no meio da profundidade); senão, por nome; `name` sempre pelo nome do arquivo. Arquivos listados explicitamente mantêm sua ordem |
 | `--json FILE` | Grava um resumo de resultado legível por máquina em FILE ao terminar |
 | `--json-progress` | Imprime um objeto JSON de progresso por etapa em stdout (NDJSON); o texto vai para stderr |
 | `--dry-run` | Valida as entradas e imprime o plano sem fundir |
@@ -949,21 +953,19 @@ exit_code = run_recipe("workflow.json", dry_run=True)  # use False para processa
 
 ### Reproduzir um checkpoint de retoque
 
-O primeiro salvamento ou carregamento verifica a base e as origens processadas em uma operação em segundo plano cancelável. Salvar também reproduz as edições registradas e confere a imagem atual e o estado de desfazer/refazer antes de publicar o checkpoint. Se uma origem mudou e a reprodução não corresponde mais, o salvamento falha e mantém suas edições. Cancelar um salvamento ou carregamento também mantém suas edições atuais. Se a memória for insuficiente para verificação ou reprodução, a operação para e mantém inalteradas tanto suas edições atuais quanto qualquer checkpoint existente.
+Use os controles de salvar/carregar pontos de controle do espaço de retoque com a base original e as origens processadas. Sessões com fundo automático, incluindo análises bem-sucedidas sem mudanças nos pixels, salvam instantâneos ZIP v2 `.ofretouch` sem perdas com metadados JSON e dados NumPy: a imagem de trabalho exata, os blocos acessíveis de desfazer/refazer, os estados de diagnóstico e a procedência das origens. Carregar v2 não recalcula o fundo. Sessões apenas de pincel/tons podem usar JSON v1 compacto; pontos de controle de fundo antigos em JSON v1 continuam reproduzíveis.
+
+A verificação das origens ocorre em segundo plano e pode ser cancelada. Antes de substituir o destino, o salvamento recarrega o arquivo preparado e confere a igualdade exata da imagem atual, dos blocos acessíveis de desfazer/refazer e dos estados de diagnóstico. Origem incompatível, falha de verificação, cancelamento ou memória insuficiente mantêm as edições atuais e qualquer ponto de controle existente inalterados.
 
 Se o limite de registro do checkpoint impedir outra edição, aplique as edições atuais e inicie uma nova sessão de retoque para continuar.
 
 Salve um checkpoint de retoque no espaço de retoque, depois forneça a imagem base original e cada quadro de origem processado na mesma ordem da sessão:
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Use os quadros realmente usados para o retoque, após alinhamento e qualquer corte de ROI ou outro processamento, com seus valores de pixel e profundidade de bits originais. O checkpoint registra edições e impressões digitais, não os pixels. A reprodução reconstrói os deslocamentos de quadro e o comportamento de alinhamento registrados e verifica a base, os quadros ordenados e as máscaras de validade; pixels, geometrias ou máscaras incompatíveis são rejeitados. Cada caminho deve conter uma imagem. A saída deve ser PNG ou TIFF e preserva a profundidade de bits da base. O checkpoint e as imagens de entrada não podem ser usados como saída.
-
-Se o ponto de controlo contiver um passo de fundo automático executado num
-resultado já retocado, indique também o resultado empilhado de origem com
-`--stacked stacked.png`.
+Ambos os formatos ainda exigem a base original e todos os quadros realmente usados para o retoque, na ordem da sessão, após alinhamento e qualquer corte de ROI ou outro processamento, com seus valores de pixel e profundidade de bits originais. O carregamento reconstrói os deslocamentos de quadro e o comportamento de alinhamento registrados e verifica a base, os quadros ordenados e as máscaras de validade; pixels, geometrias ou máscaras incompatíveis são rejeitados. Cada caminho deve conter uma imagem. A saída deve ser PNG ou TIFF e preserva a profundidade de bits da base. O ponto de controle e as imagens de entrada não podem ser usados como saída.
 
 Códigos de saída: `0` sucesso, `1` erro de processamento, `2` erro de uso. Executar `python main.py --help` mostra todas as opções; iniciar com um caminho simples (`python main.py C:\stack`) ainda abre a interface com essa pasta carregada.
 
@@ -1027,8 +1029,7 @@ Códigos de saída: `0` sucesso, `1` erro de processamento, `2` erro de uso. Exe
 
 #### IA indisponível
 
-- Instale o PyTorch: `pip install torch` (torchvision não é usado)
-- Para suporte a GPU, instale o PyTorch com CUDA
+- Verifique o ONNX Runtime e o modelo incluído.
 - Verifique em **Ajuda → Informações do ambiente**
 
 #### Erros de falta de memória

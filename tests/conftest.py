@@ -11,6 +11,15 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def isolate_gui_usage_reports(request, monkeypatch):
+    """GUI tests cannot write synthetic installation IDs to production."""
+    if "qapp" not in request.fixturenames or request.module.__name__.rsplit(".", 1)[-1] == "test_usage_analytics":
+        return
+    from utils import usage_analytics
+    monkeypatch.setattr(usage_analytics, "_send", lambda payload: False)
+
+
 def make_two_focus_stack(size=(120, 160)):
     """Two synthetic frames: left half sharp in frame 0, right half sharp in frame 1.
 
@@ -68,9 +77,23 @@ def qapp():
     shutil.rmtree(tmp, ignore_errors=True)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, tmp)
     app = QApplication.instance() or QApplication([])
+    from utils.settings_store import get_settings
+    get_settings().setValue("usage/enabled", False)
     yield app
 
 
 @pytest.fixture(scope="session")
 def two_focus_stack():
     return make_two_focus_stack()
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _background_fill_at_tuned_scale():
+    """Synthetic Auto background scenes are a few hundred pixels and were
+    designed around the distances as tuned (scale 1); scaling to the image's
+    size has its own tests, which override this."""
+    import core.background_fill as bf
+    patch = pytest.MonkeyPatch()
+    patch.setattr(bf, "SCALE_OVERRIDE", 1.0)
+    yield
+    patch.undo()
