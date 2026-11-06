@@ -103,6 +103,13 @@ shot_tmp.py
 /.probe/
 /assets/demo_stack/outputs/
 
+# Local Auto Background research fixtures and prototype tools
+/Marthamyces phacidioides.jpg
+/tools/bgfill_crops.py
+/tools/bgfill_prototype.py
+/tools/bgfill_realign.py
+/tools/bgfill_suite.py
+
 # Local test-run transcripts
 /.pytest_*.txt
 
