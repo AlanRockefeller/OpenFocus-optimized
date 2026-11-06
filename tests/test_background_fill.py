@@ -157,6 +157,21 @@ def test_edge_frame_map_handles_thin_and_empty_subjects():
         edge_frame_map(np.zeros_like(subject), indices)
 
 
+@pytest.mark.parametrize("count", [1, 2, 7, 1000, 1001])
+def test_channel_medians_match_numpy_exactly(count):
+    from core.background_fill import _channel_medians
+    rng = np.random.default_rng(count)
+    img = rng.integers(0, 65536, size=(40, 50, 3), dtype=np.uint16)
+    img[:5] = 65535                                    # ties and the top bin
+    index = np.sort(rng.choice(img.shape[0] * img.shape[1], size=count, replace=False))
+    as_float = img.astype(np.float32).reshape(-1, 3)[index]
+    expected = [np.median(as_float[:, c]) for c in range(3)]
+    got = _channel_medians(img, index)
+    assert [type(v) for v in got] == [type(v) for v in expected]
+    assert got == expected
+    assert all(np.isnan(v) for v in _channel_medians(img, np.array([], np.intp)))
+
+
 def test_recorded_range_ignores_registration_fill():
     from core.background_fill import recorded_range
     frames = [np.zeros((64, 64, 3), np.float32),
