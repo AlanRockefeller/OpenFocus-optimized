@@ -574,7 +574,7 @@ ricostruire, correggere e fondere i suoi pixel.
    arrotondata di una spina. Può mantenere come impilati anche oggetti di sfondo
    accanto al soggetto, quindi controlla il risultato.
 5. Fai clic su **Sostituisci sfondo**. Una pila di 15 fotogrammi da 20 megapixel
-   richiede circa un minuto e circa 3,5 GB di memoria libera. **Annulla** la
+   richiede circa un minuto e circa 2,5 GB di memoria libera. **Annulla** la
    interrompe.
 
 La modifica è un solo passaggio annullabile, e i tratti già dipinti sul soggetto
@@ -582,6 +582,12 @@ restano. Usa il **Pennello di ripristino** per riportare i pixel impilati dove l
 preferisci, per esempio un filo d'erba sfocato davanti al soggetto. Se il
 soggetto riempie quasi tutta l'inquadratura, come in una scena di sottobosco,
 l'immagine resta come impilata e compare una nota.
+
+Se apri il ritocco su un risultato già ritoccato, lo sfondo automatico analizza
+il risultato impilato da cui proviene e applica il nuovo sfondo sulla tua
+immagine ritoccata. I ritocchi a pennello sul soggetto vengono mantenuti e uno
+sfondo già sostituito non viene mai rianalizzato, quindi un secondo passaggio
+non accumula aloni.
 
 Dopo un'elaborazione, **Mostra dati mancanti** colora i punti che nessun
 fotogramma ha visto con chiarezza. Sono i punti da controllare o ritoccare a
@@ -826,7 +832,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # avvia l'app desktop
 openfocus ctl <command> [flags]          # controlla una finestra in esecuzione (vedi AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # riproduce una ricetta headless salvata
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` si avvia in background; `--control` attende il canale di controllo e stampa il suo JSON di connessione. `openfocus describe` e `version` non richiedono input. Il flusso di lavoro per agenti è documentato in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -897,6 +903,12 @@ Ad esempio, aggiungi `--align openfocus --alignment-report alignment.json` a un 
 | `--scale-um` | Dimensione pixel in µm/px, che prevale sui metadati (implica `--scale-bar`) |
 | `--depth-map [path]` | Salva anche una mappa colorizzata della posizione di fuoco (predefinito `<output>_depth.png`); solo metodi compatibili con la profondità, non raggruppati né trasparenti. In modalità batch è consentito solo il percorso predefinito |
 | `--depth-colormap` | Mappa colori per `--depth-map`: turbo, viridis, jet, gray, … (turbo predefinito) |
+| `--auto-background [preset]` | Sostituisce lo sfondo dello stack con quello di un fotogramma allineato, come Sfondo automatico nel ritocco: `auto` (predefinito), `soft` (sfondo più sfocato) o `sharp` (fotogramma a fuoco più lontano). Richiede i fotogrammi allineati, quindi non con la fusione a gruppi |
+| `--background-mode` | Sfondo automatico: `clean` (predefinito) rimuove anche gli aloni sui bordi dello stack, entro quanto registrato dai fotogrammi; `faithful` li mantiene |
+| `--keep-soft-parts` | Sfondo automatico: mantiene le parti morbide attaccate al soggetto su cui un fotogramma ha messo a fuoco |
+| `--save-stacked [path]` | Con `--auto-background`, salva anche il risultato prima della sostituzione (predefinito `<output>_stacked<ext>`). In modalità batch è ammesso solo il percorso predefinito |
+| `--missing-data-map [path]` | Con `--auto-background`, salva anche la mappa dei dati mancanti e una maschera a 8 bit per classe (predefinito `<output>_missing.png`). In modalità batch è ammesso solo il percorso predefinito |
+| `--frame-order` | Cartella in ingresso: `auto` (predefinito) ordina i fotogrammi da vicino a lontano secondo i passi di messa a fuoco EXIF quando tutti li hanno (il bracketing di fuoco OM SYSTEM parte da metà profondità), altrimenti per nome; `name` ordina sempre per nome file. I file elencati esplicitamente mantengono il loro ordine |
 | `--json FILE` | Scrive un riepilogo del risultato leggibile dalla macchina in FILE al termine |
 | `--json-progress` | Stampa un oggetto JSON di avanzamento per passo su stdout (NDJSON); il testo va su stderr |
 | `--dry-run` | Valida gli input e stampa il piano senza fondere |
@@ -950,6 +962,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Usa i fotogrammi effettivamente usati per il ritocco, dopo allineamento e qualsiasi ritaglio ROI o altra elaborazione, con i valori di pixel e la profondità di bit originali. Il punto di controllo registra modifiche e impronte, non i pixel. La riproduzione ricostruisce gli offset dei fotogrammi e il comportamento di allineamento registrati e verifica base, fotogrammi ordinati e maschere di validità; pixel, geometria o maschere incompatibili vengono rifiutati. Ogni percorso deve contenere un'immagine. L'output deve essere PNG o TIFF e conserva la profondità di bit della base. Il punto di controllo e le immagini di input non possono essere usati come output.
+
+Se il checkpoint contiene un passaggio di sfondo automatico eseguito su un
+risultato già ritoccato, indica anche il risultato impilato di origine con
+`--stacked stacked.png`.
 
 Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `python main.py --help` mostra tutte le opzioni; avviare con un semplice percorso (`python main.py C:\stack`) apre comunque la GUI con quella cartella caricata.
 

@@ -44,7 +44,7 @@ from widgets.flow_layout import FlowPanel
 from widgets.stepper import StepperSpinBox
 from utils import colormap as cmap
 from utils.image_utils import imwrite_auto
-from utils.settings_store import get_last_dialog_dir, get_settings, set_last_dialog_dir
+from utils.settings_store import get_settings, image_save_dir, remember_image_save
 from utils.logging_setup import frame_details, log_operation
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
@@ -935,9 +935,10 @@ class DepthMapDialog(QDialog):
                      frame.offset_x:frame.offset_x + depth.shape[1]] = depth
                 depth = full
             path, _ = QFileDialog.getSaveFileName(self, trans.t("depth_save_physical"),
-                self._default_path(get_last_dialog_dir(), raw=True), "TIFF (*.tif *.tiff)")
+                self._default_path(image_save_dir(), raw=True), "TIFF (*.tif *.tiff)")
             if not path:
                 return
+            remember_image_save(path)
             if os.path.splitext(path)[1].lower() not in (".tif", ".tiff"):
                 raise ValueError(trans.t("depth_raw_needs_tiff"))
             self._safe_export_paths([path])
@@ -1545,7 +1546,7 @@ class DepthMapDialog(QDialog):
         if not self._require_current_map():
             return
         title = trans.t("depth_save_render" if render else "depth_save_indices")
-        start_dir = get_last_dialog_dir()
+        start_dir = image_save_dir()
         default = os.path.join(start_dir, "depth_render.tif" if render else "depth_indices.tif")
         path, _ = QFileDialog.getSaveFileName(self, title, default, "TIFF (*.tif *.tiff)")
         if not path or not self._require_current_map():
@@ -1574,7 +1575,7 @@ class DepthMapDialog(QDialog):
         self.status_lbl.setText(title)
         self.status_lbl.setToolTip(path)
         self._reconcile_controls()
-        set_last_dialog_dir(path)
+        remember_image_save(path)
         try:
             worker.start()
         except Exception as exc:
@@ -1586,7 +1587,7 @@ class DepthMapDialog(QDialog):
     def _save(self, colorized=True):
         if not self._require_current_map():
             return
-        start_dir = get_last_dialog_dir()
+        start_dir = image_save_dir()
         if colorized:
             path, _ = QFileDialog.getSaveFileName(
                 self, trans.t("depth_save_color"),
@@ -1608,7 +1609,7 @@ class DepthMapDialog(QDialog):
         except ValueError as exc:
             self.status_lbl.setText(str(exc))
             return
-        set_last_dialog_dir(path)
+        remember_image_save(path)
         try:
             if colorized:
                 ok = imwrite_auto(path, self._colorized_full())
@@ -1632,8 +1633,8 @@ class DepthMapDialog(QDialog):
             self.status_lbl.setText(self.lbl_surface_state.text())
             return
         from utils.mesh_export import obj_paths
-        start_dir = get_last_dialog_dir()
-        default = os.path.join(start_dir, "depth_model.obj") if start_dir else "depth_model.obj"
+        start_dir = image_save_dir()
+        default = os.path.join(start_dir, "depth_model.obj")
         path, _ = QFileDialog.getSaveFileName(
             self, trans.t("depth_export_3d"), default, "Wavefront OBJ (*.obj)")
         if not path:
@@ -1677,7 +1678,7 @@ class DepthMapDialog(QDialog):
         self.status_lbl.setText(trans.t("depth_export_3d"))
         self.status_lbl.setToolTip("\n".join(obj_paths(path)))
         self._reconcile_controls()
-        set_last_dialog_dir(path)
+        remember_image_save(path)
         try:
             worker.start()
         except Exception as exc:

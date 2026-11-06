@@ -57,6 +57,18 @@ def _scene(subject_radius=110):
     return frames, fused, disc > 0
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _tuned_scale():
+    """The synthetic scenes were designed around the distances as tuned
+    (scale 1); scaling to the image's size has its own tests.  Module scope,
+    so it is in place before the module-scoped results below are computed."""
+    import core.background_fill as bf
+    patch = pytest.MonkeyPatch()
+    patch.setattr(bf, "SCALE_OVERRIDE", 1.0)
+    yield
+    patch.undo()
+
+
 @pytest.fixture(scope="module")
 def scene():
     return _scene()
@@ -155,6 +167,21 @@ def test_edge_frame_map_handles_thin_and_empty_subjects():
     assert edge_frame_map(subject, indices).shape == subject.shape
     with pytest.raises(BackgroundFillError, match="no subject"):
         edge_frame_map(np.zeros_like(subject), indices)
+
+
+@pytest.mark.parametrize("count", [1, 2, 7, 1000, 1001])
+def test_channel_medians_match_numpy_exactly(count):
+    from core.background_fill import _channel_medians
+    rng = np.random.default_rng(count)
+    img = rng.integers(0, 65536, size=(40, 50, 3), dtype=np.uint16)
+    img[:5] = 65535                                    # ties and the top bin
+    index = np.sort(rng.choice(img.shape[0] * img.shape[1], size=count, replace=False))
+    as_float = img.astype(np.float32).reshape(-1, 3)[index]
+    expected = [np.median(as_float[:, c]) for c in range(3)]
+    got = _channel_medians(img, index)
+    assert [type(v) for v in got] == [type(v) for v in expected]
+    assert got == expected
+    assert all(np.isnan(v) for v in _channel_medians(img, np.array([], np.intp)))
 
 
 def test_recorded_range_ignores_registration_fill():
@@ -514,3 +541,323 @@ def test_fill_enclosed_matches_per_hole_filling():
     out = _fill_enclosed(sub)
     assert np.array_equal(out, expected) and out[45, 55] == 1
     assert sub[45, 55] == 0                                 # the input is not modified
+
+
+# ------------------------------------------------------- dark backgrounds
+def test_field_stop_mask_needs_a_black_core():
+    from core.background_fill import field_stop_mask
+    lum = np.full((200, 200), 100.0, np.float32)
+    lum[:, 140:] = 30.0                        # an ordinary dark background
+    assert not field_stop_mask(lum, 100.0, 30).any()
+    lum[:, :20] = 2.0                          # a microscope's field stop...
+    lum[:, 20:40] = 25.0                       # ...and its dim, blurred rim
+    stop = field_stop_mask(lum, 100.0, 30)
+    assert stop[:, :40].all()
+    assert not stop[:, 40:].any()              # the dark background stays usable
+
+
+def test_halo_zone_beside_a_dark_background_is_rebuilt_from_that_background():
+    """A dark gap beside the subject (a fifth of the lit ground's level) was
+    taken for a field stop and refilled from the lit ground: a pale smear."""
+    from core.background_fill import fill_halo_zone
+    size = 256
+    yy, xx = np.mgrid[:size, :size]
+    bg = np.full((size, size, 3), 200 * 257, np.float32)
+    bg[:, 160:] = 40 * 257
+    sub = (xx - 128) ** 2 + (yy - 128) ** 2 < 30 ** 2
+    dist = cv2.distanceTransform((~sub).astype(np.uint8), cv2.DIST_L2, 5)
+    out, _est = fill_halo_zone(bg.copy(), dist, sub, np.float32(24))
+    zone = (~sub) & (dist < 24) & (xx > 170)
+    assert out[zone].mean() < 1.25 * 40 * 257
+
+
+# ---------------------------------------------- retouched starting images
+def test_composite_onto_keeps_edits_and_analyses_the_stacked_result(scene, soft_result):
+    frames, fused, disc = scene
+    edited = fused.copy()
+    ys, xs = np.nonzero(disc)
+    cy, cx = int(ys.mean()), int(xs.mean())
+    edited[cy - 10:cy + 10, cx - 10:cx + 10] = (0, 0, 255)     # brushing on the subject
+    again = replace_background(frames, fused, composite_onto=edited)
+    np.testing.assert_array_equal(again.image[cy - 10:cy + 10, cx - 10:cx + 10],
+                                  edited[cy - 10:cy + 10, cx - 10:cx + 10])
+    # Away from the subject the background is the clean run's (the blend
+    # weight can sit a hair under 1, so allow one level of rounding).
+    far = cv2.distanceTransform((~disc).astype(np.uint8), cv2.DIST_L2, 5) > 40
+    diff = np.abs(again.image[far].astype(int) - soft_result.image[far].astype(int))
+    assert diff.max() <= 1 and (diff > 0).mean() < 1e-4
+    with pytest.raises(BackgroundFillError):
+        replace_background(frames, fused, composite_onto=edited[:-1])
+
+
+def _retouched_document(scene):
+    """A retouched output (brushing on the subject) linked to its stack."""
+    from core.render_context import build_render_context
+    from utils.retouch import RetouchDocument
+    frames, fused, disc = scene
+    context = build_render_context(frames, fused, filenames=[f"f{i}.png" for i in range(len(frames))],
+                                   algorithm="test")
+    edited = fused.copy()
+    ys, xs = np.nonzero(disc)
+    cy, cx = int(ys.mean()), int(xs.mean())
+    edited[cy - 10:cy + 10, cx - 10:cx + 10] = (0, 0, 255)
+    doc = RetouchDocument(edited, context)
+    doc.stacked_image = fused
+    return doc, (cy, cx)
+
+
+def test_retouch_from_a_retouched_output_uses_the_stacked_result(scene, soft_result, tmp_path, monkeypatch):
+    import utils.retouch as rt
+    monkeypatch.setattr(rt, "_AUTO_BG_CACHE", {})
+    _frames, _fused, disc = scene
+    doc, (cy, cx) = _retouched_document(scene)
+    doc.initialize_checkpoint()
+    assert doc.auto_background() == "committed"
+    assert doc._operations[-1]["stacked"] == doc.stacked_fingerprint()
+    assert (doc.working[cy, cx] == (0, 0, 255)).all()
+    far = cv2.distanceTransform((~disc).astype(np.uint8), cv2.DIST_L2, 5) > 40
+    diff = np.abs(doc.working[far].astype(int) - soft_result.image[far].astype(int))
+    assert diff.max() <= 1 and (diff > 0).mean() < 1e-4
+    path = tmp_path / "history.json"
+    doc.save_checkpoint(str(path))
+    fresh, _ = _retouched_document(scene)
+    fresh.stacked_image = None
+    fresh.initialize_checkpoint()
+    with pytest.raises(ValueError, match="stacked result"):
+        fresh.load_checkpoint(str(path))
+    fresh, _ = _retouched_document(scene)
+    fresh.initialize_checkpoint()
+    fresh.load_checkpoint(str(path))
+    np.testing.assert_array_equal(fresh.working, doc.working)
+
+
+def test_cli_replay_takes_the_stacked_result(scene, tmp_path, monkeypatch):
+    import utils.retouch as rt
+    from core.cli import run_cli
+    monkeypatch.setattr(rt, "_AUTO_BG_CACHE", {})
+    frames, fused, _disc = scene
+    doc, _ = _retouched_document(scene)
+    doc.initialize_checkpoint()
+    assert doc.auto_background() == "committed"
+    checkpoint = tmp_path / "history.json"
+    doc.save_checkpoint(str(checkpoint))
+    base, stacked = tmp_path / "base.png", tmp_path / "stacked.png"
+    assert cv2.imwrite(str(base), doc.base) and cv2.imwrite(str(stacked), fused)
+    sources = []
+    for i, frame in enumerate(frames):
+        sources.append(tmp_path / f"f{i}.png")
+        assert cv2.imwrite(str(sources[-1]), frame)
+    output = tmp_path / "out.png"
+    args = ["retouch", "replay", str(checkpoint), "--base", str(base),
+            "--sources", *(str(p) for p in sources), "--output", str(output)]
+    assert run_cli(args) != 0                       # the step needs the stacked result
+    assert run_cli(args + ["--stacked", str(stacked)]) == 0
+    np.testing.assert_array_equal(cv2.imread(str(output), cv2.IMREAD_UNCHANGED), doc.working)
+
+
+def test_stacked_source_follows_retouches_back_to_the_stack():
+    from types import SimpleNamespace
+    from controllers.output_manager import OutputManager, OutputRecord
+    frames = (SimpleNamespace(image=np.zeros((4, 4, 3), np.uint8)),)
+    context = SimpleNamespace(frames=frames)
+    image = np.zeros((8, 8, 3), np.uint16)
+    stack = OutputRecord.create(image, "stack", context=context)
+    first = OutputRecord.create(image.copy(), "stack · Retouched 1", context=context,
+                                kind="retouch", parent_id=stack.output_id)
+    second = OutputRecord.create(image.copy(), "stack · Retouched 2", context=context,
+                                 kind="retouch", parent_id=first.output_id)
+    other = OutputRecord.create(image.copy(), "other", context=SimpleNamespace(
+        frames=(SimpleNamespace(image=np.zeros((4, 4, 3), np.uint8)),)), kind="retouch",
+        parent_id=stack.output_id)
+    records = [second, first, stack, other]
+    manager = OutputManager.__new__(OutputManager)
+    manager.window = SimpleNamespace(output_list=SimpleNamespace(count=lambda: len(records)))
+    manager.record_for_row = lambda row: records[row]
+    assert manager.stacked_source(second) is stack
+    assert manager.stacked_source(first) is stack
+    assert manager.stacked_source(stack) is None          # already the stacked result
+    assert manager.stacked_source(other) is None          # different frames
+    orphan = OutputRecord.create(image.copy(), "x", context=context, kind="retouch", parent_id="gone")
+    assert manager.stacked_source(orphan) is None
+
+
+def test_retouch_dialog_on_a_retouched_output_links_the_stacked_result(qapp, scene):
+    from types import SimpleNamespace
+    from PyQt6.QtWidgets import QApplication, QLabel, QWidget
+    from controllers.output_manager import OutputRecord
+    from core.render_context import build_render_context
+    from dialogs.retouch import RetouchDialog, _AutoBackgroundDialog
+    from locales import trans
+
+    frames, fused, _ = scene
+    ctx = build_render_context(frames, fused, filenames=[f"f{i}.png" for i in range(len(frames))],
+                               algorithm="test")
+    stack = OutputRecord.create(fused, "demo.png", context=ctx)
+    retouched = OutputRecord.create(fused.copy(), "demo.png · Retouched 1", context=ctx,
+                                    kind="retouch", parent_id=stack.output_id)
+    window = QWidget()
+    window.output_manager = SimpleNamespace(
+        stacked_source=lambda record: stack if record is retouched else None)
+    plain = RetouchDialog(window, record=stack, apply_callback=lambda *_: (True, ""))
+    assert plain.doc.stacked_image is None
+    dlg = RetouchDialog(window, record=retouched, apply_callback=lambda *_: (True, ""))
+    try:
+        assert dlg.doc.stacked_image is fused
+        assert dlg._notice == trans.t("retouch_from_retouched")
+        auto = _AutoBackgroundDialog(dlg.doc, dlg)
+        texts = [label.text() for label in auto.findChildren(QLabel)]
+        assert trans.t("retouch_auto_bg_from_stacked") in texts
+        auto.deleteLater()
+    finally:
+        for d in (plain, dlg):
+            d._allow_close = True
+            d.close()
+        QApplication.processEvents()
+        window.deleteLater()
+
+
+# ------------------------------------------------------------------ headless CLI
+def _write_stack(folder, frames):
+    folder.mkdir()
+    for k, frame in enumerate(frames):
+        assert cv2.imwrite(str(folder / f"frame_{k:02d}.png"), frame)
+
+
+def test_cli_auto_background_writes_result_stacked_and_maps(scene, tmp_path):
+    import json
+    from core.cli import run_cli
+    frames, _fused, disc = scene
+    _write_stack(tmp_path / "stack", frames)
+    out = tmp_path / "out" / "result.png"
+    summary = tmp_path / "summary.json"
+    rc = run_cli(["-i", str(tmp_path / "stack"), "-o", str(out), "--method", "guided_filter",
+                  "--cpu", "--threads", "2", "--auto-background", "soft", "--save-stacked",
+                  "--missing-data-map", "--json", str(summary)])
+    assert rc == 0
+    result = cv2.imread(str(out), cv2.IMREAD_UNCHANGED)
+    stacked = cv2.imread(str(tmp_path / "out" / "result_stacked.png"), cv2.IMREAD_UNCHANGED)
+    assert result.shape == stacked.shape == frames[0].shape
+    inner = cv2.erode(disc.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
+    far_bg = cv2.erode((~disc).astype(np.uint8), np.ones((61, 61), np.uint8)) > 0
+    assert np.array_equal(result[inner], stacked[inner])           # subject kept
+    assert np.abs(result[far_bg].astype(int) - stacked[far_bg]).mean() > 1.0   # background replaced
+    for name in ("", "-background", "-hidden", "-out_of_range", "-featureless"):
+        assert (tmp_path / "out" / f"result_missing{name}.png").is_file()
+    report = json.loads(summary.read_text())
+    assert report["auto_background"]["preset"] == "soft"
+    assert report["auto_background"]["changed"] is True
+    assert len(report["outputs"]) == 7
+
+
+@pytest.mark.parametrize("argv", [
+    ["--save-stacked"],
+    ["--keep-soft-parts"],
+    ["--background-mode", "faithful"],
+    ["--auto-background", "--group-size", "3"],
+    ["--auto-background", "--missing-data-map", "maps.jpg"],
+    ["--auto-background", "--save-stacked", "x.txt"],
+])
+def test_cli_auto_background_usage_errors(tmp_path, argv):
+    from core.cli import EXIT_USAGE, run_cli
+    folder = tmp_path / "stack"
+    folder.mkdir()
+    assert run_cli(["-i", str(folder), "-o", str(tmp_path / "out.png"), *argv]) == EXIT_USAGE
+
+
+def test_focus_order_follows_focus_steps_only_when_direction_is_known():
+    from core.focus_order import FocusPosition, _order
+    # OM SYSTEM bracketing: shot 1 at the start (mid-depth), then near -> far;
+    # larger step counts are nearer (near_step > infinity_step).
+    steps = {"s01": 17121, "s02": 18216, "s03": 17997, "s04": 17778, "s05": 16902}
+    known = [FocusPosition(path, step, near_step=20000, infinity_step=0)
+             for path, step in steps.items()]
+    assert _order(known)[0] == ["s02", "s03", "s04", "s01", "s05"]
+    unknown = [FocusPosition(path, step) for path, step in steps.items()]
+    assert _order(unknown)[0] is None
+    partial = known[:-1] + [FocusPosition("s05")]
+    assert _order(partial)[0] is None
+
+
+def test_focus_order_leaves_frames_without_metadata_alone(scene, tmp_path):
+    from core.focus_order import order_by_focus
+    frames, _fused, _disc = scene
+    _write_stack(tmp_path / "stack", frames[:3])
+    paths = sorted(str(p) for p in (tmp_path / "stack").iterdir())
+    assert order_by_focus(paths) == (paths, None)
+
+
+def test_roi_render_context_does_not_keep_full_frames_alive():
+    """An ROI output's provenance holds copies of the crops, not views that
+    would pin every full-size aligned frame while the output exists."""
+    from core.render_context import build_render_context
+    full = [np.full((200, 300, 3), 40 * (i + 1), np.uint8) for i in range(3)]
+    crop = full[0][50:150, 60:260]
+    ctx = build_render_context(full, crop.copy(), filenames=["a", "b", "c"], algorithm="test",
+                               roi_rect=(60, 50, 200, 100), roi_mode="crop")
+    assert ctx is not None
+    for frame, source in zip(ctx.frames, full):
+        assert frame.image.shape == (100, 200, 3)
+        assert not np.shares_memory(frame.image, source)
+        np.testing.assert_array_equal(frame.image, source[50:150, 60:260])
+
+
+
+def test_distances_scale_with_the_image_size(monkeypatch):
+    """Distances are written for 20 MP (5216 px long side) and follow the
+    image's size during a run; at the reference size they are unchanged."""
+    import core.background_fill as bf
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", None)
+    seen = []
+    real = bf._replace_background
+
+    def spy(frames, fused, **kwargs):
+        seen.append((bf._px(32.0), bf._ksize(49), bf._area(10000), bf._sigma(1.0)))
+        raise bf.BackgroundFillCancelled()
+
+    monkeypatch.setattr(bf, "_replace_background", spy)
+    for long_side in (5216, 2608, 7824):
+        img = np.zeros((long_side * 3 // 4, long_side, 3), np.uint16)
+        with pytest.raises(bf.BackgroundFillCancelled):
+            bf.replace_background([img, img], img)
+    assert seen[0] == (32.0, 49, 10000, 1.0)                 # exactly as tuned
+    assert seen[1] == (16.0, 25, 2500, 0.5)
+    assert seen[2] == (48.0, 75, 22500, 1.5)
+    assert bf._px(32.0) == 32.0                              # back to 1 after the run
+    monkeypatch.setattr(bf, "_replace_background", real)
+
+
+def test_the_same_scene_twice_as_large_gets_zones_twice_as_wide(scene, monkeypatch):
+    """Scale follows the image: the scene enlarged 2x gets a rebuild zone about
+    twice as wide in pixels, i.e. the same relative to the scene."""
+    import core.background_fill as bf
+    frames, fused, _disc = scene
+    widths = []
+    real = bf.fill_halo_zone
+
+    def spy(bg, dist, sub, width, scale=4):
+        widths.append(float(np.median(width)))
+        return real(bg, dist, sub, width, scale)
+
+    monkeypatch.setattr(bf, "fill_halo_zone", spy)
+    big = lambda img: cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+    # Scales 1 and 2 (the synthetic scene is too small for the reference
+    # size itself): what matters is that doubling the image doubles them.
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", 1.0)
+    small_run = bf.replace_background(frames, fused, preset="soft")
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", 2.0)
+    large_run = bf.replace_background([big(f) for f in frames], big(fused), preset="soft")
+    assert small_run.changed and large_run.changed
+    assert 1.6 < widths[1] / widths[0] < 2.4
+
+
+
+def test_fine_outline_band_and_ring_stay_a_pixel_wide_on_tiny_images():
+    import core.background_fill as bf
+    assert bf._outline_band_and_ring() == (20, (3, 15))           # as tuned at 20 MP
+    token = bf._SCALE.set(64 / bf.REFERENCE_LONG_SIDE)            # the smallest accepted image
+    try:
+        band, (inner, outer) = bf._outline_band_and_ring()
+    finally:
+        bf._SCALE.reset(token)
+    assert band >= 1.0
+    assert inner < 1.0 < outer          # distances of 1 px fall inside the ring

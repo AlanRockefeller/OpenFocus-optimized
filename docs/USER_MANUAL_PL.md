@@ -591,13 +591,19 @@ i mieszać jego piksele.
    leżą tuż poza głębią ostrości, na przykład główka na końcu kolca. Obiekty tła
    obok obiektu też mogą wtedy zostać jak po stackowaniu, więc sprawdź wynik.
 5. Kliknij **Zastąp tło**. Stack 15 klatek po 20 megapikseli trwa około minuty i
-   potrzebuje około 3,5 GB wolnej pamięci. **Anuluj** przerywa.
+   potrzebuje około 2,5 GB wolnej pamięci. **Anuluj** przerywa.
 
 Zmiana to jeden krok, który można cofnąć, a pociągnięcia namalowane wcześniej na
 obiekcie zostają. **Pędzlem przywracania** przywrócisz piksele ze stacku tam,
 gdzie wolisz, na przykład nieostre źdźbło trawy przed obiektem. Gdy obiekt
 wypełnia prawie cały kadr, jak w scenie z dna lasu, obraz zostaje jak po
 stackowaniu i pojawia się komunikat.
+
+Jeśli otworzysz retusz na wyniku, który był już retuszowany, automatyczne tło
+analizuje wynik stacku, z którego pochodzi, i nakłada nowe tło na Twój
+retuszowany obraz. Poprawki pędzlem na obiekcie zostają zachowane, a wcześniej
+zastąpione tło nigdy nie jest analizowane ponownie, więc drugie uruchomienie nie
+nawarstwia aureoli.
 
 Po przebiegu **Pokaż brakujące dane** zabarwia miejsca, których żadna klatka nie
 uchwyciła wyraźnie. To miejsca do sprawdzenia lub ręcznego retuszu:
@@ -849,7 +855,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # uruchom aplikację desk
 openfocus ctl <command> [flags]          # steruj działającym oknem (patrz AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # odtwórz zapisany przepis headless
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` uruchamia aplikację w tle; `--control` czeka na kanał sterowania i wypisuje JSON połączenia. `openfocus describe` i `version` nie wymagają danych wejściowych. Przepływ pracy dla agenta opisano w [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) oraz `skills/openfocus-control/SKILL.md`.
@@ -920,6 +926,12 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--scale-um` | Rozmiar piksela w µm/px, ważniejszy od metadanych (implikuje `--scale-bar`) |
 | `--depth-map [path]` | Dodatkowo zapisuje kolorową mapę położenia ostrości (domyślnie `<output>_depth.png`); tylko dla metod z mapą głębi, nie dla wejścia grupowego lub przezroczystego. W trybie wsadowym dozwolona jest tylko ścieżka domyślna |
 | `--depth-colormap` | Mapa kolorów dla `--depth-map`: turbo, viridis, jet, gray, … (domyślnie turbo) |
+| `--auto-background [preset]` | Zastępuje tło stosu tłem wyrównanej klatki, tak jak Automatyczne tło w retuszu: `auto` (domyślnie), `soft` (najbardziej rozmyte tło) lub `sharp` (klatka ostrzona najdalej). Wymaga wyrównanych klatek, więc nie działa z fuzją grupową |
+| `--background-mode` | Automatyczne tło: `clean` (domyślnie) usuwa też obwódki na krawędziach stosu, w granicach tego, co zarejestrowały klatki; `faithful` je zachowuje |
+| `--keep-soft-parts` | Automatyczne tło: zachowuje miękkie części połączone z obiektem, na które ostrzyła któraś klatka |
+| `--save-stacked [path]` | Z `--auto-background` zapisuje też wynik sprzed zastąpienia (domyślnie `<output>_stacked<ext>`). W trybie wsadowym tylko ścieżka domyślna |
+| `--missing-data-map [path]` | Z `--auto-background` zapisuje też mapę brakujących danych i jedną 8-bitową maskę na klasę (domyślnie `<output>_missing.png`). W trybie wsadowym tylko ścieżka domyślna |
+| `--frame-order` | Folder na wejściu: `auto` (domyślnie) porządkuje klatki od bliskich do dalekich według kroków ostrości z EXIF, gdy mają je wszystkie klatki (bracketing ostrości OM SYSTEM zaczyna się w połowie głębi), w przeciwnym razie według nazwy; `name` zawsze według nazwy pliku. Pliki podane jawnie zachowują swoją kolejność |
 | `--json FILE` | Zapisuje czytelny maszynowo raport wyników do FILE po zakończeniu |
 | `--json-progress` | Wypisuje jeden obiekt JSON postępu na krok do stdout (NDJSON); komunikaty tekstowe trafiają do stderr |
 | `--dry-run` | Sprawdza wejście i wypisuje plan bez wykonywania fuzji |
@@ -995,6 +1007,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Użyj rzeczywistych klatek używanych do retuszu, po wyrównaniu i dowolnym przycięciu ROI lub innym przetwarzaniu, z oryginalnymi wartościami pikseli i głębią. Punkt kontrolny zapisuje edycje i odciski, a nie piksele obrazów. Odtwarzanie rekonstruuje zapisane przesunięcia klatek i zachowanie wyrównania oraz weryfikuje bazę, uporządkowane klatki i maski ważności; niezgodne piksele, geometria lub maski są odrzucane. Każda ścieżka musi zawierać jeden obraz. Wyjście musi być PNG lub TIFF i zachowuje głębię bazy. Punkt kontrolny i obrazy wejściowe nie mogą być użyte jako wyjście.
+
+Jeśli punkt kontrolny zawiera krok automatycznego tła wykonany na wyniku, który
+był już retuszowany, podaj też wynik stacku, z którego pochodzi, przez
+`--stacked stacked.png`.
 
 Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd użycia. Uruchomienie `python main.py --help` wypisuje wszystkie opcje; uruchomienie z prostą ścieżką (`python main.py C:\stack`) nadal otwiera interfejs graficzny z wczytanym folderem.
 

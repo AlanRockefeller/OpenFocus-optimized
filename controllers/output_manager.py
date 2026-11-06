@@ -17,7 +17,8 @@ from utils import (show_error_box, show_message_box, show_success_box,
                    show_warning_box)
 from utils.settings_store import get_drag_export_format, set_drag_export_format
 from utils import scalebar
-from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+from utils.settings_store import (get_last_dialog_dir, image_save_default, remember_image_save,
+                                  set_last_dialog_dir)
 from utils.image_utils import to_display_uint8, cv2_to_pixmap
 from utils.image_utils import imwrite_auto
 from locales import trans
@@ -543,6 +544,36 @@ class OutputManager:
         if view is not None and hasattr(view, 'set_display_pixmap'):
             view.set_display_pixmap(pixmap)
 
+    def stacked_source(self, record: OutputRecord) -> Optional[OutputRecord]:
+        """The stacked result a retouched output was made from, or None.
+
+        Follows each retouch back to its parent; only a stack of the same
+        size rendered from the same frames counts."""
+        if record is None or record.kind != "retouch":
+            return None
+        by_id = {}
+        for row in range(self.window.output_list.count()):
+            other = self.record_for_row(row)
+            if other is not None:
+                by_id[other.output_id] = other
+        current, seen = record, set()
+        while current is not None and current.kind == "retouch":
+            parent = current.parent_id
+            if not parent or parent in seen:
+                return None
+            seen.add(parent)
+            current = by_id.get(parent)
+        if (current is None or current.image is None or record.image is None
+                or current.image.shape != record.image.shape
+                or current.image.dtype != record.image.dtype):
+            return None
+        frames = getattr(current.context, "frames", None)
+        mine = getattr(record.context, "frames", None)
+        if (not frames or not mine or len(frames) != len(mine)
+                or any(a.image is not b.image for a, b in zip(frames, mine))):
+            return None
+        return current
+
     def add_retouched_output(self, base_record: OutputRecord,
                              image) -> OutputRecord:
         """Publish a retouch buffer as a new output, leaving the base intact."""
@@ -959,10 +990,11 @@ class OutputManager:
             if record.linear_dng_metadata is not None and not record.annotations_baked:
                 filters += ';;' + trans.t('linear_dng_filter')
             file_path, selected_filter = QFileDialog.getSaveFileName(
-                window, trans.t('action_save'), default_filename, filters)
+                window, trans.t('action_save'), image_save_default(default_filename), filters)
             if not file_path:
                 return
             file_path = window.export_manager.normalize_export_path(file_path, selected_filter=selected_filter)
+            remember_image_save(file_path)
             if os.path.splitext(file_path)[1].lower() == '.dng':
                 self.start_linear_dng_export(record, original, file_path, labels)
                 return

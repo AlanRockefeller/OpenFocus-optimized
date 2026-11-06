@@ -576,7 +576,7 @@ reconstruire, ajuster et mélanger ses pixels.
    d'une épine. Des objets d'arrière-plan voisins du sujet peuvent aussi rester
    tels qu'empilés, vérifiez donc le résultat.
 5. Cliquez sur **Remplacer l'arrière-plan**. Une pile de 15 images de
-   20 mégapixels prend environ une minute et demande environ 3,5 Go de mémoire
+   20 mégapixels prend environ une minute et demande environ 2,5 Go de mémoire
    libre. **Annuler** l'arrête.
 
 La modification est une seule étape annulable, et les traits déjà peints sur le
@@ -584,6 +584,12 @@ sujet sont conservés. Utilisez le **Pinceau de restauration** pour retrouver le
 pixels empilés là où vous les préférez, par exemple un brin d'herbe flou devant
 le sujet. Si le sujet remplit presque toute l'image, comme une scène de sol
 forestier, l'image reste telle qu'empilée et une note l'indique.
+
+Si vous ouvrez la retouche sur un résultat déjà retouché, l'arrière-plan
+automatique analyse le résultat empilé dont il provient et pose le nouvel
+arrière-plan sur votre image retouchée. Les retouches au pinceau sur le sujet
+sont conservées, et un arrière-plan déjà remplacé n'est jamais réanalysé : un
+second passage n'accumule donc pas de halos.
 
 Après un passage, **Afficher les données manquantes** colore les endroits
 qu'aucune image n'a vus nettement. Ce sont les endroits à vérifier ou à
@@ -829,7 +835,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # démarre l'application 
 openfocus ctl <command> [flags]          # pilote une fenêtre en cours (voir AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # rejoue une recette headless enregistrée
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` démarre en arrière-plan ; `--control` attend le canal de contrôle et imprime son JSON de connexion. `openfocus describe` et `version` ne nécessitent aucune entrée. Le workflow destiné aux agents est documenté dans [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) et `skills/openfocus-control/SKILL.md`.
@@ -900,6 +906,12 @@ Par exemple, ajoutez `--align openfocus --alignment-report alignment.json` à un
 | `--scale-um` | Taille de pixel en µm/px, prioritaire sur les métadonnées (implique `--scale-bar`) |
 | `--depth-map [path]` | Enregistre aussi une carte de position de mise au point colorisée (défaut `<output>_depth.png`) ; méthodes compatibles avec la profondeur uniquement, ni groupées ni transparentes. En mode lot, seul le chemin par défaut est autorisé |
 | `--depth-colormap` | Palette pour `--depth-map` : turbo, viridis, jet, gray, … (turbo par défaut) |
+| `--auto-background [preset]` | Remplace l'arrière-plan empilé par celui d'une image alignée, comme Arrière-plan auto dans la retouche : `auto` (défaut), `soft` (arrière-plan le plus flou) ou `sharp` (image mise au point au plus loin). Nécessite les images alignées, donc pas avec la fusion par groupes |
+| `--background-mode` | Arrière-plan auto : `clean` (défaut) supprime aussi les halos de bord de l'empilement, dans la limite de ce que les images ont enregistré ; `faithful` les conserve |
+| `--keep-soft-parts` | Arrière-plan auto : conserve les parties floues rattachées au sujet sur lesquelles une image a fait la mise au point |
+| `--save-stacked [path]` | Avec `--auto-background`, enregistre aussi le résultat avant le remplacement (défaut `<output>_stacked<ext>`). En mode lot, seul le chemin par défaut est accepté |
+| `--missing-data-map [path]` | Avec `--auto-background`, enregistre aussi la carte des données manquantes et un masque 8 bits par classe (défaut `<output>_missing.png`). En mode lot, seul le chemin par défaut est accepté |
+| `--frame-order` | Dossier en entrée : `auto` (défaut) ordonne les images du plus proche au plus lointain selon les pas de mise au point EXIF quand toutes les images en ont (le bracketing de mise au point OM SYSTEM commence à mi-profondeur), sinon par nom ; `name` trie toujours par nom de fichier. Les fichiers listés explicitement gardent leur ordre |
 | `--json FILE` | Écrit un résumé de résultat lisible par machine dans FILE à la fin |
 | `--json-progress` | Imprime un objet JSON de progression par étape sur stdout (NDJSON) ; la prose va sur stderr |
 | `--dry-run` | Valide les entrées et imprime le plan sans fusionner |
@@ -953,6 +965,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Utilisez les images réellement utilisées pour la retouche, après recalage et tout recadrage ROI ou autre traitement, avec leurs valeurs de pixel et profondeur de bits d'origine. Le point de contrôle consigne les modifications et les empreintes, pas les pixels. Le rejeu reconstruit les décalages d'image et le comportement d'alignement enregistrés et vérifie la base, les images ordonnées et les masques de validité ; les pixels, géométries ou masques incompatibles sont refusés. Chaque chemin doit contenir une image. La sortie doit être PNG ou TIFF et conserve la profondeur de bits de la base. Le point de contrôle et les images d'entrée ne peuvent pas servir de sortie.
+
+Si le point de contrôle contient une étape d'arrière-plan automatique lancée sur
+un résultat déjà retouché, indiquez aussi le résultat empilé d'origine avec
+`--stacked stacked.png`.
 
 Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisation. `python main.py --help` affiche toutes les options ; lancer avec un simple chemin (`python main.py C:\stack`) ouvre toujours l'interface avec ce dossier chargé.
 

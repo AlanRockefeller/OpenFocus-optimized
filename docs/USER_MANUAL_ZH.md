@@ -768,6 +768,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 蒙版不兼容会被拒绝。每个路径只能包含一张图，输出必须是 PNG 或 TIFF 并保留底图位深，
 检查点和输入图像不能作为输出。
 
+如果检查点包含在已修饰结果上运行的自动背景步骤，还需用 `--stacked stacked.png` 指定它所来自的堆栈结果。
+
 **编辑 → 修饰图像文件…** 可单独选择已有结果和已对齐源图。只接受单页 PNG、TIFF、
 JPEG 和 BMP，正立尺寸、通道及 8 位/16 位深度必须一致，加载时会应用 EXIF 方向；
 不支持 alpha 和多页图像。所选帧由用户提供，不是渲染记录的来源。尺寸相同并不能证明
@@ -786,9 +788,11 @@ JPEG 和 BMP，正立尺寸、通道及 8 位/16 位深度必须一致，加载�
    - **清晰背景** 使用对焦最远的那一帧。
 3. 保持 **清除边缘光晕** 开启，可去除主体边缘的光晕。它绝不会超出各帧实际记录的范围。关闭则保留堆栈原有的边缘效果。
 4. 当主体的某些部分刚好在景深之外（例如突起末端的小球）时，勾选 **保留与主体相连的柔和部分**。主体旁边的背景物体也可能保留为堆栈结果，请检查效果。
-5. 点击 **替换背景**。一组 15 帧、2000 万像素的堆栈大约需要一分钟，并需要约 3.5 GB 可用内存。**取消** 可以中止。
+5. 点击 **替换背景**。一组 15 帧、2000 万像素的堆栈大约需要一分钟，并需要约 2.5 GB 可用内存。**取消** 可以中止。
 
 这项更改是一步可撤销的操作，之前在主体上画的笔触会保留。对于希望恢复为堆栈像素的地方（例如主体前方失焦的草叶），请使用 **还原画笔**。当主体几乎占满整个画面时（例如林地地面场景），图像会保持堆栈结果并显示提示。
+
+如果在已经修饰过的结果上打开修饰，自动背景会分析它所来自的堆栈结果，并把新背景铺到你修饰后的图像上。你在主体上的笔刷修饰会被保留，之前替换过的背景不会被再次分析，因此运行两次也不会叠加光晕。
 
 运行后，开启 **显示缺失数据** 会给没有任何帧清晰拍到的位置着色。这些是需要检查或手动修饰的地方：
 
@@ -1123,7 +1127,7 @@ openfocus gui [--control] [--socket NAME] [路径…]   # 启动桌面应用
 openfocus ctl <command> [flags]          # 操作运行中的窗口（见 AGENT_CONTROL_SPEC.md）
 openfocus recipe create FILE --input … --output … [处理参数]
 openfocus recipe run FILE [--dry-run]    # 重放保存的无头配方
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` 会分离启动；`--control` 会等待控制通道建立并打印连接 JSON。
@@ -1223,6 +1227,8 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 和指纹，不记录像素。每个路径只能包含一张图，输出必须是 PNG 或 TIFF、保留底图位深，
 且不能覆盖检查点或输入图像。
 
+如果检查点包含在已修饰结果上运行的自动背景步骤，还需用 `--stacked stacked.png` 指定它所来自的堆栈结果。
+
 | 参数 | 说明 |
 |------|------|
 | `--input, -i` | 图像文件夹、视频文件、一个/多个图像文件，或单个多页 TIFF |
@@ -1260,6 +1266,12 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 | `--scale-bar` | 绘制比例尺（标定从 TIFF/DNG 显微元数据自动检测） |
 | `--depth-map [路径]` | 同时保存伪彩焦点位置（深度）图（默认 `<输出名>_depth.png`）；仅支持支持深度图的方法，分组或透明输入会被拒绝；批处理只允许默认路径 |
 | `--depth-colormap` | 深度图配色：turbo、viridis、jet、gray 等（默认 turbo） |
+| `--auto-background [预设]` | 与修图中的自动背景相同，用一张对齐帧的背景替换堆栈背景：`auto`（默认）、`soft`（背景最模糊）或 `sharp`（对焦最远的帧）。需要对齐后的帧，因此不能与分组融合同用 |
+| `--background-mode` | 自动背景：`clean`（默认）还会在各帧记录的范围内去除堆栈的边缘光晕；`faithful` 保留它们 |
+| `--keep-soft-parts` | 自动背景：保留某一帧对上焦、与主体相连的柔和部分 |
+| `--save-stacked [路径]` | 配合 `--auto-background`，同时保存替换前的结果（默认 `<输出名>_stacked<扩展名>`）；批处理只允许默认路径 |
+| `--missing-data-map [路径]` | 配合 `--auto-background`，同时保存缺失数据图及每类一张 8 位蒙版（默认 `<输出名>_missing.png`）；批处理只允许默认路径 |
+| `--frame-order` | 文件夹输入：`auto`（默认）在所有帧都有 EXIF 对焦步数时按由近到远排序（OM SYSTEM 焦点包围从中间深度开始），否则按文件名；`name` 始终按文件名。显式列出的文件保持原顺序 |
 | `--scale-um` | 手动指定像素大小 µm/px，覆盖元数据（隐含 `--scale-bar`） |
 | `--dry-run` | 只检查参数和输入，不写结果 |
 | `--resume` | 续跑批处理中尚未完成的任务 |

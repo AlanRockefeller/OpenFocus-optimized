@@ -613,7 +613,7 @@ seine Pixel rekonstruiert, angepasst und überblendet werden.
    am Ende eines Stachels. Dabei können auch Hintergrundobjekte neben dem Motiv
    wie gestackt bleiben, prüfen Sie also das Ergebnis.
 5. Klicken Sie auf **Hintergrund ersetzen**. Ein Stack aus 15 Bildern mit
-   20 Megapixeln braucht etwa eine Minute und etwa 3,5 GB freien Speicher.
+   20 Megapixeln braucht etwa eine Minute und etwa 2,5 GB freien Speicher.
    **Abbrechen** stoppt den Vorgang.
 
 Die Änderung ist ein rückgängig machbarer Schritt, und bereits gemalte Striche
@@ -621,6 +621,12 @@ auf dem Motiv bleiben erhalten. Mit dem **Wiederherstellungspinsel** holen Sie
 gestackte Pixel überall dort zurück, wo Sie sie bevorzugen, zum Beispiel einen
 unscharfen Grashalm vor dem Motiv. Füllt das Motiv fast das ganze Bild, wie bei
 einer Waldbodenszene, bleibt das Bild wie gestackt und ein Hinweis erscheint.
+
+Wenn Sie die Retusche auf einem bereits retuschierten Ergebnis öffnen,
+analysiert Automatischer Hintergrund das gestackte Ergebnis, aus dem es stammt,
+und legt den neuen Hintergrund auf Ihr retuschiertes Bild. Pinselarbeit am Motiv
+bleibt erhalten, und ein früher ersetzter Hintergrund wird nie erneut
+analysiert. Ein zweiter Durchlauf baut daher keine Säume auf.
 
 Nach einem Durchlauf färbt **Fehlende Daten anzeigen** die Stellen ein, die kein
 Bild sauber erfasst hat. Diese Stellen sollten Sie prüfen oder von Hand
@@ -868,7 +874,7 @@ openfocus gui [--control] [--socket NAME] [Pfade…]   # Desktop-App starten
 openfocus ctl <command> [flags]          # ein laufendes Fenster steuern (siehe AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [Verarbeitungsoptionen]
 openfocus recipe run FILE [--dry-run]    # ein gespeichertes Headless-Rezept wiedergeben
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` startet die App abgekoppelt; `--control` wartet auf den Steuerkanal und gibt dessen Verbindungs-JSON aus. `openfocus describe` und `version` benötigen keine Eingabe. Der Agent-Workflow ist in [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) und `skills/openfocus-control/SKILL.md` dokumentiert.
@@ -936,6 +942,12 @@ Für ein einzelnes Rendering lässt sich beispielsweise `--align openfocus --ali
 | `--scale-um` | Pixelgröße in µm/px, überschreibt die Metadaten (impliziert `--scale-bar`) |
 | `--depth-map [path]` | Zusätzlich eine kolorierte Tiefenkarte (Fokusposition) speichern (Standard `<output>_depth.png`); nur tiefenfähige Methoden, nicht gruppiert oder transparent. Im Batch-Modus ist nur der Standardpfad erlaubt |
 | `--depth-colormap` | Farbtabelle für `--depth-map`: turbo, viridis, jet, gray, … (Standard turbo) |
+| `--auto-background [preset]` | Den gestackten Hintergrund durch den eines ausgerichteten Einzelbilds ersetzen, wie Auto-Hintergrund in der Retusche: `auto` (Standard), `soft` (unschärfster Hintergrund) oder `sharp` (Fern-Fokus-Bild). Benötigt die ausgerichteten Bilder, daher nicht mit gruppierter Fusion |
+| `--background-mode` | Auto-Hintergrund: `clean` (Standard) entfernt zusätzlich die Kantenhalos des Stacks, im Rahmen dessen, was die Bilder aufgezeichnet haben; `faithful` behält sie |
+| `--keep-soft-parts` | Auto-Hintergrund: weiche, am Motiv hängende Teile behalten, auf die ein Bild fokussiert hat |
+| `--save-stacked [path]` | Mit `--auto-background` zusätzlich das Ergebnis vor dem Ersetzen speichern (Standard `<output>_stacked<ext>`). Im Stapelmodus nur der Standardpfad |
+| `--missing-data-map [path]` | Mit `--auto-background` zusätzlich die Fehlende-Daten-Karte und je Klasse eine 8-Bit-Maske speichern (Standard `<output>_missing.png`). Im Stapelmodus nur der Standardpfad |
+| `--frame-order` | Ordner als Eingabe: `auto` (Standard) sortiert die Bilder von nah nach fern nach den EXIF-Fokusschritten, wenn alle Bilder sie haben (OM-SYSTEM-Fokus-Bracketing beginnt in der Mitte), sonst nach Namen; `name` immer nach Dateiname. Einzeln angegebene Dateien behalten ihre Reihenfolge |
 | `--dry-run` | Eingaben prüfen und den Plan ausgeben, ohne zu fusionieren |
 | `--resume` | Stapelmodus: Ordner überspringen, deren Ausgabedatei bereits existiert |
 | `--json FILE` | Eine maschinenlesbare Ergebniszusammenfassung in FILE schreiben |
@@ -997,6 +1009,10 @@ openfocus retouch replay edits.json --base fused.png --sources processed1.png pr
 ```
 
 Verwenden Sie die tatsächlich für die Retusche verwendeten Bilder – nach Ausrichtung und einem etwaigen ROI-Zuschnitt oder anderer Verarbeitung – mit ihren ursprünglichen Pixelwerten und ihrer Bittiefe. Der Kontrollpunkt zeichnet Bearbeitungen und Fingerabdrücke auf, nicht die Bildpixel. Die Wiedergabe rekonstruiert die aufgezeichneten Bildversätze und das Ausrichtungsverhalten und prüft Basis, geordnete Bilder und Gültigkeitsmasken; unvereinbare Pixel, Geometrie oder Masken werden abgelehnt. Jeder Pfad muss genau ein Bild enthalten. Die Ausgabe muss PNG oder TIFF sein und behält die Bittiefe der Basis. Kontrollpunkt und Eingabebilder dürfen nicht als Ausgabe dienen.
+
+Enthält der Checkpoint einen Schritt Automatischer Hintergrund auf einem bereits
+retuschierten Ergebnis, geben Sie zusätzlich das gestackte Ergebnis, aus dem es
+stammt, mit `--stacked stacked.png` an.
 
 Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler, `2` Nutzungsfehler. Der Aufruf `python main.py --help` gibt alle Optionen aus; ein Start mit einem reinen Pfad (`python main.py C:\stack`) öffnet weiterhin die GUI mit diesem Ordner.
 

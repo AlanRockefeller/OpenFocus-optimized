@@ -76,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  openfocus --input ./stack --output ./result/fused.png --method dtcwt --align ecc --threads 8\n"
             "  openfocus --input ./stackA ./stackB --output-dir ./results -m stackmffv3\n"
             "  openfocus --input img1.jpg img2.jpg img3.jpg --output fused.png --method gfgfgf\n"
+            "  openfocus --input ./stack --output fused.tif --align ecc --auto-background\n"
             "\nTransparent input: PNG frames must share one rectangular, constant-opacity\n"
             "region and bit depth. Output must be PNG; alignment, dust correction,\n"
             "sensor cleanup, depth maps and scale bars are unsupported. See the user manual.\n"
@@ -175,6 +176,30 @@ def build_parser() -> argparse.ArgumentParser:
                              "(optional value: output path; default <output>_depth.png; batch requires default path)")
     parser.add_argument("--depth-colormap", default="turbo",
                         help="Colormap for --depth-map: turbo, viridis, jet, gray, ... (default turbo)")
+    parser.add_argument("--auto-background", nargs="?", const="auto", default=None,
+                        choices=["auto", "soft", "sharp"], metavar="PRESET",
+                        help="Replace the stacked background with an aligned frame's, as Retouch > "
+                             "Auto background does: auto (default) = the blurriest background unless the "
+                             "stack recorded much of the background in focus, soft = blurriest, "
+                             "sharp = the far-focus frame. Needs the aligned frames, so not with --group-size")
+    parser.add_argument("--background-mode", default="clean", choices=["clean", "faithful"],
+                        help="Auto background: clean (default) also removes the stack's outline-following "
+                             "edge flaws, within what the frames recorded; faithful keeps them")
+    parser.add_argument("--keep-soft-parts", action="store_true",
+                        help="Auto background: keep soft objects attached to the subject that some frame "
+                             "focused on (can keep nearby background objects in their stacked rendering too)")
+    parser.add_argument("--save-stacked", nargs="?", const=True, default=None, metavar="PATH",
+                        help="With --auto-background, also save the result before the background was "
+                             "replaced (default <output>_stacked<ext>; batch requires the default path)")
+    parser.add_argument("--missing-data-map", nargs="?", const=True, default=None, metavar="PATH",
+                        help="With --auto-background, also save where no frame recorded the scene: a tinted "
+                             "PNG plus one 8-bit mask PNG per class (default <output>_missing.png; batch "
+                             "requires the default path)")
+    parser.add_argument("--frame-order", default="auto", choices=["auto", "name"],
+                        help="Frames of an input folder: auto (default) orders them near to far by EXIF "
+                             "focus steps when every frame has them (OM SYSTEM focus bracketing starts at "
+                             "mid-depth), otherwise by name; name = always by filename. Files listed "
+                             "explicitly keep their order")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate inputs and print the plan without fusing")
     parser.add_argument("--resume", action="store_true",
@@ -248,6 +273,17 @@ def _list_folder_images(folder: str, loader) -> List[str]:
     )
 
 
+def _folder_stack_paths(folder: str, loader, args) -> List[str]:
+    """A folder's frames: by name, or near to far by EXIF focus steps."""
+    paths = _list_folder_images(folder, loader)
+    if getattr(args, "frame_order", "name") == "auto":
+        from core.focus_order import order_by_focus
+        paths, how = order_by_focus(paths)
+        if how:
+            _say(f"Frame order: near to far by {how}")
+    return paths
+
+
 def _filter_stack_paths(paths, reference):
     from utils.path_identity import same_path
     return [path for path in paths if not same_path(path, reference)]
@@ -288,7 +324,7 @@ def _resolve_stack(args, video_temp_root: str) -> Tuple[str, List[str]]:
 
     for entry in inputs:
         if os.path.isdir(entry):
-            paths.extend(_list_folder_images(entry, loader))
+            paths.extend(_folder_stack_paths(entry, loader, args))
         elif loader.is_video_file(entry):
             if getattr(args, "defect_mask_path", None):
                 raise ValueError("Cannot use a sensor defect mask with video frames: "
@@ -706,6 +742,109 @@ def _save_depth(args, fused_out: str) -> None:
           f"[{time.time() - t0:.1f}s]")
 
 
+def _extra_out_path(value, fused_out: str, suffix: str, ext: Optional[str] = None) -> str:
+    """An explicit PATH, or <fused stem><suffix><ext or the fused extension>."""
+    if isinstance(value, str) and value:
+        return value
+    stem, fused_ext = os.path.splitext(fused_out)
+    return stem + suffix + (fused_ext if ext is None else ext)
+
+
+def _background_out_paths(args, fused_out: str) -> List[str]:
+    """Every extra file --auto-background will write for `fused_out`."""
+    paths = []
+    if getattr(args, "save_stacked", None):
+        paths.append(_extra_out_path(args.save_stacked, fused_out, "_stacked"))
+    if getattr(args, "missing_data_map", None):
+        overlay = _extra_out_path(args.missing_data_map, fused_out, "_missing", ".png")
+        import dataclasses
+        from core.background_fill import MissingData
+        stem = overlay[:-4]
+        paths += [overlay] + [f"{stem}-{field.name}.png"
+                              for field in dataclasses.fields(MissingData)]
+    return paths
+
+
+def _auto_background(args, fused):
+    """Replace the background of a fused result (Retouch > Auto background).
+
+    Uses the registered frames the fusion consumed, cropped to the result
+    like the GUI's render context.  Returns the `BackgroundFillResult`."""
+    from core.background_fill import (_release_free_memory, replace_background,
+                                      working_set_bytes)
+    from core.render_context import _alignment_valid_mask
+
+    frames = getattr(args, "_depth_frames", None)
+    if not frames:
+        raise RuntimeError("--auto-background: no aligned frames available")
+    if fused.ndim == 3 and fused.shape[2] == 4:
+        raise RuntimeError("--auto-background does not support transparent results")
+    h, w = fused.shape[:2]
+    if any(f.shape[0] < h or f.shape[1] < w for f in frames):
+        raise RuntimeError("--auto-background: the aligned frames are smaller than the result")
+    frames = [f[:h, :w] for f in frames]
+    # Registration fills uncovered borders with black; never sample those.
+    valid = ([_alignment_valid_mask(f) for f in frames] if args.align != "none"
+             else None)
+    require_memory(working_set_bytes(frames, h, w)
+                   + sum(m.nbytes for m in (valid or ()) if m is not None))
+    progress = None
+    if getattr(args, "json_progress", False):
+        def progress(fraction, message):
+            args._progress(event="background", stage=message, fraction=round(fraction, 3))
+    t0 = time.time()
+    try:
+        result = replace_background(
+            frames, fused, preset=args.auto_background,
+            clean=args.background_mode == "clean",
+            keep_soft_parts=bool(getattr(args, "keep_soft_parts", False)),
+            valid_masks=valid, progress=progress,
+            cancelled=getattr(args, "_should_cancel", None))
+    finally:
+        del frames, valid
+        _release_free_memory()
+    if result.changed:
+        _say(f"Auto background ({args.auto_background} -> {result.preset_used}, "
+             f"{args.background_mode}): frame {result.background_frame + 1} of "
+             f"{len(args._depth_frames)}, subject {result.subject_fraction:.0%} of the image "
+             f"[{time.time() - t0:.1f}s]")
+    else:
+        _say(f"Auto background: the subject covers {result.subject_fraction:.0%} of the image "
+             f"(a ground-level scene), so the background was left as stacked "
+             f"[{time.time() - t0:.1f}s]")
+    return result
+
+
+def _save_background_extras(args, fused_out, stacked, result, scale_cfg, icc_profile) -> List[str]:
+    """Write --save-stacked / --missing-data-map files; returns their paths."""
+    written = []
+    if getattr(args, "save_stacked", None):
+        path = _extra_out_path(args.save_stacked, fused_out, "_stacked")
+        _save(path, stacked, scale_cfg, icc_profile)
+        _say(f"Saved stacked result: {path}")
+        written.append(path)
+    if getattr(args, "missing_data_map", None):
+        from core.background_fill import missing_data_overlay
+        from utils.image_utils import imwrite_auto
+        overlay = _extra_out_path(args.missing_data_map, fused_out, "_missing", ".png")
+        os.makedirs(os.path.dirname(os.path.abspath(overlay)), exist_ok=True)
+        stem = overlay[:-4]
+        outputs = [(overlay, missing_data_overlay(result.image, result.missing))]
+        outputs += [(f"{stem}-{name}.png", layer) for name, layer, _c in result.missing.layers()]
+        for path, image in outputs:
+            if not imwrite_auto(path, image):
+                raise RuntimeError(f"Failed to write missing-data map: {path}")
+            written.append(path)
+        _say(f"Missing-data map saved: {overlay} (+{len(outputs) - 1} masks)")
+    return written
+
+
+def _background_summary(result) -> dict:
+    return {"preset_used": result.preset_used, "background_frame": result.background_frame,
+            "changed": bool(result.changed),
+            "subject_fraction": round(float(result.subject_fraction), 4)}
+
+
 def _resolve_scale_cfg(args, paths):
     """Scale-bar config from --scale-bar/--scale-um + TIFF/DNG metadata.
 
@@ -780,7 +919,9 @@ def _run_batch(args, _emit_json=None) -> int:
         name = os.path.basename(folder.rstrip("/\\")) or "stack"
         out_path = os.path.join(args.output_dir, f"{name}{args._batch_ext}")
         if (folder_args_mask_conflict(args, out_path) or
-                (args.depth_map and folder_args_mask_conflict(args, _depth_out_path(args, out_path)))):
+                (args.depth_map and folder_args_mask_conflict(args, _depth_out_path(args, out_path)))
+                or (args.auto_background and any(folder_args_mask_conflict(args, path)
+                                                 for path in _background_out_paths(args, out_path)))):
             print(f"error: output would overwrite defect mask: {out_path}", file=sys.stderr)
             failures.append(name)
             continue
@@ -805,7 +946,8 @@ def _run_batch(args, _emit_json=None) -> int:
 
         if args.dry_run:
             try:
-                paths = _filter_stack_paths(_list_folder_images(folder, loader), folder_args.dust_map)
+                paths = _filter_stack_paths(_folder_stack_paths(folder, loader, folder_args),
+                                            folder_args.dust_map)
                 paths = _filter_stack_paths(paths, getattr(folder_args, "defect_mask_path", None))
                 _validate_sensor_sources(paths, folder_args)
                 from core.image_loader import count_frames
@@ -827,7 +969,8 @@ def _run_batch(args, _emit_json=None) -> int:
             progress(event="folder", name=name, index=i + 1,
                      total=len(folders))
         try:
-            paths = _filter_stack_paths(_list_folder_images(folder, loader), folder_args.dust_map)
+            paths = _filter_stack_paths(_folder_stack_paths(folder, loader, folder_args),
+                                        folder_args.dust_map)
             paths = _filter_stack_paths(paths, getattr(folder_args, "defect_mask_path", None))
             _validate_sensor_sources(paths, folder_args)
             # Count frames, not files: a folder holding one multi-page TIFF
@@ -844,10 +987,20 @@ def _run_batch(args, _emit_json=None) -> int:
                     paths, thread_count=getattr(args, "threads", 0) or 0,
                     resource_preference=getattr(args, "resource_preference", "balanced"))
                 fused = _fuse_stack(images, folder_args)
+                images = None
             from core.image_loader import common_icc_profile
-            _save(out_path, fused, _resolve_scale_cfg(folder_args, paths),
-                  common_icc_profile(paths))
+            scale_cfg, icc_profile = _resolve_scale_cfg(folder_args, paths), common_icc_profile(paths)
+            background = stacked = None
+            if getattr(folder_args, "auto_background", None):
+                stacked = fused
+                background = _auto_background(folder_args, fused)
+                fused = background.image
+            _save(out_path, fused, scale_cfg, icc_profile)
             _say(f"Saved: {out_path}")
+            if background is not None:
+                _save_background_extras(folder_args, out_path, stacked, background,
+                                        scale_cfg, icc_profile)
+                background = stacked = None
             if args.depth_map:
                 _save_depth(folder_args, out_path)
             ok_count += 1
@@ -855,6 +1008,11 @@ def _run_batch(args, _emit_json=None) -> int:
             _log.exception("batch folder failed: %s", folder)
             print(f"error: {name}: {exc}", file=sys.stderr)
             failures.append(name)
+        finally:
+            # Each folder's aligned frames were kept for its depth map and
+            # background; release them before the next folder loads.
+            for holder in {id(args): args, id(folder_args): folder_args}.values():
+                holder._depth_frames = None
 
     summary = {
         "mode": "batch", "dry_run": bool(args.dry_run),
@@ -959,13 +1117,17 @@ def _run_retouch_command(argv: List[str]) -> int:
                         help="processed source images in checkpoint order")
     replay.add_argument("--output", "-o", required=True,
                         help="output PNG or TIFF")
+    replay.add_argument("--stacked", default=None,
+                        help="the stacked result, when Auto background ran on an "
+                             "already retouched image")
     args = parser.parse_args(argv)
 
     try:
         if os.path.splitext(args.output)[1].lower() not in (".png", ".tif", ".tiff"):
             raise ValueError("replay output must be PNG or TIFF to preserve bit depth")
         output_path = os.path.normcase(os.path.realpath(os.path.abspath(args.output)))
-        for path in [args.checkpoint, args.base, *args.sources]:
+        for path in [args.checkpoint, args.base, *args.sources,
+                     *([args.stacked] if args.stacked else [])]:
             input_path = os.path.normcase(os.path.realpath(os.path.abspath(path)))
             if output_path == input_path or (os.path.exists(args.output)
                     and os.path.exists(path) and os.path.samefile(args.output, path)):
@@ -1016,6 +1178,12 @@ def _run_retouch_command(argv: List[str]) -> int:
         from core.resource_policy import require_memory
         require_memory(2 * base.nbytes)
         document = RetouchDocument(base, context)
+        if args.stacked:
+            stacked = _load_images([args.stacked])
+            if (len(stacked) != 1 or stacked[0].shape != base.shape
+                    or stacked[0].dtype != base.dtype):
+                raise ValueError("--stacked must be one image with the size and bit depth of --base")
+            document.stacked_image = stacked[0]
         document.initialize_checkpoint()
         document.load_checkpoint(args.checkpoint)
         _save(args.output, document.result(), icc_profile=_read_icc_profile(args.base))
@@ -1130,6 +1298,43 @@ def _run_cli_admitted(argv: List[str]) -> int:
         except ValueError as exc:
             print(f"error: --depth-colormap: {exc}", file=sys.stderr)
             return EXIT_USAGE
+    background_extras = [flag for flag, used in (
+        ("--background-mode", args.background_mode != "clean"),
+        ("--keep-soft-parts", args.keep_soft_parts),
+        ("--save-stacked", args.save_stacked),
+        ("--missing-data-map", args.missing_data_map)) if used]
+    if background_extras and not args.auto_background:
+        print(f"error: {', '.join(background_extras)} requires --auto-background", file=sys.stderr)
+        return EXIT_USAGE
+    if args.auto_background:
+        if args.group_size:
+            print("error: --auto-background is unavailable with grouped fusion: it needs the "
+                  "aligned frames of one stack", file=sys.stderr)
+            return EXIT_USAGE
+        if args.output_dir and any(isinstance(value, str) for value in
+                                   (args.save_stacked, args.missing_data_map)):
+            print("error: --save-stacked / --missing-data-map with an explicit path cannot be "
+                  "used with --output-dir (every stack would overwrite the same file); use them "
+                  "without a value to derive one per stack", file=sys.stderr)
+            return EXIT_USAGE
+        if isinstance(args.missing_data_map, str) and \
+                not args.missing_data_map.lower().endswith(".png"):
+            print("error: --missing-data-map must be a .png path", file=sys.stderr)
+            return EXIT_USAGE
+        if isinstance(args.save_stacked, str) and \
+                os.path.splitext(args.save_stacked)[1].lower() not in VALID_FORMATS:
+            print(f"error: --save-stacked: unsupported extension; expected one of "
+                  f"{', '.join(VALID_FORMATS)}", file=sys.stderr)
+            return EXIT_USAGE
+        if args.output and not args.output_dir:
+            extra = _background_out_paths(args, args.output)
+            for index, path in enumerate(extra):
+                same = [other for other in [args.output, *extra[:index]]
+                        if os.path.normcase(os.path.abspath(other))
+                        == os.path.normcase(os.path.abspath(path))]
+                if same:
+                    print(f"error: two outputs would be written to {path}", file=sys.stderr)
+                    return EXIT_USAGE
 
     # Per-folder overrides (--config) are batch-only; load once here so a bad
     # file is a usage error instead of a mid-run failure.
@@ -1157,7 +1362,8 @@ def _run_cli_admitted(argv: List[str]) -> int:
                 "method", "align", "kernel", "depth_smoothing", "blend_smoothing",
                 "ai_mode", "base_frame", "sort", "exposure_match", "sharpen_output", "cpu", "threads",
                 "batch_size", "downscale", "tile_size", "align_shift_limit",
-                "resource_preference", "fusion_parameters", "registration_parameters"}
+                "resource_preference", "fusion_parameters", "registration_parameters",
+                "auto_background", "background_mode", "keep_soft_parts"}
             if unknown:
                 raise ValueError(f"Unknown override keys for {folder}: {sorted(unknown)}")
             _resolve_algorithm_arguments(argparse.Namespace(**{**vars(args), **override}))
@@ -1224,6 +1430,8 @@ def _run_cli_admitted(argv: List[str]) -> int:
         destinations = [args.output, args.json]
         if args.output and args.depth_map:
             destinations.append(_depth_out_path(args, args.output))
+        if args.output and args.auto_background:
+            destinations += _background_out_paths(args, args.output)
         if any(folder_args_mask_conflict(args, path) for path in destinations if path):
             print("error: an output would overwrite the defect mask", file=sys.stderr)
             return EXIT_USAGE
@@ -1283,11 +1491,24 @@ def _run_cli_admitted(argv: List[str]) -> int:
             scale_cfg = _resolve_scale_cfg(args, paths)
             from core.image_loader import common_icc_profile
             source_icc_profile = common_icc_profile(paths)
+            frame_count = len(images) if not args.group_size else len(paths)
+            background = stacked = None
+            if args.auto_background:
+                # The decoded originals are no longer needed: the aligned
+                # frames are what the background is rebuilt from.
+                images = None
+                stacked = fused
+                background = _auto_background(args, fused)
+                fused = background.image
 
         _save(args.output, fused, scale_cfg, source_icc_profile)
         _say(f"Saved: {args.output}")
         _progress(event="save", output=args.output)
         outputs = [args.output]
+        if background is not None:
+            outputs += _save_background_extras(args, args.output, stacked, background,
+                                               scale_cfg, source_icc_profile)
+            stacked = None
         if args.depth_map:
             _save_depth(args, args.output)
             outputs.append(_depth_out_path(args, args.output))
@@ -1295,12 +1516,17 @@ def _run_cli_admitted(argv: List[str]) -> int:
             _write_alignment_report(args.alignment_report, {
                 "method": args.align,
                 "input": args.input,
-                "frame_count": len(images),
+                "frame_count": frame_count,
                 "entries": entries,
             })
-        _emit_json({"mode": "single", "method": args.method, "align": args.align,
-                    "frames": len(paths), "input": args.input,
-                    "output": args.output, "outputs": outputs})
+        summary = {"mode": "single", "method": args.method, "align": args.align,
+                   "frames": len(paths), "input": args.input,
+                   "output": args.output, "outputs": outputs}
+        if background is not None:
+            summary["auto_background"] = {"preset": args.auto_background,
+                                          "mode": args.background_mode,
+                                          **_background_summary(background)}
+        _emit_json(summary)
         if args.json_progress:
             _progress(event="done", ok=True,
                       duration_s=round(time.time() - started_at, 1),
@@ -1370,6 +1596,9 @@ def describe_payload() -> dict:
             "grouped": ["--group-size", "--group-overlap"],
             "cleanup": ["--dust-map", "--defect-mask-path", "--sensor-denoise"],
             "export": ["--scale-bar", "--scale-um", "--depth-map", "--depth-colormap"],
+            "background": ["--auto-background", "--background-mode", "--keep-soft-parts",
+                           "--save-stacked", "--missing-data-map"],
+            "order": ["--frame-order", "--sort"],
             "subcommands": sorted(SUBCOMMANDS),
             "options": sorted(option for action in build_parser()._actions
                               for option in action.option_strings if option.startswith("--")),

@@ -573,7 +573,7 @@ e mesclar seus pixels.
    espinho. Também pode manter objetos de fundo junto ao motivo tal como foram
    empilhados, por isso verifique o resultado.
 5. Clique em **Substituir fundo**. Uma pilha de 15 quadros de 20 megapixels
-   demora cerca de um minuto e precisa de cerca de 3,5 GB de memória livre.
+   demora cerca de um minuto e precisa de cerca de 2,5 GB de memória livre.
    **Cancelar** interrompe.
 
 A alteração é um único passo que pode ser anulado, e os traços já pintados no
@@ -581,6 +581,11 @@ motivo são mantidos. Use o **Pincel de restauração** para recuperar os pixels
 empilhados onde os preferir, por exemplo uma folha de erva desfocada à frente do
 motivo. Quando o motivo ocupa quase todo o enquadramento, como numa cena do chão
 da floresta, a imagem fica tal como foi empilhada e aparece um aviso.
+
+Se abrir o retoque num resultado que já foi retocado, o fundo automático analisa
+o resultado empilhado de onde ele veio e aplica o novo fundo sobre a sua imagem
+retocada. Os retoques a pincel no motivo são mantidos e um fundo já substituído
+nunca volta a ser analisado, por isso uma segunda execução não acumula halos.
 
 Após uma execução, **Mostrar dados ausentes** colore os locais que nenhum
 quadro mostrou com nitidez. São os locais que devem ser verificados ou retocados à mão:
@@ -825,7 +830,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # inicia o aplicativo des
 openfocus ctl <command> [flags]          # controla uma janela em execução (ver AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # reproduz uma receita headless salva
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
 ```
 
 `openfocus gui` inicia em segundo plano; `--control` aguarda o canal de controle e imprime seu JSON de conexão. `openfocus describe` e `version` não exigem entrada. O fluxo de trabalho para agentes está documentado em [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) e `skills/openfocus-control/SKILL.md`.
@@ -896,6 +901,12 @@ Por exemplo, adicione `--align openfocus --alignment-report alignment.json` a um
 | `--scale-um` | Tamanho do pixel em µm/px, substituindo metadados (implica `--scale-bar`) |
 | `--depth-map [path]` | Também salva um mapa colorido de posição de foco (padrão `<output>_depth.png`); apenas métodos com capacidade de profundidade, não agrupados nem transparentes. No modo lote, apenas o caminho padrão é permitido |
 | `--depth-colormap` | Mapa de cores para `--depth-map`: turbo, viridis, jet, gray, … (turbo padrão) |
+| `--auto-background [preset]` | Substitui o fundo empilhado pelo de um quadro alinhado, como o Fundo automático no retoque: `auto` (padrão), `soft` (fundo mais desfocado) ou `sharp` (quadro focado mais longe). Precisa dos quadros alinhados, portanto não funciona com fusão em grupos |
+| `--background-mode` | Fundo automático: `clean` (padrão) também remove os halos de borda do empilhamento, dentro do que os quadros registraram; `faithful` os mantém |
+| `--keep-soft-parts` | Fundo automático: mantém as partes suaves presas ao objeto em que algum quadro focou |
+| `--save-stacked [path]` | Com `--auto-background`, também salva o resultado antes da substituição (padrão `<output>_stacked<ext>`). No modo em lote só o caminho padrão é permitido |
+| `--missing-data-map [path]` | Com `--auto-background`, também salva o mapa de dados ausentes e uma máscara de 8 bits por classe (padrão `<output>_missing.png`). No modo em lote só o caminho padrão é permitido |
+| `--frame-order` | Pasta de entrada: `auto` (padrão) ordena os quadros de perto para longe pelos passos de foco EXIF quando todos os têm (o bracketing de foco da OM SYSTEM começa no meio da profundidade); senão, por nome; `name` sempre pelo nome do arquivo. Arquivos listados explicitamente mantêm sua ordem |
 | `--json FILE` | Grava um resumo de resultado legível por máquina em FILE ao terminar |
 | `--json-progress` | Imprime um objeto JSON de progresso por etapa em stdout (NDJSON); o texto vai para stderr |
 | `--dry-run` | Valida as entradas e imprime o plano sem fundir |
@@ -949,6 +960,10 @@ openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2
 ```
 
 Use os quadros realmente usados para o retoque, após alinhamento e qualquer corte de ROI ou outro processamento, com seus valores de pixel e profundidade de bits originais. O checkpoint registra edições e impressões digitais, não os pixels. A reprodução reconstrói os deslocamentos de quadro e o comportamento de alinhamento registrados e verifica a base, os quadros ordenados e as máscaras de validade; pixels, geometrias ou máscaras incompatíveis são rejeitados. Cada caminho deve conter uma imagem. A saída deve ser PNG ou TIFF e preserva a profundidade de bits da base. O checkpoint e as imagens de entrada não podem ser usados como saída.
+
+Se o ponto de controlo contiver um passo de fundo automático executado num
+resultado já retocado, indique também o resultado empilhado de origem com
+`--stacked stacked.png`.
 
 Códigos de saída: `0` sucesso, `1` erro de processamento, `2` erro de uso. Executar `python main.py --help` mostra todas as opções; iniciar com um caminho simples (`python main.py C:\stack`) ainda abre a interface com essa pasta carregada.
 

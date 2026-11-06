@@ -441,6 +441,11 @@ class _AutoBackgroundDialog(QDialog):
         soft_note.setObjectName("mutedLabel")
         layout.addWidget(soft_note)
         self._notes.append(soft_note)
+        if getattr(doc, "stacked_image", None) is not None:
+            stacked_note = QLabel(trans.t("retouch_auto_bg_from_stacked"))
+            stacked_note.setWordWrap(True)
+            layout.addWidget(stacked_note)
+            self._notes.append(stacked_note)
         # The theme draws a thin bar; text inside it was clipped, so the
         # percentage sits beside it instead.
         self.progress = QProgressBar()
@@ -736,6 +741,13 @@ class RetouchDialog(QDialog):
         self.apply_callback = apply_callback
         self.input_paths = tuple(input_paths)
         self.doc = RetouchDocument(record.image, record.context)
+        # Retouching an already retouched output: Auto background works from
+        # the stacked result and keeps the brushing on the subject.
+        manager = getattr(window_main, "output_manager", None)
+        stacked_source = getattr(manager, "stacked_source", None)
+        stacked = stacked_source(record) if callable(stacked_source) else None
+        if stacked is not None:
+            self.doc.stacked_image = stacked.image
         self.view = _ViewState()
         self.view.center = QPointF(self.doc.width / 2.0, self.doc.height / 2.0)
 
@@ -814,6 +826,8 @@ class RetouchDialog(QDialog):
         self._update_brush_labels()
         self._update_controls()
         self._refresh_help_text()
+        if self.doc.stacked_image is not None:
+            self._set_notice(trans.t("retouch_from_retouched"))
         self._focus_signal = QApplication.instance().focusChanged
         self._focus_signal.connect(self._on_focus_changed)
         self.finished.connect(lambda _result: self._save_geometry())
@@ -1752,10 +1766,13 @@ class RetouchDialog(QDialog):
         fill = self.doc.background_fill
         if fill is None:
             return
+        from utils.settings_store import image_save_default, remember_image_save
         path, _ = QFileDialog.getSaveFileName(
-            self, trans.t("retouch_missing_save"), "missing-data.png", "PNG (*.png)")
+            self, trans.t("retouch_missing_save"), image_save_default("missing-data.png"),
+            "PNG (*.png)")
         if not path:
             return
+        remember_image_save(path)
         if not path.lower().endswith(".png"):
             path += ".png"
         from core.background_fill import missing_data_overlay
