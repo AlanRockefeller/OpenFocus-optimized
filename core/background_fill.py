@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import sys
-import dataclasses
+import contextvars
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -50,12 +50,38 @@ MAX_SUBJECT_DEFAULT = 0.90
 # stack had recorded sharply; ground-level scenes are 70%+.
 AUTO_SHARP_SHARE = 0.15
 # Every distance in this module (blur sizes, zone widths, glow-radius bins,
-# margins) was tuned on 20 MP stacks, 5216 px on the long side.  A stack
-# loaded at a fraction of that size made every zone several times too wide
-# for the scene: a large pale lobe and rings around the subject.  Smaller
-# images are therefore processed at the tuned size (see _replace_upscaled).
+# margins, kernel sizes) was tuned on 20 MP stacks, 5216 px on the long side.
+# They are written at that size and scaled with the image's long side while
+# a run is in progress (`_px`, `_ksize`, `_area`), so a 12 MP or a 45 MP
+# camera gets the same geometry relative to the frame.  At exactly the
+# reference size every value is used unchanged.
 REFERENCE_LONG_SIDE = 5216
-UPSCALE_BELOW = 0.75      # of REFERENCE_LONG_SIDE; set to 0 to always work at the input size
+SCALE_OVERRIDE: Optional[float] = None    # tests: force a scale (1.0 = as tuned)
+_SCALE = contextvars.ContextVar("background_fill_scale", default=1.0)
+
+
+def _px(value):
+    """A distance or blur size in pixels at the reference size -> this image."""
+    scale = _SCALE.get()
+    return value if scale == 1.0 else value * scale
+
+
+def _ksize(size):
+    """An odd kernel size at the reference size -> this image (at least 1)."""
+    scale = _SCALE.get()
+    return size if scale == 1.0 else max(1, int(round(size * scale))) | 1
+
+
+def _area(count):
+    """A pixel-count threshold at the reference size -> this image."""
+    scale = _SCALE.get()
+    return count if scale == 1.0 else max(1, int(round(count * scale * scale)))
+
+
+def _sigma(value):
+    """A smoothing sigma at the reference size -> this image (never below 0.5)."""
+    scale = _SCALE.get()
+    return value if scale == 1.0 else max(0.5, value * scale)
 
 
 class BackgroundFillCancelled(Exception):
@@ -129,7 +155,7 @@ def _from16f(img16: np.ndarray, like: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------- helpers
-def focus_measures(G, sigma=6.0):
+def focus_measures(G, sigma=None):
     """Per-pixel focus measures from smoothed Laplacian energy E across the stack.
 
     ratio = log10(max E / median E): how much the best frame stands out.
@@ -138,6 +164,7 @@ def focus_measures(G, sigma=6.0):
     peak  = log10(max E): is there real structure in *any* frame, compared
             with the empty-background noise floor.
     """
+    sigma = _sigma(6.0) if sigma is None else sigma
     E = np.empty_like(G)
     for i in range(len(G)):
         L = cv2.Laplacian(G[i], cv2.CV_32F, ksize=3)
@@ -170,7 +197,7 @@ def subject_mask(measures, use, thresh=None, min_island=2e-5):
         t = thresh if (thresh is not None and len(use) == 1) else otsu_threshold(measures[name])
         sub |= (measures[name] > t).astype(np.uint8)
         used[name] = t
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(5), _ksize(5)))
     sub = cv2.morphologyEx(sub, cv2.MORPH_CLOSE, k)
     sub = cv2.morphologyEx(sub, cv2.MORPH_OPEN, k)
     n, lab, st, _ = cv2.connectedComponentsWithStats(sub, 8)
@@ -217,7 +244,8 @@ def guided_filter_color(I, p, r, eps):
     return (ma * I).sum(-1) + _box(b, r)
 
 
-def fine_outline(sub_half, G, color=None, band=20, sigma=1.5, sliver=3, bg_ring=(3, 15), step=2.5 / 255, wall_k=5):
+def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_ring=None, step=2.5 / 255,
+                 wall_k=None):
     """Re-decide the outer `band` half-res px of the subject at fine scale.
 
     The coarse measures are blurred (sigma 6) to beat noise, which pushes the
@@ -225,6 +253,10 @@ def fine_outline(sub_half, G, color=None, band=20, sigma=1.5, sliver=3, bg_ring=
     the fused pixels and reads as a halo.  Peak Laplacian energy at sigma 1.5
     follows the real edge.  Deep inside the coarse mask stays subject; gaps
     the fine mask leaves on smooth surfaces are filled when enclosed."""
+    band = _px(20) if band is None else band
+    sliver = int(round(_px(3))) if sliver is None else sliver
+    bg_ring = (_px(3), _px(15)) if bg_ring is None else bg_ring
+    wall_k = _ksize(5) if wall_k is None else wall_k
     peak = None
     for g in G:
         L = cv2.Laplacian(g, cv2.CV_32F, ksize=3)
@@ -233,7 +265,7 @@ def fine_outline(sub_half, G, color=None, band=20, sigma=1.5, sliver=3, bg_ring=
     peak = np.log10(peak + 1e-10)
     fine = (peak > otsu_threshold(peak)).astype(np.uint8)
     fine = cv2.morphologyEx(fine, cv2.MORPH_CLOSE,
-                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(5), _ksize(5))))
     d_in = cv2.distanceTransform(sub_half.astype(np.uint8), cv2.DIST_L2, 5)
     # Candidate pixels to peel off: inside the coarse mask, near its outline,
     # without fine texture.  Only peel the overshoot band around the outside:
@@ -249,7 +281,7 @@ def fine_outline(sub_half, G, color=None, band=20, sigma=1.5, sliver=3, bg_ring=
         # Only the peel candidates' estimates are ever read: the wider (and
         # much slower) scales run only while some candidate is unresolved.
         unread = peel == 0
-        def local_mean(region, sigma=12):
+        def local_mean(region, sigma=_sigma(12)):
             reg = region.astype(np.float32)
             est = np.zeros_like(color)
             done = unread.copy()
@@ -319,7 +351,7 @@ def fine_outline(sub_half, G, color=None, band=20, sigma=1.5, sliver=3, bg_ring=
     return sub.astype(bool)
 
 
-def protect_missed_subject(sub_half, G, k_far, min_area, near=6, sigma=4.0):
+def protect_missed_subject(sub_half, G, k_far, min_area, near=None, sigma=None):
     """Add back subject the focus measures missed.
 
     Smooth, untextured parts (bare bristle segments, a stalk that swayed
@@ -331,6 +363,8 @@ def protect_missed_subject(sub_half, G, k_far, min_area, near=6, sigma=4.0):
     in front of it.  Frames only, so fusion seams in the result cannot
     trigger it.  Pieces the focus mask does not already cover (within
     `near` half-res px) are added back."""
+    near = int(round(_px(6))) if near is None else near
+    sigma = _sigma(4.0) if sigma is None else sigma
     # Only the strongest energy and the far frame's are needed: keep a running
     # maximum instead of a second (and, while stacking, third) copy of the
     # whole frame stack.  max is exact, so R is unchanged.
@@ -347,7 +381,8 @@ def protect_missed_subject(sub_half, G, k_far, min_area, near=6, sigma=4.0):
     R = np.log10((e_max + 1e-9) / (e_far + 1e-9))
     del e_max, e_far
     d = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
-    bg_noise = np.percentile(R[d > 30], 99.9) if (d > 30).any() else 0.8
+    away = d > _px(30)
+    bg_noise = np.percentile(R[away], 99.9) if away.any() else 0.8
     t = min(otsu_threshold(R), max(0.8, bg_noise + 0.05))
     covered = cv2.dilate(sub_half.astype(np.uint8),
                          cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * near + 1, 2 * near + 1)))
@@ -357,7 +392,7 @@ def protect_missed_subject(sub_half, G, k_far, min_area, near=6, sigma=4.0):
     keep = np.zeros(n, bool)
     keep[1:] = st[1:, cv2.CC_STAT_AREA] >= min_area
     missed = keep[lab].astype(np.uint8)
-    missed = cv2.dilate(missed, np.ones((5, 5), np.uint8))   # join to the subject it touches
+    missed = cv2.dilate(missed, np.ones((_ksize(5), _ksize(5)), np.uint8))   # join to the subject it touches
     return sub_half | (missed > 0), t, int(keep[1:].sum()), float(missed.mean() * 100)
 
 
@@ -378,19 +413,20 @@ def refine_subject(sub_half, fused, band=24, r=12, eps=2e-4):
     return cv2.resize(matte, (W, H), interpolation=cv2.INTER_LINEAR)
 
 
-def edge_frame_map(sub_half, idx_half, inner=(3, 20)):
+def edge_frame_map(sub_half, idx_half, inner=None):
     """For every pixel, the in-focus frame of the nearest subject edge.
 
     Reads the argmax index just inside the subject (between inner[0] and
     inner[1] half-res px from its outline, where focus is reliable) after a
     median filter, then propagates it outward to the nearest such pixel."""
+    inner = (_px(3), _px(20)) if inner is None else inner
     d_in = cv2.distanceTransform(sub_half.astype(np.uint8), cv2.DIST_L2, 5)
     ring = sub_half & (d_in >= inner[0]) & (d_in <= inner[1])
     if not ring.any():
         ring = sub_half
     if not ring.any():
         raise BackgroundFillError("no subject found to replace the background around")
-    idx = cv2.medianBlur(idx_half, 5)
+    idx = cv2.medianBlur(idx_half, _ksize(5))
     src = np.where(ring, 0, 1).astype(np.uint8)
     _, labels = cv2.distanceTransformWithLabels(src, cv2.DIST_L2, 5,
                                                 labelType=cv2.DIST_LABEL_PIXEL)
@@ -437,14 +473,14 @@ def fill_halo_zone(bg, dist, sub, width, scale=4):
     lum_s = bs.mean(axis=2)
     if (ds > ws).any():
         ref = float(np.median(lum_s[ds > ws]))
-        usable = ~field_stop_mask(lum_s, ref, max(4.0 * float(np.median(ws)), 32.0))
+        usable = ~field_stop_mask(lum_s, ref, max(4.0 * float(np.median(ws)), _px(32.0)))
     else:
         usable = np.ones_like(lum_s, bool)
     # Not the field stop, nor its blurred rim: the rim is above the darkness
     # cutoff but still far darker/bluer than the glass, and filled in from
     # there it drew light lines across the Marthamyces corner.
     if (~usable).any():
-        rim = cv2.distanceTransform(usable.astype(np.uint8), cv2.DIST_L2, 5) < max(float(np.median(ws)), 8.0)
+        rim = cv2.distanceTransform(usable.astype(np.uint8), cv2.DIST_L2, 5) < max(float(np.median(ws)), _px(8.0))
         usable &= ~rim
     known = ((ds > ws) & usable).astype(np.float32)   # background beyond the zone
     r = float(np.median(width)) / scale if width.ndim else float(width) / scale
@@ -470,7 +506,7 @@ def fill_halo_zone(bg, dist, sub, width, scale=4):
     return bg, est
 
 
-def edge_width_map(fz, est_lum, sub, dist, lo=6.0, hi=48.0):
+def edge_width_map(fz, est_lum, sub, dist, lo=None, hi=None):
     """Per-pixel blend width matching how soft the nearest subject edge is.
 
     A blurred edge ramps from subject to background over a width of about
@@ -478,6 +514,8 @@ def edge_width_map(fz, est_lum, sub, dist, lo=6.0, hi=48.0):
     blend at a fixed 6 px ended that fade abruptly against the rebuilt
     background and drew a light outline.  Sharp edges keep the minimum.
     `est_lum` is `_lum` of the clean background estimate."""
+    lo = _px(6.0) if lo is None else lo
+    hi = _px(48.0) if hi is None else hi
     lum = _lum
     # Full-size single-channel maps: each is freed once used, which keeps
     # this step from setting the run's peak memory.
@@ -490,17 +528,18 @@ def edge_width_map(fz, est_lum, sub, dist, lo=6.0, hi=48.0):
     del gx, gy
     grad /= 8.0
     d_in = cv2.distanceTransform(sub.astype(np.uint8), cv2.DIST_L2, 5)
-    inner = (sub & (d_in > 3) & (d_in < 15)).astype(np.float32)
-    sub_lvl = cv2.GaussianBlur(lf * inner, (0, 0), 8) / np.maximum(cv2.GaussianBlur(inner, (0, 0), 8), 1e-3)
+    inner = (sub & (d_in > _px(3)) & (d_in < _px(15))).astype(np.float32)
+    sg = _sigma(8)
+    sub_lvl = cv2.GaussianBlur(lf * inner, (0, 0), sg) / np.maximum(cv2.GaussianBlur(inner, (0, 0), sg), 1e-3)
     del lf, inner
-    band = (dist < 12) & ((~sub) | (d_in < 6))                  # straddles the outline
-    slope = cv2.dilate(np.where(band, grad, 0).astype(np.float32), np.ones((13, 13), np.uint8))
+    band = (dist < _px(12)) & ((~sub) | (d_in < _px(6)))        # straddles the outline
+    slope = cv2.dilate(np.where(band, grad, 0).astype(np.float32), np.ones((_ksize(13), _ksize(13)), np.uint8))
     del band, grad
     contrast = np.abs(sub_lvl - est_lum)
     del sub_lvl
     width = np.clip(contrast / np.maximum(slope, 0.05), lo, hi)
     del contrast, slope
-    ring = sub & (d_in <= 2)                                    # read the width at the outline
+    ring = sub & (d_in <= max(_px(2), 1.0))                    # read the width at the outline
     del d_in
     src = np.where(ring, 0, 1).astype(np.uint8)
     _, labels = cv2.distanceTransformWithLabels(src, cv2.DIST_L2, 5, labelType=cv2.DIST_LABEL_PIXEL)
@@ -510,7 +549,7 @@ def edge_width_map(fz, est_lum, sub, dist, lo=6.0, hi=48.0):
     labels -= 1
     wmap = vals[labels].astype(np.float32)
     del labels
-    return cv2.GaussianBlur(wmap, (0, 0), 6)
+    return cv2.GaussianBlur(wmap, (0, 0), _sigma(6))
 
 
 def occlusion_width(G, sub_half, k_edge):
@@ -519,17 +558,17 @@ def occlusion_width(G, sub_half, k_edge):
     lens's view of the out-of-focus background.  Weighted median over edge
     depths; also returns the per-depth table."""
     d = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5) * 2
-    edges = [0, 8, 16, 24, 32, 48, 64, 96, 128, 160, 320]
+    edges = [_px(e) for e in (0, 8, 16, 24, 32, 48, 64, 96, 128, 160, 320)]
     widths, weights, table = [], [], {}
     for k in np.unique(k_edge[~sub_half]):
         sel = (~sub_half) & (k_edge == k)
-        if sel.sum() < 3000:
+        if sel.sum() < _area(3000):
             continue
-        lp = cv2.GaussianBlur(G[k], (0, 0), 2)
+        lp = cv2.GaussianBlur(G[k], (0, 0), _sigma(2))
         prof = []
         for lo, hi in zip(edges[:-1], edges[1:]):
             m = sel & (d > lo) & (d <= hi)
-            prof.append(float(lp[m].mean()) if m.sum() > 200 else np.nan)
+            prof.append(float(lp[m].mean()) if m.sum() > _area(200) else np.nan)
         prof = np.array(prof)
         base = prof[-1]
         if not (np.isfinite(base) and np.isfinite(prof[0])):
@@ -546,7 +585,7 @@ def occlusion_width(G, sub_half, k_edge):
         widths.append(w)
         weights.append(int(sel.sum()))
     if not widths:
-        return 32.0, table
+        return _px(32.0), table
     o = np.argsort(widths)
     cw = np.cumsum(np.array(weights)[o])
     return float(np.array(widths)[o][np.searchsorted(cw, cw[-1] / 2)]), table
@@ -578,7 +617,7 @@ def missing_data_map(sub, dist, k_edge_full, peak_half, peak_t, N, k_far, c_raw,
     # is subject.  ~0.5 beside a straight edge, more in a concave corner
     # (cap meets stem), most in a narrow gap; that is where the background
     # is hidden from the most directions of the lens aperture.
-    sg = max(float(np.median(W[~sub])) if (~sub).any() else 32.0, 8.0) / 2
+    sg = max(float(np.median(W[~sub])) if (~sub).any() else _px(32.0), _px(8.0)) / 2
     scale = 4
     sm = cv2.resize(sub.astype(np.float32), (sub.shape[1] // scale, sub.shape[0] // scale), interpolation=cv2.INTER_AREA)
     blocked = cv2.resize(blur(sm, sg / scale), (sub.shape[1], sub.shape[0]),
@@ -591,7 +630,7 @@ def missing_data_map(sub, dist, k_edge_full, peak_half, peak_t, N, k_far, c_raw,
     return bg_missing.astype(np.float32), soft.astype(np.float32), W_by_ke, k_B, W
 
 
-def natural_near_background(bgf, fz, sub, dist, reach, sigma=6.0, scale=4):
+def natural_near_background(bgf, fz, sub, dist, reach, sigma=None, scale=4):
     """Near the subject keep the fused result's own brightness and colour
     (what the frames actually recorded there, including the natural
     darkening beside sharp edges) and take only fine grain from the
@@ -600,9 +639,10 @@ def natural_near_background(bgf, fz, sub, dist, reach, sigma=6.0, scale=4):
     extrapolation looked cleaner on paper but read as a glow (a bright green
     band along the Panaeolus cap) and lost real detail (the dark gap between
     the caps, which every sharp frame shows)."""
+    sigma = _px(6.0) if sigma is None else sigma
     H, W = dist.shape
     h, w = H // scale, W // scale
-    bgmask = ((~sub) & (dist > 2)).astype(np.float32)
+    bgmask = ((~sub) & (dist > _px(2))).astype(np.float32)
     ms = cv2.resize(bgmask, (w, h), interpolation=cv2.INTER_AREA)
     del bgmask
     sg = sigma / scale
@@ -666,7 +706,7 @@ def normconv(img, mask, sigmas, eps=0.03):
     return num / np.maximum(den, 1e-12)[..., None]
 
 
-def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio=3.0, spread=6,
+def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio=3.0, spread=None,
                            keep_share=0.25, frame_medians=None):
     """Never replace what the stacked image clearly shows.
 
@@ -675,9 +715,12 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
     (bokeh) has almost none, so it stays replaceable; a smooth cap or broad
     straws missed by the focus measures in a ground-level scene (Psilocybe)
     are kept instead of being swapped for a blurred version."""
+    spread = _px(6) if spread is None else spread
+    smooth = _sigma(3)
+
     def energy(g):
         L = cv2.Laplacian(cv2.GaussianBlur(g, (0, 0), 0.8), cv2.CV_32F, ksize=3)
-        return cv2.GaussianBlur(L * L, (0, 0), 3)
+        return cv2.GaussianBlur(L * L, (0, 0), smooth)
     # Measured on the frames, not the stacked result: fusion seams (OpenFocus
     # A's patchwork) are detail that exists in no frame, and counting them
     # protected 84% of the Dendrocollybia A image.
@@ -707,7 +750,8 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
         e_f = energy(fused_half)
         keep &= e_f > keep_share * ef
     keep = keep.astype(np.uint8)
-    keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
+    keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(9), _ksize(9)))) > 0
     # The energy is blurred (sigma 3) and closed, so around every sharp
     # subject edge it spreads ~6 half-res px into the background.  Unioned
     # as is, that ring undid the fine outline: a 10-12 px strip of the
@@ -715,11 +759,13 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
     # as a dark halo beside the Panaeolus stem.  Only add pieces
     # that reach beyond that ring; within it, add just what connects such a
     # piece to the subject.
-    ring = spread + 2
+    ring = spread + _px(2)
     d_out = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
     far = (keep & (d_out > ring)).astype(np.uint8)
-    far = cv2.morphologyEx(far, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    bridge = cv2.dilate(far, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4 * ring + 1, 4 * ring + 1))) > 0
+    far = cv2.morphologyEx(far, cv2.MORPH_OPEN,
+                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(5), _ksize(5))))
+    reach = 4 * int(round(ring)) + 1
+    bridge = cv2.dilate(far, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach))) > 0
     keep = keep & ((far > 0) | bridge)
     sub = (sub_half | keep).astype(np.uint8)
     sub = _fill_enclosed(sub)            # enclosed gaps belong to the subject
@@ -727,7 +773,7 @@ def protect_visible_detail(sub_half, G, k_bg, fused_half=None, factor=4.0, ratio
 
 
 def protect_focused_objects(sub_half, G, k_bg, fused_half, ratio=6.0, factor=4.0, keep_share=0.25,
-                            ring=22, min_area=2e-4, frame_medians=None):
+                            ring=None, min_area=2e-4, frame_medians=None):
     """Keep soft objects that some frame focused on and the stack kept.
 
     A peg's knob, a leaf or a twig just outside the depth of field is never
@@ -745,6 +791,7 @@ def protect_focused_objects(sub_half, G, k_bg, fused_half, ratio=6.0, factor=4.0
     Whether an attached piece is subject or background nearly in focus is a
     matter of taste (kept moss behind debris looked worse on one stack,
     blurred peg knobs looked wrong on another), so callers make it an option."""
+    ring = _px(22) if ring is None else ring
     medians = frame_medians
     if medians is None:
         medians = [np.median(g) for g in G]
@@ -765,32 +812,35 @@ def protect_focused_objects(sub_half, G, k_bg, fused_half, ratio=6.0, factor=4.0
             return np.zeros(sub_half.shape, bool)
         return (mx > ratio * mb) & (mx > factor * np.percentile(mx, 1)) & (band(fused_half) > keep_share * mx)
 
-    keep = focused(1.5, 4.0, 4)
+    keep = focused(_sigma(1.5), _sigma(4.0), _sigma(4))
     keep = cv2.morphologyEx(keep.astype(np.uint8), cv2.MORPH_CLOSE,
-                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))) > 0
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(9), _ksize(9)))) > 0
     d_out = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5)
     far = (keep & (d_out > ring)).astype(np.uint8)
-    far = cv2.morphologyEx(far, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    far = cv2.morphologyEx(far, cv2.MORPH_OPEN,
+                           cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(7), _ksize(7))))
     n, lab, st, _ = cv2.connectedComponentsWithStats(far, 8)
     ok = np.zeros(n, bool)
     ok[1:] = st[1:, cv2.CC_STAT_AREA] >= min_area * far.size
+    reach = 4 * int(round(ring)) + 1
     near_subject = cv2.dilate(sub_half.astype(np.uint8),
-                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4 * ring + 1, 4 * ring + 1))) > 0
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach))) > 0
     attached = np.zeros(n, bool)
     attached[np.unique(lab[near_subject & (far > 0)])] = True
     far = (ok & attached)[lab].astype(np.uint8)
-    bridge = cv2.dilate(far, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4 * ring + 1, 4 * ring + 1))) > 0
+    bridge = cv2.dilate(far, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach))) > 0
     sub = (sub_half | (keep & ((far > 0) | bridge))).astype(np.uint8)
     sub = _fill_enclosed(sub)            # enclosed gaps belong to the subject
     return sub.astype(bool)
 
 
-def object_size_cap(sub_half, shape, factor=6.0, floor=32.0):
+def object_size_cap(sub_half, shape, factor=6.0, floor=None):
     """Per-pixel cap (full-res px) on how far an object's glow/occlusion can
     matter: ~factor x the half-thickness of the nearest object.  A debris
     speck's defocus glow spreads wide but is negligibly faint; sizing its
     zone by the large-object glow radius left almost no usable background on
     the Marthamyces slide."""
+    floor = _px(32.0) if floor is None else floor
     H, W = shape
     sub8 = sub_half.astype(np.uint8)
     d_in = cv2.distanceTransform(sub8, cv2.DIST_L2, 5) * 2          # full-res px
@@ -805,8 +855,8 @@ def object_size_cap(sub_half, shape, factor=6.0, floor=32.0):
     # zone sized by this cap.  Smooth it, but only ever downward (local
     # minimum, then blur): letting large objects' caps spread onto nearby
     # specks brought back the Marthamyces blotches.
-    cap_half = cv2.erode(cap_half, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (49, 49)))
-    cap_half = blur(cap_half, 12.0)
+    cap_half = cv2.erode(cap_half, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (_ksize(49), _ksize(49))))
+    cap_half = blur(cap_half, _sigma(12.0))
     return cv2.resize(cap_half, (W, H), interpolation=cv2.INTER_LINEAR)
 
 
@@ -822,12 +872,13 @@ def lp_background(img, bgmask, sigma, scale=4):
     return out
 
 
-def recorded_range(count, load_matched, shape, sigma=6.0, scale=4,
+def recorded_range(count, load_matched, shape, sigma=None, scale=4,
                    valid_masks=None):
     """Per-pixel min and max (quarter res, low-passed, exposure-matched) over
     every frame: the span of what the camera actually recorded at each spot.
     Near an edge the frame where it is sharp records the darkened view and
     the defocused frames record the glow; the clean background lies between."""
+    sigma = _px(6.0) if sigma is None else sigma
     H, W = shape
     lo = hi = None
     seen = None
@@ -862,7 +913,7 @@ def recorded_range(count, load_matched, shape, sigma=6.0, scale=4,
     return lo, hi
 
 
-def contour_profile(D, sub_q, zone_q, seg=24, dbin=2):
+def contour_profile(D, sub_q, zone_q, seg=None, dbin=None):
     """The part of a deviation field that follows the subject outline.
 
     A stacking halo runs along an edge with the same profile for a long way;
@@ -871,6 +922,8 @@ def contour_profile(D, sub_q, zone_q, seg=24, dbin=2):
     outline point; group by (stretch of outline, distance band) and take the
     median deviation; smooth along the outline.  Returns that profile, which
     is what gets removed.  Quarter-res arrays; seg and dbin in quarter px."""
+    seg = max(4, int(round(_px(24)))) if seg is None else seg
+    dbin = _px(2) if dbin is None else dbin
     h, w = sub_q.shape
     cs, _ = cv2.findContours(sub_q.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     seg_of = np.full((h, w), -1, np.int64)
@@ -953,12 +1006,12 @@ def contour_profile(D, sub_q, zone_q, seg=24, dbin=2):
     # (stem meets cap) the nearest stretch flips along the corner's diagonal,
     # which drew a straight wedge.  Normalized over background pixels only.
     msk = sel.astype(np.float32)
-    num = cv2.GaussianBlur(prof * msk[..., None], (0, 0), 3.0)
-    den = cv2.GaussianBlur(msk, (0, 0), 3.0)
+    num = cv2.GaussianBlur(prof * msk[..., None], (0, 0), _sigma(3.0))
+    den = cv2.GaussianBlur(msk, (0, 0), _sigma(3.0))
     return np.where(sel[..., None], num / np.maximum(den, 1e-3)[..., None], 0).astype(np.float32)
 
 
-def halo_directions(prof, bg, img_q, sub_q, ring=6):
+def halo_directions(prof, bg, img_q, sub_q, ring=None):
     """Keep only the part of an edge deviation a halo can physically cause.
 
     Beside an edge the background can be darkened (partial occlusion: every
@@ -969,11 +1022,12 @@ def halo_directions(prof, bg, img_q, sub_q, ring=6):
     was flattened into a bright line along the rim.  Per pixel,
     decompose the deviation onto those two directions with non-negative
     weights and return just that part.  Quarter-res arrays."""
+    ring = _px(6) if ring is None else ring
     d_in = cv2.distanceTransform(sub_q.astype(np.uint8), cv2.DIST_L2, 5)
     inner = sub_q & (d_in <= ring)
     if not inner.any():
         return prof
-    subc = normconv(img_q.astype(np.float32), inner, (3, 9, 27, 81))
+    subc = normconv(img_q.astype(np.float32), inner, tuple(_sigma(v) for v in (3, 9, 27, 81)))
     u1 = subc - bg                                   # toward the subject colour
     u2 = -bg                                         # darkening
     a11 = (u1 * u1).sum(2); a22 = (u2 * u2).sum(2); a12 = (u1 * u2).sum(2)
@@ -1003,8 +1057,8 @@ def clean_edges(fz, bgf, est_q, sub, dist, Wq, lo_q, hi_q, strength, scale=4):
     INTER_LINEAR reductions).  Corrects `bgf` in place and returns it with
     the applied shift (full res)."""
     H, W = dist.shape
-    bgmask = (~sub) & (dist > 2)
-    lpf = lp_background(fz, bgmask, 6.0, scale)
+    bgmask = (~sub) & (dist > _px(2))
+    lpf = lp_background(fz, bgmask, _px(6.0), scale)
     D = lpf - est_q
     dq = cv2.resize(dist, (W // scale, H // scale), interpolation=cv2.INTER_NEAREST)
     sub_q = cv2.resize(sub.astype(np.uint8), (W // scale, H // scale), interpolation=cv2.INTER_NEAREST) > 0
@@ -1027,15 +1081,15 @@ def clean_edges(fz, bgf, est_q, sub, dist, Wq, lo_q, hi_q, strength, scale=4):
     # cap held the correction to 20-60% right beside the stem.
     dark = ((lum < 0.35 * ref) & ~sub_q).astype(np.uint8)
     if dark.any():
-        near_dark = cv2.distanceTransform(1 - dark, cv2.DIST_L2, 5) < np.maximum(1.5 * Wq / scale, 8)
+        near_dark = cv2.distanceTransform(1 - dark, cv2.DIST_L2, 5) < np.maximum(1.5 * Wq / scale, _px(8))
         weight = weight * (~near_dark)
-        weight = cv2.GaussianBlur(weight.astype(np.float32), (0, 0), 4)
+        weight = cv2.GaussianBlur(weight.astype(np.float32), (0, 0), _sigma(4))
     shift_q = (corrected - lpf) * weight[..., None] * (~sub_q)[..., None]
     # Extend the correction a little into the subject before enlarging, then
     # cut it at the full-res outline: cutting at quarter res left a
     # stair-stepped edge that showed in the blend strip (Panaeolus stem).
     if (~sub_q).any():
-        shift_q = normconv(shift_q, ~sub_q, (1.0, 2.0, 4.0))
+        shift_q = normconv(shift_q, ~sub_q, tuple(_sigma(v) for v in (1.0, 2.0, 4.0)))
     shift = cv2.resize(shift_q, (W, H), interpolation=cv2.INTER_LINEAR)
     shift *= (~sub)[..., None]
     bgf += shift
@@ -1051,25 +1105,27 @@ def classify_never_sharp(sub, peak_half, peak_t, idx_half, N, fused, dist):
     H, W = sub.shape
     h, w = peak_half.shape
     never = np.clip((peak_t - peak_half) / 0.5, 0, 1).astype(np.float32)
-    ends = cv2.medianBlur(idx_half, 5)
+    ends = cv2.medianBlur(idx_half, _ksize(5))
     at_end = ((ends == 0) | (ends == N - 1)).astype(np.float32)
     g = cv2.resize(cv2.cvtColor(fused.astype(np.float32) / 257.0, cv2.COLOR_BGR2GRAY), (w, h),
                    interpolation=cv2.INTER_AREA)
     hp = g - cv2.GaussianBlur(g, (0, 0), 1.5)
     noise = 1.4826 * float(np.median(np.abs(hp))) + 1e-3
-    local = np.sqrt(np.maximum(cv2.GaussianBlur(g * g, (0, 0), 3) - cv2.GaussianBlur(g, (0, 0), 3) ** 2, 0))
+    sg = _sigma(3)
+    local = np.sqrt(np.maximum(cv2.GaussianBlur(g * g, (0, 0), sg) - cv2.GaussianBlur(g, (0, 0), sg) ** 2, 0))
     flat = np.clip((4 * noise - local) / (2 * noise), 0, 1).astype(np.float32)
     # Hidden data sits where something blocks the view: next to the outline
     # or next to a depth step inside the subject (one cap in front of the
     # other).  Smooth, dark shadow there is hidden, not merely featureless.
-    depth = cv2.medianBlur(idx_half, 5).astype(np.float32)
+    depth = cv2.medianBlur(idx_half, _ksize(5)).astype(np.float32)
     gx = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=3) / 8
     gy = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=3) / 8
     sub_h = cv2.resize(sub.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
     step = ((np.hypot(gx, gy) > 0.6) & (sub_h > 0)).astype(np.uint8)
     outline = cv2.morphologyEx(sub_h, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
     blockers = np.maximum(step, outline)
-    near_block = (cv2.distanceTransform((blockers == 0).astype(np.uint8), cv2.DIST_L2, 5) < 30).astype(np.float32)
+    near_block = (cv2.distanceTransform((blockers == 0).astype(np.uint8), cv2.DIST_L2, 5)
+                  < _px(30)).astype(np.float32)
     up = lambda x: cv2.resize(x, (W, H), interpolation=cv2.INTER_LINEAR) * sub
     out_of_range = never * at_end
     rest = never * (1 - at_end)
@@ -1084,8 +1140,8 @@ def match_noise(bgf, fz, dist):
     A single frame is noisier than the fused result (StackMFF's soft blend
     averages frames), so a pasted-in background looked grainier than the
     subject beside it.  Measured on background well away from the subject."""
-    far = dist > 150
-    if far.sum() < 10000:
+    far = dist > _px(150)
+    if far.sum() < _area(10000):
         return bgf, 1.0
     def hp(x):
         out = cv2.GaussianBlur(x, (0, 0), 1.5)
@@ -1116,7 +1172,7 @@ def soft_object_mask(fz, est_lum, dist, sub, width):
     lf, le = _lum(fz), est_lum      # est_lum: _lum of the clean estimate
     obj = (dist > 0) & (dist < 1.5 * width) & (np.abs(lf - le) > np.maximum(1.0 * le, 10.0))
     obj = cv2.morphologyEx(obj.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    near = cv2.dilate(sub.astype(np.uint8), np.ones((5, 5), np.uint8))
+    near = cv2.dilate(sub.astype(np.uint8), np.ones((_ksize(5), _ksize(5)), np.uint8))
     n, lab, _, _ = cv2.connectedComponentsWithStats(obj, 8)
     touch = np.zeros(n, bool)
     touch[np.unique(lab[(near > 0) & (obj > 0)])] = True
@@ -1125,7 +1181,7 @@ def soft_object_mask(fz, est_lum, dist, sub, width):
     return cv2.GaussianBlur(obj, (0, 0), 1.5)
 
 
-def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=16.0, map_targets=None):
+def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=None, map_targets=None):
     """Measure spill radii for one or more background frames in one pass.
 
     The subject geometry, edge selections and low-pass image for each source
@@ -1134,11 +1190,12 @@ def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=16.0, map_targets=N
     different frames.  Only maps in ``map_targets`` are materialised; every
     requested frame still receives its per-step table.
     """
+    floor = _px(16.0) if floor is None else floor
     targets = tuple(dict.fromkeys(int(k) for k in k_fars))
     wanted_maps = set(targets if map_targets is None else map(int, map_targets))
     background = ~sub_half
     d = cv2.distanceTransform(background.astype(np.uint8), cv2.DIST_L2, 5) * 2
-    farzone = background & (d > 256)
+    farzone = background & (d > _px(256))
     has_farzone = bool(farzone.any())
 
     def normalised(k):
@@ -1148,23 +1205,23 @@ def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=16.0, map_targets=N
         return g / max(float(np.median(g[farzone])), 1e-6)
 
     def lowpass(k):
-        return cv2.GaussianBlur(normalised(k), (0, 0), 3)
+        return cv2.GaussianBlur(normalised(k), (0, 0), _sigma(3))
 
     far_images = {k: lowpass(k) for k in targets}
-    edges = [0, 16, 32, 48, 64, 96, 128, 192, 256, 384]
+    edges = [_px(e) for e in (0, 16, 32, 48, 64, 96, 128, 192, 256, 384)]
     ratios = {k: [] for k in targets}
     weights = {k: [] for k in targets}
     for frame in np.unique(k_edge[background]):
         frame = int(frame)
         sel = background & (k_edge == frame)
         weight = int(sel.sum())
-        active = [k for k in targets if abs(k - frame) >= 2 and weight >= 2000]
+        active = [k for k in targets if abs(k - frame) >= 2 and weight >= _area(2000)]
         if not active:
             continue
         near = far_images.get(frame)
         if near is None:
             near = lowpass(frame)
-        tail = sel & (d > 256)
+        tail = sel & (d > _px(256))
         tail_count = int(tail.sum())
         for k_far in active:
             dk = abs(k_far - frame)
@@ -1172,11 +1229,11 @@ def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=16.0, map_targets=N
             prof = []
             for lo, hi in zip(edges[:-1], edges[1:]):
                 m = sel & (d > lo) & (d <= hi)
-                prof.append(float(diff[m].mean()) if m.sum() > 200 else np.nan)
+                prof.append(float(diff[m].mean()) if m.sum() > _area(200) else np.nan)
             prof = np.array(prof)
             if not np.isfinite(prof[0]):
                 continue
-            base = min(float(np.median(diff[tail])) if tail_count > 500 else np.inf,
+            base = min(float(np.median(diff[tail])) if tail_count > _area(500) else np.inf,
                        np.nanmin(prof))
             far_mean = np.nanmean(prof[6:]) if np.isfinite(prof[6:]).any() else base
             if prof[0] < 1.5 * far_mean:      # no decline: scene detail, not glow
@@ -1199,19 +1256,19 @@ def _spill_radius_results(G, sub_half, k_edge, k_fars, floor=16.0, map_targets=N
             per_step = 1.5 * float(
                 np.array(target_ratios)[order][np.searchsorted(cw, cw[-1] / 2)])
         else:
-            per_step = 48.0 / max(len(G) // 2, 1)
-        table = {dk: float(np.clip(per_step * dk, floor, 384)) for dk in range(len(G))}
+            per_step = _px(48.0) / max(len(G) // 2, 1)
+        table = {dk: float(np.clip(per_step * dk, floor, _px(384))) for dk in range(len(G))}
         table["per_step_raw"] = per_step / 1.5
         rmap = None
         if k_far in wanted_maps:
             radius_lookup = np.fromiter(
                 (table[abs(k_far - k)] for k in range(len(G))), np.float32, count=len(G))
-            rmap = cv2.GaussianBlur(radius_lookup[k_edge], (0, 0), 8)
+            rmap = cv2.GaussianBlur(radius_lookup[k_edge], (0, 0), _sigma(8))
         results[k_far] = rmap, table
     return results
 
 
-def spill_radius_map(G, sub_half, k_edge, k_far, floor=16.0):
+def spill_radius_map(G, sub_half, k_edge, k_far, floor=None):
     """Per-pixel distance (full-res px) over which the far frame still shows
     the subject's own defocus glow.
 
@@ -1329,67 +1386,24 @@ def working_set_bytes(frames: Sequence[np.ndarray], height: int, width: int) -> 
     per_px = max(120, 100 + len(frames))
     if any(f.dtype != np.uint16 for f in frames):
         per_px += 18
-    factor = _upscale_factor(height, width)
-    if factor is None:
-        return int(height) * int(width) * per_px
-    # Upscaled run: the working set at the tuned size, plus the upscaled
-    # copies of every frame (and of the stacked image) it works from.
-    big = int(round(height * factor)) * int(round(width * factor))
-    copies = sum(f.dtype.itemsize * (f.shape[2] if f.ndim == 3 else 1) for f in frames)
-    return big * (per_px + copies + 12)
+    return int(height) * int(width) * per_px
 
 
-def _upscale_factor(height: int, width: int) -> Optional[float]:
-    """How much to enlarge an image to the tuned size, or None if not needed."""
-    long_side = max(int(height), int(width))
-    if long_side <= 0 or long_side >= UPSCALE_BELOW * REFERENCE_LONG_SIDE:
-        return None
-    return REFERENCE_LONG_SIDE / long_side
+def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, **kwargs) -> BackgroundFillResult:
+    """Replace the background of `fused` with one of `frames`; see
+    `_replace_background` for the options.  Every distance is scaled to the
+    image's size for the duration of the run (see REFERENCE_LONG_SIDE)."""
+    scale = SCALE_OVERRIDE
+    if scale is None:
+        scale = max(fused.shape[:2]) / REFERENCE_LONG_SIDE if fused.ndim >= 2 else 1.0
+    token = _SCALE.set(float(scale))
+    try:
+        return _replace_background(frames, fused, **kwargs)
+    finally:
+        _SCALE.reset(token)
 
 
-def _replace_upscaled(frames, fused, factor, composite_onto, valid_masks, kwargs):
-    """Run at the tuned size and bring back only the change.
-
-    Frames, the stacked image (and `composite_onto`) are enlarged to the size
-    the method was tuned at; the change the run made is reduced back and
-    added to the original image, so pixels the run left alone (the subject)
-    stay exactly as they were.  Missing-data maps are reduced the same way."""
-    H, W = fused.shape[:2]
-    size = (int(round(W * factor)), int(round(H * factor)))
-
-    def up(image):
-        return cv2.resize(image, size, interpolation=cv2.INTER_CUBIC)
-
-    base = fused if composite_onto is None else composite_onto
-    frames_up = [up(f) for f in frames]
-    masks_up = None if valid_masks is None else [
-        None if m is None else cv2.resize(np.asarray(m, np.uint8), size,
-                                          interpolation=cv2.INTER_NEAREST) > 0
-        for m in valid_masks]
-    fused_up = up(fused)
-    base_up = fused_up if composite_onto is None else up(composite_onto)
-    result = replace_background(frames_up, fused_up, valid_masks=masks_up,
-                                composite_onto=None if composite_onto is None else base_up,
-                                **kwargs)
-    del frames_up, masks_up, fused_up
-    change = result.image.astype(np.float32)
-    change -= base_up.astype(np.float32)
-    del base_up
-    change = cv2.resize(change, (W, H), interpolation=cv2.INTER_AREA)
-    out = base.astype(np.float32) + change.reshape(base.shape)
-    if np.issubdtype(base.dtype, np.integer):
-        info = np.iinfo(base.dtype)
-        out = np.clip(np.round(out), info.min, info.max).astype(base.dtype)
-    else:
-        out = out.astype(base.dtype)
-    small = lambda m: cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
-    missing = MissingData(small(result.missing.background), small(result.missing.hidden),
-                          small(result.missing.out_of_range), small(result.missing.featureless))
-    return dataclasses.replace(result, image=out, missing=missing,
-                               stats={**result.stats, "upscaled_from": [H, W], "factor": factor})
-
-
-def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
+def _replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
                        preset: str = "auto", clean: bool = True,
                        background_frame: Optional[int] = None,
                        max_subject: float = MAX_SUBJECT_DEFAULT,
@@ -1430,17 +1444,6 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
         raise BackgroundFillError("composite_onto must match the stacked image's shape and type")
     if H < 64 or W < 64:
         raise BackgroundFillError("image too small for background replacement")
-    factor = _upscale_factor(H, W)
-    if factor is not None:
-        for f in frames:
-            if f.shape[:2] != (H, W):
-                raise BackgroundFillError("every frame must match the result's size")
-        if valid_masks is not None and len(valid_masks) != N:
-            raise BackgroundFillError("valid_masks must match the frame count")
-        return _replace_upscaled(frames, fused, factor, composite_onto, valid_masks, dict(
-            preset=preset, clean=clean, background_frame=background_frame,
-            max_subject=max_subject, keep_soft_parts=keep_soft_parts,
-            progress=progress, cancelled=cancelled))
     for f in frames:
         if f.shape[:2] != (H, W):
             raise BackgroundFillError("every frame must match the result's size")
@@ -1471,7 +1474,7 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
             progress(min(steps[0] / total, 1.0), msg)
         steps[0] += 1
 
-    margin, feather, halo_fill = 2.0, 6.0, 32.0
+    margin, feather, halo_fill = _px(2.0), _px(6.0), _px(32.0)
     min_island = 2e-5
 
     step("analysing focus")
@@ -1490,8 +1493,8 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     sub_half = fine_outline(sub_half, G, color_half)
     # Skip the strip next to the subject: blurred subject edges there would
     # count as background detail and skew which end looks like the background.
-    away = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5) > 20
-    if away.sum() < 64:
+    away = cv2.distanceTransform((~sub_half).astype(np.uint8), cv2.DIST_L2, 5) > _px(20)
+    if away.sum() < _area(64):
         raise BackgroundFillError("no background found: the whole frame looks like subject")
     curve = background_curve(G, away)
     far_end = N - 1 if curve[-1] >= curve[0] else 0
@@ -1558,7 +1561,7 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     del measures
 
     step("refining the outline")
-    matte = refine_subject(sub_half, fused16, band=6, r=4)
+    matte = refine_subject(sub_half, fused16, band=_px(6), r=max(1, int(round(_px(4)))))
     sub = matte > 0.5
     # Precise distances: the fast approximation has polygonal iso-lines,
     # and every band defined by distance inherited those straight edges.
@@ -1572,16 +1575,16 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     fz = fused16.astype(np.float32)
     # Colour-match on background well clear of the subject: right next to it
     # every frame is darkened by partial occlusion, which biased the gain.
-    band = (dist > max(64, 2 * halo_fill)) & (dist < 600)
+    band = (dist > max(_px(64), 2 * halo_fill)) & (dist < _px(600))
     lum_f = fz.mean(axis=2)
     if (~sub).any():
         ref = float(np.median(lum_f[~sub]))
         small = cv2.resize(lum_f, (W // 4, H // 4), interpolation=cv2.INTER_AREA)
-        stop = field_stop_mask(small, ref, max(8.0, halo_fill))   # not a microscope's field stop
+        stop = field_stop_mask(small, ref, max(_px(8.0), halo_fill))   # not a microscope's field stop
         band &= ~cv2.resize(stop.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
         del small, stop
     del lum_f
-    if band.sum() < 10000:
+    if band.sum() < _area(10000):
         band = dist > margin + feather
     band_index = np.flatnonzero(band)
     del band
@@ -1595,7 +1598,7 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
             sample = np.zeros(H * W, bool)
             sample[band_index] = True
             sample = sample.reshape(H, W) & valid_masks[k]
-            if sample.sum() < 64:
+            if sample.sum() < _area(64):
                 sample = (~sub) & valid_masks[k]
             index = np.flatnonzero(sample)
             target = _channel_medians(fused16, index)
@@ -1615,7 +1618,7 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     # The width follows the nearest edge's focus position, which switches
     # along straight lines (a concave corner's diagonal); smooth it so the
     # zone boundary cannot jump there and draw a wedge.
-    fill_width = blur(fill_width.astype(np.float32), 48.0)
+    fill_width = blur(fill_width.astype(np.float32), _sigma(48.0))
     del rmap
     bgf, _ratio = match_noise(bgf, fz, dist)
 
@@ -1638,11 +1641,11 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     # only its blur and grain; otherwise each object's hand-over zone shows
     # as a patch.
     big = 0.08 * float(np.hypot(H, W))
-    bgm = (~sub) & (dist > 2)
+    bgm = (~sub) & (dist > _px(2))
     vlf = lp_background(fz, bgm, big) - lp_background(bgf, bgm, big)
     bgf += cv2.resize(blur(vlf, big / 16), (W, H), interpolation=cv2.INTER_LINEAR)
     del vlf, bgm
-    reach = np.clip(2.5 * np.asarray(fill_width, np.float32), 48, 400)
+    reach = np.clip(2.5 * np.asarray(fill_width, np.float32), _px(48), _px(400))
     bgf = natural_near_background(bgf, fz, sub, dist, reach)
     del reach
     keep_obj = soft_object_mask(fz, est_lum, dist, sub, fill_width)

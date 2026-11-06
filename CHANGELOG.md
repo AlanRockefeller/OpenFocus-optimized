@@ -53,11 +53,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   field stop. Ignoring it filled the area beside the subject from lit ground
   and the subject itself: a pale or orange smear, a lumpy outline, rings
   around small specks and a dark band along the edge.
-- Auto background on a stack loaded at reduced size no longer draws a large
-  pale halo and rings around the subject. Its distances were tuned on 20 MP
-  images; smaller images now run at that size and only the change is applied
-  back, so the subject stays exactly as stacked. This needs the memory of a
-  full-size run.
+- Auto background works at any image size. Its distances (blur sizes, the
+  zone rebuilt beside the subject, glow measurement, margins) were fixed pixel
+  counts tuned on 20 MP images, so a stack loaded at reduced size got a large
+  pale halo and rings, and larger sensors got zones too narrow. They now scale
+  with the image's long side; 20 MP results are unchanged.
 
 ## [1.75.4] - 2026-11-05
 

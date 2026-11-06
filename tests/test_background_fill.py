@@ -58,13 +58,13 @@ def _scene(subject_radius=110):
 
 
 @pytest.fixture(autouse=True, scope="module")
-def _work_at_input_size():
-    """The synthetic scenes are small; keep them at their own size (the
-    upscaled path for small real stacks has its own test).  Module scope, so
-    it is in place before the module-scoped results below are computed."""
+def _tuned_scale():
+    """The synthetic scenes were designed around the distances as tuned
+    (scale 1); scaling to the image's size has its own tests.  Module scope,
+    so it is in place before the module-scoped results below are computed."""
     import core.background_fill as bf
     patch = pytest.MonkeyPatch()
-    patch.setattr(bf, "UPSCALE_BELOW", 0.0)
+    patch.setattr(bf, "SCALE_OVERRIDE", 1.0)
     yield
     patch.undo()
 
@@ -802,30 +802,49 @@ def test_roi_render_context_does_not_keep_full_frames_alive():
 
 
 
-def test_small_images_are_processed_at_the_tuned_size(scene, monkeypatch):
-    """A stack loaded at a fraction of the tuned size made every zone too wide
-    for the scene; it now runs enlarged and only the change comes back."""
+def test_distances_scale_with_the_image_size(monkeypatch):
+    """Distances are written for 20 MP (5216 px long side) and follow the
+    image's size during a run; at the reference size they are unchanged."""
     import core.background_fill as bf
-    frames, fused, disc = scene
-    monkeypatch.setattr(bf, "UPSCALE_BELOW", 0.75)
-    monkeypatch.setattr(bf, "REFERENCE_LONG_SIDE", 1280)          # 640 px -> twice the size
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", None)
     seen = []
-    real = bf.replace_background
+    real = bf._replace_background
 
-    def spy(frames_in, fused_in, **kwargs):
-        seen.append(fused_in.shape)
-        return real(frames_in, fused_in, **kwargs)
+    def spy(frames, fused, **kwargs):
+        seen.append((bf._px(32.0), bf._ksize(49), bf._area(10000), bf._sigma(1.0)))
+        raise bf.BackgroundFillCancelled()
 
-    monkeypatch.setattr(bf, "replace_background", spy)
-    r = real(frames, fused, preset="soft")
-    assert seen == [(960, 1280, 3)]                               # the inner run was enlarged
-    assert r.image.shape == fused.shape and r.image.dtype == fused.dtype
-    assert r.stats["factor"] == 2.0
-    assert r.missing.background.shape == fused.shape[:2]
-    inner = cv2.erode(disc.astype(np.uint8), np.ones((61, 61), np.uint8)) > 0
-    np.testing.assert_array_equal(r.image[inner], fused[inner])     # the subject is untouched
-    far = cv2.distanceTransform((~disc).astype(np.uint8), cv2.DIST_L2, 5) > 40
-    assert np.abs(r.image[far].astype(int) - fused[far].astype(int)).mean() > 2
-    small = bf.working_set_bytes(frames, *fused.shape[:2])
-    monkeypatch.setattr(bf, "UPSCALE_BELOW", 0.0)
-    assert small > 3 * bf.working_set_bytes(frames, *fused.shape[:2])
+    monkeypatch.setattr(bf, "_replace_background", spy)
+    for long_side in (5216, 2608, 7824):
+        img = np.zeros((long_side * 3 // 4, long_side, 3), np.uint16)
+        with pytest.raises(bf.BackgroundFillCancelled):
+            bf.replace_background([img, img], img)
+    assert seen[0] == (32.0, 49, 10000, 1.0)                 # exactly as tuned
+    assert seen[1] == (16.0, 25, 2500, 0.5)
+    assert seen[2] == (48.0, 75, 22500, 1.5)
+    assert bf._px(32.0) == 32.0                              # back to 1 after the run
+    monkeypatch.setattr(bf, "_replace_background", real)
+
+
+def test_the_same_scene_twice_as_large_gets_zones_twice_as_wide(scene, monkeypatch):
+    """Scale follows the image: the scene enlarged 2x gets a rebuild zone about
+    twice as wide in pixels, i.e. the same relative to the scene."""
+    import core.background_fill as bf
+    frames, fused, _disc = scene
+    widths = []
+    real = bf.fill_halo_zone
+
+    def spy(bg, dist, sub, width, scale=4):
+        widths.append(float(np.median(width)))
+        return real(bg, dist, sub, width, scale)
+
+    monkeypatch.setattr(bf, "fill_halo_zone", spy)
+    big = lambda img: cv2.resize(img, (img.shape[1] * 2, img.shape[0] * 2), interpolation=cv2.INTER_CUBIC)
+    # Scales 1 and 2 (the synthetic scene is too small for the reference
+    # size itself): what matters is that doubling the image doubles them.
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", 1.0)
+    small_run = bf.replace_background(frames, fused, preset="soft")
+    monkeypatch.setattr(bf, "SCALE_OVERRIDE", 2.0)
+    large_run = bf.replace_background([big(f) for f in frames], big(fused), preset="soft")
+    assert small_run.changed and large_run.changed
+    assert 1.6 < widths[1] / widths[0] < 2.4
