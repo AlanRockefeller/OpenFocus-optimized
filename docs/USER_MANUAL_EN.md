@@ -966,13 +966,19 @@ adjust, and blend its pixels.
    It can also keep background objects next to the subject as stacked, so check
    the result.
 5. Click **Replace background**. A 20-megapixel stack of 15 frames takes about
-   a minute and needs about 3.5 GB of free memory. **Cancel** stops it.
+   a minute and needs about 2.5 GB of free memory. **Cancel** stops it.
 
 The change is one undoable step, and strokes you painted on the subject before
 are kept. Use the **Restore Brush** to bring back stacked pixels wherever you
 prefer them, for example an out-of-focus grass blade in front of the subject.
 When the subject fills nearly the whole frame, as in a ground-level forest
 scene, the image is left as stacked and a note says so.
+
+If you open Retouch on an output that was already retouched, Auto background
+analyzes the stacked result it came from and lays the new background onto your
+retouched image. Brushing on the subject is kept, and an earlier background
+replacement is never analyzed again, so running it twice does not build up
+halos.
 
 After a run, **Show missing data** tints the places no frame saw cleanly. These
 are the places to check or retouch by hand:

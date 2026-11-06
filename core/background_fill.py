@@ -25,7 +25,7 @@ Principles:
 The module is UI-free.  `replace_background` takes the render's aligned
 frames and its fused result (any project dtype) and returns a
 `BackgroundFillResult`; it reports progress and honours cancellation
-through optional callbacks.  Peak memory is about 3.5 GB for 15 frames of
+through optional callbacks.  Peak memory is about 2 GB for 15 frames of
 20 MP, independent of how the frames are stored.
 """
 from __future__ import annotations
@@ -1305,6 +1305,7 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
                        max_subject: float = MAX_SUBJECT_DEFAULT,
                        keep_soft_parts: bool = False,
                        valid_masks: Optional[Sequence[Optional[np.ndarray]]] = None,
+                       composite_onto: Optional[np.ndarray] = None,
                        progress: Optional[Callable[[float, str], None]] = None,
                        cancelled: Optional[Callable[[], bool]] = None) -> BackgroundFillResult:
     """Replace the background of `fused` with one of `frames`.
@@ -1323,6 +1324,10 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     as stacked and only the missing-data maps are computed.  `valid_masks`
     optionally marks registration-valid pixels for each frame; invalid warp
     fill is excluded from matching and never composited into the result.
+    `composite_onto` (same shape and dtype as `fused`) is the image the new
+    background is laid onto; everything is still analysed from `fused`.  A
+    retouched copy of the stacked result keeps its subject edits this way,
+    while an earlier replacement in it is never analysed again.
     """
     if preset not in PRESETS:
         raise BackgroundFillError(f"unknown preset {preset!r}")
@@ -1330,6 +1335,9 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     if N < 2:
         raise BackgroundFillError("background replacement needs at least two frames")
     H, W = fused.shape[:2]
+    if composite_onto is not None and (composite_onto.shape != fused.shape
+                                       or composite_onto.dtype != fused.dtype):
+        raise BackgroundFillError("composite_onto must match the stacked image's shape and type")
     if H < 64 or W < 64:
         raise BackgroundFillError("image too small for background replacement")
     for f in frames:
@@ -1575,8 +1583,13 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
     subject_fraction = float(sub.mean())
     changed = subject_fraction <= max_subject
     if changed:
-        comp = fz * (1 - alpha[..., None])
-        del fz
+        if composite_onto is not None:
+            del fz
+            comp = _u16(composite_onto).astype(np.float32)
+            comp *= (1 - alpha)[..., None]
+        else:
+            comp = fz * (1 - alpha[..., None])
+            del fz
         bgf *= alpha[..., None]
         comp += bgf
         del bgf
@@ -1598,9 +1611,10 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
         # ``_u16`` may return an already-uint16 input without copying.  Keep
         # result ownership independent from the caller as it was before the
         # integer fast path.
-        out16 = fused16.copy()
-    image = _from16f(out16.astype(np.float32), fused) if fused.dtype != np.uint16 or fused.ndim != 3 \
-        or fused.shape[2] != 3 else out16
+        out16 = fused16.copy() if composite_onto is None else _u16(composite_onto).copy()
+    like = fused if composite_onto is None else composite_onto
+    image = _from16f(out16.astype(np.float32), like) if like.dtype != np.uint16 or like.ndim != 3 \
+        or like.shape[2] != 3 else out16
     step("done")
     return BackgroundFillResult(
         image=image, changed=changed, background_frame=k_bg, far_end=far_end,

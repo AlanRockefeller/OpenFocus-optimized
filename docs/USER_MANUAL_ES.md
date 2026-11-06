@@ -573,7 +573,7 @@ procesamiento puede reconstruir, ajustar y mezclar los píxeles del fondo.
    redondeado de una espina. También puede conservar objetos del fondo junto al
    sujeto tal como se apilaron, así que revisa el resultado.
 5. Pulsa **Sustituir fondo**. Una pila de 15 fotogramas de 20 megapíxeles tarda
-   alrededor de un minuto y necesita unos 3,5 GB de memoria libre. **Cancelar**
+   alrededor de un minuto y necesita unos 2,5 GB de memoria libre. **Cancelar**
    la detiene.
 
 El cambio es un solo paso que se puede deshacer, y los trazos pintados antes
@@ -582,6 +582,12 @@ los píxeles apilados donde los prefieras, por ejemplo una brizna de hierba
 desenfocada delante del sujeto. Si el sujeto ocupa casi todo el encuadre, como
 en una escena del suelo del bosque, la imagen queda tal como se apiló y aparece
 un aviso.
+
+Si abres el retoque sobre un resultado que ya se retocó, el fondo automático
+analiza el resultado apilado del que procede y coloca el nuevo fondo sobre tu
+imagen retocada. Los retoques con pincel sobre el sujeto se conservan y un fondo
+ya reemplazado nunca se vuelve a analizar, así que ejecutarlo dos veces no
+acumula halos.
 
 Tras una pasada, **Mostrar datos faltantes** colorea los lugares que ningún
 fotograma vio con claridad. Son los lugares que conviene revisar o retocar a

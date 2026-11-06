@@ -613,7 +613,7 @@ verwerking kan de pixels reconstrueren, aanpassen en mengen.
    knopje aan het eind van een stekel. Ook achtergrondobjecten naast het
    onderwerp kunnen dan zoals gestapeld blijven, dus controleer het resultaat.
 5. Klik op **Achtergrond vervangen**. Een stapel van 15 frames van 20 megapixel
-   duurt ongeveer een minuut en vraagt ongeveer 3,5 GB vrij geheugen.
+   duurt ongeveer een minuut en vraagt ongeveer 2,5 GB vrij geheugen.
    **Annuleren** stopt het.
 
 De wijziging is één stap die u ongedaan kunt maken, en penseelstreken die u al
@@ -622,6 +622,12 @@ gestapelde pixels terug waar u die liever hebt, bijvoorbeeld een onscherp
 grassprietje vóór het onderwerp. Vult het onderwerp bijna het hele beeld, zoals
 bij een bosbodemscène, dan blijft het beeld zoals gestapeld en ziet u een
 melding.
+
+Als je Retoucheren opent op een resultaat dat al geretoucheerd is, analyseert
+Automatische achtergrond het gestapelde resultaat waar het van komt en legt de
+nieuwe achtergrond op je geretoucheerde afbeelding. Penseelwerk op het onderwerp
+blijft behouden en een eerder vervangen achtergrond wordt nooit opnieuw
+geanalyseerd, dus een tweede keer draaien bouwt geen halo's op.
 
 Na een run kleurt **Ontbrekende gegevens tonen** de plekken die geen frame scherp
 zag. Dit zijn de plekken om te controleren of met de hand te retoucheren:

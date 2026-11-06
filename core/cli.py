@@ -959,13 +959,17 @@ def _run_retouch_command(argv: List[str]) -> int:
                         help="processed source images in checkpoint order")
     replay.add_argument("--output", "-o", required=True,
                         help="output PNG or TIFF")
+    replay.add_argument("--stacked", default=None,
+                        help="the stacked result, when Auto background ran on an "
+                             "already retouched image")
     args = parser.parse_args(argv)
 
     try:
         if os.path.splitext(args.output)[1].lower() not in (".png", ".tif", ".tiff"):
             raise ValueError("replay output must be PNG or TIFF to preserve bit depth")
         output_path = os.path.normcase(os.path.realpath(os.path.abspath(args.output)))
-        for path in [args.checkpoint, args.base, *args.sources]:
+        for path in [args.checkpoint, args.base, *args.sources,
+                     *([args.stacked] if args.stacked else [])]:
             input_path = os.path.normcase(os.path.realpath(os.path.abspath(path)))
             if output_path == input_path or (os.path.exists(args.output)
                     and os.path.exists(path) and os.path.samefile(args.output, path)):
@@ -1016,6 +1020,11 @@ def _run_retouch_command(argv: List[str]) -> int:
         from core.resource_policy import require_memory
         require_memory(2 * base.nbytes)
         document = RetouchDocument(base, context)
+        if args.stacked:
+            stacked = _load_images([args.stacked])
+            if len(stacked) != 1 or stacked[0].shape != base.shape:
+                raise ValueError("--stacked must be one image the size of --base")
+            document.stacked_image = stacked[0]
         document.initialize_checkpoint()
         document.load_checkpoint(args.checkpoint)
         _save(args.output, document.result(), icc_profile=_read_icc_profile(args.base))

@@ -21,6 +21,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   loading finishes; pressing it again cancels.
 - The status bar reads "RAM used" so it is clear which number is in use.
 - Reword the retouch brush-size hint.
+- Auto background needs about a third less memory (about 2.5 GB free for 15
+  frames of 20 MP) and runs faster; results are unchanged.
+- Auto background on an output that was already retouched analyses the
+  stacked result it came from and lays the new background onto the retouched
+  image: brushing on the subject is kept, and an earlier replacement is not
+  analysed again, so running it twice no longer builds up halos. Retouch says
+  so when it opens on such an output. Checkpoints record the stacked result's
+  fingerprint; `openfocus retouch replay` takes it with `--stacked`.
 
 ### Fixed
 - Message-box buttons such as "Discard changes" are no longer cut off.

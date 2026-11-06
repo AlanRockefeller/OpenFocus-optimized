@@ -591,13 +591,19 @@ i mieszać jego piksele.
    leżą tuż poza głębią ostrości, na przykład główka na końcu kolca. Obiekty tła
    obok obiektu też mogą wtedy zostać jak po stackowaniu, więc sprawdź wynik.
 5. Kliknij **Zastąp tło**. Stack 15 klatek po 20 megapikseli trwa około minuty i
-   potrzebuje około 3,5 GB wolnej pamięci. **Anuluj** przerywa.
+   potrzebuje około 2,5 GB wolnej pamięci. **Anuluj** przerywa.
 
 Zmiana to jeden krok, który można cofnąć, a pociągnięcia namalowane wcześniej na
 obiekcie zostają. **Pędzlem przywracania** przywrócisz piksele ze stacku tam,
 gdzie wolisz, na przykład nieostre źdźbło trawy przed obiektem. Gdy obiekt
 wypełnia prawie cały kadr, jak w scenie z dna lasu, obraz zostaje jak po
 stackowaniu i pojawia się komunikat.
+
+Jeśli otworzysz retusz na wyniku, który był już retuszowany, automatyczne tło
+analizuje wynik stacku, z którego pochodzi, i nakłada nowe tło na Twój
+retuszowany obraz. Poprawki pędzlem na obiekcie zostają zachowane, a wcześniej
+zastąpione tło nigdy nie jest analizowane ponownie, więc drugie uruchomienie nie
+nawarstwia aureoli.
 
 Po przebiegu **Pokaż brakujące dane** zabarwia miejsca, których żadna klatka nie
 uchwyciła wyraźnie. To miejsca do sprawdzenia lub ręcznego retuszu:

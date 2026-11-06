@@ -576,7 +576,7 @@ reconstruire, ajuster et mélanger ses pixels.
    d'une épine. Des objets d'arrière-plan voisins du sujet peuvent aussi rester
    tels qu'empilés, vérifiez donc le résultat.
 5. Cliquez sur **Remplacer l'arrière-plan**. Une pile de 15 images de
-   20 mégapixels prend environ une minute et demande environ 3,5 Go de mémoire
+   20 mégapixels prend environ une minute et demande environ 2,5 Go de mémoire
    libre. **Annuler** l'arrête.
 
 La modification est une seule étape annulable, et les traits déjà peints sur le
@@ -584,6 +584,12 @@ sujet sont conservés. Utilisez le **Pinceau de restauration** pour retrouver le
 pixels empilés là où vous les préférez, par exemple un brin d'herbe flou devant
 le sujet. Si le sujet remplit presque toute l'image, comme une scène de sol
 forestier, l'image reste telle qu'empilée et une note l'indique.
+
+Si vous ouvrez la retouche sur un résultat déjà retouché, l'arrière-plan
+automatique analyse le résultat empilé dont il provient et pose le nouvel
+arrière-plan sur votre image retouchée. Les retouches au pinceau sur le sujet
+sont conservées, et un arrière-plan déjà remplacé n'est jamais réanalysé : un
+second passage n'accumule donc pas de halos.
 
 Après un passage, **Afficher les données manquantes** colore les endroits
 qu'aucune image n'a vus nettement. Ce sont les endroits à vérifier ou à

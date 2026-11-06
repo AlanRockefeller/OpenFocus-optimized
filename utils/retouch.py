@@ -456,25 +456,33 @@ def _auto_background_bytes(result) -> int:
     return total + sum(layer.nbytes for _name, layer, _colour in result.missing.layers())
 
 
-def _auto_background_key(image, frames, preset, clean, keep_soft_parts=False):
+def _auto_background_key(image, frames, preset, clean, keep_soft_parts=False, stacked=None):
     import hashlib
-    digest = hashlib.sha256()
-    for row in image:
-        digest.update(memoryview(np.ascontiguousarray(row)).cast("B"))
-    return (digest.hexdigest(), image.shape, image.dtype.str, str(preset), bool(clean),
-            bool(keep_soft_parts)), \
+
+    def digest_of(array):
+        digest = hashlib.sha256()
+        for row in array:
+            digest.update(memoryview(np.ascontiguousarray(row)).cast("B"))
+        return digest.hexdigest()
+
+    return (digest_of(image), image.shape, image.dtype.str, str(preset), bool(clean),
+            bool(keep_soft_parts), None if stacked is None else digest_of(stacked)), \
         tuple(frame.image for frame in frames)
 
 
 def compute_auto_background(image, frames, preset="auto", clean=True,
-                            cancelled=None, progress=None, keep_soft_parts=False):
+                            cancelled=None, progress=None, keep_soft_parts=False,
+                            stacked=None):
     """Run `core.background_fill.replace_background` on a retouch image.
 
-    Admits the working set with the resource policy and serializes with
-    other heavy jobs.  Returns a `BackgroundFillResult`."""
+    With `stacked` (the stacked result `image` was retouched from), the
+    background is analysed from `stacked` and laid onto `image`, so edits
+    on the subject survive and an earlier replacement is not analysed
+    again.  Admits the working set with the resource policy and serializes
+    with other heavy jobs.  Returns a `BackgroundFillResult`."""
     from core.background_fill import _release_free_memory, replace_background
     from core.resource_policy import heavy_job, require_memory
-    key, arrays = _auto_background_key(image, frames, preset, clean, keep_soft_parts)
+    key, arrays = _auto_background_key(image, frames, preset, clean, keep_soft_parts, stacked)
     with _AUTO_BG_LOCK:
         entries = _AUTO_BG_CACHE.setdefault("entries", [])
         for index, (cached_key, references, result) in enumerate(entries):
@@ -492,8 +500,10 @@ def compute_auto_background(image, frames, preset="auto", clean=True,
     with heavy_job(cancelled):
         require_memory(required)
         try:
-            result = replace_background([frame.image for frame in frames], image, preset=preset,
+            result = replace_background([frame.image for frame in frames],
+                                        image if stacked is None else stacked, preset=preset,
                                         valid_masks=valid_masks,
+                                        composite_onto=None if stacked is None else image,
                                         clean=clean, keep_soft_parts=keep_soft_parts,
                                         progress=progress, cancelled=cancelled)
         finally:
@@ -552,6 +562,11 @@ class RetouchDocument:
         self.last_status = ""
         # Missing-data maps per committed auto_background operation index.
         self._background_fills = {}
+        # The stacked result this image was retouched from, when the session
+        # starts on an already retouched output: Auto background analyses it
+        # instead of a background that may already have been replaced.
+        self.stacked_image = None
+        self._stacked_fingerprint = None
 
     @property
     def checkpoint_ready(self):
@@ -677,10 +692,14 @@ class RetouchDocument:
             return "unsupported"
         if self.working.nbytes > self.history.max_bytes:
             return "oversize"
+        stacked = self.stacked_image
+        if stacked is not None and stacked.shape != self.working.shape:
+            stacked = None
         try:
             result = compute_auto_background(self.working, self.frames, preset, clean,
                                              cancelled=cancelled, progress=progress,
-                                             keep_soft_parts=keep_soft_parts)
+                                             keep_soft_parts=keep_soft_parts,
+                                             stacked=stacked)
         except (BackgroundFillCancelled, RegistrationCancelled):
             return "cancelled"
         image = result.image
@@ -705,6 +724,8 @@ class RetouchDocument:
                              "clean": bool(clean)}
                 if keep_soft_parts:
                     operation["keep_soft_parts"] = True
+                if stacked is not None:
+                    operation["stacked"] = self.stacked_fingerprint()
                 self._record_operation(operation)
                 # The maps describe this step's result; the image itself is
                 # in the history, so it is not kept a second time here.
@@ -713,6 +734,15 @@ class RetouchDocument:
         except BaseException:
             self.history.abort()
             raise
+
+    def stacked_fingerprint(self):
+        """Checkpoint fingerprint of `stacked_image` (computed once)."""
+        if self.stacked_image is None:
+            return None
+        if self._stacked_fingerprint is None:
+            from utils.retouch_checkpoint import _fingerprint
+            self._stacked_fingerprint = _fingerprint(self.stacked_image)
+        return self._stacked_fingerprint
 
     # ---------------------------------------------------------- choices
     def set_frame(self, index: int) -> bool:

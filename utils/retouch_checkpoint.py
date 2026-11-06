@@ -197,6 +197,8 @@ def _replay_checkpoint(doc, path, cancelled=None):
         from utils.retouch import RetouchDocument
         replay = RetouchDocument(doc.base, doc.context, max_strokes=max_strokes, max_bytes=max_bytes)
         replay._provenance = doc._provenance
+        replay.stacked_image = getattr(doc, "stacked_image", None)
+        replay._stacked_fingerprint = getattr(doc, "_stacked_fingerprint", None)
         points_count = 0
         for op in operations:
             if cancelled is not None and cancelled():
@@ -246,11 +248,25 @@ def _replay_checkpoint(doc, path, cancelled=None):
                 preset = op['preset']
                 clean = op['clean']
                 soft_parts = op.get('keep_soft_parts', False)
+                stacked = op.get('stacked')
                 if (preset not in ('auto', 'soft', 'sharp') or type(clean) is not bool
-                        or type(soft_parts) is not bool):
+                        or type(soft_parts) is not bool
+                        or (stacked is not None and not isinstance(stacked, dict))):
                     raise ValueError('Invalid auto background operation')
-                status = replay.auto_background(preset, clean, cancelled,
-                                                keep_soft_parts=soft_parts)
+                # A step run from an already retouched image analysed the
+                # stacked result it came from; replay needs that same image.
+                if stacked is not None and (replay.stacked_image is None
+                                            or replay.stacked_fingerprint() != stacked):
+                    raise ValueError('This Auto background step needs the stacked result '
+                                     'it was made from')
+                saved_stacked = replay.stacked_image
+                if stacked is None:
+                    replay.stacked_image = None      # it analysed the image itself
+                try:
+                    status = replay.auto_background(preset, clean, cancelled,
+                                                    keep_soft_parts=soft_parts)
+                finally:
+                    replay.stacked_image = saved_stacked
                 if status == 'cancelled':
                     raise ValueError('Retouch replay cancelled')
                 if status != 'committed':

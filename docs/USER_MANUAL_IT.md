@@ -574,7 +574,7 @@ ricostruire, correggere e fondere i suoi pixel.
    arrotondata di una spina. Può mantenere come impilati anche oggetti di sfondo
    accanto al soggetto, quindi controlla il risultato.
 5. Fai clic su **Sostituisci sfondo**. Una pila di 15 fotogrammi da 20 megapixel
-   richiede circa un minuto e circa 3,5 GB di memoria libera. **Annulla** la
+   richiede circa un minuto e circa 2,5 GB di memoria libera. **Annulla** la
    interrompe.
 
 La modifica è un solo passaggio annullabile, e i tratti già dipinti sul soggetto
@@ -582,6 +582,12 @@ restano. Usa il **Pennello di ripristino** per riportare i pixel impilati dove l
 preferisci, per esempio un filo d'erba sfocato davanti al soggetto. Se il
 soggetto riempie quasi tutta l'inquadratura, come in una scena di sottobosco,
 l'immagine resta come impilata e compare una nota.
+
+Se apri il ritocco su un risultato già ritoccato, lo sfondo automatico analizza
+il risultato impilato da cui proviene e applica il nuovo sfondo sulla tua
+immagine ritoccata. I ritocchi a pennello sul soggetto vengono mantenuti e uno
+sfondo già sostituito non viene mai rianalizzato, quindi un secondo passaggio
+non accumula aloni.
 
 Dopo un'elaborazione, **Mostra dati mancanti** colora i punti che nessun
 fotogramma ha visto con chiarezza. Sono i punti da controllare o ritoccare a
