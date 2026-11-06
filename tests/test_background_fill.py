@@ -706,3 +706,16 @@ def test_retouch_dialog_on_a_retouched_output_links_the_stacked_result(qapp, sce
             d.close()
         QApplication.processEvents()
         window.deleteLater()
+
+
+
+def test_headless_paths_import_without_pyqt6():
+    """`pip install openfocus` has no PyQt6: the CLI's --auto-background and
+    retouch replay import these modules and must not need Qt."""
+    import subprocess
+    import sys
+    code = ("import sys; sys.modules['PyQt6'] = None\n"
+            "import core.render_context, core.background_fill, core.cli, utils.retouch, "
+            "utils.retouch_checkpoint\n")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
