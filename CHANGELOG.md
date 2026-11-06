@@ -48,6 +48,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   steps when every frame has them (`--frame-order auto`, the default; `name`
   keeps filename order). OM SYSTEM focus bracketing takes its first shot at
   mid-depth, so filename order put a mid-depth frame first.
+- Auto background on an output that was already retouched analyses the
+  stacked result it came from and lays the new background onto the retouched
+  image: brushing on the subject is kept, and an earlier replacement is not
+  analysed again, so running it twice no longer builds up halos. Retouch says
+  so when it opens on such an output.
 
 ### Fixed
 - Message-box buttons such as "Discard changes" are no longer cut off.
