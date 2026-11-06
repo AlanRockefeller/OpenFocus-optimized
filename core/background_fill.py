@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -48,6 +49,13 @@ MAX_SUBJECT_DEFAULT = 0.90
 # Marthamyces), 24% on a pine-needle floor where soft smeared a log the
 # stack had recorded sharply; ground-level scenes are 70%+.
 AUTO_SHARP_SHARE = 0.15
+# Every distance in this module (blur sizes, zone widths, glow-radius bins,
+# margins) was tuned on 20 MP stacks, 5216 px on the long side.  A stack
+# loaded at a fraction of that size made every zone several times too wide
+# for the scene: a large pale lobe and rings around the subject.  Smaller
+# images are therefore processed at the tuned size (see _replace_upscaled).
+REFERENCE_LONG_SIDE = 5216
+UPSCALE_BELOW = 0.75      # of REFERENCE_LONG_SIDE; set to 0 to always work at the input size
 
 
 class BackgroundFillCancelled(Exception):
@@ -1321,7 +1329,64 @@ def working_set_bytes(frames: Sequence[np.ndarray], height: int, width: int) -> 
     per_px = max(120, 100 + len(frames))
     if any(f.dtype != np.uint16 for f in frames):
         per_px += 18
-    return int(height) * int(width) * per_px
+    factor = _upscale_factor(height, width)
+    if factor is None:
+        return int(height) * int(width) * per_px
+    # Upscaled run: the working set at the tuned size, plus the upscaled
+    # copies of every frame (and of the stacked image) it works from.
+    big = int(round(height * factor)) * int(round(width * factor))
+    copies = sum(f.dtype.itemsize * (f.shape[2] if f.ndim == 3 else 1) for f in frames)
+    return big * (per_px + copies + 12)
+
+
+def _upscale_factor(height: int, width: int) -> Optional[float]:
+    """How much to enlarge an image to the tuned size, or None if not needed."""
+    long_side = max(int(height), int(width))
+    if long_side <= 0 or long_side >= UPSCALE_BELOW * REFERENCE_LONG_SIDE:
+        return None
+    return REFERENCE_LONG_SIDE / long_side
+
+
+def _replace_upscaled(frames, fused, factor, composite_onto, valid_masks, kwargs):
+    """Run at the tuned size and bring back only the change.
+
+    Frames, the stacked image (and `composite_onto`) are enlarged to the size
+    the method was tuned at; the change the run made is reduced back and
+    added to the original image, so pixels the run left alone (the subject)
+    stay exactly as they were.  Missing-data maps are reduced the same way."""
+    H, W = fused.shape[:2]
+    size = (int(round(W * factor)), int(round(H * factor)))
+
+    def up(image):
+        return cv2.resize(image, size, interpolation=cv2.INTER_CUBIC)
+
+    base = fused if composite_onto is None else composite_onto
+    frames_up = [up(f) for f in frames]
+    masks_up = None if valid_masks is None else [
+        None if m is None else cv2.resize(np.asarray(m, np.uint8), size,
+                                          interpolation=cv2.INTER_NEAREST) > 0
+        for m in valid_masks]
+    fused_up = up(fused)
+    base_up = fused_up if composite_onto is None else up(composite_onto)
+    result = replace_background(frames_up, fused_up, valid_masks=masks_up,
+                                composite_onto=None if composite_onto is None else base_up,
+                                **kwargs)
+    del frames_up, masks_up, fused_up
+    change = result.image.astype(np.float32)
+    change -= base_up.astype(np.float32)
+    del base_up
+    change = cv2.resize(change, (W, H), interpolation=cv2.INTER_AREA)
+    out = base.astype(np.float32) + change.reshape(base.shape)
+    if np.issubdtype(base.dtype, np.integer):
+        info = np.iinfo(base.dtype)
+        out = np.clip(np.round(out), info.min, info.max).astype(base.dtype)
+    else:
+        out = out.astype(base.dtype)
+    small = lambda m: cv2.resize(m, (W, H), interpolation=cv2.INTER_AREA)
+    missing = MissingData(small(result.missing.background), small(result.missing.hidden),
+                          small(result.missing.out_of_range), small(result.missing.featureless))
+    return dataclasses.replace(result, image=out, missing=missing,
+                               stats={**result.stats, "upscaled_from": [H, W], "factor": factor})
 
 
 def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
@@ -1365,6 +1430,17 @@ def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,
         raise BackgroundFillError("composite_onto must match the stacked image's shape and type")
     if H < 64 or W < 64:
         raise BackgroundFillError("image too small for background replacement")
+    factor = _upscale_factor(H, W)
+    if factor is not None:
+        for f in frames:
+            if f.shape[:2] != (H, W):
+                raise BackgroundFillError("every frame must match the result's size")
+        if valid_masks is not None and len(valid_masks) != N:
+            raise BackgroundFillError("valid_masks must match the frame count")
+        return _replace_upscaled(frames, fused, factor, composite_onto, valid_masks, dict(
+            preset=preset, clean=clean, background_frame=background_frame,
+            max_subject=max_subject, keep_soft_parts=keep_soft_parts,
+            progress=progress, cancelled=cancelled))
     for f in frames:
         if f.shape[:2] != (H, W):
             raise BackgroundFillError("every frame must match the result's size")

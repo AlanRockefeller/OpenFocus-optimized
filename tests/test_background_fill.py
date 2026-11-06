@@ -57,6 +57,18 @@ def _scene(subject_radius=110):
     return frames, fused, disc > 0
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _work_at_input_size():
+    """The synthetic scenes are small; keep them at their own size (the
+    upscaled path for small real stacks has its own test).  Module scope, so
+    it is in place before the module-scoped results below are computed."""
+    import core.background_fill as bf
+    patch = pytest.MonkeyPatch()
+    patch.setattr(bf, "UPSCALE_BELOW", 0.0)
+    yield
+    patch.undo()
+
+
 @pytest.fixture(scope="module")
 def scene():
     return _scene()
@@ -787,3 +799,33 @@ def test_roi_render_context_does_not_keep_full_frames_alive():
         assert frame.image.shape == (100, 200, 3)
         assert not np.shares_memory(frame.image, source)
         np.testing.assert_array_equal(frame.image, source[50:150, 60:260])
+
+
+
+def test_small_images_are_processed_at_the_tuned_size(scene, monkeypatch):
+    """A stack loaded at a fraction of the tuned size made every zone too wide
+    for the scene; it now runs enlarged and only the change comes back."""
+    import core.background_fill as bf
+    frames, fused, disc = scene
+    monkeypatch.setattr(bf, "UPSCALE_BELOW", 0.75)
+    monkeypatch.setattr(bf, "REFERENCE_LONG_SIDE", 1280)          # 640 px -> twice the size
+    seen = []
+    real = bf.replace_background
+
+    def spy(frames_in, fused_in, **kwargs):
+        seen.append(fused_in.shape)
+        return real(frames_in, fused_in, **kwargs)
+
+    monkeypatch.setattr(bf, "replace_background", spy)
+    r = real(frames, fused, preset="soft")
+    assert seen == [(960, 1280, 3)]                               # the inner run was enlarged
+    assert r.image.shape == fused.shape and r.image.dtype == fused.dtype
+    assert r.stats["factor"] == 2.0
+    assert r.missing.background.shape == fused.shape[:2]
+    inner = cv2.erode(disc.astype(np.uint8), np.ones((61, 61), np.uint8)) > 0
+    np.testing.assert_array_equal(r.image[inner], fused[inner])     # the subject is untouched
+    far = cv2.distanceTransform((~disc).astype(np.uint8), cv2.DIST_L2, 5) > 40
+    assert np.abs(r.image[far].astype(int) - fused[far].astype(int)).mean() > 2
+    small = bf.working_set_bytes(frames, *fused.shape[:2])
+    monkeypatch.setattr(bf, "UPSCALE_BELOW", 0.0)
+    assert small > 3 * bf.working_set_bytes(frames, *fused.shape[:2])
