@@ -848,3 +848,16 @@ def test_the_same_scene_twice_as_large_gets_zones_twice_as_wide(scene, monkeypat
     large_run = bf.replace_background([big(f) for f in frames], big(fused), preset="soft")
     assert small_run.changed and large_run.changed
     assert 1.6 < widths[1] / widths[0] < 2.4
+
+
+
+def test_fine_outline_band_and_ring_stay_a_pixel_wide_on_tiny_images():
+    import core.background_fill as bf
+    assert bf._outline_band_and_ring() == (20, (3, 15))           # as tuned at 20 MP
+    token = bf._SCALE.set(64 / bf.REFERENCE_LONG_SIDE)            # the smallest accepted image
+    try:
+        band, (inner, outer) = bf._outline_band_and_ring()
+    finally:
+        bf._SCALE.reset(token)
+    assert band >= 1.0
+    assert inner < 1.0 < outer          # distances of 1 px fall inside the ring

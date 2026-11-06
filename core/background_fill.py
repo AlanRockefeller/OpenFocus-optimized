@@ -244,6 +244,14 @@ def guided_filter_color(I, p, r, eps):
     return (ma * I).sum(-1) + _box(b, r)
 
 
+def _outline_band_and_ring():
+    """fine_outline's band and background-sampling ring (half-res px), scaled.
+
+    Floors keep both at least a pixel wide on tiny images: an empty ring made
+    the background colour read as black."""
+    return max(_px(20), 1.0), (_px(3), max(_px(15), 2.0))
+
+
 def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_ring=None, step=2.5 / 255,
                  wall_k=None):
     """Re-decide the outer `band` half-res px of the subject at fine scale.
@@ -253,9 +261,10 @@ def fine_outline(sub_half, G, color=None, band=None, sigma=1.5, sliver=None, bg_
     the fused pixels and reads as a halo.  Peak Laplacian energy at sigma 1.5
     follows the real edge.  Deep inside the coarse mask stays subject; gaps
     the fine mask leaves on smooth surfaces are filled when enclosed."""
-    band = _px(20) if band is None else band
+    default_band, default_ring = _outline_band_and_ring()
+    band = default_band if band is None else band
     sliver = int(round(_px(3))) if sliver is None else sliver
-    bg_ring = (_px(3), _px(15)) if bg_ring is None else bg_ring
+    bg_ring = default_ring if bg_ring is None else bg_ring
     wall_k = _ksize(5) if wall_k is None else wall_k
     peak = None
     for g in G:
