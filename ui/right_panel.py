@@ -451,16 +451,17 @@ def create_right_panel() -> RightPanelComponents:
     source_header.addWidget(btn_none)
     source_list_layout.addLayout(source_header)
     review_row = QHBoxLayout()
-    btn_review_stack = QPushButton(trans.t('stack_review_button'))
+    btn_review_stack = ElidingButton(trans.t('stack_review_button'))
     btn_review_stack.setObjectName("secondaryButton")
-    btn_review_stack.setToolTip(trans.t('stack_review_hint'))
+    btn_review_stack.setToolTip(
+        trans.t('stack_review_button') + "\n" + trans.t('stack_review_hint'))
     btn_review_stack.setEnabled(False)
     review_status = QLabel()
     review_status.setWordWrap(True)
     review_row.addWidget(btn_review_stack)
-    btn_retouch = QPushButton(trans.t('action_retouch'))
+    btn_retouch = ElidingButton(trans.t('action_retouch'))
     btn_retouch.setObjectName("secondaryButton")
-    btn_retouch.setToolTip(trans.t('action_retouch_hint'))
+    btn_retouch.setToolTip(trans.t('action_retouch') + "\n" + trans.t('action_retouch_hint'))
     review_row.addWidget(btn_retouch)
     review_row.addWidget(review_status, 1)
     source_list_layout.addLayout(review_row)
@@ -618,8 +619,8 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
         lambda values: window.set_fusion_parameters(window.current_fusion_method(), values))
     components.registration_parameter_panel.valuesChanged.connect(
         lambda values: window.set_registration_parameters(window.current_alignment_method(), values))
-    # Resolving the PyTorch backend means importing torch (~2.1 s, ~193 MB).
-    # Do it when the user actually chooses the neural method, not on every launch.
+    # Provider validation runs a small inference, so probe off the UI thread
+    # only when a neural method is selected.
     components.combo_fusion.currentIndexChanged.connect(
         lambda: components.combo_fusion.currentData() != "none"
         and get_fusion(components.combo_fusion.currentData()).neural

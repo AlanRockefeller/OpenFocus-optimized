@@ -19,19 +19,40 @@ import numpy as np
 from PyQt6.QtCore import (QEvent, QPointF, QRect, QRectF, QSize, Qt, QThread,
                           QTimer, pyqtSignal)
 from PyQt6.QtGui import (QBrush, QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap)
+from utils.file_dialogs import FileDialog
 from PyQt6.QtWidgets import (
     QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QDialog,
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-    QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QSlider, QSpinBox, QSplitter, QStyle, QVBoxLayout, QWidget,
 )
 
 from locales import trans
 from utils.image_utils import thumbnail_bgr, to_display_uint8
 from utils.path_identity import same_path
-from utils.retouch import (RetouchDocument, adjust_tones,
-                           clear_auto_background_cache)
+from utils.retouch import adjust_tones, prepare_retouch_document
+from core.source_frames import display_image
+from utils.frame_pixels import run_pixel_worker
 from widgets.flow_layout import FlowPanel
+from dialogs.render_settings import _OptionLabel
+
+
+def _add_wrapped_option(layout, option):
+    """Use the render-settings label convention for narrow option columns."""
+    text = option.text()
+    option.setText("")
+    option.setAccessibleName(text)
+    label = _OptionLabel(option)
+    label.setText(text)
+    label.setToolTip(option.toolTip())
+    row = QWidget()
+    row_layout = QHBoxLayout(row)
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.setSpacing(8)
+    row_layout.addWidget(option, 0, Qt.AlignmentFlag.AlignTop)
+    row_layout.addWidget(label, 1)
+    layout.addWidget(row)
+    return row
 
 _SHARPNESS_WORKERS = set()
 
@@ -146,7 +167,7 @@ class _SharpnessWorker(QThread):
             for index, frame in enumerate(self.frames):
                 if self.isInterruptionRequested():
                     return
-                image = frame.image
+                image = display_image(frame.image)
                 if image is None or image.size == 0:
                     continue
                 h, w = image.shape[:2]
@@ -339,6 +360,7 @@ class _ToneDialog(QDialog):
     def _finished(self):
         worker = self.worker
         self.worker = None
+        worker.deleteLater()
         if worker.error:
             QMessageBox.critical(self, trans.t("msg_error"), worker.error)
             self.exposure.setEnabled(True)
@@ -393,7 +415,7 @@ class _AutoBackgroundWorker(QThread):
         except MemoryError as exc:
             self.error = str(exc) or trans.t("retouch_auto_bg_failed")
         except Exception as exc:
-            self.error = str(exc)
+            self.error = str(exc) or trans.t("retouch_auto_bg_failed")
 
 
 class _AutoBackgroundDialog(QDialog):
@@ -408,44 +430,50 @@ class _AutoBackgroundDialog(QDialog):
         self.setWindowTitle(trans.t("retouch_auto_bg"))
         self.setModal(True)
         layout = QVBoxLayout(self)
+        self.options_scroll = QScrollArea()
+        self.options_scroll.setWidgetResizable(True)
+        self.options_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        options = QWidget()
+        option_layout = QVBoxLayout(options)
+        option_layout.setContentsMargins(0, 0, 0, 0)
+        self.options_scroll.setWidget(options)
+        layout.addWidget(self.options_scroll, 1)
         note = QLabel(trans.t("retouch_auto_bg_hint"))
         note.setWordWrap(True)
-        layout.addWidget(note)
+        option_layout.addWidget(note)
         settings = get_settings()
         self.rb_auto = QRadioButton(trans.t("retouch_auto_bg_auto"))
         self.rb_soft = QRadioButton(trans.t("retouch_auto_bg_soft"))
         self.rb_sharp = QRadioButton(trans.t("retouch_auto_bg_sharp"))
         group = QButtonGroup(self)
-        for button in (self.rb_auto, self.rb_soft, self.rb_sharp):
+        for button, control in ((self.rb_auto, "auto_background_auto"),
+                                (self.rb_soft, "auto_background_soft"),
+                                (self.rb_sharp, "auto_background_sharp")):
+            button.setProperty("controlId", control)
             group.addButton(button)
-            layout.addWidget(button)
+            _add_wrapped_option(option_layout, button)
         mode = str(settings.value("retouch/auto_bg_mode", "auto"))
         {"soft": self.rb_soft, "sharp": self.rb_sharp}.get(mode, self.rb_auto).setChecked(True)
         self.chk_clean = QCheckBox(trans.t("retouch_auto_bg_clean"))
+        self.chk_clean.setProperty("controlId", "auto_background_clean")
         self.chk_clean.setToolTip(trans.t("retouch_auto_bg_clean_hint"))
         self.chk_clean.setChecked(str(settings.value("retouch/auto_bg_clean", "true")).lower()
                                   not in ("false", "0"))
-        layout.addWidget(self.chk_clean)
+        _add_wrapped_option(option_layout, self.chk_clean)
         clean_note = QLabel(trans.t("retouch_auto_bg_clean_hint"))
         clean_note.setWordWrap(True)
         clean_note.setObjectName("mutedLabel")
-        layout.addWidget(clean_note)
-        self._notes = [note, clean_note]
+        option_layout.addWidget(clean_note)
         self.chk_soft_parts = QCheckBox(trans.t("retouch_auto_bg_soft_parts"))
+        self.chk_soft_parts.setProperty("controlId", "auto_background_keep_soft")
         self.chk_soft_parts.setToolTip(trans.t("retouch_auto_bg_soft_parts_hint"))
         self.chk_soft_parts.setChecked(str(settings.value("retouch/auto_bg_soft_parts", "false")).lower()
                                        in ("true", "1"))
-        layout.addWidget(self.chk_soft_parts)
+        _add_wrapped_option(option_layout, self.chk_soft_parts)
         soft_note = QLabel(trans.t("retouch_auto_bg_soft_parts_hint"))
         soft_note.setWordWrap(True)
         soft_note.setObjectName("mutedLabel")
-        layout.addWidget(soft_note)
-        self._notes.append(soft_note)
-        if getattr(doc, "stacked_image", None) is not None:
-            stacked_note = QLabel(trans.t("retouch_auto_bg_from_stacked"))
-            stacked_note.setWordWrap(True)
-            layout.addWidget(stacked_note)
-            self._notes.append(stacked_note)
+        option_layout.addWidget(soft_note)
         # The theme draws a thin bar; text inside it was clipped, so the
         # percentage sits beside it instead.
         self.progress = QProgressBar()
@@ -464,9 +492,11 @@ class _AutoBackgroundDialog(QDialog):
         layout.addWidget(self.progress_box)
         buttons = QHBoxLayout()
         self.run_button = QPushButton(trans.t("retouch_auto_bg_run"))
+        self.run_button.setProperty("controlId", "auto_background_run")
         self.run_button.setObjectName("primaryButton")
         self.run_button.clicked.connect(self._run)
         self.cancel_button = QPushButton(trans.t("btn_cancel"))
+        self.cancel_button.setProperty("controlId", "auto_background_cancel")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addStretch(1)
         buttons.addWidget(self.run_button)
@@ -474,10 +504,8 @@ class _AutoBackgroundDialog(QDialog):
         layout.addLayout(buttons)
         self.status = ""
         self.preset = ""
-        # Size from the contents: a fixed height computed before the wrapped
-        # hints knew their width cut their last line off.
-        self.setMinimumWidth(480)
-        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
+        from utils.ui_utils import size_dialog_to_content
+        size_dialog_to_content(self, self.options_scroll, preferred_width=480)
 
     def _run(self):
         if self.worker is not None:
@@ -502,14 +530,6 @@ class _AutoBackgroundDialog(QDialog):
         self.worker.finished.connect(self._finished)
         self.worker.start()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Wrapped hints render taller than the layout's estimate (their
-        # last line was cut off); reserve what they need at this width.
-        for label in getattr(self, "_notes", ()):
-            need = label.heightForWidth(max(label.width(), 1))
-            if need > 0 and label.minimumHeight() != need:
-                label.setMinimumHeight(need)
 
     def _show_progress(self, fraction):
         self.progress.setValue(int(fraction * 1000))
@@ -519,6 +539,7 @@ class _AutoBackgroundDialog(QDialog):
         worker = self.worker
         self.worker = None
         self.status = worker.status
+        worker.deleteLater()
         if worker.error:
             QMessageBox.critical(self, trans.t("msg_error"),
                                  trans.t("retouch_auto_bg_failed") + "\n\n" + worker.error)
@@ -740,14 +761,9 @@ class RetouchDialog(QDialog):
         self.record = record
         self.apply_callback = apply_callback
         self.input_paths = tuple(input_paths)
-        self.doc = RetouchDocument(record.image, record.context)
-        # Retouching an already retouched output: Auto background works from
-        # the stacked result and keeps the brushing on the subject.
-        manager = getattr(window_main, "output_manager", None)
-        stacked_source = getattr(manager, "stacked_source", None)
-        stacked = stacked_source(record) if callable(stacked_source) else None
-        if stacked is not None:
-            self.doc.stacked_image = stacked.image
+        self.doc = run_pixel_worker(
+            self, trans.t("retouch_title"),
+            lambda: prepare_retouch_document(record.image, record.context))
         self.view = _ViewState()
         self.view.center = QPointF(self.doc.width / 2.0, self.doc.height / 2.0)
 
@@ -785,6 +801,7 @@ class RetouchDialog(QDialog):
 
         self.setWindowTitle(trans.t("retouch_title"))
         self._checkpoint_dialog = None
+        self._edit_dialog = None
         self.setModal(True)
         self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
         self.setMinimumSize(900, 600)
@@ -804,6 +821,9 @@ class RetouchDialog(QDialog):
                 ("btn_peek", "retouch_peek"),
                 ("btn_shortcuts", "retouch_shortcuts"),
                 ("chk_sharp", "retouch_sharpness"),
+                ("btn_auto_bg", "retouch_auto_background"),
+                ("chk_missing", "retouch_missing_data"),
+                ("btn_save_missing", "retouch_save_missing"),
                 ("btn_restore_all", "retouch_restore"),
                 ("btn_apply", "retouch_apply"),
                 ("btn_cancel", "retouch_cancel"),
@@ -826,19 +846,18 @@ class RetouchDialog(QDialog):
         self._update_brush_labels()
         self._update_controls()
         self._refresh_help_text()
-        if self.doc.stacked_image is not None:
-            self._set_notice(trans.t("retouch_from_retouched"))
         self._focus_signal = QApplication.instance().focusChanged
         self._focus_signal.connect(self._on_focus_changed)
         self.finished.connect(lambda _result: self._save_geometry())
         self.finished.connect(self._shutdown_sharpness)
-        self.finished.connect(lambda _result: clear_auto_background_cache())
         self.finished.connect(self.deleteLater)
         self.destroyed.connect(
             lambda _object=None, ref=weakref.ref(self): _release_dialog_buffers(ref))
 
     # ------------------------------------------------------------- build
     def _build_ui(self) -> None:
+        from ui.right_panel import ElidingButton
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 4)
         outer.setSpacing(4)
@@ -946,7 +965,7 @@ class RetouchDialog(QDialog):
         self.side_scroll.setWidgetResizable(True)
         self.side_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.side_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.side_scroll.setMinimumWidth(240)
         self.side_scroll.setMaximumWidth(360)
         self.side_panel = QWidget()
@@ -965,7 +984,7 @@ class RetouchDialog(QDialog):
         side.addWidget(self.lbl_help)
         # The full key list is reachable as a visible entry, not only by
         # hovering the help paragraph.
-        self.btn_shortcuts = QPushButton(trans.t("retouch_shortcuts_help"))
+        self.btn_shortcuts = ElidingButton(trans.t("retouch_shortcuts_help"))
         self.btn_shortcuts.setAutoDefault(False)
         self.btn_shortcuts.clicked.connect(self._show_shortcuts)
         side.addWidget(self.btn_shortcuts)
@@ -988,9 +1007,9 @@ class RetouchDialog(QDialog):
             lambda on: self._set_tool("restore") if on else None)
         self.rb_exposure.toggled.connect(
             lambda on: self._set_tool("exposure") if on else None)
-        side.addWidget(self.rb_source)
-        side.addWidget(self.rb_restore)
-        side.addWidget(self.rb_exposure)
+        _add_wrapped_option(side, self.rb_source)
+        _add_wrapped_option(side, self.rb_restore)
+        _add_wrapped_option(side, self.rb_exposure)
         self.num_exposure = _NumberRow(trans.t("retouch_exposure_amount"),
                                        -200, 200, 50)
         self.num_exposure.setToolTip(trans.t("retouch_exposure_hint"))
@@ -1010,7 +1029,7 @@ class RetouchDialog(QDialog):
         self.chk_sharp = QCheckBox(trans.t("retouch_show_sharpness"))
         self.chk_sharp.setToolTip(trans.t("retouch_sharpness_legend"))
         self.chk_sharp.toggled.connect(self._toggle_sharpness)
-        side.addWidget(self.chk_sharp)
+        _add_wrapped_option(side, self.chk_sharp)
         self.lbl_sharp_state = QLabel("")
         self.lbl_sharp_state.setObjectName("mutedLabel")
         self.lbl_sharp_state.setWordWrap(True)
@@ -1022,27 +1041,28 @@ class RetouchDialog(QDialog):
         self.lbl_heat_legend.setVisible(False)
         side.addWidget(self.lbl_heat_legend)
 
-        self.btn_auto_bg = QPushButton(trans.t("retouch_auto_bg") + "…")
-        self.btn_auto_bg.setToolTip(trans.t("retouch_auto_bg_hint"))
+        self.btn_auto_bg = ElidingButton(trans.t("retouch_auto_bg") + "…")
+        self.btn_auto_bg.setToolTip(trans.t("retouch_auto_bg") + "\n"
+                                   + trans.t("retouch_auto_bg_hint"))
         self.btn_auto_bg.clicked.connect(self._auto_background)
         side.addWidget(self.btn_auto_bg)
         self.chk_missing = QCheckBox(trans.t("retouch_missing_show"))
         self.chk_missing.setToolTip(trans.t("retouch_missing_legend"))
         self.chk_missing.toggled.connect(self._toggle_missing)
-        side.addWidget(self.chk_missing)
+        self.missing_option_row = _add_wrapped_option(side, self.chk_missing)
         self.lbl_missing_legend = QLabel(trans.t("retouch_missing_legend"))
         self.lbl_missing_legend.setWordWrap(True)
         self.lbl_missing_legend.setObjectName("mutedLabel")
         self.lbl_missing_legend.setVisible(False)
         side.addWidget(self.lbl_missing_legend)
-        self.btn_save_missing = QPushButton(trans.t("retouch_missing_save"))
+        self.btn_save_missing = ElidingButton(trans.t("retouch_missing_save"))
         self.btn_save_missing.clicked.connect(self._save_missing)
         self.btn_save_missing.setVisible(False)
         side.addWidget(self.btn_save_missing)
-        self.btn_tones = QPushButton(trans.t("retouch_tones_title") + "…")
+        self.btn_tones = ElidingButton(trans.t("retouch_tones_title") + "…")
         self.btn_tones.clicked.connect(self._adjust_tones)
         side.addWidget(self.btn_tones)
-        self.btn_restore_all = QPushButton(trans.t("retouch_restore_all"))
+        self.btn_restore_all = ElidingButton(trans.t("retouch_restore_all"))
         self.btn_restore_all.clicked.connect(self._restore_all)
         side.addWidget(self.btn_restore_all)
         side.addStretch(1)
@@ -1050,7 +1070,7 @@ class RetouchDialog(QDialog):
         self.lbl_apply_hint = QLabel(trans.t("retouch_apply_hint"))
         self.lbl_apply_hint.setWordWrap(True)
         self.lbl_apply_hint.setObjectName("mutedLabel")
-        self.btn_apply = QPushButton(trans.t("retouch_apply"))
+        self.btn_apply = ElidingButton(trans.t("retouch_apply"))
         self.btn_apply.setObjectName("primaryButton")
         # Only the explicit shortcut may apply: an implicit default button
         # would let a plain Enter publish while the visible button is disabled.
@@ -1165,12 +1185,19 @@ class RetouchDialog(QDialog):
         restored = False
         if geometry is not None:
             restored = self.restoreGeometry(geometry)
-        if not restored:
-            screen = self.screen() or QApplication.primaryScreen()
-            if screen is not None:
-                available = screen.availableGeometry()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            style = self.style()
+            frame = style.pixelMetric(QStyle.PixelMetric.PM_DefaultFrameWidth, None, self)
+            title = style.pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight, None, self)
+            max_width = max(1, available.width() - 2 * frame)
+            max_height = max(1, available.height() - title - 2 * frame)
+            self.setMinimumSize(min(900, max_width), min(600, max_height))
+            if not restored:
                 self.resize(min(1280, max(900, available.width() - 80)),
                             min(820, max(600, available.height() - 100)))
+            self.resize(min(self.width(), max_width), min(self.height(), max_height))
         state = settings.value("retouch/splitter")
         if state is not None:
             self.splitter.restoreState(state)
@@ -1194,9 +1221,10 @@ class RetouchDialog(QDialog):
         self.frame_list.blockSignals(True)
         self.frame_list.clear()
         for index, frame in enumerate(self.doc.frames):
-            h, w = frame.image.shape[:2]
-            scale = 64 / max(h, w)
-            small = cv2.resize(frame.image, (max(1, int(w * scale)), max(1, int(h * scale))),
+            image = self.doc.source_previews[index]
+            h, w = image.shape[:2]
+            scale = min(1.0, 64 / max(h, w))
+            small = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))),
                                interpolation=cv2.INTER_AREA)
             thumb = thumbnail_bgr(self._display_image(small), 64)
             item = QListWidgetItem(
@@ -1342,7 +1370,10 @@ class RetouchDialog(QDialog):
 
     def _refresh_source_display(self) -> None:
         frame = self.doc.active_frame
-        display = self._display_image(frame.image)
+        index = self.doc.frame_index
+        display, valid = run_pixel_worker(
+            self, trans.t("retouch_title"),
+            lambda: (self._display_image(frame.image), self.doc.mask_for(index)))
         if display.ndim == 2:
             display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
         self._pure_source_qimage = _qimage_from_bgr(display)
@@ -1352,7 +1383,6 @@ class RetouchDialog(QDialog):
                 heat = cv2.resize(heat, (display.shape[1], display.shape[0]),
                                   interpolation=cv2.INTER_LINEAR)
                 display = cv2.addWeighted(display, 0.45, heat, 0.55, 0)
-        valid = self.doc.mask_for(self.doc.frame_index)
         if valid is not None:
             display = display.copy()
             display[~valid] = (80, 80, 160)
@@ -1633,7 +1663,8 @@ class RetouchDialog(QDialog):
     # ------------------------------------------------------------- strokes
     def begin_stroke(self, x: float, y: float) -> bool:
         if (not self._source_ready or self.preview_mode is not None
-                or self.doc.stroke_active):
+                or self.doc.stroke_active or self._edit_dialog is not None
+                or self._checkpoint_dialog is not None):
             return False
         if not self.doc.source_valid_at(x, y):
             self._set_notice(trans.t("retouch_source_unavailable"))
@@ -1691,7 +1722,8 @@ class RetouchDialog(QDialog):
 
     # ------------------------------------------------------------- history
     def _undo(self) -> None:
-        if self.preview_mode is not None:
+        if (self.preview_mode is not None or self._edit_dialog is not None
+                or self._checkpoint_dialog is not None):
             return
         was_stroke = self.doc.stroke_active
         if self.doc.undo():
@@ -1702,7 +1734,8 @@ class RetouchDialog(QDialog):
         self._update_controls()
 
     def _redo(self) -> None:
-        if self.preview_mode is not None:
+        if (self.preview_mode is not None or self._edit_dialog is not None
+                or self._checkpoint_dialog is not None):
             return
         was_stroke = self.doc.stroke_active
         if self.doc.redo():
@@ -1713,9 +1746,17 @@ class RetouchDialog(QDialog):
         self._update_controls()
 
     def _adjust_tones(self) -> None:
-        if self.doc.stroke_active or self.preview_mode is not None:
+        if (self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None):
             return
-        if _ToneDialog(self.doc, self).exec() == QDialog.DialogCode.Accepted:
+        dialog = _ToneDialog(self.doc, self)
+        self._edit_dialog = dialog
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self._edit_dialog = None
+            dialog.deleteLater()
+        if accepted:
             self._refresh_result_display()
             if self.doc.history.evicted and not self._eviction_announced:
                 self._eviction_announced = True
@@ -1724,10 +1765,17 @@ class RetouchDialog(QDialog):
             self._update_controls()
 
     def _auto_background(self) -> None:
-        if self.doc.stroke_active or self.preview_mode is not None:
+        if (self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None):
             return
         dialog = _AutoBackgroundDialog(self.doc, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        self._edit_dialog = dialog
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self._edit_dialog = None
+            dialog.deleteLater()
+        if accepted:
             self._refresh_result_display()
             fill = self.doc.background_fill
             if dialog.status == "empty" or (fill is not None and not fill.changed):
@@ -1764,31 +1812,29 @@ class RetouchDialog(QDialog):
 
     def _save_missing(self) -> None:
         fill = self.doc.background_fill
-        if fill is None:
+        if (fill is None or self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None):
             return
-        from utils.settings_store import image_save_default, remember_image_save
-        path, _ = QFileDialog.getSaveFileName(
-            self, trans.t("retouch_missing_save"), image_save_default("missing-data.png"),
-            "PNG (*.png)")
+        path, _ = FileDialog.getSaveFileName(
+            self, trans.t("retouch_missing_save"), "missing-data.png", "PNG (*.png)")
         if not path:
             return
-        remember_image_save(path)
+        selected_path = path
         if not path.lower().endswith(".png"):
             path += ".png"
-        from core.background_fill import missing_data_overlay
-        from utils.image_utils import imwrite_auto
         # The tinted preview, plus one exact 8-bit mask per class: the masks
         # are the record of where no frame backs the result.
         stem = path[:-4]
-        outputs = [(path, missing_data_overlay(self.doc.working, fill.missing))]
-        outputs += [(f"{stem}-{name}.png", layer) for name, layer, _c in fill.missing.layers()]
+        layers = list(fill.missing.layers())
+        targets = [path, *(f"{stem}-{name}.png" for name, _layer, _c in layers)]
         try:
             sources = self._checkpoint_sources()
-            for target, _image in outputs:
+            for target in targets:
                 if any(same_path(target, source) for source in sources):
                     raise ValueError(trans.t("retouch_missing_input"))
-            existing_siblings = [target for target, _image in outputs[1:]
-                                 if os.path.exists(target)]
+            existing_siblings = [target for target in targets[1:] if os.path.exists(target)]
+            if selected_path != path and os.path.exists(path):
+                existing_siblings.insert(0, path)
             if existing_siblings and QMessageBox.question(
                     self, trans.t("retouch_missing_save"),
                     trans.t("retouch_missing_replace").format(
@@ -1796,9 +1842,21 @@ class RetouchDialog(QDialog):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
                 return
-            for target, image in outputs:
-                if not imwrite_auto(target, image):
-                    raise OSError(target)
+            from dialogs.retouch_export import MissingDataExportDialog
+
+            dialog = MissingDataExportDialog(self.doc.working, fill.missing, targets, self)
+            self._edit_dialog = dialog
+            self._update_controls()
+            try:
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            finally:
+                self._edit_dialog = None
+                self._update_controls()
+                dialog.deleteLater()
+            if dialog.worker.error is not None:
+                raise dialog.worker.error
+            if not accepted:
+                return
         except Exception as exc:
             QMessageBox.critical(self, trans.t("msg_error"), str(exc))
             return
@@ -1806,6 +1864,7 @@ class RetouchDialog(QDialog):
 
     def _restore_all(self) -> None:
         if (self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None
                 or not self.doc.is_dirty):
             return
         box = QMessageBox(self)
@@ -1842,9 +1901,10 @@ class RetouchDialog(QDialog):
         return paths
 
     def _save_checkpoint(self) -> None:
-        if self.doc.stroke_active or self.preview_mode is not None:
+        if (self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None):
             return
-        path, _ = QFileDialog.getSaveFileName(
+        path, _ = FileDialog.getSaveFileName(
             self, trans.t("retouch_checkpoint_save"), "",
             trans.t("retouch_checkpoint_filter"))
         if not path:
@@ -1869,9 +1929,10 @@ class RetouchDialog(QDialog):
                                  + str(dialog.worker.error))
 
     def _load_checkpoint(self) -> None:
-        if self.doc.stroke_active or self.preview_mode is not None:
+        if (self.doc.stroke_active or self.preview_mode is not None
+                or self._edit_dialog is not None or self._checkpoint_dialog is not None):
             return
-        path, _ = QFileDialog.getOpenFileName(
+        path, _ = FileDialog.getOpenFileName(
             self, trans.t("retouch_checkpoint_load"), "",
             trans.t("retouch_checkpoint_filter"))
         if not path:
@@ -1929,9 +1990,11 @@ class RetouchDialog(QDialog):
                                     and self.doc.auto_background_supported())
         has_missing = self.doc.background_fill is not None
         self.chk_missing.setVisible(has_missing)
-        self.chk_missing.setEnabled(has_missing and not blocked)
+        self.missing_option_row.setVisible(has_missing)
+        self.chk_missing.setEnabled(has_missing and not blocked and not preview)
+        self.lbl_missing_legend.setVisible(has_missing and self.chk_missing.isChecked())
         self.btn_save_missing.setVisible(has_missing and self.chk_missing.isChecked())
-        self.btn_save_missing.setEnabled(has_missing and not blocked)
+        self.btn_save_missing.setEnabled(has_missing and not blocked and not preview)
         self.btn_restore_all.setEnabled(
             self.doc.is_dirty and not blocked and not preview)
         self.btn_apply.setEnabled(
@@ -2163,6 +2226,7 @@ class RetouchDialog(QDialog):
         """
         return (not self._applied and not self._applying and not self._closing
                 and not self.doc.stroke_active and self.preview_mode is None
+                and self._edit_dialog is None and self._checkpoint_dialog is None
                 and self.doc.is_dirty)
 
     def _apply(self):
@@ -2219,6 +2283,8 @@ class RetouchDialog(QDialog):
         return clicked is discard_btn
 
     def _change_result(self) -> None:
+        if self._edit_dialog is not None or self._checkpoint_dialog is not None:
+            return
         if self.doc.stroke_active:
             self.end_stroke()
         if not self._confirm_close():
@@ -2234,6 +2300,10 @@ class RetouchDialog(QDialog):
         self.close()
 
     def closeEvent(self, event) -> None:
+        if self._edit_dialog is not None:
+            self._edit_dialog.reject()
+            event.ignore()
+            return
         if self._checkpoint_dialog is not None:
             self._checkpoint_dialog.reject()
             event.ignore()
@@ -2385,6 +2455,8 @@ class RetouchDialog(QDialog):
         return False
 
     def eventFilter(self, obj, event) -> bool:
+        if self._edit_dialog is not None or self._checkpoint_dialog is not None:
+            return super().eventFilter(obj, event)
         if event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             if event.type() == QEvent.Type.KeyRelease:
                 # Releasing a temporarily held key is cleanup, not editing:

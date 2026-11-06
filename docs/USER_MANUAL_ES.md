@@ -60,6 +60,8 @@ Por ejemplo, el equivalente en la CLI es `python main.py --input ./png-stack --o
 
 ### Formatos de salida compatibles
 
+En **Guardar como**, TIFF normal guarda el resultado como una sola imagen; TIFF por capas incluye los fotogramas de origen como capas. Linear DNG siempre aparece, pero para guardarlo se requiere un resultado lineal de cámara sin ajustes incorporados, obtenido con **Abrir RAW nativo** y con calibración de cámara.
+
 - Imágenes individuales: JPG, PNG, BMP, TIFF, WebP
 - Secuencias de imágenes: guardadas como carpetas
 - Animaciones: formato GIF
@@ -404,30 +406,32 @@ OpenFocus ofrece diez algoritmos de fusión (además de un modo de solo alineaci
 
 ### StackMFF (V1, aprendizaje profundo)
 
-- **Algoritmo**: una U-Net 3D que predice la luminancia fusionada de toda la pila en una pasada; Cb/Cr se toman del fotograma de origen más cercano a esa luminancia
+- **Algoritmo**: una red de atención de una sola escala mezcla la luminancia de origen con pesos softmax; Cb/Cr se toman del fotograma cuya luminancia más se aproxima a la fusionada
 - **Ideal para**: fusión neuronal de una pila de enfoque completa
-- **Ventajas**: sin parámetros y color dentro de gama; el orden de los fotogramas puede afectar al resultado
-- **Nota**: 6 M de parámetros; las pilas grandes se benefician de la aceleración por GPU
+- **Ventajas**: sin parámetros y color dentro de gama; la luminancia fusionada es independiente del orden de los fotogramas, pero la crominancia puede variar si hay empate en la distancia de luminancia
+- **Nota**: unos 156.172 parámetros; las pilas grandes se benefician de la aceleración por GPU
 
 ### StackMFF V2 (aprendizaje profundo)
 
-- **Algoritmo**: estimación de enfoque por capas refinada por una capa recurrente bidireccional; la red regresa el índice de plano focal y muestrea la pila. **Los fotogramas deben mantener su orden de enfoque original** — invertir está desactivado para este método
+- **Algoritmo**: una red de atención de una sola escala normaliza la profundidad de enfoque esperada y muestrea el fotograma de origen más cercano. Los índices de profundidad dependen del orden de la pila. **Los fotogramas deben mantener su orden de enfoque original** — invertir está desactivado para este método
 - **Mapas de profundidad**: compatibles; informa de la capa focal muestreada
 - **Ideal para**: barridos de enfoque continuos en los que importa un modelo muy pequeño y rápido
-- **Requisitos**: PyTorch; unos 0,05 M de parámetros; sin ajustes
+- **Requisitos**: ONNX Runtime y el modelo ONNX incluido.
 
 ### StackMFF V3 (aprendizaje profundo)
 
 Es el método preseleccionado en una instalación nueva.
 
-- **Algoritmo**: clasificación de origen píxel a píxel (requiere PyTorch). La red predice, para cada píxel, de qué imagen de entrada proviene, y después mezcla las imágenes según esas probabilidades o elige una sola imagen
+- **Algoritmo**: clasificación de origen píxel a píxel (ONNX Runtime). La red predice, para cada píxel, de qué imagen de entrada proviene, y después mezcla las imágenes según esas probabilidades o elige una sola imagen
 - **Modo de salida de IA** (panel derecho, solo para este método):
   - **Mezcla suave (ponderada)**: opción predeterminada; cada píxel es una mezcla de las imágenes ponderada por probabilidad. Transiciones suaves y sin costuras duras; coincide con la configuración publicada en el artículo
   - **Selección dura (una imagen)**: cada píxel se copia de la imagen más probable. Selección más nítida y sin interpolación entre imágenes; puede aparecer una costura a nivel de píxel donde dos imágenes empatan
 - **Ideal para**: máxima calidad cuando hay GPU disponible
-- **Ventajas**: invariante al orden (el orden de los fotogramas nunca cambia el resultado), admite pilas de cualquier longitud, sin ajustes por método, optimización automática
-- **Requisitos**: PyTorch instalado, GPU CUDA opcional (sin torchvision)
-- **Nota**: puede no estar disponible si PyTorch no está instalado
+- **Ventajas**: invariante al orden (el orden de los fotogramas nunca cambia el resultado), admite pilas dentro de los recursos disponibles, sin ajustes por método, optimización automática
+- **Requisitos**: ONNX Runtime y el modelo ONNX incluido.
+
+Cada mosaico neuronal usa todos los fotogramas. Los fotogramas y los datos temporales de alineación pueden guardarse en disco; el espacio libre y la memoria disponible limitan el tamaño de la pila. Los mosaicos espaciales de V2 aproximan la inferencia de la imagen completa.
+
 
 ### OpenFocus A / B / C
 
@@ -473,7 +477,7 @@ Selecciona **Solo alineación (sin fusión)** para registrar la pila y añadir u
 | DCT | Media | Buena | Texturas |
 | DTCWT | Media | Muy buena | Escenas complejas |
 | GFG-FGF | Rápida | Buena | Regiones de enfoque |
-| StackMFF (V1) | Lenta (GPU) | No evaluada aquí | Fusión neuronal de la pila; el orden puede afectar al resultado |
+| StackMFF (V1) | Lenta (GPU) | No evaluada aquí | Luminancia independiente del orden; crominancia variable si hay empate en la distancia de luminancia |
 | StackMFF V2 | Rápida (GPU) | No evaluada aquí | Barridos continuos con un modelo minúsculo |
 | StackMFF V3 | Lenta (GPU) | Excelente | Máxima calidad |
 | OpenFocus A | Depende de la pila | Depende de la pila | Selección multiescala de píxeles enfocados |
@@ -540,7 +544,7 @@ La fusión puede dejar todavía algún defecto local: un halo alrededor de un bo
 5. Mantén `Tab` para ver el resultado antes de esta sesión y `Alt` para asomarte al fotograma de origen. La referencia de nitidez es opcional, cubre solo el lienzo de origen y usa una escala compartida para todos los fotogramas.
 6. `Ctrl+Z` / `Ctrl+Y` deshacen y rehacen trazos completos. **Restaurar todo…** es un único paso deshacible. **Aplicar como nueva salida** añade una entrada llamada `<nombre> · Retocado N` y la selecciona; el original queda intacto. La nueva entrada se marca como *Sin exportar* hasta que la exportes desde la ventana principal, y OpenFocus la protege de la expulsión automática del historial y de cerrar sin tomar una decisión.
 
-Aplica el retoque como nueva salida y después haz clic derecho en esa salida en la ventana principal y elige **Exportar TIFF por capas** para guardarla con sus fotogramas de origen. Las etiquetas y barras de escala activas no se incluyen; los cambios de anotaciones sin guardar siguen protegidos. Se conservan la geometría de origen y las máscaras de validez. El resultado y las fuentes deben ser imágenes RGB o de escala de grises opacas con la misma profundidad de 8 o 16 bits, y cada rectángulo de origen debe caber dentro del resultado. La exportación admite hasta 128 fuentes; los nombres de origen se limitan a 255 caracteres y no pueden contener NUL ni caracteres fuera del Plano Básico Multilingüe, como muchos emoji. Rechaza contextos inseguros y trabajos que se estima necesitan más de 512 MiB de memoria de trabajo o superan el presupuesto de RAM disponible, e informa del fallo en lugar de escribir una exportación incompleta. GIMP 3.2.6 en Windows importa las capas de 8 y 16 bits, incluidos sus desplazamientos y el relleno transparente de registro. El resultado es visible y las capas de origen están ocultas; GIMP también añade una capa de fondo visible. Otros editores no se han probado.
+Aplica el retoque como nueva salida, selecciónala y abre **Guardar como**. Elige TIFF por capas en la lista de formatos para guardar el resultado con sus fotogramas de origen. Las etiquetas y barras de escala activas no se incluyen; los cambios de anotaciones sin guardar siguen protegidos. Se conservan la geometría de origen y las máscaras de validez. El resultado y las fuentes deben ser imágenes RGB o de escala de grises opacas con la misma profundidad de 8 o 16 bits, y cada rectángulo de origen debe caber dentro del resultado. La exportación admite hasta 128 fuentes; los nombres de origen se limitan a 255 caracteres y no pueden contener NUL ni caracteres fuera del Plano Básico Multilingüe, como muchos emoji. Rechaza contextos inseguros y trabajos que se estima necesitan más de 512 MiB de memoria de trabajo o superan el presupuesto de RAM disponible, e informa del fallo en lugar de escribir una exportación incompleta. GIMP 3.2.6 en Windows importa las capas de 8 y 16 bits, incluidos sus desplazamientos y el relleno transparente de registro. El resultado es visible y las capas de origen están ocultas; GIMP también añade una capa de fondo visible. Otros editores no se han probado.
 
 Para una corrección tonal local, selecciona **Pincel de exposición**, ajusta su cantidad en centésimas de paso (100 duplica los valores de píxel, -100 los reduce a la mitad) y pinta sobre el resultado. La vista previa se actualiza mientras pintas. Cada trazo ajusta el resultado actual una vez, incluso donde sus toques se solapan; otro trazo se acumula. Usa la opacidad y dureza del pincel para controlar la mezcla. Las luces pueden recortarse al aclarar. Mantén **Antes** para comparar con el resultado tal como se abrió, pulsa Escape durante un trazo para cancelarlo o usa deshacer y rehacer después. Son ediciones de píxeles, no capas ajustables. Aplica como nueva salida y exporta la nueva entrada para guardar los píxeles editados; un proyecto no almacena esos píxeles.
 
@@ -573,7 +577,7 @@ procesamiento puede reconstruir, ajustar y mezclar los píxeles del fondo.
    redondeado de una espina. También puede conservar objetos del fondo junto al
    sujeto tal como se apilaron, así que revisa el resultado.
 5. Pulsa **Sustituir fondo**. Una pila de 15 fotogramas de 20 megapíxeles tarda
-   alrededor de un minuto y necesita unos 2,5 GB de memoria libre. **Cancelar**
+   alrededor de un minuto y necesita unos 3,5 GB de memoria libre. **Cancelar**
    la detiene.
 
 El cambio es un solo paso que se puede deshacer, y los trazos pintados antes
@@ -582,12 +586,6 @@ los píxeles apilados donde los prefieras, por ejemplo una brizna de hierba
 desenfocada delante del sujeto. Si el sujeto ocupa casi todo el encuadre, como
 en una escena del suelo del bosque, la imagen queda tal como se apiló y aparece
 un aviso.
-
-Si abres el retoque sobre un resultado que ya se retocó, el fondo automático
-analiza el resultado apilado del que procede y coloca el nuevo fondo sobre tu
-imagen retocada. Los retoques con pincel sobre el sujeto se conservan y un fondo
-ya reemplazado nunca se vuelve a analizar, así que ejecutarlo dos veces no
-acumula halos.
 
 Tras una pasada, **Mostrar datos faltantes** colorea los lugares que ningún
 fotograma vio con claridad. Son los lugares que conviene revisar o retocar a
@@ -601,8 +599,8 @@ mano:
 **Guardar mapa de datos faltantes…** guarda la vista coloreada y una máscara en
 blanco y negro por color. El fondo automático necesita los fotogramas que
 produjeron el resultado y no está disponible para resultados de región (ROI).
-Los puntos de control de retoque guardan la elección y la vuelven a calcular al
-cargarlos.
+Los nuevos puntos de control de fondo restauran exactamente la imagen, el
+historial accesible y los diagnósticos sin volver a calcular el fondo.
 
 ### Gestión de etiquetas
 
@@ -695,7 +693,7 @@ El planificador considera los núcleos físicos, la afinidad y las cuotas de CPU
 
 ### Aceleración por GPU
 
-OpenFocus usa la GPU (CUDA/MPS) para los modelos neuronales de IA (StackMFF V1/V2/V3); los algoritmos clásicos y el registro de la aplicación se ejecutan en CPU. El registro de bajo nivel opcional con CuPy es un backend numérico separado.
+StackMFF V1/V2/V3 usan ONNX Runtime. DirectML en Windows y CoreML en macOS pueden acelerar la inferencia; de lo contrario se usa la CPU. La disponibilidad del proveedor no demuestra ejecución en GPU. El soporte de otras GPU requiere validación.
 
 - Actívala o desactívala en **Ajustes → Aceleración por GPU**
 - Al desmarcarla, los métodos neuronales se fuerzan a la CPU; resulta útil cuando los controladores de la GPU dan problemas
@@ -833,7 +831,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # inicia la aplicación d
 openfocus ctl <command> [flags]          # controla una ventana en ejecución (ver AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # reproduce una receta guardada sin interfaz
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` se inicia en segundo plano; `--control` espera el canal de control e imprime su JSON de conexión. `openfocus describe` y `version` no necesitan entrada. El flujo de trabajo para agentes está documentado en [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) y `skills/openfocus-control/SKILL.md`.
@@ -904,12 +902,6 @@ Por ejemplo, añade `--align openfocus --alignment-report alignment.json` a un r
 | `--scale-um` | Tamaño de píxel en µm/px, que anula los metadatos (implica `--scale-bar`) |
 | `--depth-map [path]` | Guarda además un mapa de posición de enfoque coloreado (predeterminado `<output>_depth.png`); solo métodos con capacidad de profundidad, no agrupados ni transparentes. En modo por lotes solo se permite la ruta predeterminada |
 | `--depth-colormap` | Mapa de color para `--depth-map`: turbo, viridis, jet, gray, … (turbo por defecto) |
-| `--auto-background [preset]` | Sustituye el fondo apilado por el de un fotograma alineado, como Fondo automático en el retoque: `auto` (predeterminado), `soft` (fondo más desenfocado) o `sharp` (fotograma enfocado más lejos). Necesita los fotogramas alineados, así que no funciona con la fusión por grupos |
-| `--background-mode` | Fondo automático: `clean` (predeterminado) también elimina los halos de borde del apilado, dentro de lo que registraron los fotogramas; `faithful` los conserva |
-| `--keep-soft-parts` | Fondo automático: conserva las partes suaves unidas al sujeto que algún fotograma enfocó |
-| `--save-stacked [path]` | Con `--auto-background`, guarda también el resultado antes de la sustitución (predeterminado `<output>_stacked<ext>`). En modo por lotes solo se admite la ruta predeterminada |
-| `--missing-data-map [path]` | Con `--auto-background`, guarda también el mapa de datos faltantes y una máscara de 8 bits por clase (predeterminado `<output>_missing.png`). En modo por lotes solo se admite la ruta predeterminada |
-| `--frame-order` | Carpeta de entrada: `auto` (predeterminado) ordena los fotogramas de cerca a lejos según los pasos de enfoque EXIF cuando todos los tienen (el bracketing de enfoque de OM SYSTEM empieza a media profundidad); si no, por nombre; `name` siempre por nombre de archivo. Los archivos indicados explícitamente conservan su orden |
 | `--json FILE` | Escribe un resumen de resultado legible por máquina en FILE al terminar |
 | `--json-progress` | Imprime un objeto JSON de progreso por paso en stdout (NDJSON); la prosa va a stderr |
 | `--dry-run` | Valida las entradas e imprime el plan sin fusionar |
@@ -952,21 +944,19 @@ exit_code = run_recipe("workflow.json", dry_run=True)  # usa False para procesar
 
 ### Reproducir un punto de control de retoque
 
-La primera vez que se guarda o carga se verifican la base y las fuentes procesadas en una operación en segundo plano cancelable. Al guardar también se reproducen las ediciones registradas y se comprueban la imagen actual y el estado de deshacer/rehacer antes de publicar el punto de control. Si una fuente ha cambiado y la reproducción ya no coincide, el guardado falla y conserva tus ediciones. Cancelar un guardado o una carga también conserva tus ediciones actuales. Si la memoria no basta para la verificación o la reproducción, la operación se detiene y deja intactas tanto tus ediciones actuales como cualquier punto de control existente.
+Usa los controles de guardar/cargar puntos de control del espacio de retoque con la base original y las fuentes procesadas. Las sesiones con fondo automático, incluidos los análisis correctos sin cambios de píxeles, guardan instantáneas ZIP v2 `.ofretouch` sin pérdidas con metadatos JSON y datos NumPy: la imagen de trabajo exacta, los mosaicos accesibles de deshacer/rehacer, los estados de diagnóstico y la procedencia de las fuentes. Cargar v2 no vuelve a calcular el fondo. Las sesiones solo de pincel/tonos pueden usar JSON v1 compacto; los puntos de control de fondo antiguos en JSON v1 siguen siendo reproducibles.
+
+La verificación de fuentes se ejecuta en segundo plano y se puede cancelar. Antes de sustituir el destino, el guardado vuelve a cargar el archivo preparado y comprueba la igualdad exacta de la imagen actual, los mosaicos accesibles de deshacer/rehacer y los estados de diagnóstico. Una fuente incompatible, una verificación fallida, la cancelación o la falta de memoria dejan intactos las ediciones actuales y cualquier punto de control existente.
 
 Si el límite de registro del punto de control impide otra edición, aplica las ediciones actuales y comienza una nueva sesión de retoque para continuar.
 
 Guarda un punto de control de retoque desde el espacio de retoque y después proporciona la imagen base original y cada fotograma de origen procesado en el mismo orden que la sesión:
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Usa los fotogramas reales empleados para el retoque, tras la alineación y cualquier recorte de ROI u otro procesamiento, con sus valores de píxel y profundidad de bits originales. El punto de control registra ediciones y huellas, no los píxeles de imagen. La reproducción reconstruye los desplazamientos de fotograma y el comportamiento de alineación registrados y verifica la base, los fotogramas ordenados y las máscaras de validez; se rechazan píxeles, geometría o máscaras incompatibles. Cada ruta debe contener una imagen. La salida debe ser PNG o TIFF y conserva la profundidad de bits de la base. El punto de control y las imágenes de entrada no pueden usarse como salida.
-
-Si el punto de control contiene un paso de fondo automático hecho sobre un
-resultado ya retocado, indica también el resultado apilado de origen con
-`--stacked stacked.png`.
+Ambos formatos siguen necesitando la base original y todos los fotogramas realmente usados para el retoque, en el orden de la sesión, tras la alineación y cualquier recorte de ROI u otro procesamiento, con sus valores de píxel y profundidad de bits originales. La carga reconstruye los desplazamientos de fotograma y el comportamiento de alineación registrados y verifica la base, los fotogramas ordenados y las máscaras de validez; se rechazan píxeles, geometría o máscaras incompatibles. Cada ruta debe contener una imagen. La salida debe ser PNG o TIFF y conserva la profundidad de bits de la base. El punto de control y las imágenes de entrada no pueden usarse como salida.
 
 Códigos de salida: `0` éxito, `1` error de procesamiento, `2` error de uso. Ejecutar `python main.py --help` muestra todas las opciones; iniciar con una ruta simple (`python main.py C:\stack`) sigue abriendo la interfaz con esa carpeta cargada.
 
@@ -1030,8 +1020,7 @@ Códigos de salida: `0` éxito, `1` error de procesamiento, `2` error de uso. Ej
 
 #### IA no disponible
 
-- Instala PyTorch: `pip install torch` (no se usa torchvision)
-- Para compatibilidad con GPU, instala la versión de PyTorch con CUDA
+- Comprueba ONNX Runtime y el modelo incluido.
 - Compruébalo en **Ayuda → Información del entorno**
 
 #### Errores de memoria insuficiente

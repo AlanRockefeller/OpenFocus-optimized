@@ -13,13 +13,32 @@ from __future__ import annotations
 from collections import OrderedDict
 import dataclasses
 import threading
-import weakref
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 
 from core.render_context import RenderContext, SourceFrame
+
+
+def prepare_retouch_document(base_image, context):
+    """Resolve captured sources sequentially on a worker into disk storage."""
+    from dataclasses import replace
+    from core.source_frames import materialize_frames, resolve_frame
+    from core.frame_storage import store_frame
+    originals = materialize_frames(frame.image for frame in context.frames)
+    context = replace(context, frames=tuple(
+        replace(frame, image=image) for frame, image in zip(context.frames, originals)))
+    document = RetouchDocument(resolve_frame(base_image), context)
+    document.source_previews = []
+    for frame in document.frames:
+        image = frame.image
+        h, w = image.shape[:2]
+        scale = min(1.0, 1024 / max(h, w))
+        document.source_previews.append(store_frame(cv2.resize(
+            image, (max(1, round(w * scale)), max(1, round(h * scale))),
+            interpolation=cv2.INTER_AREA)))
+    return document
 
 TILE = 128  # undo granularity (pixels)
 DEFAULT_MAX_STROKES = 100
@@ -257,6 +276,7 @@ class TileHistory:
         self._redo: list[dict] = []
         self._current: Optional[dict] = None
         self._current_bytes = 0
+        self._reserved_bytes = 0  # document diagnostics share this hard budget
         self._dirty: set[tuple[int, int]] = set()
         self.evicted = False
 
@@ -289,7 +309,7 @@ class TileHistory:
         """Commit the open stroke, rolling back if it is too large or cancelled."""
         if self._current is None:
             return "idle"
-        if self._current_bytes > self.max_bytes:
+        if self._current_bytes + self._reserved_bytes > self.max_bytes:
             self.abort()
             return "oversize"
         if not self._current:
@@ -422,7 +442,7 @@ class TileHistory:
         # The budget covers both directions: undoing a stroke moves its tiles
         # into the redo stack, and that memory must not be ignored.
         while (len(self._undo) + len(self._redo) > self.max_strokes
-               or self._total_bytes() > self.max_bytes):
+               or self._total_bytes() + self._reserved_bytes > self.max_bytes):
             if self._undo:
                 self._undo.pop(0)
             elif self._redo:
@@ -432,89 +452,29 @@ class TileHistory:
             self.evicted = True
 
 
-# Cached auto-background results, newest last.  Saving a checkpoint replays
-# every operation to verify it; recomputing a background there would cost as
-# much as the original run, and a recomputation is not guaranteed to round
-# every pixel the same way (OpenCV threading), which would fail the exact
-# replay check.  One entry per run in the session, bounded by count and bytes
-# (the newest entry is always kept).  Weak frame references preserve the
-# identity check without making this cache the owner of a released stack.
-_AUTO_BG_CACHE: dict = {}
-_AUTO_BG_LOCK = threading.Lock()
-_AUTO_BG_CACHE_ENTRIES = 4
-_AUTO_BG_CACHE_BYTES = 2 << 30
-
-
-def clear_auto_background_cache():
-    """Release the cached results and masks at the end of a retouch session."""
-    with _AUTO_BG_LOCK:
-        _AUTO_BG_CACHE.clear()
-
-
-def _auto_background_bytes(result) -> int:
-    total = result.image.nbytes if result.image is not None else 0
-    return total + sum(layer.nbytes for _name, layer, _colour in result.missing.layers())
-
-
-def _auto_background_key(image, frames, preset, clean, keep_soft_parts=False, stacked=None):
-    import hashlib
-
-    def digest_of(array):
-        digest = hashlib.sha256()
-        for row in array:
-            digest.update(memoryview(np.ascontiguousarray(row)).cast("B"))
-        return digest.hexdigest()
-
-    return (digest_of(image), image.shape, image.dtype.str, str(preset), bool(clean),
-            bool(keep_soft_parts), None if stacked is None else digest_of(stacked)), \
-        tuple(frame.image for frame in frames)
-
-
 def compute_auto_background(image, frames, preset="auto", clean=True,
-                            cancelled=None, progress=None, keep_soft_parts=False,
-                            stacked=None):
+                            cancelled=None, progress=None, keep_soft_parts=False):
     """Run `core.background_fill.replace_background` on a retouch image.
 
-    With `stacked` (the stacked result `image` was retouched from), the
-    background is analysed from `stacked` and laid onto `image`, so edits
-    on the subject survive and an earlier replacement is not analysed
-    again.  Admits the working set with the resource policy and serializes
-    with other heavy jobs.  Returns a `BackgroundFillResult`."""
-    from core.background_fill import (_release_free_memory, replace_background,
-                                      working_set_bytes)
+    Admits the working set with the resource policy and serializes with
+    other heavy jobs.  Returns a `BackgroundFillResult`."""
+    from core.background_fill import replace_background, background_working_set_bytes
     from core.resource_policy import heavy_job, require_memory
-    key, arrays = _auto_background_key(image, frames, preset, clean, keep_soft_parts, stacked)
-    with _AUTO_BG_LOCK:
-        entries = _AUTO_BG_CACHE.setdefault("entries", [])
-        for index, (cached_key, references, result) in enumerate(entries):
-            if cached_key == key and len(references) == len(arrays) and all(
-                    reference() is array for reference, array in zip(references, arrays)):
-                entries.append(entries.pop(index))          # most recently used last
-                return result
     h, w = image.shape[:2]
-    valid_masks = [frame.valid_mask() for frame in frames]
-    required = working_set_bytes(arrays, h, w) + sum(
-        mask.nbytes for mask in valid_masks if mask is not None)
+    # Alignment masks are built sequentially: retain at most one byte/pixel
+    # per aligned frame, plus the connected-component construction scratch.
+    aligned = [frame for frame in frames if frame.aligned]
+    mask_bytes = sum(frame.image.shape[0] * frame.image.shape[1] for frame in aligned)
+    mask_scratch = max((frame.image.shape[0] * frame.image.shape[1] * 16
+                        for frame in aligned), default=0)
+    required = background_working_set_bytes(h, w, len(frames)) + mask_bytes + mask_scratch
     with heavy_job(cancelled):
         require_memory(required)
-        try:
-            result = replace_background([frame.image for frame in frames],
-                                        image if stacked is None else stacked, preset=preset,
-                                        valid_masks=valid_masks,
-                                        composite_onto=None if stacked is None else image,
-                                        clean=clean, keep_soft_parts=keep_soft_parts,
-                                        progress=progress, cancelled=cancelled)
-        finally:
-            # Hand the run's freed scratch back to the OS, so the next run
-            # (or anything else on the machine) can use it.
-            _release_free_memory()
-    with _AUTO_BG_LOCK:
-        entries = _AUTO_BG_CACHE.setdefault("entries", [])
-        entries.append((key, tuple(weakref.ref(array) for array in arrays), result))
-        total = sum(_auto_background_bytes(entry[2]) for entry in entries)
-        while len(entries) > 1 and (len(entries) > _AUTO_BG_CACHE_ENTRIES
-                                    or total > _AUTO_BG_CACHE_BYTES):
-            total -= _auto_background_bytes(entries.pop(0)[2])
+        valid_masks = [frame.valid_mask() for frame in frames]
+        result = replace_background([frame.image for frame in frames], image, preset=preset,
+                                    valid_masks=valid_masks,
+                                    clean=clean, keep_soft_parts=keep_soft_parts,
+                                    progress=progress, cancelled=cancelled)
     return result
 
 
@@ -558,13 +518,15 @@ class RetouchDocument:
         self._point_count = 0
         self._record_overflow = False
         self.last_status = ""
-        # Missing-data maps per committed auto_background operation index.
+        # Diagnostic results belong to image states, including successful
+        # analyses that changed no pixels. No-op parameters make those states
+        # replayable without adding an undo entry or changing dirty pixels.
         self._background_fills = {}
-        # The stacked result this image was retouched from, when the session
-        # starts on an already retouched output: Auto background analyses it
-        # instead of a background that may already have been replaced.
-        self.stacked_image = None
-        self._stacked_fingerprint = None
+        self._background_analyses = {}
+        # Set only while migrating a tile-only JSON v1 checkpoint. Replay
+        # retains its final reachable diagnostics without charging old edits
+        # a budget that their original recording did not include.
+        self._checkpoint_background_states = None
 
     @property
     def checkpoint_ready(self):
@@ -688,19 +650,25 @@ class RetouchDocument:
             return "record_limit"
         if not self.auto_background_supported():
             return "unsupported"
-        if self.working.nbytes > self.history.max_bytes:
-            return "oversize"
-        stacked = self.stacked_image
-        if stacked is not None and stacked.shape != self.working.shape:
-            stacked = None
         try:
             result = compute_auto_background(self.working, self.frames, preset, clean,
                                              cancelled=cancelled, progress=progress,
-                                             keep_soft_parts=keep_soft_parts,
-                                             stacked=stacked)
+                                             keep_soft_parts=keep_soft_parts)
         except (BackgroundFillCancelled, RegistrationCancelled):
             return "cancelled"
         image = result.image
+        map_bytes = sum(layer.nbytes for _, layer, _ in result.missing.layers())
+        changed = not np.array_equal(image, self.working)
+        before = self.background_fill if changed else (
+            self._background_fill_at(self._cursor - 1) if self.can_undo else None)
+        required_maps = map_bytes + self._background_map_bytes(before)
+        if self._checkpoint_background_states is not None:
+            required_maps = 0
+        minimum_entry = (self.history._entry_bytes(self.history._undo[-1])
+                         if not changed and self.can_undo else 0)
+        if required_maps + minimum_entry > self.history.max_bytes:
+            return "oversize"
+        self.history._reserved_bytes = required_maps
         self.history.begin()
         try:
             for key in self.history._tile_keys(0, 0, self.width, self.height):
@@ -711,36 +679,34 @@ class RetouchDocument:
                 tile = self.working[sl]
                 new = image[sl]
                 if not np.array_equal(tile, new):
+                    if (self.history._current_bytes + tile.nbytes + required_maps
+                            > self.history.max_bytes):
+                        self.history.abort()
+                        return "oversize"
                     self.history.remember_tile(key)
                     tile[...] = new
             if cancelled is not None and cancelled():
                 self.history.abort()
                 return "cancelled"
             status = self.history.end(cancelled=cancelled)
-            if status == "committed":
+            if status in ("committed", "empty"):
                 operation = {"type": "auto_background", "preset": str(preset),
                              "clean": bool(clean)}
                 if keep_soft_parts:
                     operation["keep_soft_parts"] = True
-                if stacked is not None:
-                    operation["stacked"] = self.stacked_fingerprint()
-                self._record_operation(operation)
-                # The maps describe this step's result; the image itself is
-                # in the history, so it is not kept a second time here.
-                self._background_fills[self._cursor - 1] = dataclasses.replace(result, image=None)
+                if status == "committed":
+                    self._record_operation(operation)
+                else:
+                    self._background_analyses[self._cursor] = operation
+                self._background_fills[self._cursor] = dataclasses.replace(result, image=None)
+                self._enforce_background_budget()
             return status
         except BaseException:
             self.history.abort()
             raise
-
-    def stacked_fingerprint(self):
-        """Checkpoint fingerprint of `stacked_image` (computed once)."""
-        if self.stacked_image is None:
-            return None
-        if self._stacked_fingerprint is None:
-            from utils.retouch_checkpoint import _fingerprint
-            self._stacked_fingerprint = _fingerprint(self.stacked_image)
-        return self._stacked_fingerprint
+        finally:
+            self.history._reserved_bytes = (0 if self._checkpoint_background_states is not None
+                                            else self._background_map_bytes(self.background_fill))
 
     # ---------------------------------------------------------- choices
     def set_frame(self, index: int) -> bool:
@@ -928,32 +894,80 @@ class RetouchDocument:
 
     @property
     def background_fill(self):
-        """The auto-background result behind the current image, or None.
+        """Diagnostics at the current reachable image state, including no-ops."""
+        return self._background_fill_at(self._cursor)
 
-        Follows undo/redo: the latest auto_background step at or before the
-        history cursor, unless a later Restore all returned to the base."""
-        earlier = [index for index in self._background_fills if index < self._cursor]
+    def _background_fill_at(self, cursor):
+        earlier = [state for state in self._background_fills if state <= cursor]
         if not earlier:
             return None
-        index = max(earlier)
-        if any(op.get("type") == "restore_all" for op in self._operations[index + 1:self._cursor]):
+        state = max(earlier)
+        if any(op.get("type") == "restore_all" for op in self._operations[state:cursor]):
             return None
-        return self._background_fills[index]
+        return self._background_fills[state]
 
     def _drop_operations_from(self, start):
         self._point_count -= sum(len(op.get("points", ())) for op in self._operations[start:])
         del self._operations[start:]
-        for index in [index for index in self._background_fills if index >= start]:
-            del self._background_fills[index]
+        for states in (self._background_fills, self._background_analyses):
+            for state in [state for state in states if state > start]:
+                del states[state]
 
     def _trim_redo(self):
         self._drop_operations_from(self._cursor + len(self.history._redo))
+        self._enforce_background_budget()
+
+    def _prune_background_fills(self):
+        # Every undo/redo state can need diagnostics, as can the baseline
+        # immediately before the oldest reachable edit. Older full-size maps
+        # cannot be reached and must not accumulate after history eviction.
+        if self._checkpoint_background_states is not None:
+            for states in (self._background_fills, self._background_analyses):
+                for state in list(states):
+                    if state not in self._checkpoint_background_states:
+                        del states[state]
+            return
+        first = self._cursor - len(self.history._undo)
+        last = self._cursor + len(self.history._redo)
+        older = [state for state in self._background_fills if state <= first]
+        baseline = max(older) if older else None
+        if baseline is not None and any(op.get("type") == "restore_all"
+                                        for op in self._operations[baseline:first]):
+            baseline = None
+        for states in (self._background_fills, self._background_analyses):
+            for state in list(states):
+                if not first <= state <= last and state != baseline:
+                    del states[state]
+
+    @staticmethod
+    def _background_map_bytes(fill):
+        return 0 if fill is None else sum(layer.nbytes for _, layer, _ in fill.missing.layers())
+
+    def _enforce_background_budget(self):
+        self._prune_background_fills()
+        if self._checkpoint_background_states is not None:
+            self.history._reserved_bytes = 0
+            return
+        while (self.history._total_bytes() + sum(self._background_map_bytes(fill)
+                                                for fill in self._background_fills.values())
+               > self.history.max_bytes):
+            if self.history._undo:
+                self.history._undo.pop(0)
+            elif self.history._redo:
+                self.history._redo.pop(0)
+                self._drop_operations_from(self._cursor + len(self.history._redo))
+            else:
+                raise RuntimeError("Background diagnostics exceed the history budget")
+            self.history.evicted = True
+            self._prune_background_fills()
+        self.history._reserved_bytes = self._background_map_bytes(self.background_fill)
 
     def _record_operation(self, operation):
         self._drop_operations_from(self._cursor)
         self._operations.append(operation)
         self._cursor += 1
         self._point_count += len(operation.get("points", ()))
+        self._enforce_background_budget()
 
     def save_checkpoint(self, path, cancelled=None):
         from utils.retouch_checkpoint import save_checkpoint

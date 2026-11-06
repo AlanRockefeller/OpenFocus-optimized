@@ -18,10 +18,9 @@ _FIELDS = (
     "threads", "resource_preference", "batch_size", "cpu", "downscale",
     "tile_size", "tile_enabled", "tile_overlap", "tile_threshold",
     "scale_bar", "scale_um", "depth_map", "depth_colormap", "sharpen_output",
-    "group_size", "group_overlap", "frame_order",
-    "auto_background", "background_mode", "keep_soft_parts", "save_stacked", "missing_data_map",
+    "group_size", "group_overlap",
 )
-_PATH_FIELDS = {"dust_map", "depth_map", "defect_mask_path", "save_stacked", "missing_data_map"}
+_PATH_FIELDS = {"dust_map", "depth_map", "defect_mask_path"}
 _INTEGER_LIMITS = {"threads": 0, "batch_size": 1, "downscale": 1, "tile_size": 64,
                    "tile_overlap": 0, "tile_threshold": 1,
                    "group_size": 0, "group_overlap": 0}
@@ -119,10 +118,7 @@ def validate_recipe(recipe, recipe_path):
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("scale_um must be a positive finite number")
-        elif key == "auto_background" and value is None:
-            continue
-        elif key in ("cpu", "scale_bar", "exposure_match", "tile_enabled", "sharpen_output",
-                     "sensor_denoise", "keep_soft_parts"):
+        elif key in ("cpu", "scale_bar", "exposure_match", "tile_enabled", "sharpen_output", "sensor_denoise"):
             if type(value) is not bool:
                 raise ValueError(f"{key} must be boolean")
             if key in ("exposure_match", "tile_enabled"):
@@ -131,15 +127,15 @@ def validate_recipe(recipe, recipe_path):
             elif value:
                 argv.append("--" + key.replace("_", "-"))
             continue
-        elif key in ("depth_map", "save_stacked", "missing_data_map"):
+        elif key == "depth_map":
             if value is None or value is False:
                 continue
             if value is True:
-                argv.append("--" + key.replace("_", "-"))
+                argv.append("--depth-map")
                 continue
             value = _relative(value, base)
             if output_key == "output_dir":
-                raise ValueError(f"explicit {key} path cannot be used with output_dir")
+                raise ValueError("explicit depth_map path cannot be used with output_dir")
         elif key in ("dust_map", "defect_mask_path"):
             if value is None:
                 continue

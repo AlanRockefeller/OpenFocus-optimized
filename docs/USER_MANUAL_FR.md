@@ -60,6 +60,8 @@ Par exemple, l'équivalent en CLI est `python main.py --input ./png-stack --outp
 
 ### Formats de sortie pris en charge
 
+Dans **Enregistrer sous**, le TIFF ordinaire enregistre le résultat comme une seule image ; le TIFF multicouche inclut les images sources comme calques. Linear DNG est toujours affiché, mais son enregistrement exige un résultat linéaire appareil sans modifications incorporées, issu de **Ouvrir un RAW natif** et doté de la calibration de l’appareil.
+
 - Images individuelles : JPG, PNG, BMP, TIFF, WebP
 - Séquences d'images : enregistrées sous forme de dossiers
 - Animations : format GIF
@@ -404,30 +406,32 @@ OpenFocus propose dix algorithmes de fusion (plus un mode alignement seul). Un p
 
 ### StackMFF (V1, apprentissage profond)
 
-- **Algorithme** : un U-Net 3D qui prédit la luminance fusionnée de toute la pile en une passe ; Cb/Cr proviennent de l'image source la plus proche de cette luminance
+- **Algorithme** : un réseau d'attention à une seule échelle mélange la luminance des sources avec des poids softmax ; Cb/Cr proviennent de l'image source dont la luminance est la plus proche de la luminance fusionnée
 - **Idéal pour** : fusion neuronale d'une pile de mise au point complète
-- **Avantages** : sans paramètres, couleurs dans la gamme ; l'ordre des images peut modifier le résultat
-- **Remarque** : 6 M de paramètres ; les grandes piles gagnent à utiliser le GPU
+- **Avantages** : sans paramètres, couleurs dans la gamme ; la luminance fusionnée est indépendante de l'ordre des images, mais la chrominance peut varier en cas d'égalité des écarts de luminance
+- **Remarque** : environ 156 172 paramètres ; les grandes piles gagnent à utiliser le GPU
 
 ### StackMFF V2 (apprentissage profond)
 
-- **Algorithme** : estimation de netteté par couche affinée par une couche récurrente bidirectionnelle ; le réseau régresse l'indice de plan focal et échantillonne la pile. **Les images doivent conserver leur ordre de mise au point d'origine** — l'inversion est désactivée pour cette méthode
+- **Algorithme** : un réseau d'attention à une seule échelle normalise la profondeur de mise au point attendue et échantillonne l'image source la plus proche. Les indices de profondeur dépendent de l'ordre de la pile. **Les images doivent conserver leur ordre de mise au point d'origine** — l'inversion est désactivée pour cette méthode
 - **Cartes de profondeur** : prises en charge ; indique la couche focale échantillonnée
 - **Idéal pour** : balayages de mise au point continus où un modèle très petit et rapide compte
-- **Prérequis** : PyTorch ; environ 0,05 M de paramètres ; aucun réglage
+- **Prérequis** : ONNX Runtime et le modèle ONNX fourni.
 
 ### StackMFF V3 (apprentissage profond)
 
 C'est la méthode présélectionnée dans une nouvelle installation.
 
-- **Algorithme** : classification de la source pixel par pixel (nécessite PyTorch). Le réseau prédit, pour chaque pixel, l'image d'entrée dont il provient, puis mélange les images selon ces probabilités ou en choisit une
+- **Algorithme** : classification de la source pixel par pixel (ONNX Runtime). Le réseau prédit, pour chaque pixel, l'image d'entrée dont il provient, puis mélange les images selon ces probabilités ou en choisit une
 - **Mode de sortie IA** (panneau droit, uniquement pour cette méthode) :
   - **Mélange doux (pondéré)** — par défaut ; chaque pixel est un mélange des images pondéré par les probabilités. Transitions douces, sans coutures dures ; correspond à la configuration publiée dans l'article
   - **Sélection stricte (image unique)** — chaque pixel est copié depuis l'image la plus probable. Sélection plus nette, sans interpolation entre images ; une couture au niveau du pixel peut apparaître là où deux images sont à égalité
 - **Idéal pour** : qualité maximale lorsqu'un GPU est disponible
-- **Avantages** : invariant à l'ordre (l'ordre des images ne change jamais le résultat), gère toute longueur de pile, aucun réglage par méthode, optimisation automatique
-- **Prérequis** : PyTorch installé, GPU CUDA facultatif (sans torchvision)
-- **Remarque** : peut être indisponible si PyTorch n'est pas installé
+- **Avantages** : invariant à l'ordre (l'ordre des images ne change jamais le résultat), gère les piles selon les ressources disponibles, aucun réglage par méthode, optimisation automatique
+- **Prérequis** : ONNX Runtime et le modèle ONNX fourni.
+
+Chaque tuile neuronale utilise toutes les images. Les images et les données temporaires de recalage peuvent être stockées sur disque ; l’espace libre et la mémoire disponible limitent la pile. Le pavage spatial V2 est une approximation de l’inférence sur l’image entière.
+
 
 ### OpenFocus A / B / C
 
@@ -473,7 +477,7 @@ Sélectionnez **Alignement seul (sans fusion)** pour recaler la pile et ajouter 
 | DCT | Moyenne | Bonne | Textures |
 | DTCWT | Moyenne | Très bonne | Scènes complexes |
 | GFG-FGF | Rapide | Bonne | Régions nettes |
-| StackMFF (V1) | Lente (GPU) | Non évaluée ici | Fusion neuronale de la pile ; l'ordre peut influencer le résultat |
+| StackMFF (V1) | Lente (GPU) | Non évaluée ici | Luminance indépendante de l'ordre ; chrominance variable en cas d'égalité des écarts de luminance |
 | StackMFF V2 | Rapide (GPU) | Non évaluée ici | Balayages continus avec un modèle minuscule |
 | StackMFF V3 | Lente (GPU) | Excellente | Qualité maximale |
 | OpenFocus A | Dépend de la pile | Dépend de la pile | Sélection multi-échelles des pixels nets |
@@ -540,7 +544,7 @@ La fusion peut encore laisser un défaut local — un halo autour d'un contour t
 5. Maintenez `Tab` pour voir le résultat avant cette session et `Alt` pour jeter un œil à l'image source. La référence de netteté est facultative, ne couvre que le canevas source et utilise une échelle commune à toutes les images.
 6. `Ctrl+Z` / `Ctrl+Y` annulent et rétablissent des traits entiers. **Tout restaurer…** est une seule étape annulable. **Appliquer comme nouvelle sortie** ajoute une entrée nommée `<nom> · Retouché N` et la sélectionne ; l'original reste intact. La nouvelle entrée est marquée *Non exportée* jusqu'à son export depuis la fenêtre principale, et OpenFocus la protège de l'éviction automatique de l'historique et d'une fermeture sans décision.
 
-Appliquez la retouche comme nouvelle sortie, puis cliquez droit sur cette sortie dans la fenêtre principale et choisissez **Exporter un TIFF multicouche** pour l'enregistrer avec ses images sources. Les libellés et barres d'échelle actifs ne sont pas inclus ; les modifications d'annotation non enregistrées restent protégées. La géométrie source et les masques de validité sont conservés. Le résultat et les sources doivent être des images RVB ou en niveaux de gris opaques de même profondeur 8 ou 16 bits, et chaque rectangle source doit tenir dans le résultat. L'export prend en charge jusqu'à 128 sources ; les noms de source sont limités à 255 caractères et ne peuvent pas contenir de NUL ni de caractères hors du plan multilingue de base, comme beaucoup d'emoji. Il refuse les contextes dangereux et les tâches estimées à plus de 512 Mio de mémoire de travail ou dépassant le budget de RAM disponible, en signalant l'échec plutôt qu'en écrivant un export incomplet. GIMP 3.2.6 sous Windows importe les calques 8 et 16 bits, y compris leurs décalages et le remplissage transparent de recalage. Le résultat est visible et les calques sources masqués ; GIMP ajoute aussi un calque d'arrière-plan visible. Les autres éditeurs n'ont pas été testés.
+Appliquez la retouche comme nouvelle sortie, sélectionnez-la et ouvrez **Enregistrer sous**. Choisissez TIFF multicouche dans la liste des formats pour enregistrer le résultat avec ses images sources. Les libellés et barres d'échelle actifs ne sont pas inclus ; les modifications d'annotation non enregistrées restent protégées. La géométrie source et les masques de validité sont conservés. Le résultat et les sources doivent être des images RVB ou en niveaux de gris opaques de même profondeur 8 ou 16 bits, et chaque rectangle source doit tenir dans le résultat. L'export prend en charge jusqu'à 128 sources ; les noms de source sont limités à 255 caractères et ne peuvent pas contenir de NUL ni de caractères hors du plan multilingue de base, comme beaucoup d'emoji. Il refuse les contextes dangereux et les tâches estimées à plus de 512 Mio de mémoire de travail ou dépassant le budget de RAM disponible, en signalant l'échec plutôt qu'en écrivant un export incomplet. GIMP 3.2.6 sous Windows importe les calques 8 et 16 bits, y compris leurs décalages et le remplissage transparent de recalage. Le résultat est visible et les calques sources masqués ; GIMP ajoute aussi un calque d'arrière-plan visible. Les autres éditeurs n'ont pas été testés.
 
 Pour une correction tonale locale, sélectionnez **Pinceau d'exposition**, réglez sa valeur en centièmes de diaphragme (100 double les valeurs de pixel, -100 les divise par deux) et peignez sur le résultat. L'aperçu se met à jour pendant la peinture. Chaque trait ajuste le résultat courant une fois, même là où ses touches se chevauchent ; un autre trait s'y ajoute. Utilisez l'opacité et la dureté du pinceau pour contrôler le mélange. Les hautes lumières peuvent être écrêtées en éclaircissant. Maintenez **Avant** pour comparer avec le résultat tel qu'ouvert, appuyez sur Échap pendant un trait pour l'annuler, ou utilisez annuler/rétablir après le trait. Ce sont des modifications de pixels, pas des calques réglables. Appliquez comme nouvelle sortie et exportez la nouvelle entrée pour enregistrer les pixels modifiés ; un projet ne stocke pas ces pixels.
 
@@ -576,7 +580,7 @@ reconstruire, ajuster et mélanger ses pixels.
    d'une épine. Des objets d'arrière-plan voisins du sujet peuvent aussi rester
    tels qu'empilés, vérifiez donc le résultat.
 5. Cliquez sur **Remplacer l'arrière-plan**. Une pile de 15 images de
-   20 mégapixels prend environ une minute et demande environ 2,5 Go de mémoire
+   20 mégapixels prend environ une minute et demande environ 3,5 Go de mémoire
    libre. **Annuler** l'arrête.
 
 La modification est une seule étape annulable, et les traits déjà peints sur le
@@ -584,12 +588,6 @@ sujet sont conservés. Utilisez le **Pinceau de restauration** pour retrouver le
 pixels empilés là où vous les préférez, par exemple un brin d'herbe flou devant
 le sujet. Si le sujet remplit presque toute l'image, comme une scène de sol
 forestier, l'image reste telle qu'empilée et une note l'indique.
-
-Si vous ouvrez la retouche sur un résultat déjà retouché, l'arrière-plan
-automatique analyse le résultat empilé dont il provient et pose le nouvel
-arrière-plan sur votre image retouchée. Les retouches au pinceau sur le sujet
-sont conservées, et un arrière-plan déjà remplacé n'est jamais réanalysé : un
-second passage n'accumule donc pas de halos.
 
 Après un passage, **Afficher les données manquantes** colore les endroits
 qu'aucune image n'a vus nettement. Ce sont les endroits à vérifier ou à
@@ -603,8 +601,8 @@ retoucher à la main :
 **Enregistrer la carte des données manquantes…** écrit l'aperçu coloré et un
 masque noir et blanc par couleur. L'arrière-plan automatique a besoin des images
 qui ont produit le résultat et n'est pas disponible pour les résultats de zone
-(ROI). Les points de contrôle de retouche enregistrent le choix et le
-recalculent au chargement.
+(ROI). Les nouveaux points de contrôle de fond restaurent exactement l'image,
+l'historique accessible et les diagnostics sans recalculer l'arrière-plan.
 
 ### Gestion des libellés
 
@@ -697,7 +695,7 @@ Le planificateur tient compte des cœurs physiques, de l'affinité et des quotas
 
 ### Accélération GPU
 
-OpenFocus utilise le GPU (CUDA/MPS) pour les modèles neuronaux IA (StackMFF V1/V2/V3) ; les algorithmes classiques et le recalage de l'application s'exécutent sur CPU. Le recalage bas niveau facultatif avec CuPy est un backend numérique distinct.
+StackMFF V1/V2/V3 utilisent ONNX Runtime. DirectML sous Windows et CoreML sous macOS peuvent accélérer l’inférence ; sinon le CPU est utilisé. La disponibilité du fournisseur ne prouve pas une exécution sur GPU. La prise en charge d’autres GPU reste à valider.
 
 - Basculez via **Paramètres → Accélération GPU**
 - La décocher force les méthodes neuronales sur le CPU — utile lorsque les pilotes GPU posent problème
@@ -835,7 +833,7 @@ openfocus gui [--control] [--socket NAME] [paths…]   # démarre l'application 
 openfocus ctl <command> [flags]          # pilote une fenêtre en cours (voir AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
 openfocus recipe run FILE [--dry-run]    # rejoue une recette headless enregistrée
-openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT [--stacked STACKED]
+openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
 `openfocus gui` démarre en arrière-plan ; `--control` attend le canal de contrôle et imprime son JSON de connexion. `openfocus describe` et `version` ne nécessitent aucune entrée. Le workflow destiné aux agents est documenté dans [AGENT_CONTROL_SPEC.md](./AGENT_CONTROL_SPEC.md) et `skills/openfocus-control/SKILL.md`.
@@ -906,12 +904,6 @@ Par exemple, ajoutez `--align openfocus --alignment-report alignment.json` à un
 | `--scale-um` | Taille de pixel en µm/px, prioritaire sur les métadonnées (implique `--scale-bar`) |
 | `--depth-map [path]` | Enregistre aussi une carte de position de mise au point colorisée (défaut `<output>_depth.png`) ; méthodes compatibles avec la profondeur uniquement, ni groupées ni transparentes. En mode lot, seul le chemin par défaut est autorisé |
 | `--depth-colormap` | Palette pour `--depth-map` : turbo, viridis, jet, gray, … (turbo par défaut) |
-| `--auto-background [preset]` | Remplace l'arrière-plan empilé par celui d'une image alignée, comme Arrière-plan auto dans la retouche : `auto` (défaut), `soft` (arrière-plan le plus flou) ou `sharp` (image mise au point au plus loin). Nécessite les images alignées, donc pas avec la fusion par groupes |
-| `--background-mode` | Arrière-plan auto : `clean` (défaut) supprime aussi les halos de bord de l'empilement, dans la limite de ce que les images ont enregistré ; `faithful` les conserve |
-| `--keep-soft-parts` | Arrière-plan auto : conserve les parties floues rattachées au sujet sur lesquelles une image a fait la mise au point |
-| `--save-stacked [path]` | Avec `--auto-background`, enregistre aussi le résultat avant le remplacement (défaut `<output>_stacked<ext>`). En mode lot, seul le chemin par défaut est accepté |
-| `--missing-data-map [path]` | Avec `--auto-background`, enregistre aussi la carte des données manquantes et un masque 8 bits par classe (défaut `<output>_missing.png`). En mode lot, seul le chemin par défaut est accepté |
-| `--frame-order` | Dossier en entrée : `auto` (défaut) ordonne les images du plus proche au plus lointain selon les pas de mise au point EXIF quand toutes les images en ont (le bracketing de mise au point OM SYSTEM commence à mi-profondeur), sinon par nom ; `name` trie toujours par nom de fichier. Les fichiers listés explicitement gardent leur ordre |
 | `--json FILE` | Écrit un résumé de résultat lisible par machine dans FILE à la fin |
 | `--json-progress` | Imprime un objet JSON de progression par étape sur stdout (NDJSON) ; la prose va sur stderr |
 | `--dry-run` | Valide les entrées et imprime le plan sans fusionner |
@@ -954,21 +946,19 @@ exit_code = run_recipe("workflow.json", dry_run=True)  # utilisez False pour tra
 
 ### Rejouer un point de contrôle de retouche
 
-Le premier enregistrement ou chargement vérifie la base et les sources traitées dans une opération d'arrière-plan annulable. L'enregistrement rejoue aussi les modifications consignées et vérifie l'image actuelle et l'état annuler/rétablir avant de publier le point de contrôle. Si une source a changé et que le rejeu ne correspond plus, l'enregistrement échoue et conserve vos modifications. Annuler un enregistrement ou un chargement conserve aussi vos modifications actuelles. Si la mémoire est insuffisante pour la vérification ou le rejeu, l'opération s'arrête et laisse inchangés vos modifications actuelles et tout point de contrôle existant.
+Utilisez les commandes d'enregistrement et de chargement des points de contrôle de l'espace de retouche avec la base d'origine et les sources traitées. Les sessions avec arrière-plan automatique, y compris les analyses réussies sans changement de pixels, enregistrent des instantanés ZIP v2 `.ofretouch` sans perte avec métadonnées JSON et données NumPy : l'image de travail exacte, les tuiles accessibles d'annulation/rétablissement, les états de diagnostic et la provenance des sources. Le chargement v2 ne recalcule pas l'arrière-plan. Les sessions limitées au pinceau et aux tonalités peuvent utiliser le JSON v1 compact ; les anciens points de contrôle de fond en JSON v1 restent rejouables.
+
+La vérification des sources s'exécute en arrière-plan et peut être annulée. Avant de remplacer la destination, l'enregistrement recharge le fichier préparé et vérifie l'égalité exacte de l'image actuelle, des tuiles accessibles d'annulation/rétablissement et des états de diagnostic. Une source incompatible, un échec de vérification, une annulation ou un manque de mémoire laissent les modifications actuelles et tout point de contrôle existant inchangés.
 
 Si la limite d'enregistrement du point de contrôle empêche une nouvelle modification, appliquez les modifications en cours et démarrez une nouvelle session de retouche pour continuer.
 
 Enregistrez un point de contrôle de retouche depuis l'espace de retouche, puis fournissez l'image de base d'origine et chaque image source traitée dans le même ordre que la session :
 
 ```bash
-openfocus retouch replay edits.json --base fused.png --sources frame1.png frame2.png --output retouched.tif
+openfocus retouch replay edits.ofretouch --base fused.png --sources frame1.png frame2.png --output retouched.tif
 ```
 
-Utilisez les images réellement utilisées pour la retouche, après recalage et tout recadrage ROI ou autre traitement, avec leurs valeurs de pixel et profondeur de bits d'origine. Le point de contrôle consigne les modifications et les empreintes, pas les pixels. Le rejeu reconstruit les décalages d'image et le comportement d'alignement enregistrés et vérifie la base, les images ordonnées et les masques de validité ; les pixels, géométries ou masques incompatibles sont refusés. Chaque chemin doit contenir une image. La sortie doit être PNG ou TIFF et conserve la profondeur de bits de la base. Le point de contrôle et les images d'entrée ne peuvent pas servir de sortie.
-
-Si le point de contrôle contient une étape d'arrière-plan automatique lancée sur
-un résultat déjà retouché, indiquez aussi le résultat empilé d'origine avec
-`--stacked stacked.png`.
+Les deux formats nécessitent toujours la base d'origine et toutes les images réellement utilisées pour la retouche, dans l'ordre de la session, après recalage et tout recadrage ROI ou autre traitement, avec leurs valeurs de pixel et profondeur de bits d'origine. Le chargement reconstruit les décalages d'image et le comportement d'alignement enregistrés et vérifie la base, les images ordonnées et les masques de validité ; les pixels, géométries ou masques incompatibles sont refusés. Chaque chemin doit contenir une image. La sortie doit être PNG ou TIFF et conserve la profondeur de bits de la base. Le point de contrôle et les images d'entrée ne peuvent pas servir de sortie.
 
 Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisation. `python main.py --help` affiche toutes les options ; lancer avec un simple chemin (`python main.py C:\stack`) ouvre toujours l'interface avec ce dossier chargé.
 
@@ -1032,8 +1022,7 @@ Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisatio
 
 #### IA indisponible
 
-- Installez PyTorch : `pip install torch` (torchvision n'est pas utilisé)
-- Pour le GPU, installez la version CUDA de PyTorch
+- Vérifiez ONNX Runtime et le modèle fourni.
 - Vérifiez via **Aide → Informations sur l'environnement**
 
 #### Erreurs de mémoire insuffisante

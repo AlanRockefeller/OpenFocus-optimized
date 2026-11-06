@@ -60,7 +60,7 @@ def test_batch_excludes_and_applies_mask_before_processing(qapp, tmp_path, monke
         np.testing.assert_allclose(frame, 10001.0 / 257.0, rtol=1e-6)
 
 
-def test_render_admits_full_cleanup_stack_before_mask_or_copy(qapp, tmp_path, monkeypatch):
+def test_render_admits_full_cleanup_stack_before_mask_or_processing(qapp, tmp_path, monkeypatch):
     from core.workers import RenderWorker
     import utils.sensor_cleanup as sensor
     path, image = _inputs(tmp_path)
@@ -68,8 +68,8 @@ def test_render_admits_full_cleanup_stack_before_mask_or_copy(qapp, tmp_path, mo
     assert cv2.imwrite(str(source), image)
     frames = [image, image.copy()]
     seen = []
-    def reject(images, mask_path, denoise):
-        seen.append((list(images), mask_path, denoise))
+    def reject(images, mask_path, denoise, *, disk_backed=False):
+        seen.append((list(images), mask_path, denoise, disk_backed))
         raise MemoryError('cleanup budget')
     def unexpected(*args, **kwargs):
         pytest.fail('cleanup allocated before admission')
@@ -81,8 +81,11 @@ def test_render_admits_full_cleanup_stack_before_mask_or_copy(qapp, tmp_path, mo
     with pytest.raises(MemoryError, match='cleanup budget'):
         worker._run_admitted()
     assert len(seen) == 1
-    assert seen[0][0][0] is frames[0] and seen[0][0][1] is frames[1]
-    assert seen[0][1:] == (str(path), True)
+    assert len(seen[0][0]) == len(frames)
+    for admitted, original in zip(seen[0][0], frames):
+        assert admitted.shape == original.shape and admitted.dtype == original.dtype
+        np.testing.assert_array_equal(admitted, original)
+    assert seen[0][1:] == (str(path), True, True)
 
 
 def test_batch_admits_cleanup_before_mask_decode(qapp, tmp_path, monkeypatch):
@@ -94,8 +97,8 @@ def test_batch_admits_cleanup_before_mask_decode(qapp, tmp_path, monkeypatch):
     for index in range(2):
         assert cv2.imwrite(str(source / f'{index}.png'), image)
     admitted = []
-    def reject(images, mask_path, denoise):
-        admitted.append((len(images), mask_path, denoise))
+    def reject(images, mask_path, denoise, *, disk_backed=False):
+        admitted.append((len(images), mask_path, denoise, disk_backed))
         raise MemoryError('cleanup budget')
     def unexpected(*args, **kwargs):
         pytest.fail('mask decoded before admission')
@@ -107,17 +110,18 @@ def test_batch_admits_cleanup_before_mask_decode(qapp, tmp_path, monkeypatch):
     outcome = {}
     worker.finished.connect(outcome.update)
     worker.run()
-    assert admitted == [(2, str(path), True)]
+    assert admitted == [(2, str(path), True, True)]
     assert outcome['success'] == 0
 
 
-def _oriented_jpegs(folder):
+def _oriented_jpegs(folder, orientations=(1, 6), values=None):
     from PIL import Image
     folder.mkdir()
     paths = []
-    for index, orientation in enumerate((1, 6)):
+    for index, orientation in enumerate(orientations):
         path = folder / f'{index}.jpg'
-        image = Image.fromarray(np.full((16, 16, 3), 80 + index, dtype=np.uint8))
+        value = 80 + index if values is None else values[index]
+        image = Image.fromarray(np.full((16, 16, 3), value, dtype=np.uint8))
         exif = image.getexif()
         exif[274] = orientation
         image.save(path, exif=exif)
@@ -147,17 +151,29 @@ def test_gui_render_passes_included_sources_and_reports_orientation(qapp, tmp_pa
     assert errors == [trans.t('sensor_source_orientation').format(path=paths[1])]
 
 
-def test_gui_render_passes_only_included_source_paths(qapp, monkeypatch):
+def test_excluded_rotated_source_does_not_block_masked_gui_render(qapp, tmp_path, monkeypatch):
+    from core.image_loader import decode_image
+    from core.workers import RenderWorker
     from tests.test_gui_units import _render_window, _patched_render_manager
 
-    frames = [np.zeros((16, 16, 3), np.uint8) for _ in range(3)]
+    paths = _oriented_jpegs(tmp_path / 'source', (1, 6, 1), (80, 240, 80))
+    mask, _ = _inputs(tmp_path)
+    frames = [decode_image(path) for path in paths]
     window = _render_window(frames)
-    window.image_source_paths = ['first.jpg', 'excluded.jpg', 'last.jpg']
+    window.defect_mask_path = str(mask)
+    window.image_source_paths = paths
+    window.excluded_frames = {1}
     window.effective_stack = lambda: ([frames[0], frames[2]],
                                       [window.image_filenames[0], window.image_filenames[2]], [0, 2])
     manager, _ = _patched_render_manager(monkeypatch, window)
-    manager.start_render()
-    assert manager.worker.kwargs['source_paths'] == ['first.jpg', 'last.jpg']
+    manager.start_render(force_algorithm='dct')
+    worker = RenderWorker(*manager.worker.args, **manager.worker.kwargs)
+    errors, results = [], []
+    worker.error_signal.connect(errors.append)
+    worker.finished_signal.connect(lambda _frames, result, *_: results.append(result))
+    worker.run()
+    assert errors == []
+    np.testing.assert_array_equal(results[0], np.full((16, 16, 3), 80, np.uint8))
 
 
 @pytest.mark.parametrize('source_paths', [[], ['missing.jpg', 'missing.jpg'], ['video.mp4', 'video.mp4']])

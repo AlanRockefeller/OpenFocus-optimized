@@ -5,7 +5,8 @@ import cv2
 import os
 from PyQt6.QtCore import QObject, QPoint, QThread, Qt
 from PyQt6.QtGui import QAction, QIcon, QDragEnterEvent, QDropEvent
-from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMenu, QMessageBox, QDialog
+from utils.file_dialogs import FileDialog
+from PyQt6.QtWidgets import QListWidgetItem, QMenu, QMessageBox, QDialog
 
 from core.workers import StackLoadWorker
 from dialogs import DownsampleDialog
@@ -43,6 +44,7 @@ class LoadOptions:
     filenames: list[str]
     base_images: list[Any]
     working_images: list[Any]
+    reset_scale_factor: float | None = None
 
 
 class SourceManager(QObject):
@@ -208,7 +210,9 @@ class SourceManager(QObject):
         busy = self._review_worker is not None
         panel.btn_review_stack.setText(trans.t(
             "stack_review_cancel" if busy else "stack_review_button"))
-        panel.btn_review_stack.setToolTip(trans.t("stack_review_hint"))
+        panel.btn_review_stack.setToolTip(trans.t(
+            "stack_review_cancel" if busy else "stack_review_button")
+            + "\n" + trans.t("stack_review_hint"))
         panel.btn_review_stack.setEnabled(busy or len(self.window.raw_images) >= 2)
         status_key = self._review_status_key
         visible = self._visible_review_results()
@@ -275,6 +279,12 @@ class SourceManager(QObject):
         msg.setStyleSheet(ui_styles.MESSAGE_BOX_STYLE)
         return msg.exec() == QMessageBox.StandardButton.Yes
 
+    def _show_linear_profile_notice(self, metadata) -> None:
+        if getattr(metadata, "profile_tags", None):
+            show_message_box(self.window, trans.t("linear_raw_caption"),
+                             trans.t("linear_raw_profile_hint"), "",
+                             QMessageBox.Icon.Information)
+
     def _start_load_worker(self, folder=None, video=None, filepaths=None,
                            scale=1.0, append=False, on_success=None,
                            accept_event=None, prepare_options=None, on_error=None,
@@ -294,6 +304,15 @@ class SourceManager(QObject):
                 linear_raw = True
             elif linear_raw:
                 message = trans.t("linear_raw_mismatch")
+                if on_error is not None:
+                    on_error(message)
+                else:
+                    show_warning_box(window, trans.t("msg_load_failed"), message)
+                return
+        if linear_raw and filepaths:
+            from core.image_loader import is_raw_source
+            if not all(is_raw_source(path) for path in filepaths):
+                message = trans.t("linear_raw_invalid")
                 if on_error is not None:
                     on_error(message)
                 else:
@@ -326,9 +345,18 @@ class SourceManager(QObject):
         self._load_generation = getattr(self, "_load_generation", 0) + 1
         generation = self._load_generation
 
+        def load_is_current():
+            from PyQt6 import sip
+            return (not (isinstance(window, QObject) and sip.isdeleted(window))
+                    and not getattr(window, "_shutting_down", False)
+                    and generation == getattr(self, "_load_generation", -1))
+
         def on_done(ok: bool, message: str, images, filenames) -> None:
+            accepted = False
+            previous_window_state = None
+            previous_baseline = None
             try:
-                if generation != getattr(self, "_load_generation", -1):
+                if not load_is_current():
                     return  # superseded by a newer load request
                 if not ok:
                     if on_error is not None:
@@ -343,21 +371,36 @@ class SourceManager(QObject):
                     if any(_has_transparency(image) for image in images):
                         raise UnsupportedTransparency("Transparent images cannot be downsampled during loading")
                     factor = working_scale / scale
+                    from core.source_frames import transform_frame
                     load_options.working_images = [
-                        cv2.resize(image, (max(1, int(image.shape[1] * factor)),
-                                           max(1, int(image.shape[0] * factor))),
-                                   interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_LINEAR)
+                        transform_frame(image, 'resize', width=max(1, int(image.shape[1] * factor)),
+                                        height=max(1, int(image.shape[0] * factor)))
                         for image in images]
-                if not self._confirm_mixed_sizes(load_options.working_images):
+                mixed_ok = self._confirm_mixed_sizes(load_options.working_images)
+                if not load_is_current():
+                    return
+                if not mixed_ok:
                     if on_error is not None:
                         on_error("CANCELLED")
                     return
-                if append and not self._confirm_append_dimensions(load_options.working_images):
+                append_ok = not append or self._confirm_append_dimensions(load_options.working_images)
+                if not load_is_current():
+                    return
+                if not append_ok:
                     if on_error is not None:
                         on_error("CANCELLED")
                     return
                 if prepare_options is not None:
                     load_options = prepare_options(load_options)
+                if not load_is_current():
+                    return
+                state_fields = ("current_folder_path", "source_px_um", "linear_dng_metadata",
+                                "base_images", "raw_images", "image_filenames", "image_source_paths",
+                                "image_icc_profiles", "current_scale_factor", "base_scale_factor",
+                                "excluded_frames", "source_transforms", "unrecoverable_source_changes")
+                previous_window_state = {name: getattr(window, name) for name in state_fields
+                                         if hasattr(window, name)}
+                previous_baseline = self._stack_baseline
                 load_folder = folder or (os.path.dirname(video) if video else
                                         os.path.dirname(filepaths[0]) if filepaths else "")
                 if not append or not window.raw_images:
@@ -376,7 +419,9 @@ class SourceManager(QObject):
                     window.linear_dng_metadata = worker.linear_dng_metadata
                 self._apply_load_options(load_options, append=append,
                                          profile_map=getattr(worker, "source_icc_profiles", {}))
-                worker._load_applied = True
+                accepted = True
+                worker._load_stack = window.raw_images
+                worker._load_revision = getattr(window, "source_revision", 0)
                 if on_success is not None:
                     on_success()
                 # Remember for the optional "restore last stack on startup"
@@ -389,7 +434,13 @@ class SourceManager(QObject):
                 # Crash auto-recovery: refresh the session snapshot
                 from utils import recovery
                 recovery.write_snapshot(window)
+                self._show_linear_profile_notice(getattr(window, "linear_dng_metadata", None))
+                worker._load_applied = load_is_current()
             except Exception as exc:  # pylint: disable=broad-except
+                if not accepted and previous_window_state is not None:
+                    for name, value in previous_window_state.items():
+                        setattr(window, name, value)
+                    self._stack_baseline = previous_baseline
                 if on_error is not None:
                     on_error(str(exc))
                     return
@@ -400,6 +451,15 @@ class SourceManager(QObject):
                     f"Error: {str(exc)}",
                     QMessageBox.Icon.Critical,
                 )
+            finally:
+                if ok and not accepted:
+                    restore = getattr(worker, "restore_loader_state", None)
+                    if restore is not None:
+                        restore(images)
+                if accepted:
+                    previous_state = getattr(worker, "_previous_loader_state", None)
+                    if previous_state is not None:
+                        previous_state.clear()
 
         worker = self._load_worker
         worker.progress.connect(self._on_load_progress)
@@ -425,10 +485,13 @@ class SourceManager(QObject):
         request = getattr(render, "_render_after_load", None) if render is not None else None
         if request is None:
             return
-        render._render_after_load = None
         try:
-            ready = (bool(getattr(worker, "_load_applied", False))
+            ready = (request.get("load_worker") is worker
+                     and request.get("load_generation") == getattr(self, "_load_generation", 0)
+                     and bool(getattr(worker, "_load_applied", False))
                      and not getattr(worker, "is_cancelled", False)
+                     and getattr(worker, "_load_stack", None) is self.window.raw_images
+                     and getattr(worker, "_load_revision", None) == getattr(self.window, "source_revision", 0)
                      and len(self.window.effective_stack()[0]) >= 2)
         except Exception:
             ready = False
@@ -436,18 +499,38 @@ class SourceManager(QObject):
             ready = False
         if ready:
             from PyQt6.QtCore import QTimer
-            method = request.get("force_algorithm")
-            compare = bool(request.get("compare", False))
+            source_ref = self.window.raw_images
+            revision = getattr(self.window, "source_revision", 0)
+            included = list(self.window.effective_stack()[2])
 
             def start():
-                # Compare-all can be cancelled before this deferred call runs;
-                # its method must not then start as a standalone render.
-                if compare and not getattr(render, "_compare_mode", False):
+                # Keep the request cancellable until this event-loop turn;
+                # replacing the stack or starting a new load invalidates it.
+                if render._render_after_load is not request:
                     return
-                render.start_render(force_algorithm=method)
+                render._render_after_load = None
+                from PyQt6 import sip
+                current = (not (isinstance(self.window, QObject) and sip.isdeleted(self.window))
+                           and not getattr(self.window, "_shutting_down", False)
+                           and getattr(self, "_load_worker", None) is None
+                           and request["load_generation"] == getattr(self, "_load_generation", 0)
+                           and self.window.raw_images is source_ref
+                           and getattr(self.window, "source_revision", 0) == revision
+                           and list(self.window.effective_stack()[2]) == included)
+                compare = request.get("compare", False)
+                if compare:
+                    current = (current and render._compare_mode
+                               and request["compare_token"] is render._compare_token
+                               and not render._stack_changed_since(render._compare_context))
+                if not current:
+                    if compare and request["compare_token"] is render._compare_token:
+                        render._abort_compare_run()
+                    return
+                render.start_render(force_algorithm=request.get("force_algorithm"))
 
             QTimer.singleShot(0, start)
         else:
+            render._render_after_load = None
             if request.get("compare", False):
                 render._abort_compare_run()
             self.window.statusBar().showMessage(trans.t("msg_render_queue_cancelled"), 5000)
@@ -497,7 +580,7 @@ class SourceManager(QObject):
 
     def cancel_load(self) -> None:
         worker = getattr(self, "_load_worker", None)
-        if worker is not None and worker.isRunning():
+        if worker is not None:
             worker.request_cancel()
             self._load_cancel_button.setEnabled(False)
             self._load_status_label.setText(trans.t("depth_cancelling"))
@@ -578,14 +661,17 @@ class SourceManager(QObject):
         )
 
     def prompt_and_load_linear_raw(self) -> None:
-        from core.image_loader import RAW_FORMATS
+        from core.image_loader import RAW_FORMATS, is_raw_source
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
 
-        patterns = " ".join(f"*{ext}" for ext in sorted(RAW_FORMATS))
-        paths, _ = QFileDialog.getOpenFileNames(
+        patterns = " ".join(f"*{ext}" for ext in sorted(RAW_FORMATS | {".tif", ".tiff"}))
+        paths, _ = FileDialog.getOpenFileNames(
             self.window, trans.t("linear_raw_caption"), get_last_dialog_dir(),
             f"RAW ({patterns});;All Files (*)")
         if not paths:
+            return
+        if not all(is_raw_source(path) for path in paths):
+            show_warning_box(self.window, trans.t("msg_load_failed"), trans.t("linear_raw_invalid"))
             return
         set_last_dialog_dir(paths[0])
         scale = self._ask_load_scale()
@@ -594,14 +680,10 @@ class SourceManager(QObject):
 
     def prompt_and_load_stack(self) -> None:
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
-        from utils.ui_utils import make_folder_path_editable
         window = self.window
 
-        dialog = QFileDialog(window, trans.t("action_open_folder"), get_last_dialog_dir())
-        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-        dialog.setFileMode(QFileDialog.FileMode.Directory)
-        dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        make_folder_path_editable(dialog)
+        dialog = FileDialog.for_directories(
+            window, trans.t("action_open_folder"), get_last_dialog_dir())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selected = dialog.selectedFiles()
             if selected:
@@ -617,7 +699,7 @@ class SourceManager(QObject):
         # Build video filter string
         video_exts = " ".join([f"*{ext}" for ext in ImageStackLoader.SUPPORTED_VIDEO_FORMATS])
 
-        video_path, _ = QFileDialog.getOpenFileName(
+        video_path, _ = FileDialog.getOpenFileName(
             window,
             trans.t("action_open_video"),
             get_last_dialog_dir(),
@@ -683,7 +765,8 @@ class SourceManager(QObject):
         from core.image_loader import ImageStackLoader
         if len(paths) == 1 and os.path.isfile(paths[0]):
             ext = os.path.splitext(paths[0])[1].lower()
-            if ext in ImageStackLoader.SUPPORTED_VIDEO_FORMATS:
+            if (ext in ImageStackLoader.SUPPORTED_VIDEO_FORMATS
+                    and getattr(self.window, "linear_dng_metadata", None) is None):
                 self.load_video_stack(paths[0], append=True)
                 event.acceptProposedAction()
                 return
@@ -698,9 +781,8 @@ class SourceManager(QObject):
         # Filter by supported image extensions (use ImageStackLoader.SUPPORTED_FORMATS)
         from core.image_loader import ImageStackLoader
         if getattr(self.window, "linear_dng_metadata", None) is not None:
-            from core.image_loader import RAW_FORMATS
-            if len(filepaths) != len(paths) or any(
-                    os.path.splitext(path)[1].lower() not in RAW_FORMATS for path in paths):
+            from core.image_loader import is_raw_source
+            if len(filepaths) != len(paths) or any(not is_raw_source(path) for path in paths):
                 show_warning_box(self.window, trans.t("msg_load_failed"), trans.t("linear_raw_invalid"))
                 event.ignore()
                 return
@@ -744,11 +826,9 @@ class SourceManager(QObject):
         filenames: list[str],
         scale_factor: float,
     ) -> LoadOptions:
-        # The loader decodes every frame at `scale_factor` already, so the
-        # frames must be *shared* between the two stacks (a copy would double
-        # the memory of a large stack) but the lists must not: deleting a
-        # frame pops it from each list, and an aliased list dropped two frames
-        # while only one name went away, desyncing names from images.
+        # Sources retain paths and bounded previews rather than original pixel
+        # arrays. Share those immutable frames across base/working stacks, while
+        # keeping separate lists so delete/reorder cannot mutate both at once.
         return LoadOptions(
             scale_factor=scale_factor,
             filenames=list(filenames),
@@ -790,6 +870,12 @@ class SourceManager(QObject):
         previous_profiles = list(getattr(window, "image_icc_profiles", ()) or ())
         if len(previous_profiles) != len(window.raw_images or []):
             previous_profiles = [b""] * len(window.raw_images or [])
+        if (not append or not window.raw_images) and hasattr(options, "source_px_um"):
+            window.source_px_um = options.source_px_um
+        reset_scale = getattr(options, "reset_scale_factor", None) or options.scale_factor
+        source_px_um = getattr(window, "source_px_um", None)
+        reset_px_um = (source_px_um * options.scale_factor / reset_scale
+                       if source_px_um is not None else None)
 
         if append and window.raw_images:
             if getattr(window, "source_transforms", None):
@@ -840,8 +926,8 @@ class SourceManager(QObject):
                 "paths": list(getattr(options, "reset_paths", paths)),
                 "profiles": list(profiles),
                 "folder": window.current_folder_path,
-                "scale": options.scale_factor,
-                "source_px_um": getattr(window, "source_px_um", None),
+                "scale": reset_scale,
+                "source_px_um": reset_px_um,
                 "linear_dng_metadata": getattr(window, "linear_dng_metadata", None),
             }
             initial_index = 0
