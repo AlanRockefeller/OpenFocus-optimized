@@ -480,7 +480,8 @@ def compute_auto_background(image, frames, preset="auto", clean=True,
     on the subject survive and an earlier replacement is not analysed
     again.  Admits the working set with the resource policy and serializes
     with other heavy jobs.  Returns a `BackgroundFillResult`."""
-    from core.background_fill import _release_free_memory, replace_background
+    from core.background_fill import (_release_free_memory, replace_background,
+                                      working_set_bytes)
     from core.resource_policy import heavy_job, require_memory
     key, arrays = _auto_background_key(image, frames, preset, clean, keep_soft_parts, stacked)
     with _AUTO_BG_LOCK:
@@ -492,10 +493,7 @@ def compute_auto_background(image, frames, preset="auto", clean=True,
                 return result
     h, w = image.shape[:2]
     valid_masks = [frame.valid_mask() for frame in frames]
-    # Measured peak RSS growth on 20 MP stacks: ~50 B/px + one byte per frame
-    # (the half-resolution gray stack) until the outline is settled, then
-    # ~105 B/px in the full-resolution phase; ~10% headroom on both.
-    required = int(h * w * max(120, 60 + len(arrays))) + sum(
+    required = working_set_bytes(arrays, h, w) + sum(
         mask.nbytes for mask in valid_masks if mask is not None)
     with heavy_job(cancelled):
         require_memory(required)

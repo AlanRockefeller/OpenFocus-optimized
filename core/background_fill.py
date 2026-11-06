@@ -1296,7 +1296,23 @@ def _u16(img: np.ndarray) -> np.ndarray:
             return np.ascontiguousarray(img)
         if img.dtype == np.uint8:
             return np.ascontiguousarray(img, dtype=np.uint16) * np.uint16(257)
-    return np.clip(_to16f(img), 0, 65535).astype(np.uint16)
+    f = _to16f(img)                  # always a new array: clip it in place
+    np.clip(f, 0, 65535, out=f)
+    return f.astype(np.uint16)
+
+
+def working_set_bytes(frames: Sequence[np.ndarray], height: int, width: int) -> int:
+    """New memory `replace_background` may take, for admission control.
+
+    Measured peak RSS growth on 20 MP stacks: ~50 B/px plus one byte per
+    frame (the half-resolution gray stack) until the outline is settled,
+    then ~105 B/px in the full-resolution phase; ~10% headroom on both.
+    Frames that are not uint16 are converted on use, which adds a transient
+    16-bit copy plus its float source (~18 B/px)."""
+    per_px = max(120, 60 + len(frames))
+    if any(f.dtype != np.uint16 for f in frames):
+        per_px += 18
+    return int(height) * int(width) * per_px
 
 
 def replace_background(frames: Sequence[np.ndarray], fused: np.ndarray, *,

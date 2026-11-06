@@ -15,6 +15,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as knobs just past the depth of field. A missing-data map shows, and can save,
   where no frame saw the scene cleanly. Scenes that are nearly all subject are
   left as stacked.
+- Add Auto background to the command line: `--auto-background [auto|soft|sharp]`
+  replaces the background after fusion with the Retouch defaults, so a stack
+  can be finished unattended. `--background-mode faithful` keeps the stack's
+  edges, `--keep-soft-parts` keeps soft parts attached to the subject, and
+  `--save-stacked` / `--missing-data-map` also write the stacked result and the
+  missing-data map. Batch runs and recipes accept the same options.
+- The command line orders a folder's frames near to far by their EXIF focus
+  steps when every frame has them (`--frame-order auto`, the default; `name`
+  keeps filename order). OM SYSTEM focus bracketing takes its first shot at
+  mid-depth, so filename order put a mid-depth frame first.
 
 ### Changed
 - Pressing Render while frames are still loading now starts the render when
@@ -29,6 +39,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   analysed again, so running it twice no longer builds up halos. Retouch says
   so when it opens on such an output. Checkpoints record the stacked result's
   fingerprint; `openfocus retouch replay` takes it with `--stacked`.
+- A full render now releases the region (ROI) preview's aligned frames, a second
+  full-resolution copy of the stack that was kept after ROI mode ended, and the
+  ROI preview no longer holds on to a replaced stack's frames. Opening ROI mode
+  again re-aligns.
+- Command-line batch runs release each folder's aligned frames before loading
+  the next folder.
 
 ### Fixed
 - Message-box buttons such as "Discard changes" are no longer cut off.
