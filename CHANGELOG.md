@@ -31,6 +31,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   loading finishes; pressing it again cancels.
 - The status bar reads "RAM used" so it is clear which number is in use.
 - Reword the retouch brush-size hint.
+- Image save dialogs start in the folder where you last saved an image.
 - Auto background needs about a third less memory (about 2.5 GB free for 15
   frames of 20 MP) and runs faster; results are unchanged.
 - Auto background on an output that was already retouched analyses the

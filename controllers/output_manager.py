@@ -17,7 +17,8 @@ from utils import (show_error_box, show_message_box, show_success_box,
                    show_warning_box)
 from utils.settings_store import get_drag_export_format, set_drag_export_format
 from utils import scalebar
-from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+from utils.settings_store import (get_last_dialog_dir, image_save_default, remember_image_save,
+                                  set_last_dialog_dir)
 from utils.image_utils import to_display_uint8, cv2_to_pixmap
 from utils.image_utils import imwrite_auto
 from locales import trans
@@ -989,10 +990,11 @@ class OutputManager:
             if record.linear_dng_metadata is not None and not record.annotations_baked:
                 filters += ';;' + trans.t('linear_dng_filter')
             file_path, selected_filter = QFileDialog.getSaveFileName(
-                window, trans.t('action_save'), default_filename, filters)
+                window, trans.t('action_save'), image_save_default(default_filename), filters)
             if not file_path:
                 return
             file_path = window.export_manager.normalize_export_path(file_path, selected_filter=selected_filter)
+            remember_image_save(file_path)
             if os.path.splitext(file_path)[1].lower() == '.dng':
                 self.start_linear_dng_export(record, original, file_path, labels)
                 return

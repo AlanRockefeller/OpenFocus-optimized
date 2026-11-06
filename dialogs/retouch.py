@@ -1766,10 +1766,13 @@ class RetouchDialog(QDialog):
         fill = self.doc.background_fill
         if fill is None:
             return
+        from utils.settings_store import image_save_default, remember_image_save
         path, _ = QFileDialog.getSaveFileName(
-            self, trans.t("retouch_missing_save"), "missing-data.png", "PNG (*.png)")
+            self, trans.t("retouch_missing_save"), image_save_default("missing-data.png"),
+            "PNG (*.png)")
         if not path:
             return
+        remember_image_save(path)
         if not path.lower().endswith(".png"):
             path += ".png"
         from core.background_fill import missing_data_overlay
