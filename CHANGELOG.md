@@ -24,6 +24,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 - Message-box buttons such as "Discard changes" are no longer cut off.
+- Auto background no longer mistakes a dark background for a microscope's
+  field stop. Ignoring it filled the area beside the subject from lit ground
+  and the subject itself: a pale or orange smear, a lumpy outline, rings
+  around small specks and a dark band along the edge.
 
 ## [1.75.4] - 2026-11-05
 
