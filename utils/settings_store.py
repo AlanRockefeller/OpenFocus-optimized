@@ -627,13 +627,16 @@ def remember_image_save(path: str, selected_filter: str = "") -> None:
         settings.setValue(LAST_IMAGE_SAVE_DIR_KEY, folder)
         set_last_dialog_dir(folder)
         if selected_filter:
+            # The format is the file actually written: a typed suffix wins
+            # over the filter, which only decides for a bare name.
             offered = _image_extensions(selected_filter)
-            extension = os.path.splitext(path)[1].lower()
-            if extension not in offered:
-                extension = offered[0] if offered else ""
+            extension = os.path.splitext(path)[1].lower() or (offered[0] if offered else "")
             if extension in IMAGE_SAVE_TYPES:
                 settings.setValue(LAST_IMAGE_SAVE_TYPE_KEY, extension)
-                settings.setValue(LAST_IMAGE_SAVE_FILTER_KEY, selected_filter)
+                # Keep the label only when it offers that format; otherwise
+                # the next dialog picks the first filter that does.
+                settings.setValue(LAST_IMAGE_SAVE_FILTER_KEY,
+                                  selected_filter if extension in offered else "")
 
 
 def load_drag_export_format(window) -> None:

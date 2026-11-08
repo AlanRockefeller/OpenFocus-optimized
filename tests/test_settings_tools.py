@@ -829,6 +829,13 @@ def test_image_save_dialogs_remember_the_chosen_format(tmp_path, monkeypatch):
     settings.setValue(store.LAST_IMAGE_SAVE_FILTER_KEY, "JPEG-Bild (*.jpg)")
     assert store.image_save_filter(output) == "JPG 8-bit (*.jpg)"
 
+    # A typed suffix the selected filter does not offer is what was written,
+    # so it is the format remembered, not the filter's.
+    store.remember_image_save(str(saved / "typed.png"), "TIFF image (*.tif *.tiff)")
+    assert store.image_save_type(output) == ".png"
+    assert store.image_save_filter(output) == "PNG 8/16-bit (*.png)"
+    assert store.image_save_filter(mosaic) == "PNG image (*.png)"
+
 
 def test_restore_preferences_keeps_workspace_and_user_data(qapp, tmp_path, monkeypatch):
     from PyQt6.QtCore import QSettings

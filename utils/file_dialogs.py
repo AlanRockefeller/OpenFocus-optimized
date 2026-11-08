@@ -26,6 +26,15 @@ def expand_dialog_path(text: str, directory: str) -> str:
     return os.path.normpath(text if os.path.isabs(text) else os.path.join(directory, text))
 
 
+def filter_suffix(name_filter: str) -> str:
+    """First concrete extension a name filter offers, without the dot.
+
+    "TIFF image (*.tif *.tiff)" -> "tif"; "All files (*)" -> "".
+    """
+    match = re.search(r"\*\.([A-Za-z0-9]+)", name_filter or "")
+    return match.group(1).lower() if match else ""
+
+
 class FileDialog(QFileDialog):
     """Shared Qt picker. Static helpers remain injectable at the application API."""
 
@@ -67,6 +76,12 @@ class FileDialog(QFileDialog):
         dialog.setAcceptMode(accept)
         if selectedFilter:
             dialog.selectNameFilter(selectedFilter)
+        if accept == cls.AcceptMode.AcceptSave:
+            # A bare name gets the selected filter's suffix inside the dialog,
+            # so Qt's replace-file confirmation checks the file actually written.
+            dialog.setDefaultSuffix(filter_suffix(dialog.selectedNameFilter()))
+            dialog.filterSelected.connect(
+                lambda name: dialog.setDefaultSuffix(filter_suffix(name)))
         try:
             if dialog.exec() == cls.DialogCode.Accepted:
                 return dialog.selectedFiles(), dialog.selectedNameFilter()

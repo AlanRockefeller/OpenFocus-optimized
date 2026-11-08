@@ -6,7 +6,7 @@ import threading
 import numpy as np
 from PyQt6.QtCore import QEvent, QPointF, QSignalBlocker, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon, QPainter, QPalette, QTransform
-from utils.file_dialogs import FileDialog
+from utils.file_dialogs import FileDialog, filter_suffix
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
     QFormLayout, QGraphicsItem, QGraphicsPixmapItem, QGraphicsScene,
@@ -21,8 +21,7 @@ from core.resource_policy import heavy_job, require_memory
 from locales import trans
 from utils.image_utils import cv2_to_pixmap, imwrite_auto
 from utils.settings_store import (get_last_dialog_dir, image_save_dir, image_save_filter,
-                                  image_save_type, remember_image_save,
-                                  set_last_dialog_dir)
+                                  remember_image_save, set_last_dialog_dir)
 from utils.path_identity import same_path
 
 
@@ -744,7 +743,10 @@ class MosaicDialog(QDialog):
         if not path:
             return
         if not os.path.splitext(path)[1]:
-            path += image_save_type(filters) or '.tif'
+            # The dialog already adds the selected filter's suffix; this only
+            # covers a filter without one.
+            suffix = filter_suffix(selected_filter)
+            path += '.' + suffix if suffix else '.tif'
         ext = os.path.splitext(path)[1].lower()
         if ext not in ('.tif', '.tiff', '.png'):
             QMessageBox.warning(self, trans.t('mosaic_title'), trans.t('mosaic_save_type'))

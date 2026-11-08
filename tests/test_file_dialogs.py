@@ -129,6 +129,34 @@ def test_new_save_filename_navigates_without_creating_file(qapp, tmp_path):
     assert not target.exists()
 
 
+def test_bare_save_name_gets_the_selected_filters_suffix_before_overwrite_check(qapp, tmp_path):
+    """Qt confirms replacing the file it returns, so the suffix the export
+    adds for a bare name must already be in that path."""
+    from PyQt6.QtWidgets import QComboBox
+    filters = "TIFF image (*.tif *.tiff);;PNG image (*.png);;All files (*)"
+
+    def answer(dialog):
+        name = dialog.findChild(QLineEdit, "fileNameEdit")
+        name.setText("out")
+        assert dialog.defaultSuffix() == "png"
+        assert same_path(dialog.selectedFiles()[0], tmp_path / "out.png")
+        combo = dialog.findChild(QComboBox, "fileTypeCombo")
+        combo.setFocus()
+        # Real key presses: Qt only reports a filter change made by the user.
+        for key, suffix in ((Qt.Key.Key_Down, ""), (Qt.Key.Key_Up, "png"), (Qt.Key.Key_Up, "tif")):
+            QTest.keyClick(combo, key)
+            assert dialog.defaultSuffix() == suffix
+        name.setText("typed.png")
+        assert same_path(dialog.selectedFiles()[0], tmp_path / "typed.png")
+        name.setText("out")
+        dialog.accept()
+
+    result = answer_picker(qapp, answer, lambda: FileDialog.getSaveFileName(
+        None, "Save", str(tmp_path), filters, "PNG image (*.png)"))
+    assert same_path(result[0], tmp_path / "out.tif")
+    assert result[1] == "TIFF image (*.tif *.tiff)"
+
+
 def test_open_multiple_files_retains_multiple_selection(qapp, tmp_path):
     paths = [tmp_path / "first frame.tif", tmp_path / "第二帧.tif"]
     for path in paths:
