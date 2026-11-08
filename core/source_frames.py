@@ -85,6 +85,8 @@ class PreviewPixels:
             fd, self.path = tempfile.mkstemp(prefix='openfocus-preview-', dir=directory)
         except OSError as exc:
             raise _storage_error(directory, image.nbytes, exc) from exc
+        from core.scratch_registry import register
+        register(self.path)
         self.shape, self.dtype = image.shape, image.dtype
         try:
             with os.fdopen(fd, 'wb') as stream:

@@ -375,6 +375,9 @@ class OpenFocus(QMainWindow):
         if saved_lang:
             trans.set_language(saved_lang)
         storage_warning = _restore_storage_directory(self)
+        # Scratch stranded by a crashed earlier session, in the background.
+        from core.scratch_registry import sweep_in_background
+        sweep_in_background([self.storage_directory])
         self.recent_files = getattr(self, 'recent_files', [])
         self.recent_projects = getattr(self, 'recent_projects', [])
         self._undo_stack = []

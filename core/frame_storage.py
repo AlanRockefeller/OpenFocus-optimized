@@ -337,6 +337,8 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
                     state.directory = candidate
                 else:
                     state.directory = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
+                    from core.scratch_registry import register
+                    register(state.directory)
                     state.owned = True
                 return state.directory
             except OSError:
@@ -429,9 +431,12 @@ def _storage_error(directory, size, exc):
 
 def _frame_file(directory, size):
     try:
-        return tempfile.mkstemp(prefix="openfocus-frame-", suffix=".bin", dir=directory)
+        fd, path = tempfile.mkstemp(prefix="openfocus-frame-", suffix=".bin", dir=directory)
     except OSError as exc:
         raise _storage_error(directory, size, exc) from exc
+    from core.scratch_registry import register
+    register(path)
+    return fd, path
 
 
 

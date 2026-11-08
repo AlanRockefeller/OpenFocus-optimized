@@ -1756,6 +1756,10 @@ def _run_cli_admitted(argv: List[str]) -> int:
         import tempfile
         import cv2
 
+        # Scratch from a crashed earlier run would otherwise shrink this one's disk.
+        from core.scratch_registry import sweep_abandoned
+        sweep_abandoned()
+
         if batch_mode:
             return _run_batch(args, _emit_json)
 
@@ -1763,7 +1767,9 @@ def _run_cli_admitted(argv: List[str]) -> int:
         from core.frame_storage import storage_directory
 
         # Video inputs are unpacked to a temp dir that is always cleaned up
+        from core.scratch_registry import register
         with tempfile.TemporaryDirectory(prefix="openfocus_video_", dir=storage_directory()) as video_temp:
+            register(video_temp)
             _src, paths = _resolve_stack(args, video_temp)
             # No output may replace one of the frames it is made from (or the
             # dust/defect inputs); checked before load, fusion and any write.
