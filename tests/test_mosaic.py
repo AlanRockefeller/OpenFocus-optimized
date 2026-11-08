@@ -523,7 +523,7 @@ def test_suffixless_mosaic_name_uses_the_selected_filter(qapp, tmp_path, monkeyp
         monkeypatch.setattr(mosaic, 'imwrite_auto',
                             lambda path, *args, **kwargs: written.append((path, kwargs)) or True)
         monkeypatch.setattr(mosaic, 'require_memory', lambda *_: None)
-        assert started[0](lambda: False, lambda *_: None) == str(tmp_path / 'out.png')
+        started[0](lambda: False, lambda *_: None)      # returns the stitching plan now
         assert written[0][0] == str(tmp_path / 'out.png')
         assert written[0][1]['stream_tiff'] is False
     finally:
