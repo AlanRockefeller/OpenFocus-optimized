@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -74,12 +76,26 @@ def test_high_depth_heif_to_png_retains_16bit(tmp_path):
     assert np.any(decoded % 257)
 
 
-def test_cancellation_after_encoding_removes_reserved_file(tmp_path):
+@pytest.mark.parametrize('stage', ['writer', 'after_write'])
+def test_cancelled_conversion_removes_reserved_and_temporary_outputs(tmp_path, monkeypatch, stage):
     source = tmp_path / 'image.png'
     Image.new('RGB', (4, 4)).save(source)
-    calls = iter([False, False, True])
+    before = source.read_bytes()
+    stopped = False
+    write = converter.imwrite_auto
+
+    def cancel_at_write(*args, **kwargs):
+        nonlocal stopped
+        if stage == 'writer':
+            stopped = True
+        result = write(*args, **kwargs)
+        stopped = True
+        return result
+
+    monkeypatch.setattr(converter, 'imwrite_auto', cancel_at_write)
     with pytest.raises(InterruptedError):
-        converter.convert_one(str(source), str(tmp_path), '.jpg', cancelled=lambda: next(calls))
+        converter.convert_one(str(source), str(tmp_path), '.jpg', cancelled=lambda: stopped)
+    assert source.read_bytes() == before
     assert sorted(p.name for p in tmp_path.iterdir()) == ['image.png']
 
 
@@ -94,7 +110,17 @@ def test_insufficient_memory_and_existing_file(tmp_path, monkeypatch):
     assert existing.read_bytes() == b'keep'
 
 
-def test_dialog_starts_without_main_window(qapp):
+@pytest.fixture
+def clean_converter_format(qapp):
+    """Start each dialog test without a remembered converter format."""
+    from utils.settings_store import CONVERTER_FORMAT_KEY, get_settings
+    settings = get_settings()
+    settings.remove(CONVERTER_FORMAT_KEY)
+    yield settings
+    settings.remove(CONVERTER_FORMAT_KEY)
+
+
+def test_dialog_starts_without_main_window(qapp, clean_converter_format):
     from dialogs.batch_converter import BatchConverterDialog
     dialog = BatchConverterDialog()
     try:
@@ -109,7 +135,7 @@ def test_dialog_starts_without_main_window(qapp):
 
 
 @pytest.fixture
-def converter_dialog(qapp, monkeypatch):
+def converter_dialog(qapp, monkeypatch, clean_converter_format):
     from dialogs.batch_converter import BatchConverterDialog, ThumbnailWorker, ConverterWorker
     monkeypatch.setattr(ThumbnailWorker, 'start', lambda self: None)
     monkeypatch.setattr(ConverterWorker, 'start', lambda self: None)
@@ -121,6 +147,54 @@ def converter_dialog(qapp, monkeypatch):
     finally:
         dialog.worker = None
         dialog.close()
+
+
+def test_converter_format_risks_follow_the_selected_format(converter_dialog):
+    dialog = converter_dialog
+    for image_format in ('JPEG', 'BMP', 'WebP'):
+        dialog.format.setCurrentText(image_format)
+        assert not dialog.format_warning.isHidden()
+        assert '16' in dialog.format_warning.text()
+    dialog.format.setCurrentText('DNG')
+    assert not dialog.format_warning.isHidden()
+    assert 'DNG' in dialog.format_warning.text()
+    dialog.format.setCurrentText('TIFF')
+    assert not dialog.format_warning.isHidden()
+    assert 'PNG' in dialog.format_warning.text()
+    dialog.format.setCurrentText('PNG')
+    assert dialog.format_warning.isHidden()
+
+
+def test_converter_remembers_explicit_format_and_recovers_from_a_bad_value(
+        qapp, clean_converter_format):
+    from dialogs.batch_converter import BatchConverterDialog
+    from utils.settings_store import CONVERTER_FORMAT_KEY
+    first = BatchConverterDialog()
+    try:
+        first.format.setCurrentText('JPEG')
+    finally:
+        first.close()
+    second = BatchConverterDialog()
+    try:
+        assert second.format.currentText() == 'JPEG'
+        second.format.setCurrentText('DNG')
+    finally:
+        second.close()
+    third = BatchConverterDialog()
+    try:
+        assert third.format.currentText() == 'DNG'
+    finally:
+        third.close()
+    clean_converter_format.setValue(CONVERTER_FORMAT_KEY, 'JPEG2000')
+    fallback = BatchConverterDialog()
+    try:
+        assert fallback.format.currentText() == 'PNG'
+    finally:
+        fallback.close()
+
+
+
+
 
 
 def _converter_drop(qapp, target, urls):
@@ -232,7 +306,7 @@ def test_converter_output_path_keyboard_and_delete_scope(
     dialog.directory.setText(str(source))
     assert not dialog.start.isEnabled() and dialog.directory.toolTip()
     dialog.directory.setText(str(tmp_path / 'missing'))
-    assert not dialog.start.isEnabled()
+    assert dialog.start.isEnabled() and not dialog.directory.toolTip()
     monkeypatch.setenv('OPENFOCUS_CONVERTER_OUTPUT', str(tmp_path))
     dialog.directory.setText('"%OPENFOCUS_CONVERTER_OUTPUT%"')
     assert dialog.start.isEnabled() and not dialog.directory.toolTip()
@@ -420,7 +494,8 @@ def test_cancelled_batch_keeps_completed_page_and_reports_unstarted(tmp_path, mo
 
     monkeypatch.setattr(converter, 'convert_one', convert)
     monkeypatch.setattr(converter.resource_policy, 'plan_execution', lambda *a, **k:
-                        SimpleNamespace(workers=1, max_in_flight=1, ram_budget=1024**3, describe=lambda: 'test'))
+                        SimpleNamespace(workers=1, native_threads=1, max_in_flight=1,
+                                        ram_budget=1024**3, describe=lambda: 'test'))
     monkeypatch.setattr(converter.resource_policy, 'ram_budget', lambda *a: 1024**3)
     statuses, progress = {}, []
     result = converter.convert_batch([str(source), str(remaining)], str(tmp_path), '.png',
@@ -597,15 +672,16 @@ def test_batch_restores_global_native_codec_threads_after_failure(tmp_path, monk
     options = SimpleNamespace(DECODE_THREADS=7)
     monkeypatch.setitem(sys.modules, 'pillow_heif', SimpleNamespace(options=options))
     monkeypatch.setattr(converter.resource_policy, 'plan_execution', lambda *a, **k:
-                        SimpleNamespace(workers=1, max_in_flight=1, ram_budget=1024**3, describe=lambda: 'test'))
+                        SimpleNamespace(workers=1, native_threads=3, max_in_flight=1,
+                                        ram_budget=1024**3, describe=lambda: 'test'))
     monkeypatch.setattr(converter.resource_policy, 'ram_budget', lambda *a: 1024**3)
     monkeypatch.setattr(converter, 'page_count', lambda *a: 1)
     monkeypatch.setattr(converter, 'estimate_job', lambda *a: (100, 1))
     original_cv = converter.cv2.getNumThreads()
 
     def failed_job(*args):
-        assert options.DECODE_THREADS == 1
-        assert converter.cv2.getNumThreads() == 1
+        assert options.DECODE_THREADS == 3
+        assert converter.cv2.getNumThreads() == 3
         raise ValueError('codec failed')
 
     monkeypatch.setattr(converter, '_convert_source', failed_job)
@@ -767,7 +843,7 @@ def test_cancelled_preflight_drains_active_job_without_reporting_failure(tmp_pat
                         SimpleNamespace(workers=2, max_in_flight=2, ram_budget=150, describe=lambda: 'test'))
     monkeypatch.setattr(converter.resource_policy, 'ram_budget', lambda *a: 150)
 
-    def estimate(source, should_cancel):
+    def estimate(source, should_cancel, ext=None):
         estimated.append(source)
         if source == 'second':
             cancelled.set()
@@ -821,3 +897,205 @@ def test_png_thumbnail_reads_exif_after_idat_before_pixel_admission(tmp_path, mo
     monkeypatch.setattr(PngImagePlugin.PngImageFile, 'load', load)
     pixels = converter.thumbnail_rgb(str(source))
     np.testing.assert_array_equal(pixels, np.rot90(original, -1))
+
+
+def test_mapped_rgb16_tiff_preserves_channels_orientation_and_profile(tmp_path):
+    from utils.image_utils import srgb_icc_profile
+    source = tmp_path / 'sensor.tif'
+    rgb = (np.arange(11 * 17 * 3, dtype=np.uint16).reshape(11, 17, 3) * 101)
+    profile = srgb_icc_profile()
+    tifffile.imwrite(source, rgb, photometric='rgb', metadata=None,
+                     extratags=[(274, 'H', 1, 6, False),
+                                (271, 's', 0, 'Camera', False),
+                                (34675, 'B', len(profile), profile, False)])
+    output = converter.convert_one(str(source), str(tmp_path), '.tif')
+    with tifffile.TiffFile(output) as tif:
+        page = tif.pages[0]
+        np.testing.assert_array_equal(page.asarray(), np.rot90(rgb, -1))
+        assert page.bitspersample == 16
+        assert page.tags[274].value == 1
+        assert page.tags[271].value == 'Camera'
+        assert page.tags[34675].value == profile
+
+
+def test_existing_dng_copy_fits_small_budget_without_sensor_unpack(tmp_path, monkeypatch):
+    from utils.linear_dng import LinearDNGMetadata, write_linear_dng
+    source = tmp_path / 'large-sensor.dng'
+    pixels = np.full((128, 128, 3), (1000, 5000, 12000), np.uint16)
+    matrix = ((0.8293, -0.1611, -0.1132), (-0.4759, 1.2711, 0.2275),
+              (-0.1013, 0.2415, 0.5509))
+    write_linear_dng(source, pixels, LinearDNGMetadata(matrix, (0.5, 1., 0.7),
+                                                     'Camera', 'Camera Model'))
+    monkeypatch.setattr(converter, 'available_memory_bytes', lambda: 256 * 1024**2)
+    real_rawpy = converter.image_loader.rawpy.RawPy
+
+    class HeaderOnly:
+        def __enter__(self):
+            from types import SimpleNamespace
+            self.raw = real_rawpy()
+            self.sizes = SimpleNamespace(raw_width=24000, raw_height=18000)
+            return self
+
+        def open_file(self, path):
+            self.raw.open_file(path)
+
+        def __exit__(self, *args):
+            self.raw.close()
+
+    # Missing unpack/postprocess methods make accidental sensor development
+    # fail, while the copied DNG remains a real independently readable file.
+    monkeypatch.setattr(converter.image_loader.rawpy, 'RawPy', HeaderOnly)
+    output = converter.convert_one(str(source), str(tmp_path), '.dng')
+    assert source.read_bytes() == Path(output).read_bytes()
+    assert converter.estimate_job(source)[0] > 20 * 1024**3
+    assert converter.estimate_job(source, ext='.dng')[0] <= 64 * 1024**2
+
+
+def test_cancelled_metadata_tiff_retains_original_and_existing_output(tmp_path):
+    from core.registration import RegistrationCancelled
+    source = tmp_path / 'sensor.tif'
+    rgb = np.full((300, 11, 3), (1000, 9000, 50000), np.uint16)
+    tifffile.imwrite(source, rgb, photometric='rgb', metadata=None,
+                     extratags=[(271, 's', 0, 'Camera', False)])
+    directory = tmp_path / 'output'
+    directory.mkdir()
+    existing = directory / source.name
+    existing.write_bytes(b'keep existing output')
+    checks = 0
+
+    def cancelled():
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    with pytest.raises((InterruptedError, RegistrationCancelled)):
+        converter.convert_one(str(source), str(directory), '.tif', cancelled=cancelled)
+    assert list(directory.iterdir()) == [existing]
+    assert existing.read_bytes() == b'keep existing output'
+    np.testing.assert_array_equal(tifffile.imread(source), rgb)
+
+
+def test_batch_creates_unicode_parents_and_does_not_repeat_page_admission(tmp_path, monkeypatch):
+    source = tmp_path / '花.png'
+    Image.new('RGB', (8, 8), 'red').save(source)
+    original = source.read_bytes()
+    directory = tmp_path / '新建' / '输出'
+    monkeypatch.setattr(converter, '_admit', lambda *a: pytest.fail('batch re-admitted its reserved page'))
+    statuses, progress = {}, []
+    result = converter.convert_batch([str(source)], str(directory), '.jpg', lambda: False,
+                                     lambda i, text: statuses.update({i: text}), progress.append)
+    assert result == (1, 0, False) and progress == [1]
+    assert source.read_bytes() == original
+    with Image.open(directory / '花.jpg') as output:
+        assert output.size == (8, 8)
+
+
+def test_batch_reports_output_directory_creation_error(tmp_path, monkeypatch):
+    source = tmp_path / 'input.png'
+    Image.new('RGB', (8, 8)).save(source)
+    before = source.read_bytes()
+    directory = tmp_path / 'denied' / 'output'
+    def deny(*args, **kwargs):
+        raise PermissionError('directory access denied')
+    monkeypatch.setattr(converter.os, 'makedirs', deny)
+    statuses = {}
+    result = converter.convert_batch([str(source)], str(directory), '.jpg', lambda: False,
+                                     lambda i, text: statuses.update({i: text}), lambda n: None)
+    assert result == (0, 1, False)
+    assert 'directory access denied' in statuses[0]
+    assert source.read_bytes() == before and not directory.exists()
+
+
+def test_batch_admits_one_job_above_comfortable_budget_only_up_to_ceiling(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plan = SimpleNamespace(workers=1, native_threads=1, max_in_flight=1,
+                           ram_budget=100, describe=lambda: 'test')
+    monkeypatch.setattr(converter.resource_policy, 'plan_execution', lambda *a, **k: plan)
+    monkeypatch.setattr(converter.resource_policy, 'ram_ceiling', lambda *a: 150)
+    monkeypatch.setattr(converter, '_estimate_source', lambda *a: (1, 125, 1))
+    calls = []
+    monkeypatch.setattr(converter, '_convert_source', lambda *a: (calls.append(a[1]) or True, False))
+    result = converter.convert_batch(['one'], str(tmp_path), '.jpg', lambda: False,
+                                     lambda *a: None, lambda *a: None)
+    assert result == (1, 0, False) and calls == ['one']
+    monkeypatch.setattr(converter.resource_policy, 'ram_ceiling', lambda *a: 124)
+    statuses = {}
+    result = converter.convert_batch(['two'], str(tmp_path), '.jpg', lambda: False,
+                                     lambda i, text: statuses.update({i: text}), lambda *a: None)
+    assert result == (0, 1, False) and calls == ['one']
+    assert statuses[0] == converter.trans.t('converter_memory_error')
+
+
+def test_raw_jpeg_estimate_uses_sensor_bounds_with_headroom(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    source = tmp_path / 'sensor.raf'
+    source.write_bytes(b'raw')
+    class Header:
+        sizes = SimpleNamespace(raw_width=1000, raw_height=800)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def open_file(self, path):
+            pass
+    monkeypatch.setattr(converter.image_loader.rawpy, 'RawPy', Header)
+    jpeg_ram, _ = converter.estimate_job(source, ext='.jpg')
+    png_ram, _ = converter.estimate_job(source, ext='.png')
+    assert jpeg_ram == 1000 * 800 * 32 + 6
+    assert png_ram == 1000 * 800 * 64 + 6
+
+
+def test_cancelled_batch_does_not_create_output_directory(tmp_path):
+    directory = tmp_path / 'not-created'
+    result = converter.convert_batch(['source'], str(directory), '.jpg', lambda: True,
+                                     lambda *a: None, lambda *a: None)
+    assert result == (0, 0, True)
+    assert not directory.exists()
+
+
+def test_batch_preserves_existing_output_and_same_directory_source(tmp_path):
+    source = tmp_path / 'photo.png'
+    Image.new('RGB', (8, 8), 'blue').save(source)
+    original = source.read_bytes()
+    existing = tmp_path / 'photo.jpg'
+    existing.write_bytes(b'existing output')
+    result = converter.convert_batch([str(source)], str(tmp_path), '.jpg', lambda: False,
+                                     lambda *a: None, lambda *a: None)
+    assert result == (1, 0, False)
+    assert source.read_bytes() == original
+    assert existing.read_bytes() == b'existing output'
+    with Image.open(tmp_path / 'photo_1.jpg') as output:
+        assert output.size == (8, 8)
+
+
+def test_batch_reports_unknown_memory_instead_of_claiming_shortage(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    plan = SimpleNamespace(workers=1, native_threads=1, max_in_flight=1,
+                           ram_budget=100, describe=lambda: 'test')
+    monkeypatch.setattr(converter.resource_policy, 'plan_execution', lambda *a, **k: plan)
+    monkeypatch.setattr(converter.resource_policy, 'probe_resources', lambda: SimpleNamespace(ram_known=False))
+    monkeypatch.setattr(converter.resource_policy, 'ram_ceiling', lambda *a: 0)
+    monkeypatch.setattr(converter, '_estimate_source', lambda *a: (1, 10, 1))
+    statuses = {}
+    result = converter.convert_batch(['source'], str(tmp_path), '.jpg', lambda: False,
+                                     lambda i, text: statuses.update({i: text}), lambda *a: None)
+    assert result == (0, 1, False)
+    assert statuses[0] == converter.trans.t('converter_memory_unknown')
+
+
+def test_single_page_admission_uses_localized_resource_errors(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(converter, 'estimate_job', lambda *a: (100, 100))
+    monkeypatch.setattr(converter, 'available_memory_bytes', lambda: 0)
+    with pytest.raises(MemoryError) as error:
+        converter._admit('source', 0, str(tmp_path), '.jpg')
+    assert str(error.value) == converter.trans.t('converter_memory_unknown')
+    monkeypatch.setattr(converter, 'available_memory_bytes', lambda: 100)
+    with pytest.raises(MemoryError) as error:
+        converter._admit('source', 0, str(tmp_path), '.jpg')
+    assert str(error.value) == converter.trans.t('converter_memory_error')
+    monkeypatch.setattr(converter, 'available_memory_bytes', lambda: 1000)
+    monkeypatch.setattr(converter.shutil, 'disk_usage', lambda *a: SimpleNamespace(free=99))
+    with pytest.raises(OSError) as error:
+        converter._admit('source', 0, str(tmp_path), '.jpg')
+    assert str(error.value) == converter.trans.t('converter_space_error')

@@ -37,7 +37,6 @@ def _menu_window(qapp):
     })()
     window.source_manager = type("S", (), {
         "clear_image_stack": staticmethod(stub),
-        "prompt_and_load_linear_raw": staticmethod(stub),
         "reset_current_stack": staticmethod(stub),
     })()
     window.label_manager = type("L", (), {
@@ -59,12 +58,32 @@ def _menu_window(qapp):
             "show_compare_dialog", "show_mosaic_dialog", "show_depth_map_dialog",
             "show_dust_map_dialog", "show_scale_bar_dialog",
             "remove_scale_bar", "show_advanced_settings_dialog",
-            "set_use_gpu", "apply_theme", "set_language",
+            'restore_default_settings', 'set_use_gpu', 'apply_theme', 'set_language',
             "check_for_updates", "install_update_now", "open_logs_folder",
             "show_quick_start", "show_environment_info", "show_feedback_dialog",
             "show_contact_info"):
         setattr(window, name, stub)
     return window
+
+
+def test_file_menu_uses_one_folder_entry(qapp):
+    from ui.menus import setup_menus
+
+    window = _menu_window(qapp)
+    calls = []
+    window.open_folder_dialog = lambda: calls.append(True)
+    setup_menus(window)
+    try:
+        assert 'linear_raw_open' not in window.ui_objs
+        action = window.ui_objs['action_open_folder']
+        assert action in window.ui_objs['menu_file'].actions()
+        action.trigger()
+        assert calls == [True]
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
 
 
 def test_usage_switch_is_only_in_advanced_settings(qapp):

@@ -78,6 +78,27 @@ def test_numeric_and_choice_parameters_change_real_whole_and_tile_pixels(extensi
     np.testing.assert_allclose(changed, 60)
 
 
+@pytest.mark.parametrize('tiled', [False, True])
+def test_default_extension_contract_resolves_source_descriptors(extension, tmp_path, tiled):
+    import cv2
+    from core.multi_focus_fusion import MultiFocusFusion
+    from core.source_frames import scan_source
+    frames = []
+    for index, value in enumerate((20, 100)):
+        path = tmp_path / f'{index}.png'
+        assert cv2.imwrite(str(path), np.full((24, 32, 3), value, np.uint8))
+        frames.extend(scan_source(str(path), header_only=True))
+    fusion = MultiFocusFusion('extension', tile_enabled=tiled, tile_threshold=8,
+                              tile_block_size=16, tile_overlap=4, exposure_match=False)
+    np.testing.assert_array_equal(fusion.fuse(frames, thread_count=1),
+                                  np.full((24, 32, 3), 40, np.float32))
+
+
+def test_streaming_capability_requires_an_explicit_boolean(extension):
+    with pytest.raises(ValueError, match='streaming_sources must be boolean'):
+        algorithms.register_fusion(replace(extension, id='bad_streaming', streaming_sources=1))
+
+
 def test_depth_runner_consumes_independent_parameter_schema(extension):
     from core.depth_map import compute_focus_index
     frames = [np.full((8, 12, 3), value, np.uint8) for value in (20, 100, 140)]
@@ -120,11 +141,21 @@ def test_composite_cancellation_stops_before_next_runner(extension, monkeypatch)
 
 @pytest.mark.parametrize('values', [
     {'missing': 1}, {'fraction': True}, {'fraction': float('nan')},
-    {'fraction': float('inf')}, {'fraction': 2}, {'direction': 'sideways'},
+    {'fraction': float('inf')}, {'fraction': 10**400},
+    {'fraction': 2}, {'direction': 'sideways'},
 ])
 def test_invalid_fusion_parameters_fail_explicitly(extension, values):
     with pytest.raises(ValueError):
         algorithms.resolve_fusion_parameters('extension', values)
+
+
+def test_unrepresentable_numeric_schema_is_rejected(extension):
+    invalid = replace(extension, id='invalid_numeric_schema', parameters=(
+        replace(extension.parameters[0], step=10**400),))
+    with pytest.raises(ValueError):
+        algorithms.register_fusion(invalid)
+    with pytest.raises(ValueError):
+        algorithms.get_fusion(invalid.id)
 
 
 def test_invalid_registration_parameters_and_duplicate_descriptors_fail(extension):
