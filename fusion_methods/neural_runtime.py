@@ -27,6 +27,11 @@ _ACTUAL_CHECKPOINT = None
 _AVAILABLE_PROVIDERS = ()
 _HARDWARE_ADAPTERS = ()
 _PROBE_ERRORS = ()
+# Verified accelerator that logits() will not admit because its free memory
+# cannot be read; AI jobs then run on CPU.
+_UNADMITTED = None
+# Providers whose jobs logits() admits only against known free device memory.
+VRAM_GATED_KINDS = ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO')
 
 
 def device_diagnostics():
@@ -34,7 +39,34 @@ def device_diagnostics():
     return {'hardware': _HARDWARE_ADAPTERS, 'providers': _AVAILABLE_PROVIDERS,
             'selected': _DEVICE, 'adapter': _DIRECTML_ADAPTER_NAME,
             'actual': _ACTUAL_DEVICE, 'checkpoint': _ACTUAL_CHECKPOINT,
-            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS}
+            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS,
+            'unadmitted': _UNADMITTED}
+
+
+def unadmitted_accelerator():
+    """The verified accelerator AI jobs cannot use (free memory unreadable), or None."""
+    return _UNADMITTED
+
+
+def admitted_kind(kind):
+    """The device AI jobs will actually run on: CPU for an unadmitted accelerator.
+
+    A provider that passes the probe but whose free memory cannot be read is
+    sent to CPU by every job, so it must not be shown as ready.
+    """
+    if kind is not None and kind == _UNADMITTED:
+        return 'CPU'
+    return kind
+
+
+def _memory_unreadable(kind):
+    if kind not in VRAM_GATED_KINDS:
+        return False
+    from core.resource_policy import probe_resources
+    try:
+        return not probe_resources(kind).vram_known
+    except Exception:
+        return True
 
 
 def start_inference_job():
@@ -137,9 +169,10 @@ def resolve_device(use_gpu):
     if not use_gpu:
         return 'CPU'
     global _DEVICE, _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME
-    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS
+    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS, _UNADMITTED
     with _LOCK:
         if _DEVICE is None:
+            _UNADMITTED = None
             import onnxruntime as ort
             from utils.weights import weights_path
             available = ort.get_available_providers()
@@ -181,6 +214,8 @@ def resolve_device(use_gpu):
                             set_directml_adapter(adapter_index)
                         if kind == 'DIRECTML':
                             _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME = adapter_index, adapter_name
+                        if _memory_unreadable(kind):
+                            _UNADMITTED = kind
                         device = kind
                         break
                     except Exception as error:
@@ -280,7 +315,7 @@ def logits(planes, path, device, threads, should_cancel=None):
     global _ACTUAL_DEVICE, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
     if _FALLBACK_CPU:
         device = 'CPU'
-    if device in ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO'):
+    if device in VRAM_GATED_KINDS:
         from core.resource_policy import probe_resources, vram_budget
         snapshot = probe_resources(device)
         n, hp, wp = shape

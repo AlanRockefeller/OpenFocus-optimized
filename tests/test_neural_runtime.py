@@ -131,6 +131,13 @@ def test_unknown_vram_does_not_erase_verified_provider_capability(monkeypatch, t
     assert diagnostics['actual'] is None
     assert 'DmlExecutionProvider' in diagnostics['providers']
     assert neural_runtime._DIRECTML_ADAPTER_INDEX == hardware[0][0]
+    # Capability is kept, but jobs cannot be admitted to it, so nothing may
+    # describe it as the device AI work will run on.
+    assert diagnostics['unadmitted'] == 'DIRECTML'
+    assert neural_runtime.unadmitted_accelerator() == 'DIRECTML'
+    assert neural_runtime.admitted_kind('DIRECTML') == 'CPU'
+    assert neural_runtime.execution_status(
+        True, True, 'model.onnx', neural_runtime.admitted_kind('DIRECTML')) == ('CPU', 'selected')
 
 
 def test_fusion_info_does_not_borrow_another_jobs_actual_device(monkeypatch):
@@ -360,3 +367,20 @@ def test_execution_status_separates_capability_preference_and_actual_model(
     monkeypatch.setattr(neural_runtime, '_ACTUAL_DEVICE', actual)
     monkeypatch.setattr(neural_runtime, '_ACTUAL_CHECKPOINT', actual_model)
     assert neural_runtime.execution_status(neural, use_gpu, checkpoint, capability) == expected
+
+
+@pytest.mark.parametrize('known', [True, False])
+def test_status_shows_the_device_jobs_are_admitted_to(monkeypatch, known):
+    from core import resource_policy
+    snapshot = (resource_policy.ResourceSnapshot(free_vram=4 * 1024 ** 3, total_vram=8 * 1024 ** 3)
+                if known else resource_policy.ResourceSnapshot())
+    monkeypatch.setattr(resource_policy, 'probe_resources', lambda *args: snapshot)
+    for kind in neural_runtime.VRAM_GATED_KINDS:
+        assert neural_runtime._memory_unreadable(kind) is (not known)
+    # Providers logits() does not gate on device memory are always admitted.
+    assert neural_runtime._memory_unreadable('COREML') is False
+    monkeypatch.setattr(neural_runtime, '_UNADMITTED', None if known else 'CUDA')
+    assert neural_runtime.admitted_kind('CUDA') == ('CUDA' if known else 'CPU')
+    assert neural_runtime.admitted_kind(None) is None
+    assert neural_runtime.admitted_kind('CPU') == 'CPU'
+

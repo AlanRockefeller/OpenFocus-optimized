@@ -767,6 +767,10 @@ class OpenFocus(QMainWindow):
             neural = self._ai_method_selected()
             checkpoint = (get_fusion(self.combo_fusion.currentData()).weights or ''
                           if neural else '')
+            # A verified provider whose free memory cannot be read is never
+            # admitted by AI jobs; show the CPU they will actually run on.
+            unadmitted = neural_runtime.unadmitted_accelerator()
+            capability = neural_runtime.admitted_kind(capability)
             device, state = neural_runtime.execution_status(
                 neural, getattr(self, 'use_gpu', True), checkpoint, capability)
             kind = ('…' if state == 'pending'
@@ -780,6 +784,8 @@ class OpenFocus(QMainWindow):
                 'ONNX Runtime: ' + ', '.join(diagnostics['providers']),
                 trans.t('env_gpu_accel') + ': ' + neural_runtime.display_name(capability)
                 if neural_runtime.is_accelerator(capability) else trans.t('env_no_gpu'),
+                trans.t('env_gpu_memory_unknown').format(
+                    device=neural_runtime.display_name(unadmitted)) if unadmitted else '',
                 trans.t('status_gpu').format(kind),
                 trans.t('msg_gpu_accel_hint'),
                 '\n'.join(diagnostics['probe_errors'])))))
