@@ -5,6 +5,116 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Default Batch Image Converter to lossless PNG, restore the last explicitly
+  selected output format, and show the actual result extension below the
+  selector. Its individual-file conversion, including RAW-to-DNG, remains
+  separate from fusion Batch output. RAW import now names the two intents
+  **Standard color image** and **Camera-linear RAW (Linear DNG)** with a
+  plain-language explanation in every language pack.
+- Simplify the Retouch workspace and move explanatory text throughout the UI
+  into control tooltips, keeping relevant risks and status visible. Result
+  adjustments include highlights, shadows, saturation and color temperature,
+  with a larger side-by-side preview and draggable before/after comparison.
+- Import camera RAW and ordinary image folders through the same entry; a RAW-only
+  stack can still use camera-linear import and Linear DNG export.
+- Prepare source frames with bounded parallel decoding and publish thumbnails
+  incrementally, while respecting the configured thread and memory budgets.
+- Move frame-review messages to the bottom status bar, leaving more room for
+  the source list while preserving temporary render and update messages.
+- Set new OpenFocus A/B kernel defaults to 17, B depth smoothing to 1.44 and C
+  blend smoothing to 3.6. Existing saved per-method values are preserved.
+- Match OpenFocus A's integer Burt-pyramid response and eight-bit E-37 output
+  to HF9. A smoothing is inert; sixteen-bit selected codes remain unchanged.
+- Show the localized OpenFocus smoothing hints in the registered parameter panels
+  and update all twelve language packs and manuals for A and C's actual behavior.
+- Reuse A's exact Q4 hard-selection response for normalized float and resized
+  sources, removing full-size double-precision response and expansion buffers.
+- Match OpenFocus C's native reverse, full-resolution source merge using the
+  completed depth map. Remove the unrelated RGB pyramid reconstruction and
+  its layer-count option; smoothing affects fusion and exported depth together.
+- Store independent frame snapshots in a shared, bounded RAM pool before
+  spilling to admitted temporary mappings. OpenFocus producers retain at most
+  two in-flight frames and use the same resource planner and memory ceiling.
+- Resolve only sources contributing to OpenFocus B's final depth bands in its
+  second pass, while retaining source identity and processor validation.
+- Process native OpenFocus depth, selection and reconstruction in bounded row
+  bands, borrowing native source pixels instead of full RGB code-plane copies.
+- Reuse each source's exposure gain and immutable gray-resampling axes across
+  passes. Write winner depth codes during selection, avoiding a separate
+  full-image conversion while preserving the code domain.
+- Share one admitted OpenFocus executor across row passes, keeping frame, row
+  and explicit-tile parallelism within one budget and joining on cancellation.
+- Automatically stream large TIFF, PNG and baseline JPEG exports in bounded
+  bands, including multipage and physical-depth TIFF. Preserve native 16-bit
+  samples and supported EXIF/GPS/ICC metadata without duplicating the full output.
+- Preserve advanced JPEG parameters with explicit whole-codec memory admission,
+  choose classic TIFF for known small page layouts, and retain uncompressed
+  desktop multipage exports and the public helper's historical LZW default.
+
+### Fixed
+- Give macOS fusion, comparison, depth-map and batch threads enough native
+  stack for cold LLVM compilation, preventing a crash at the stack guard page.
+- Explicitly disable OpenCV parallel regions inside native fusion jobs and
+  preserve an existing serial setting when restoring macOS GCD thread state.
+- Match OpenFocus C's native depth chain: fixed half-scale gray FMA resampling,
+  vote-based confidence, square-root guide, horizontal-first Q12 smoothing,
+  and truncating feather correction before expanding depth to the canvas. Preserve
+  native float32 coordinate order when expanding to odd canvas dimensions.
+- Preserve normalized float32 exposure and nearest-code rounding for native
+  sixteen-bit OpenFocus sources, with admitted row-band quantization scratch.
+- Include a bounded RGB display preview when converting camera RAW to DNG and
+  a safe embedded preview is available, preserving sensor samples and calibration.
+  Recover missing RAW/DNG previews for the first or selected source in admitted
+  background work; other sources retain lazy sensor decoding.
+- Let Batch Image Converter create a typed output directory and avoid rejecting
+  RAW-to-JPEG work based on an inflated working-memory estimate or duplicate
+  reservations. Resource errors are shown in the selected language.
+- Restore source-list thumbnails that were decoded just before a preview request
+  was cancelled. Show complete option indicators and numeric values in themed
+  Retouch controls and other spin boxes.
+- Select a writable local temporary volume for large jobs when the default
+  lacks space, using known stack and staging estimates. User-selected paths
+  remain binding; unavailable paths and insufficient space produce actionable
+  errors. Workers share the job's selection and release temporary files when
+  their final views are freed.
+- Avoid a frame-allocation deadlock when memory probing collects an older RAM
+  snapshot. Preserve direct file writing for snapshots that exceed the shared
+  RAM budget, and retain reservations until their final array views are freed.
+- Restore the caller's OpenCV thread count after cold direct OpenFocus calls,
+  and join all workers and late initializers before restoring native pool limits.
+- Keep ROI previews off the GUI thread after deferred alignment, bound rapid
+  frame changes to the latest request, and preserve ROI edits while previews
+  load. Match eager registration for singleton channels and opaque-alpha folders.
+- Preserve the converter's cancellation exception and remove reserved and
+  temporary outputs when cancellation occurs inside the shared image writer.
+- Drop opaque alpha through lazy tile crops before native color conversion,
+  preserving bounded memory and BGR-equivalent tiled output.
+- Apply each OpenFocus alignment estimate directly in the anchor coordinate
+  system, preventing motion from being counted twice from the third frame.
+  Invalidate alignment plans and cached results produced by the former chain.
+- Keep the initial OpenFocus translation-only grid at one-pixel spacing or
+  finer, preventing broad search ranges from skipping the true alignment.
+- Resize normalized OpenFocus samples before native code quantization, preserving
+  area interpolation for registered extensions and resized float sources.
+- Preserve native grayscale directory registration while keeping its decoded
+  source cache independent from BGR display consumers.
+- Resolve deferred alignment previews off the GUI thread and keep cached
+  alignment results usable after later edits to the active source stack.
+- Restore local scratch-volume selection before deferred registration, fusion
+  and retained-frame resolution, without reserving disk for RAM-only work.
+  Explicit temporary-directory choices remain binding.
+- Evict old source-cache owners before the next full decode, avoiding a full
+  old cache overlapping the incoming image while preserving live consumer views.
+- Keep OpenFocus A's native hard-selected codes in uint16 and release its
+  response/cache before the common float output conversion.
+- Resolve macOS temporary subdirectories to their actual disk device before
+  checking whether the volume is internal and fixed.
+- Quantize fusion results in bounded sample chunks instead of allocating
+  whole-image float copies, preserving 8/16-bit rounding and strided inputs.
+
+## [1.77.0] - 2026-11-06
+
 ### Added
 - Add Auto background to Retouch: replace the stacked background with one real
   frame while the subject stays as stacked. Automatic (the default) picks the
@@ -15,7 +125,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as knobs just past the depth of field. A missing-data map shows, and can save,
   where no frame saw the scene cleanly. Scenes that are nearly all subject are
   left as stacked.
-- Add a Retouch button beside Review frames in the right panel.
+- Put Retouch in the output header and Review frames immediately left of Select
+  all in the source header. Add grouped, scrollable shortcut help to Retouch.
+- Add Settings → Restore default settings with a second confirmation. Cancel
+  changes nothing; restoring retains loaded sources, outputs and user data.
 - Add Auto background to the command line: `--auto-background [auto|soft|sharp]`
   replaces the background after fusion with the Retouch defaults, so a stack
   can be finished unattended. `--background-mode faithful` keeps the stack's
@@ -25,10 +138,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unavailable with grouped fusion and `--native-raw`.
 
 ### Changed
-- Pressing Render while frames are still loading now starts the render when
-  loading finishes; pressing it again cancels.
+- Local development and CI use the same test dependency file, including the
+  timeout plugin and the Python 3.10 TOML parser used by packaging checks.
+- Algorithms declare source resize interpolation once; tiled preparation and
+  base correction consume the descriptor instead of branching on method names.
+- CI also installs the built wheel without Qt or PyTorch and exercises real
+  16-bit CLI fusion and recipe replay, including non-ASCII paths.
+- Rendering queued during loading shows a waiting-for-loading state, followed
+  by resource wait, preparation, alignment, fusion and finishing as applicable.
+  Cancelling removes the deferred start, including after its timer was queued.
 - The status bar reads "RAM used" so it is clear which number is in use.
 - Reword the retouch brush-size hint.
+- OpenFocus A/B/C use whole-image processing at the default tile threshold.
+  Explicit non-default thresholds still select the external tile path; internal
+  row/frame streaming retains global depth and reconstruction semantics.
+- OpenFocus A selects original pixels by local high-frequency energy. The
+  kernel controls high-pass scale and smoothing controls energy spread;
+  mapped row processing and bounded frame concurrency preserve source-order
+  selection and 16-bit precision.
+- Stream TIFF conversion in bounded strips without an encoded full-image copy,
+  preserving integer depth and supported EXIF/GPS/ICC metadata. Admit camera
+  TIFFs by their actual classic-header capacity near the 4-GiB boundary.
+- Bound exposure statistics, normalization and gain scratch by rows, including
+  deferred uint16 tiles and mixed-depth neural inputs; release strips before
+  allocating the next and check cancellation between them.
 - Save Auto background sessions, including successful analyses without pixel
   changes, as lossless v2 `.ofretouch` ZIP snapshots with JSON metadata and NumPy
   payloads. GUI and CLI restore exact working pixels, reachable undo/redo tiles
@@ -77,6 +210,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so when it opens on such an output.
 
 ### Fixed
+- Ignore delayed startup dialogs, restores, file opens and backend probes once
+  shutdown begins, so an overdue first-run guide cannot reopen after closing.
+- Reject leading-slash absolute paths in portable recipes on Windows Python
+  3.13 and later, using the same check for inputs, outputs and mask paths.
+- Preserve the loupe's selected zoom across release/reopen and retain useful
+  image content while a new native region is pending.
+- Frame-number, thumbnail and slider navigation in Retouch no longer creates a
+  stray top-level window. Auto-background option indicators align with the first
+  text line, and clearing sources removes stale frame-review status.
+  Source-header buttons retain their full preferred caption width after a
+  temporary squeeze, so an idle action does not collapse to a lone ellipsis.
+- Correct microscope mosaic scale and rotation with similarity geometry and
+  original-resolution refinement instead of blending misregistered detail.
+- Use the reference canvas for mapped OpenFocus affine destinations when source
+  sizes differ, preventing successful alignment from returning black pixels.
+- Keep C's ROI planning consistent with its actual pyramid reconstruction depth.
+- Move macOS packaging to the current hosted runner after the macOS 14
+  configuration became unavailable; branch builds remain preview artifacts.
+- Checkpoint and recipe saves cannot replace their original images or correction
+  references; recipe execution protects the recipe itself. Reject output paths
+  that require the same name to be both a file and a directory before processing.
+- Unchanged brush strokes retain redo edits. Repeated background replacement
+  analyzes the original session base while preserving current edits and exact
+  untouched floating-point pixels. Loading a checkpoint releases its redundant
+  base buffer, and DCT-trimmed retouch sources own their cropped storage.
+- Correct base-frame brightness after resizing and grayscale/BGRA promotion.
+  Homography accepts both normalized and 0-255 floating-point inputs without
+  changing integer preprocessing; ECC accepts grayscale and singleton channels.
+- Detect source files replaced during decoding and reject late-cancelled
+  materialization. Failed or cancelled video imports preserve the previous stack
+  and metadata; thin-image previews keep their one-pixel short edge.
+- Batch exports retain each stack's EXIF and physical calibration. Grouped
+  outputs draw a scale bar only when their contributing calibrations agree.
+- Source changes discard stale preview drafts and invalidate ROI work safely.
+  Clearing sources releases idle loaders and removes obsolete recovery data;
+  saved projects become dirty when source membership changes. Aligned history
+  remains navigable after replacing the active stack.
+- Recipes retain native RAW mode and batch format, and reject transient report
+  flags during capture. Fractional control indices cannot mutate another output.
+- macOS update retries discard an interrupted temporary bundle before copying,
+  preventing obsolete files from surviving into the next installed build.
+- Oversized numeric parameters and extension metadata now produce regular
+  validation errors instead of an uncaught numeric-conversion overflow.
 - Message-box buttons such as "Discard changes" are no longer cut off.
 - Replaying a checkpoint from a grayscale standalone retouch session keeps
   the grayscale layout, so its fingerprints match.
