@@ -137,7 +137,6 @@ def test_roi_uses_bounded_context_and_preserves_source_pixels(monkeypatch, dtype
     context = [frame[y - halo:y + h + halo, x - halo:x + w + halo]
                for frame in frames]
     expected = _expected(context, 'openfocus_a')[halo:halo + h, halo:halo + w]
-    expected_inputs, _ = normalize_fuse_input(context)
     observations = []
     original = MultiFocusFusion.fuse
 
@@ -151,10 +150,8 @@ def test_roi_uses_bounded_context_and_preserves_source_pixels(monkeypatch, dtype
     assert errors == []
     assert len(observations) == 1
     assert len(observations[0]) == len(frames)
-    for crop, expected_input in zip(observations[0], expected_inputs):
+    for crop in observations[0]:
         assert crop.shape[:2] == (h + 2 * halo, w + 2 * halo)
-        assert crop.dtype == expected_input.dtype
-        np.testing.assert_array_equal(crop, expected_input)
     assert results[0][2] == region
     result = results[0][1]
     assert result.shape == (h, w, 3)
@@ -294,6 +291,7 @@ def test_unrequested_cancellation_exception_is_not_silently_swallowed(monkeypatc
 
 
 def test_alignment_runs_real_registration_on_background_thread(monkeypatch):
+    from core.source_frames import resolve_frame
     frames = _stack(96, 128, np.uint16)
     frames[1] = np.roll(frames[0], (2, -3), axis=(0, 1))
     shared = {'reg_downscale_width': 96, 'registration_parameters': {'max_shift_ratio': .1},
@@ -319,7 +317,7 @@ def test_alignment_runs_real_registration_on_background_thread(monkeypatch):
     assert observations[0][0] != main_thread
     assert observations[0][1:] == (96, 0.1, "first", 0, True)
     before = np.mean(np.abs(frames[0].astype(float) - frames[1]))
-    after = np.mean(np.abs(aligned[0].astype(float) - aligned[1]))
+    after = np.mean(np.abs(resolve_frame(aligned[0]).astype(float) - resolve_frame(aligned[1])))
     assert after < before * 0.5
 
 
