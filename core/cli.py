@@ -1757,8 +1757,12 @@ def _run_cli_admitted(argv: List[str]) -> int:
         import cv2
 
         # Scratch from a crashed earlier run would otherwise shrink this one's disk.
-        from core.scratch_registry import sweep_abandoned
-        sweep_abandoned()
+        # Best-effort housekeeping: a failure must never fail the render.
+        try:
+            from core.scratch_registry import sweep_abandoned
+            sweep_abandoned()
+        except Exception:
+            _log.exception("scratch sweep failed")
 
         if batch_mode:
             return _run_batch(args, _emit_json)

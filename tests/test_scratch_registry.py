@@ -212,3 +212,59 @@ def test_boot_time_is_in_the_past():
     boot = scratch_registry._boot_time()
     if boot is not None:
         assert 0 < boot < time.time()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX byte-path names")
+def test_undecodable_path_names_are_recorded_and_removed(registry):
+    directory, scratch = registry
+    # A job folder, which only the registry (never the legacy sweep) removes.
+    raw = os.path.join(os.fsencode(scratch), b"openfocus-\xff\xfe")
+    try:
+        os.mkdir(raw)
+    except OSError:
+        pytest.skip("filesystem rejects non-UTF-8 names")
+    process = child(directory, f"""
+        scratch_registry.register(os.fsdecode({raw!r}))
+        assert not scratch_registry._disabled
+        os._exit(9)
+    """)
+    assert process.returncode == 9   # recording raised nothing
+    sweep()
+    assert not os.path.exists(raw)
+    assert not list(directory.glob("*.scratch"))
+
+
+def test_stale_registry_is_kept_until_its_scratch_is_gone(registry, monkeypatch):
+    directory, scratch = registry
+    frame = scratch / "openfocus-frame-locked.bin"
+    child(directory, f"""
+        import pathlib
+        path = pathlib.Path({str(frame)!r}); path.write_bytes(b"x" * 10)
+        scratch_registry.register(path)
+        os._exit(3)
+    """)
+    # e.g. a Windows sharing violation or an antivirus lock
+    monkeypatch.setattr(scratch_registry, "_remove", lambda target: 0)
+    assert sweep() == (0, 0)
+    assert frame.exists() and len(list(directory.glob("*.scratch"))) == 1
+    monkeypatch.undo()
+    monkeypatch.setattr(scratch_registry, "_directory_override", directory)
+    monkeypatch.setattr(scratch_registry.tempfile, "gettempdir", lambda: str(scratch))
+    sweep()
+    assert not frame.exists() and not list(directory.glob("*.scratch"))
+
+
+def test_cli_render_survives_a_failing_sweep(tmp_path, monkeypatch):
+    import cv2
+    from core.cli import run_cli
+
+    def broken(extra_directories=()):
+        raise RuntimeError("registry corrupt")
+    monkeypatch.setattr(scratch_registry, "sweep_abandoned", broken)
+    stack = tmp_path / "stack"
+    stack.mkdir()
+    for i in range(3):
+        cv2.imwrite(str(stack / f"f{i}.png"), np.full((24, 24, 3), 40 * i, np.uint8))
+    out = tmp_path / "out.png"
+    assert run_cli(["-i", str(stack), "-o", str(out), "-m", "guided_filter", "-a", "none"]) == 0
+    assert out.exists()

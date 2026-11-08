@@ -34,6 +34,8 @@ from pathlib import Path
 log = logging.getLogger("openfocus")
 
 _SUFFIX = ".scratch"
+# Lossless for any POSIX path bytes, including names that are not valid UTF-8.
+_ENCODING = dict(encoding="utf-8", errors="surrogateescape")
 # Only paths with these basenames are ever removed, whatever a registry says.
 _PREFIXES = ("openfocus-frame-", "openfocus-preview-", "openfocus-grouped-",
              "openfocus_video_", "openfocus-")
@@ -85,7 +87,7 @@ def _open_registry():
     directory = registry_directory()
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{os.getpid()}-{uuid.uuid4().hex[:12]}{_SUFFIX}"
-    handle = open(path, "a+", encoding="utf-8")
+    handle = open(path, "a+", **_ENCODING)
     if not _try_lock(handle):
         handle.close()
         path.unlink(missing_ok=True)
@@ -112,7 +114,7 @@ def register(path) -> None:
             _handle.seek(0, os.SEEK_END)
             _handle.write(line + "\n")
             _handle.flush()
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             _disabled = True
             log.warning("scratch registry unavailable; crash leftovers will not be "
                         "removed automatically: %s", exc)
@@ -158,7 +160,7 @@ def _live_registry_paths(directory: Path) -> set:
     for entry in directory.glob(f"*{_SUFFIX}"):
         if entry != _handle_path:
             try:
-                probe = open(entry, "r+", encoding="utf-8")
+                probe = open(entry, "r+", **_ENCODING)
             except OSError:
                 continue
             try:
@@ -167,8 +169,8 @@ def _live_registry_paths(directory: Path) -> set:
             finally:
                 probe.close()
         try:
-            live.update(line.strip() for line in entry.read_text(encoding="utf-8").splitlines())
-        except OSError:
+            live.update(line.strip() for line in entry.read_text(**_ENCODING).splitlines())
+        except (OSError, ValueError):
             pass
     return live
 
@@ -179,9 +181,10 @@ def _sweep_stale_registries(directory: Path):
         if _handle_path is not None and entry == _handle_path:
             continue
         try:
-            probe = open(entry, "r+", encoding="utf-8")
+            probe = open(entry, "r+", **_ENCODING)
         except OSError:
             continue
+        leftover = False
         try:
             if not _try_lock(probe):
                 continue  # owner is alive
@@ -191,11 +194,17 @@ def _sweep_stale_registries(directory: Path):
                 target = _safe_target(line.strip())
                 if target is not None:
                     size = _remove(target)
-                    if size or not target.exists():
+                    if target.exists():
+                        leftover = True  # e.g. locked by antivirus; retry next time
+                    else:
                         removed += 1
                         freed += size
+        except (OSError, ValueError):
+            leftover = True
         finally:
             probe.close()
+        if leftover:
+            continue
         try:
             entry.unlink()
         except OSError:
