@@ -120,6 +120,34 @@ def register(path) -> None:
                         "removed automatically: %s", exc)
 
 
+def forget(paths) -> None:
+    """Stop recording paths that another process has taken over.
+
+    A file handed to another process (a render worker's results, adopted by
+    the window) must leave this registry: after a clean exit the registry
+    stays on disk, unlocked, while anything it lists still exists, and the
+    next startup would remove scratch the new owner is still using.  The new
+    owner records the paths in its own registry.
+    """
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        paths = (paths,)
+    drop = {os.path.abspath(os.fsdecode(path)) for path in paths}
+    if not drop:
+        return
+    with _lock:
+        if _handle is None:
+            return
+        try:
+            _handle.seek(0)
+            kept = [line for line in _handle.read().splitlines() if line and line not in drop]
+            _handle.seek(0)
+            _handle.truncate()
+            _handle.write("".join(line + "\n" for line in kept))
+            _handle.flush()
+        except (OSError, ValueError) as exc:
+            log.warning("scratch registry: could not forget handed-over scratch: %s", exc)
+
+
 def _safe_target(path: str):
     """Return a Path that may be removed, or None for anything unexpected."""
     if not path or not os.path.isabs(path):

@@ -268,3 +268,22 @@ def test_cli_render_survives_a_failing_sweep(tmp_path, monkeypatch):
     out = tmp_path / "out.png"
     assert run_cli(["-i", str(stack), "-o", str(out), "-m", "guided_filter", "-a", "none"]) == 0
     assert out.exists()
+
+
+def test_scratch_handed_to_another_process_is_not_swept(registry):
+    """A render worker hands its results to the window and exits cleanly.
+    Its registry stays (the files still exist) but must not list what the
+    window now owns, or a later startup would delete scratch in use."""
+    directory, scratch = registry
+    kept = make(scratch / "openfocus-frame-worker-only.bin")
+    handed = make(scratch / "openfocus-frame-handed-over.bin")
+    child(directory, f"""
+        scratch_registry.register({str(kept)!r})
+        scratch_registry.register({str(handed)!r})
+        scratch_registry.forget([{str(handed)!r}])
+    """)
+    assert list(directory.glob("*.scratch"))          # kept: it still lists a file
+    scratch_registry.register(handed)                  # this process (the window) adopted it
+    sweep()
+    assert not kept.exists()
+    assert handed.exists()
