@@ -1,0 +1,304 @@
+{
+  "policy": "probability-lift-v1",
+  "inputs": [
+    "/tmp/openfocus-v3-demo/prepared/0001.tif",
+    "/tmp/openfocus-v3-demo/prepared/0002.tif",
+    "/tmp/openfocus-v3-demo/prepared/0003.tif",
+    "/tmp/openfocus-v3-demo/prepared/0004.tif",
+    "/tmp/openfocus-v3-demo/prepared/0005.tif",
+    "/tmp/openfocus-v3-demo/prepared/0006.tif"
+  ],
+  "shape": [
+    284,
+    380,
+    3
+  ],
+  "auto_background": false,
+  "exposure_match": false,
+  "align": false,
+  "max_size": 0,
+  "tile_size": 0,
+  "crop_coordinates": [
+    [
+      "region-1",
+      56,
+      37,
+      96,
+      96
+    ],
+    [
+      "region-2",
+      142,
+      56,
+      96,
+      96
+    ],
+    [
+      "region-3",
+      142,
+      131,
+      96,
+      96
+    ],
+    [
+      "region-4",
+      227,
+      94,
+      96,
+      96
+    ],
+    [
+      "region-5",
+      28,
+      150,
+      96,
+      96
+    ]
+  ],
+  "metrics_note": "Fragmentation and edge differences are proxies, not perceptual quality. RSS is cumulative process high-water, including input, ONNX and diagnostics.",
+  "runs": {
+    "soft": {
+      "parameters": {
+        "mode": "soft"
+      },
+      "seconds": 1.250007260000075,
+      "process_peak_rss_mib": 516.97265625
+    },
+    "hard": {
+      "parameters": {
+        "mode": "hard"
+      },
+      "seconds": 0.7336443229999077,
+      "process_peak_rss_mib": 557.578125,
+      "edge_band_mae_vs_hard_native_units": 0.0
+    },
+    "conservative-first-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 0.7460063700000319,
+      "process_peak_rss_mib": 560.6953125,
+      "edge_band_mae_vs_hard_native_units": 2.9551820755004883,
+      "override_percent": 2.2933654558932544,
+      "fallback_percent": 97.70663454410675,
+      "override_components": 8,
+      "selection_neighbor_disagreement_percent": 0.29172395852688693,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 16.67751736111111,
+          "horizontal_label_changes": 159
+        },
+        "region-3": {
+          "override_percent": 0.03255208333333333,
+          "horizontal_label_changes": 4
+        },
+        "region-4": {
+          "override_percent": 6.076388888888888,
+          "horizontal_label_changes": 120
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 0.7376377959999445,
+      "process_peak_rss_mib": 565.09765625,
+      "edge_band_mae_vs_hard_native_units": 3.5340499877929688,
+      "override_percent": 1.1934766493699036,
+      "fallback_percent": 98.8065233506301,
+      "override_components": 5,
+      "selection_neighbor_disagreement_percent": 0.18023709539559254,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 8.951822916666668,
+          "horizontal_label_changes": 122
+        },
+        "region-3": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-4": {
+          "override_percent": 2.170138888888889,
+          "horizontal_label_changes": 30
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 0.7232106750000185,
+      "process_peak_rss_mib": 567.23046875,
+      "edge_band_mae_vs_hard_native_units": 4.294208526611328,
+      "override_percent": 0.07968865826538177,
+      "fallback_percent": 99.92031134173462,
+      "override_components": 6,
+      "selection_neighbor_disagreement_percent": 0.04273663086699617,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 0.8138020833333334,
+          "horizontal_label_changes": 36
+        },
+        "region-3": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-4": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-last-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 0.7417257209999661,
+      "process_peak_rss_mib": 567.23046875,
+      "edge_band_mae_vs_hard_native_units": 5.860908031463623,
+      "override_percent": 6.188843587842847,
+      "fallback_percent": 93.81115641215715,
+      "override_components": 27,
+      "selection_neighbor_disagreement_percent": 1.5701066557657288,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.054253472222222224,
+          "horizontal_label_changes": 3
+        },
+        "region-2": {
+          "override_percent": 12.141927083333332,
+          "horizontal_label_changes": 371
+        },
+        "region-3": {
+          "override_percent": 40.69010416666667,
+          "horizontal_label_changes": 925
+        },
+        "region-4": {
+          "override_percent": 32.45442708333333,
+          "horizontal_label_changes": 598
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    },
+    "conservative-last-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 0.7217690309998943,
+      "process_peak_rss_mib": 567.23828125,
+      "edge_band_mae_vs_hard_native_units": 11.251900672912598,
+      "override_percent": 1.0795033358042996,
+      "fallback_percent": 98.9204966641957,
+      "override_components": 25,
+      "selection_neighbor_disagreement_percent": 0.3948493069233342,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 1.5625,
+          "horizontal_label_changes": 72
+        },
+        "region-3": {
+          "override_percent": 7.975260416666667,
+          "horizontal_label_changes": 297
+        },
+        "region-4": {
+          "override_percent": 5.479600694444445,
+          "horizontal_label_changes": 132
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    },
+    "conservative-last-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 0.7839297630000601,
+      "process_peak_rss_mib": 567.23828125,
+      "edge_band_mae_vs_hard_native_units": 12.7116117477417,
+      "override_percent": 0.024091919940696812,
+      "fallback_percent": 99.9759080800593,
+      "override_components": 2,
+      "selection_neighbor_disagreement_percent": 0.014864915084172581,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-3": {
+          "override_percent": 0.15190972222222224,
+          "horizontal_label_changes": 8
+        },
+        "region-4": {
+          "override_percent": 0.13020833333333331,
+          "horizontal_label_changes": 8
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    }
+  }
+}

@@ -1,0 +1,329 @@
+{
+  "inputs": [
+    "/tmp/openfocus-v3-keyboard/prepared/0001.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0002.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0003.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0004.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0005.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0006.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0007.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0008.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0009.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0010.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0011.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0012.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0013.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0014.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0015.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0016.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0017.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0018.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0019.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0020.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0021.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0022.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0023.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0024.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0025.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0026.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0027.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0028.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0029.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0030.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0031.tif",
+    "/tmp/openfocus-v3-keyboard/prepared/0032.tif"
+  ],
+  "shape": [
+    174,
+    314,
+    3
+  ],
+  "auto_background": false,
+  "exposure_match": false,
+  "align": false,
+  "max_size": 0,
+  "tile_size": 0,
+  "crop_coordinates": [
+    [
+      "region-1",
+      43,
+      15,
+      96,
+      96
+    ],
+    [
+      "region-2",
+      109,
+      23,
+      96,
+      96
+    ],
+    [
+      "region-3",
+      109,
+      54,
+      96,
+      96
+    ],
+    [
+      "region-4",
+      174,
+      39,
+      96,
+      96
+    ],
+    [
+      "region-5",
+      21,
+      62,
+      96,
+      96
+    ]
+  ],
+  "metrics_note": "Fragmentation and edge differences are proxies, not perceptual quality. RSS is cumulative process high-water, including input, ONNX and diagnostics.",
+  "runs": {
+    "soft": {
+      "parameters": {
+        "mode": "soft"
+      },
+      "seconds": 2.6668768380000074,
+      "process_peak_rss_mib": 1086.9375
+    },
+    "hard": {
+      "parameters": {
+        "mode": "hard"
+      },
+      "seconds": 2.1302633909999713,
+      "process_peak_rss_mib": 1132.64453125,
+      "edge_band_mae_vs_hard_native_units": 0.0
+    },
+    "conservative-first-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 2.202568575999976,
+      "process_peak_rss_mib": 1146.40234375,
+      "edge_band_mae_vs_hard_native_units": 4.074838161468506,
+      "override_percent": 25.043927081045464,
+      "fallback_percent": 74.95607291895453,
+      "override_components": 118,
+      "selection_neighbor_disagreement_percent": 7.544710073078477,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 22.0703125,
+          "horizontal_label_changes": 934
+        },
+        "region-2": {
+          "override_percent": 14.192708333333334,
+          "horizontal_label_changes": 695
+        },
+        "region-3": {
+          "override_percent": 25.83550347222222,
+          "horizontal_label_changes": 1045
+        },
+        "region-4": {
+          "override_percent": 9.776475694444445,
+          "horizontal_label_changes": 485
+        },
+        "region-5": {
+          "override_percent": 49.54427083333333,
+          "horizontal_label_changes": 1137
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 2.111245361000101,
+      "process_peak_rss_mib": 1147.29296875,
+      "edge_band_mae_vs_hard_native_units": 5.798599720001221,
+      "override_percent": 10.648656563438026,
+      "fallback_percent": 89.35134343656198,
+      "override_components": 63,
+      "selection_neighbor_disagreement_percent": 2.8166427968124563,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.8246527777777778,
+          "horizontal_label_changes": 43
+        },
+        "region-2": {
+          "override_percent": 1.1610243055555556,
+          "horizontal_label_changes": 56
+        },
+        "region-3": {
+          "override_percent": 9.266493055555555,
+          "horizontal_label_changes": 344
+        },
+        "region-4": {
+          "override_percent": 0.9982638888888888,
+          "horizontal_label_changes": 49
+        },
+        "region-5": {
+          "override_percent": 18.272569444444446,
+          "horizontal_label_changes": 414
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 2.139537503000156,
+      "process_peak_rss_mib": 1148.6953125,
+      "edge_band_mae_vs_hard_native_units": 6.740301132202148,
+      "override_percent": 3.3036825536276444,
+      "fallback_percent": 96.69631744637236,
+      "override_components": 19,
+      "selection_neighbor_disagreement_percent": 0.8354448973596268,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-2": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-3": {
+          "override_percent": 0.8572048611111112,
+          "horizontal_label_changes": 50
+        },
+        "region-4": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-5": {
+          "override_percent": 1.1610243055555556,
+          "horizontal_label_changes": 44
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-last-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 2.332719392999934,
+      "process_peak_rss_mib": 1148.6953125,
+      "edge_band_mae_vs_hard_native_units": 3.909379243850708,
+      "override_percent": 15.173145911120873,
+      "fallback_percent": 84.82685408887913,
+      "override_components": 51,
+      "selection_neighbor_disagreement_percent": 5.181594506261247,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 28.49392361111111,
+          "horizontal_label_changes": 1069
+        },
+        "region-2": {
+          "override_percent": 31.54296875,
+          "horizontal_label_changes": 907
+        },
+        "region-3": {
+          "override_percent": 8.409288194444445,
+          "horizontal_label_changes": 329
+        },
+        "region-4": {
+          "override_percent": 7.454427083333333,
+          "horizontal_label_changes": 320
+        },
+        "region-5": {
+          "override_percent": 0.9765625,
+          "horizontal_label_changes": 54
+        }
+      },
+      "fallback_source_number": 32
+    },
+    "conservative-last-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 2.0844255890001477,
+      "process_peak_rss_mib": 1148.6953125,
+      "edge_band_mae_vs_hard_native_units": 5.171065807342529,
+      "override_percent": 8.61336847499817,
+      "fallback_percent": 91.38663152500183,
+      "override_components": 59,
+      "selection_neighbor_disagreement_percent": 3.150820755756307,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 15.733506944444445,
+          "horizontal_label_changes": 547
+        },
+        "region-2": {
+          "override_percent": 18.815104166666664,
+          "horizontal_label_changes": 576
+        },
+        "region-3": {
+          "override_percent": 0.7161458333333333,
+          "horizontal_label_changes": 32
+        },
+        "region-4": {
+          "override_percent": 2.842881944444444,
+          "horizontal_label_changes": 83
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 32
+    },
+    "conservative-last-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 2.063258618000191,
+      "process_peak_rss_mib": 1148.6953125,
+      "edge_band_mae_vs_hard_native_units": 6.758773326873779,
+      "override_percent": 2.551431290724065,
+      "fallback_percent": 97.44856870927593,
+      "override_components": 44,
+      "selection_neighbor_disagreement_percent": 1.0925048657779737,
+      "crop_selection_metrics": {
+        "region-1": {
+          "override_percent": 6.217447916666666,
+          "horizontal_label_changes": 206
+        },
+        "region-2": {
+          "override_percent": 6.532118055555555,
+          "horizontal_label_changes": 232
+        },
+        "region-3": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "region-4": {
+          "override_percent": 1.0416666666666665,
+          "horizontal_label_changes": 23
+        },
+        "region-5": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 32
+    }
+  }
+}

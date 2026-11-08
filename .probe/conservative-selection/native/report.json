@@ -1,0 +1,273 @@
+{
+  "policy": "probability-lift-v1",
+  "inputs": [
+    "/tmp/openfocus-v3-demo-native/prepared/0001.tif",
+    "/tmp/openfocus-v3-demo-native/prepared/0002.tif",
+    "/tmp/openfocus-v3-demo-native/prepared/0003.tif",
+    "/tmp/openfocus-v3-demo-native/prepared/0004.tif",
+    "/tmp/openfocus-v3-demo-native/prepared/0005.tif",
+    "/tmp/openfocus-v3-demo-native/prepared/0006.tif"
+  ],
+  "shape": [
+    746,
+    995,
+    3
+  ],
+  "auto_background": false,
+  "exposure_match": false,
+  "align": false,
+  "max_size": 0,
+  "tile_size": 512,
+  "crop_coordinates": [
+    [
+      "ring-edge",
+      400,
+      200,
+      128,
+      128
+    ],
+    [
+      "facets",
+      450,
+      400,
+      128,
+      128
+    ],
+    [
+      "overlap",
+      660,
+      390,
+      128,
+      128
+    ],
+    [
+      "background",
+      80,
+      100,
+      128,
+      128
+    ]
+  ],
+  "metrics_note": "Fragmentation and edge differences are proxies, not perceptual quality. RSS is cumulative process high-water, including input, ONNX and diagnostics.",
+  "runs": {
+    "soft": {
+      "parameters": {
+        "mode": "soft"
+      },
+      "seconds": 8.616208397000037,
+      "process_peak_rss_mib": 1052.76171875
+    },
+    "hard": {
+      "parameters": {
+        "mode": "hard"
+      },
+      "seconds": 8.205199311000115,
+      "process_peak_rss_mib": 1057.72265625,
+      "edge_band_mae_vs_hard_native_units": 0.0
+    },
+    "conservative-first-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 8.985441267999931,
+      "process_peak_rss_mib": 1071.27734375,
+      "edge_band_mae_vs_hard_native_units": 3.103693962097168,
+      "override_percent": 3.218101230010643,
+      "fallback_percent": 96.78189876998935,
+      "override_components": 45,
+      "selection_neighbor_disagreement_percent": 0.4987026717948441,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 39.080810546875,
+          "horizontal_label_changes": 885
+        },
+        "facets": {
+          "override_percent": 2.9296875,
+          "horizontal_label_changes": 145
+        },
+        "overlap": {
+          "override_percent": 6.353759765625,
+          "horizontal_label_changes": 260
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 8.504214700000148,
+      "process_peak_rss_mib": 1074.88671875,
+      "edge_band_mae_vs_hard_native_units": 4.23185396194458,
+      "override_percent": 1.8857019682864726,
+      "fallback_percent": 98.11429803171353,
+      "override_components": 42,
+      "selection_neighbor_disagreement_percent": 0.27092852018275876,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 28.4912109375,
+          "horizontal_label_changes": 667
+        },
+        "facets": {
+          "override_percent": 0.03662109375,
+          "horizontal_label_changes": 7
+        },
+        "overlap": {
+          "override_percent": 0.45166015625,
+          "horizontal_label_changes": 25
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-first-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "first",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 9.064563563999855,
+      "process_peak_rss_mib": 1074.890625,
+      "edge_band_mae_vs_hard_native_units": 5.11732816696167,
+      "override_percent": 1.1357053363331402,
+      "fallback_percent": 98.86429466366685,
+      "override_components": 19,
+      "selection_neighbor_disagreement_percent": 0.12973282051558682,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 20.068359375,
+          "horizontal_label_changes": 417
+        },
+        "facets": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        },
+        "overlap": {
+          "override_percent": 0.018310546875,
+          "horizontal_label_changes": 3
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 1
+    },
+    "conservative-last-0.4": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.4,
+        "sharpness_advantage": 0.25
+      },
+      "seconds": 7.881726919999892,
+      "process_peak_rss_mib": 1074.9140625,
+      "edge_band_mae_vs_hard_native_units": 0.8631365299224854,
+      "override_percent": 10.565427674565859,
+      "fallback_percent": 89.43457232543415,
+      "override_components": 6,
+      "selection_neighbor_disagreement_percent": 0.6666001370151202,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 16.326904296875,
+          "horizontal_label_changes": 318
+        },
+        "facets": {
+          "override_percent": 89.080810546875,
+          "horizontal_label_changes": 686
+        },
+        "overlap": {
+          "override_percent": 87.896728515625,
+          "horizontal_label_changes": 913
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    },
+    "conservative-last-0.6": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.6,
+        "sharpness_advantage": 0.5
+      },
+      "seconds": 7.584010271000125,
+      "process_peak_rss_mib": 1074.921875,
+      "edge_band_mae_vs_hard_native_units": 1.9398202896118164,
+      "override_percent": 9.540598434531908,
+      "fallback_percent": 90.45940156546808,
+      "override_components": 18,
+      "selection_neighbor_disagreement_percent": 0.8037501146287915,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 11.187744140625,
+          "horizontal_label_changes": 273
+        },
+        "facets": {
+          "override_percent": 85.6201171875,
+          "horizontal_label_changes": 793
+        },
+        "overlap": {
+          "override_percent": 81.3232421875,
+          "horizontal_label_changes": 1151
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    },
+    "conservative-last-0.8": {
+      "parameters": {
+        "mode": "conservative",
+        "fallback": "last",
+        "confidence": 0.8,
+        "sharpness_advantage": 1.0
+      },
+      "seconds": 7.564116429000023,
+      "process_peak_rss_mib": 1074.921875,
+      "edge_band_mae_vs_hard_native_units": 7.373117446899414,
+      "override_percent": 5.717461301143788,
+      "fallback_percent": 94.28253869885621,
+      "override_components": 101,
+      "selection_neighbor_disagreement_percent": 0.8512199200565322,
+      "crop_selection_metrics": {
+        "ring-edge": {
+          "override_percent": 1.654052734375,
+          "horizontal_label_changes": 119
+        },
+        "facets": {
+          "override_percent": 59.844970703125,
+          "horizontal_label_changes": 1186
+        },
+        "overlap": {
+          "override_percent": 52.825927734375,
+          "horizontal_label_changes": 1429
+        },
+        "background": {
+          "override_percent": 0.0,
+          "horizontal_label_changes": 0
+        }
+      },
+      "fallback_source_number": 6
+    }
+  }
+}

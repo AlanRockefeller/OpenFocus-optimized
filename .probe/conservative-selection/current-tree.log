@@ -1,0 +1,25 @@
+..........................test tiled fusion: 8 tiles, one per call (CPU)
+test tiled fusion: 8 tiles, one per call (CPU)
+.Conservative fallback: processed source #1 of 2
+StackMFF V3 tiled fusion: 6 tiles, one per call (CPU)
+Conservative fallback: processed source #1 of 2
+Conservative fallback: processed source #1 of 2
+Conservative fallback: processed source #1 of 2
+Conservative fallback: processed source #1 of 2
+Conservative fallback: processed source #1 of 2
+Conservative fallback: processed source #1 of 2
+..Conservative fallback: processed source #2 of 2
+.StackMFF V3 tiled fusion: 4 tiles, one per call (CPU)
+Conservative fallback: processed source #2 of 2
+Conservative fallback: processed source #2 of 2
+Conservative fallback: processed source #2 of 2
+Conservative fallback: processed source #2 of 2
+........test tiled fusion: 6 tiles, one per call (CPU)
+test tiled fusion: 6 tiles, one per call (CPU)
+...StackMFF V3 tiled fusion: 9 tiles, one per call (CPU)
+StackMFF V3 tiled fusion: 9 tiles, one per call (CPU)
+.StackMFF V3 tiled fusion: 9 tiles, one per call (CPU)
+.StackMFF V3 tiled fusion: 9 tiles, one per call (CPU)
+...................StackMFF V3 tiled fusion: 4 tiles, one per call (CPU)
+................
+78 passed in 10.06s
