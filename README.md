@@ -55,9 +55,10 @@
 ## 📢 News
 
 > [!NOTE]
-> **v1.75.0** — Grouped fusion, reusable processing workflows, transparent PNG
-> stacks, alignment diagnostics, enhanced depth exports and a refreshed desktop
-> workflow. See the changelog for supported inputs and feature limitations.
+> **v1.77.0 release candidate** — Auto background and restorable retouch sessions,
+> confirmed settings reset, continuous native inspection, bounded large-stack
+> processing and TIFF conversion, plus microscope mosaic scale/rotation fixes.
+> See the changelog for supported inputs and feature limitations.
 
 Earlier releases are in the [Changelog](./CHANGELOG.md).
 
@@ -209,13 +210,13 @@ Control the desktop app through a token-protected local channel.
 
 **Also in the box:**
 
-- **Workflow** — stack browser, sharpness curve, previews, ROI and reusable settings.
+- **Workflow** — stack browser, sharpness curve, original-pixel zoom and loupe, ROI and reusable settings.
 - **Microscopy** — 16-bit processing, TIFF Z-stacks, calibration and dust correction.
 - **Image formats** — supported transparent PNG stacks and ICC profile preservation.
-- **Headless CLI** — batch processing and JSON output for scripting.
+- **Headless CLI** — batch processing, reusable recipes, EXIF focus ordering, auto background and JSON output.
 - **Projects and recovery** — session files, undo/redo and crash recovery.
 - **Languages** — twelve UI languages with automatic locale detection.
-- **Memory** — neural models load only when selected.
+- **Memory** — bounded frame/tile work, disk-backed intermediates and neural models loaded only when selected.
 
 StackMFF V1/V2/V3 use dynamic ONNX checkpoints and ONNX Runtime; production
 inference does not bundle PyTorch. The current runtime can use DirectML on
@@ -230,6 +231,11 @@ space and available memory for decoding, model workspaces and full-size output;
 they may be rejected when those resources are insufficient. StackMFF V2's
 spatial tiling is an approximation of whole-image inference and can change the
 result. See [fusion methods](docs/FUSION_METHODS.md).
+
+JPEG/RAW display previews use embedded data when available. Processing and
+original-pixel inspection decode the source independently; a small preview never
+replaces the pixels used for fusion. Keep enough free RAM and temporary disk
+space for the selected source, processing workspace and full-size result.
 
 <a id="install"></a>
 ## ⬇️ Install
@@ -283,6 +289,20 @@ pip install openfocus
 openfocus -i ./stack_folder -o ./result/fused.png
 ```
 
+For unattended background replacement while retaining the original fusion and
+its missing-data map:
+
+```bash
+openfocus -i ./stack_folder -o ./result/fused.tif --auto-background auto --save-stacked --missing-data-map
+```
+
+Folder inputs use EXIF focus steps when every frame supplies them, otherwise
+natural filename order. Use `--frame-order name` to force filename order;
+explicitly listed files retain their supplied order.
+
+Recipes preserve native RAW conversion mode and batch output format. Run
+transient duplicate and alignment reports through direct CLI invocations.
+
 See the [CLI manual](./docs/USER_MANUAL_EN.md#14-command-line-interface).
 
 <a id="community"></a>
@@ -296,9 +316,18 @@ Questions, ideas or feedback? Join our [Discord community](https://discord.gg/af
 - **Feedback** — open an [issue](https://github.com/Xinzhe99/OpenFocus/issues) for bugs, ideas and algorithm work
 - **Credits** — each fusion/registration algorithm keeps its original research licence; StackMFF V3 lives at [Xinzhe99/StackMFF-V3](https://github.com/Xinzhe99/StackMFF-V3)
 
-**WeChat community:** Scan with WeChat to join the OpenFocus group.
+**WeChat:** Scan to join the OpenFocus group or follow our official account.
 
-<img src="assets/readme/wechat-group.jpg" alt="QR code for the OpenFocus WeChat group" width="260">
+<table>
+  <tr>
+    <th align="center">WeChat group</th>
+    <th align="center">Official account</th>
+  </tr>
+  <tr>
+    <td align="center" valign="top"><img src="assets/readme/wechat-group.jpg" alt="QR code for the OpenFocus WeChat group" width="260"></td>
+    <td align="center" valign="top"><img src="assets/readme/wechat-official-account.jpg" alt="QR code for the OpenFocus WeChat official account" width="260"></td>
+  </tr>
+</table>
 
 **Support OpenFocus:** If you enjoy the software, you can buy us a coffee via Alipay in China or [PayPal](https://paypal.me/XinZEN0602) internationally. Include your username in the payment note and we will permanently acknowledge it in the project as a thank-you.
 
@@ -334,6 +363,24 @@ conda activate openfocus
 pip install -r requirements.txt
 python main.py
 ```
+
+Install the shared development tools and run the regression suite:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q --timeout=90 --timeout-method=thread
+```
+
+On a headless host, set `QT_QPA_PLATFORM=offscreen`. CI uses these same dependency
+files on Windows, macOS and Linux. A change to processing, cancellation or GUI
+state also needs a real CLI/desktop smoke run; tests alone do not exercise the
+packaged application.
+
+Keep algorithm descriptors in `core/algorithms.py`, shared processing in
+`core`/`utils`, and UI snapshots/dialog orchestration in the controllers. New
+methods declare parameters, resource estimates and capabilities once; consumers
+derive their choices from that descriptor. Preserve bit depth, source order,
+cooperative cancellation and the admitted thread/RAM limits.
 
 Packaging with PyInstaller: [docs/BUILD_COMMANDS.md](./docs/BUILD_COMMANDS.md).
 

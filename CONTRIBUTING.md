@@ -15,6 +15,10 @@ person with the merge date, the affected areas and the pull request number, and
 extend that row as more work lands. Code, bug reports, reproduction stacks and
 usability feedback all count.
 
+UI changes must follow [UI and UX guidelines](docs/UI_UX_GUIDELINES.md), including
+using control tooltips for persistent explanatory text while keeping necessary
+status, errors and decision-critical information visible.
+
 ## Agent control surface
 
 `core/control/` hosts a local command server (`openfocus/control/1`) that lets
@@ -250,6 +254,9 @@ only for an odd-valued integer parameter, with an odd default and suitable step.
 Defaults, bounds and enum choices are validated when registering; values are
 validated again at every execution boundary. Unknown keys, booleans supplied as
 numbers, NaN, infinity, illegal choices and out-of-range numbers are errors.
+Invalid values and numeric descriptors raise `ValueError`, including integers
+too large for the numeric runtime. Callers can handle one validation contract
+when restoring settings, reading CLI parameters or registering an extension.
 
 Depth parameters are declared independently. A fusion can expose no depth runner,
 or use a different parameter tuple for depth. The runner returns raw frame
@@ -266,6 +273,25 @@ execution options without interpreting them as persistent algorithm parameters.
 The same runner handles a full image and a tile. Preserve source order and avoid
 mutating caller-owned input frames. Poll cancellation between frames and expensive
 phases, and before returning a result. Never publish a partial output after cancel.
+
+`streaming_sources=True` declares that a fusion runner can consume a sized
+sequence containing `SourceFrame` / `ProcessedFrame` descriptors as well as
+arrays. Read shape, dtype and provenance from metadata; resolve pixels through
+`core.source_frames` only while that frame is being consumed. Release resolved
+frames and their views within the admitted window. Tile readers must copy or
+resolve bounded regions rather than keep small views that pin every full source.
+Use the shared normalization, exposure and cancellation boundaries, and include
+source decoding/workspace plus future cache growth in memory admission. This
+capability describes storage and lifetime, independently of the algorithm's
+numerical domain. The default is `False`: extensions keep their existing ndarray
+input contract until their implementation and consumer tests establish bounded
+descriptor handling. GUI, CLI, comparison and batch routing consume this field;
+do not add another algorithm-id list to those consumers.
+
+Set `resize_interpolation` to `"linear"` (the default) or `"area"` to match the
+backend's source resizing. Shared tile preparation and base-frame correction
+consume this descriptor field, including for newly registered methods and
+aliases; do not add algorithm-id branches to those consumers.
 
 `resource_estimator(height, width, parameters, frames)` returns
 `(fixed_bytes, per_worker_bytes)`. Include retained results, workspace and large
