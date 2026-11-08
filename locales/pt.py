@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Equilibrado deixa margem para a área de trabalho; Priorizar resposta usa menos CPU e memória; Máximo usa tudo o que a máquina permite. Nenhum altera a imagem.",
     "advanced_storage_directory": "Pasta temporária",
     "advanced_storage_default": "Padrão do sistema",
+    "advanced_storage_hint": "O OpenFocus cria aqui uma pasta isolada por execução e remove pastas abandonadas no próximo arranque. Pilhas RAW grandes podem exigir várias vezes o seu tamanho descodificado.",
     "advanced_storage_browse": "Procurar…",
     "advanced_storage_invalid": "Não é possível usar esta pasta temporária: {error}",
     "advanced_storage_fallback": "Não é possível usar a pasta temporária salva: {path}\n{error}\nA pasta temporária do sistema será usada.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Rotação",
     "mosaic_aligned_geometry": "{count} sobreposições alinhadas; resíduo mediano {residual:.2f} px; escala {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Seleção conservadora (experimental)',
+    'label_conservative_fallback': 'Fonte de reserva (ordem processada)',
+    'fallback_first': 'Primeiro quadro processado (#1)',
+    'fallback_last': 'Último quadro processado (#N)',
+    'label_conservative_confidence': 'Seletividade de confiança',
+    'label_conservative_sharpness': 'Vantagem mínima de nitidez',
+    'conservative_fallback_hint': 'Uma fonte para toda a imagem. Primeiro/último indicam a ordem processada, não necessariamente o foco próximo/distante. N é o número de quadros processados.',
+    'conservative_confidence_hint': 'Pontuação relativa experimental, não uma probabilidade de foco calibrada. Valores maiores aceitam menos alterações. Padrão: 0.40.',
+    'conservative_sharpness_hint': 'Melhoria do contraste local normalizado. 0.25 exige melhoria de 25% sobre a pontuação estabilizada de reserva. Valores maiores aceitam menos alterações.',
+    'conservative_selected_source': 'Reserva conservadora: fonte processada #{source} de {count}',
+})

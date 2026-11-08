@@ -1,6 +1,7 @@
 """Microscope mosaic placement, rendering and export contracts."""
 
 from collections import namedtuple
+import os
 from pathlib import Path
 import cv2
 import numpy as np
@@ -28,8 +29,9 @@ def test_mosaic_uses_captured_storage_directory(monkeypatch, tmp_path):
     monkeypatch.setattr(frame_storage.shutil, 'disk_usage', disk_usage)
     frame = make_frame('one', np.zeros((4, 4, 3), np.uint8))
     output, _ = render_mosaic([frame], [np.eye(3)])
-    assert checked == [str(first), str(first)]
-    assert Path(output.filename).parent == first
+    run = first / f'openfocus-run-{os.getpid()}'
+    assert checked == [str(run), str(run)]
+    assert Path(output.filename).parent == run
 
 
 def test_overlapping_microscope_tiles_align_and_reconstruct():

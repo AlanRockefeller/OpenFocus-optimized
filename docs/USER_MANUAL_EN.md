@@ -774,11 +774,17 @@ various image types.
 
 For large stacks, leave space in the temporary directory for source frames and
 any additional aligned or corrected frames. Choose an existing folder under
-**Settings → Advanced Settings → Performance → Temporary directory**; leave it
-empty for the system default. Changes apply immediately to newly created data;
-already loaded frames stay in their original directory until released. OpenFocus
-checks free space before creating mappings and estimates whole-stack needs when
-possible. This is not a reservation; other programs may use the space later.
+**Settings → Advanced Settings → Performance → Temporary storage parent**; leave
+it empty for the system default. OpenFocus creates an `openfocus-run-<PID>`
+folder below that parent. It removes abandoned run folders at the next startup
+and removes its current folder on a clean exit. Changes apply immediately to
+newly created data; already loaded frames stay in their original directory until
+released. OpenFocus checks whole-stack estimates and, where the filesystem
+supports it, reserves each frame's disk blocks before processing writes pixels.
+
+Desktop renders run in a separate worker process. A native NumPy, OpenCV, ONNX
+Runtime, or GPU-driver crash therefore ends the render and reports the worker's
+exit signal or code without terminating the main OpenFocus window.
 
 Each neural tile uses every frame. Source frames and alignment scratch can be disk-backed, but free disk space and available memory still limit stack size. V2 spatial tiling approximates whole-image inference.
 
@@ -899,6 +905,26 @@ full-resolution result. Preview mode does not apply to ROI renders and never
 pollutes the full-resolution alignment cache.
 
 ---
+
+### Experimental V3 Conservative Selection
+
+In StackMFF V3, select **Conservative Selection (experimental)** to retain
+Hard Pick in supported subject/detail regions while keeping one consistent
+fallback frame in background-like regions. The additional controls appear only in this mode:
+**Fallback source** (first/last in processed order), **Confidence selectivity**
+(default 0.40), and **Minimum sharpness advantage** (default 0.25). Higher
+thresholds retain more fallback pixels. The completion report identifies the
+selected source number. First/last do not necessarily indicate near/far focus.
+
+Decisive model confidence, measured local sharpness, or a coherent same-source
+Hard region can retain actual source pixels, so a candidate no longer has to
+pass both numeric tests. Keep Auto Background off when comparing with Soft
+Blend and Hard Pick. This experiment
+cannot recover background hidden in every source; broad smooth subject interiors
+and weak fine detail can remain in the fallback. Focus-depth export
+for this mode is unsupported; Soft/Hard depth estimates remain available.
+See [Conservative Selection](CONSERVATIVE_SELECTION.md) for limitations,
+batch/CLI examples, and reproducible visual comparisons.
 
 ## 9. Image Transformations
 
@@ -1829,6 +1855,7 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 |----------|--------|
 | `Up` / `Down` (source list focused) | Previous / next frame |
 | `Mouse Wheel` | Zoom the view; while holding the left button, change magnifier zoom |
+| `Touchpad two-finger scroll` | Pan a zoomed image; hold `Ctrl` to zoom instead |
 | `Ctrl + Wheel` while holding the left button | Resize the magnifier |
 | `Middle-click` | Fit the image to the window |
 

@@ -99,9 +99,18 @@ def _admit(path, page, output_dir, ext=None):
     estimate, disk = estimate_job(path, page, ext)
     available = available_memory_bytes()
     if not available or estimate > available // 2:
-        raise MemoryError('Insufficient available memory for this image.')
-    if shutil.disk_usage(output_dir).free < disk:
-        raise OSError('Insufficient free disk space for this image.')
+        from core.frame_storage import format_bytes
+        known = format_bytes(available) if available else 'unknown'
+        raise MemoryError(
+            f'Insufficient memory for this image: estimated working space '
+            f'{format_bytes(estimate)}; available RAM {known} '
+            f'(conversion admission limit: half of available RAM).')
+    free = shutil.disk_usage(output_dir).free
+    if free < disk:
+        from core.frame_storage import format_bytes
+        raise OSError(
+            f'Insufficient disk space in {output_dir}: need {format_bytes(disk)}; '
+            f'free {format_bytes(free)}.')
 
 
 def _decode(path, page):

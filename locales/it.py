@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Bilanciata lascia margine al desktop; Reattiva usa meno CPU e memoria; Massima usa tutto ciò che la macchina consente. Nessuna modifica l'immagine.",
     "advanced_storage_directory": "Cartella temporanea",
     "advanced_storage_default": "Predefinita di sistema",
+    "advanced_storage_hint": "OpenFocus crea qui una cartella isolata per ogni esecuzione e rimuove quelle abbandonate all'avvio successivo. Le pile RAW grandi possono richiedere più volte la loro dimensione decodificata.",
     "advanced_storage_browse": "Sfoglia…",
     "advanced_storage_invalid": "Impossibile usare questa cartella temporanea: {error}",
     "advanced_storage_fallback": "La cartella temporanea salvata non è utilizzabile: {path}\n{error}\nVerrà usata la cartella temporanea di sistema.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Rotazione",
     "mosaic_aligned_geometry": "{count} sovrapposizioni allineate; residuo mediano {residual:.2f} px; scala {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Selezione conservativa (sperimentale)',
+    'label_conservative_fallback': 'Sorgente di riserva (ordine elaborato)',
+    'fallback_first': 'Primo fotogramma elaborato (#1)',
+    'fallback_last': 'Ultimo fotogramma elaborato (#N)',
+    'label_conservative_confidence': 'Selettività della confidenza',
+    'label_conservative_sharpness': 'Vantaggio minimo di nitidezza',
+    'conservative_fallback_hint': 'Una sorgente per tutta l’immagine. Primo/ultimo indicano l’ordine elaborato, non necessariamente il fuoco vicino/lontano. N è il numero di fotogrammi elaborati.',
+    'conservative_confidence_hint': 'Punteggio relativo sperimentale, non probabilità di messa a fuoco calibrata. Valori maggiori accettano meno modifiche. Predefinito: 0.40.',
+    'conservative_sharpness_hint': 'Miglioramento del contrasto locale normalizzato. 0.25 richiede un miglioramento del 25% sul punteggio stabilizzato della riserva. Valori maggiori accettano meno modifiche.',
+    'conservative_selected_source': 'Riserva conservativa: sorgente elaborata #{source} di {count}',
+})

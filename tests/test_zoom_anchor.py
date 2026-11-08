@@ -14,12 +14,6 @@ from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QMouseEvent, QPixmap, QWheelEvent
 
 
-@pytest.fixture()
-def qapp():
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
-
-
 def _send_mouse(widget, kind, pos, button, buttons):
     from PyQt6.QtWidgets import QApplication
     event = QMouseEvent(kind, QPointF(pos), QPointF(pos), button, buttons,
@@ -28,11 +22,12 @@ def _send_mouse(widget, kind, pos, button, buttons):
     QApplication.processEvents()
 
 
-def _send_wheel(widget, pos, delta):
+def _send_wheel(widget, pos, delta, *, pixels=QPoint(), control=False):
     from PyQt6.QtWidgets import QApplication
-    event = QWheelEvent(QPointF(pos), QPointF(pos), QPoint(0, 0),
+    event = QWheelEvent(QPointF(pos), QPointF(pos), pixels,
                         QPoint(0, delta), Qt.MouseButton.NoButton,
-                        Qt.KeyboardModifier.NoModifier,
+                        (Qt.KeyboardModifier.ControlModifier if control
+                         else Qt.KeyboardModifier.NoModifier),
                         Qt.ScrollPhase.NoScrollPhase, False)
     QApplication.sendEvent(widget, event)
     QApplication.processEvents()
@@ -98,6 +93,29 @@ class TestMagnifierZoomAnchor:
                 QPointF(label.width() / 2, label.height() / 2))
             assert 0 <= centre_base.x() <= pix.width()
             assert 0 <= centre_base.y() <= pix.height()
+        finally:
+            label.close()
+
+    def test_touchpad_two_finger_scroll_pans_without_zooming(self, qapp):
+        label = self._label(qapp)
+        try:
+            label._zoom_factor = 2.0
+            label.refresh_display()
+            before_zoom = label._zoom_factor
+            before_pan = QPointF(label._pan_offset)
+            _send_wheel(label, QPointF(200, 150), 18, pixels=QPoint(34, -27))
+            assert label._zoom_factor == before_zoom
+            assert label._pan_offset == before_pan + QPointF(34, -27)
+        finally:
+            label.close()
+
+    def test_control_touchpad_scroll_retains_zoom(self, qapp):
+        label = self._label(qapp)
+        try:
+            before = label._zoom_factor
+            _send_wheel(label, QPointF(200, 150), 18,
+                        pixels=QPoint(0, 12), control=True)
+            assert label._zoom_factor > before
         finally:
             label.close()
 

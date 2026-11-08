@@ -155,11 +155,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Resource scheduling preference (default: balanced)")
     parser.add_argument("--batch-size", type=int, default=2,
                         help="StackMFF-V3 tile batch size (default: 2)")
-    parser.add_argument("--ai-mode", default=None, choices=["soft", "hard"],
-                        metavar="{soft,hard}",
+    parser.add_argument("--ai-mode", default=None, choices=["soft", "hard", "conservative"],
+                        metavar="{soft,hard,conservative}",
                         help="StackMFF-V3 output: 'soft' blends the frames by "
                              "their predicted probabilities (default); 'hard' "
-                             "takes the most probable frame per pixel")
+                             "takes the most probable frame per pixel; conservative keeps one fallback "
+                             "unless confidence and sharpness pass (use --param 'fallback=\"first\"', "
+                             "--param confidence=0.4, --param sharpness_advantage=0.25)")
     parser.add_argument("--cpu", action="store_true",
                         help="Force CPU even if CUDA/ROCm/XPU/MPS is available")
     parser.add_argument("--downscale", type=int, default=None,
@@ -238,6 +240,8 @@ def _resolve_algorithm_arguments(args):
     """Translate old flags once; generic dictionaries/assignments win per field."""
     spec = get_fusion(args.method)
     get_registration(args.align)
+    if getattr(args, 'ai_mode', None) == 'conservative' and spec.id != 'stackmffv3':
+        raise ValueError('Conservative Selection is available only for StackMFF V3')
     declared = {parameter.key for parameter in spec.parameters}
     values = {}
     if getattr(args, "kernel", None) is not None and "kernel_size" in declared:
@@ -267,6 +271,8 @@ def _resolve_algorithm_arguments(args):
     args._registration_parameters = resolve_registration_parameters(args.align, alignment)
     if getattr(args, "depth_map", None) and spec.depth is None:
         raise ValueError(f"--depth-map is not available for method '{args.method}'")
+    if getattr(args, "depth_map", None) and args._fusion_parameters.get('mode') == 'conservative':
+        raise ValueError("Conservative Selection does not support focus-depth export; use comparison provenance diagnostics")
     return args
 
 

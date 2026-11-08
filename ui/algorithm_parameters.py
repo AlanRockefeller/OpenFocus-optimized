@@ -54,6 +54,7 @@ class AlgorithmParameterPanel(QWidget):
                         editor.setCurrentIndex(self._choice_index(spec, resolved[spec.key]))
                     else:
                         editor.setValue(resolved[spec.key])
+            self._update_visibility()
             return
         while self._form.rowCount():
             self._form.removeRow(0)
@@ -86,6 +87,7 @@ class AlgorithmParameterPanel(QWidget):
                 editor.setToolTip(hint)
             self.editors[spec.key] = editor
             self._form.addRow(label, editor)
+        self._update_visibility()
 
     @staticmethod
     def _choice_index(spec, value):
@@ -101,6 +103,12 @@ class AlgorithmParameterPanel(QWidget):
             result[spec.key] = validate_parameter(spec, value)
         return result
 
+    def _update_visibility(self):
+        values = self.values()
+        for spec in self._specs:
+            visible = not spec.visible_when or values.get(spec.visible_when[0]) == spec.visible_when[1]
+            self._form.setRowVisible(self.editors[spec.key], visible)
+
     def _edited(self, *_args):
         for spec in self._specs:
             if spec.odd and not spec.choices:
@@ -110,4 +118,5 @@ class AlgorithmParameterPanel(QWidget):
                     value = value - 1 if spec.minimum is None or value - 1 >= spec.minimum else value + 1
                     with QSignalBlocker(editor):
                         editor.setValue(value)
+        self._update_visibility()
         self.valuesChanged.emit(self.values())

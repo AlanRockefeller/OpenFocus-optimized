@@ -151,7 +151,7 @@ class EnvironmentInfoDialog(QDialog):
             from fusion_methods import neural_runtime
             from core.multi_focus_fusion import ensure_neural_device_kind
             available["onnxruntime"] = True
-            kind = ensure_neural_device_kind()
+            kind = neural_runtime.admitted_kind(ensure_neural_device_kind())
             available["device"] = (neural_runtime.display_name(kind)
                                    if neural_runtime.is_accelerator(kind)
                                    else "CPU")
@@ -168,6 +168,8 @@ class EnvironmentInfoDialog(QDialog):
             if neural_runtime.is_accelerator(kind):
                 info_lines.append(f"  ✓ {trans.t('env_gpu_accel')} ({available['device']})")
             else:
+                if neural_runtime.admission_note():
+                    info_lines.append(f"  ⚠ {neural_runtime.admission_note()}")
                 info_lines.append(f"  ⚠ {trans.t('env_no_gpu')}")
                 info_lines.append(f"  ✓ {trans.t('env_cpu_mode')}")
             info_lines.append('  ' + trans.t('msg_gpu_accel_hint'))

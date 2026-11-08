@@ -106,6 +106,7 @@ class AdvancedSettingsDialog(QDialog):
         storage_layout.setContentsMargins(0, 0, 0, 0)
         self.storage_directory = QLineEdit(getattr(w, "storage_directory", ""))
         self.storage_directory.setPlaceholderText(trans.t("advanced_storage_default"))
+        self.storage_directory.setToolTip(trans.t("advanced_storage_hint"))
         storage_layout.addWidget(self.storage_directory, 1)
         browse = QPushButton(trans.t("advanced_storage_browse"))
         browse.clicked.connect(self._browse_storage_directory)

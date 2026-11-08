@@ -259,6 +259,8 @@ def _measure_stackmffv3(images, progress, should_cancel,
     from fusion_methods.stackmffv3 import model_probabilities, normalize_mode
 
     mode = normalize_mode(mode)
+    if mode == 'conservative':
+        raise ValueError("Conservative Selection provenance is not a focus-depth map")
     h, w = images[0].shape[:2]
     n = len(images)
     tile_size = getattr(execution_plan, 'tile_size', None) or max(h, w)
@@ -328,6 +330,8 @@ def compute_focus_index(images: Sequence[np.ndarray], method: str, parameters=No
         if value is not None:
             values[target] = value
     values = resolve_fusion_parameters(method, values, depth=True)
+    if method == 'stackmffv3' and values.get('mode') == 'conservative':
+        raise ValueError("Conservative Selection does not support focus-depth export; choose Soft/Hard for a separate focus estimate")
     depth_block = legacy_parameters.get('block_size')
     try:
         with heavy_job(should_cancel):

@@ -7,6 +7,7 @@ recently opened stacks) survives restarts through this module.
 import json
 import math
 import os
+import re
 from typing import Any, Optional
 
 from PyQt6.QtCore import QSettings
@@ -40,6 +41,10 @@ UPDATE_BANNER_DISMISSED_KEY = "updates/banner_dismissed_tag"
 LAST_STACK_FOLDER_KEY = "ui/last_stack_folder"
 LAST_DIALOG_DIR_KEY = "ui/last_dialog_dir"
 LAST_IMAGE_SAVE_DIR_KEY = "ui/last_image_save_dir"
+LAST_IMAGE_SAVE_TYPE_KEY = "ui/last_image_save_type"
+IMAGE_SAVE_TYPES = frozenset({
+    ".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp", ".webp", ".dng", ".gif",
+})
 # The "AI runs on the CPU" warning is informational and repeat-per-launch
 # annoying; once the user says "don't show again" it must stay gone.
 AI_CPU_WARNING_DISMISSED_KEY = "rendering/ai_cpu_warning_dismissed"
@@ -541,18 +546,59 @@ def image_save_dir() -> str:
     return get_last_dialog_dir() or os.path.expanduser("~")
 
 
-def image_save_default(filename: str) -> str:
-    """`filename` placed in `image_save_dir()`, for a save dialog's default."""
-    return os.path.join(image_save_dir(), os.path.basename(filename or ""))
+def _image_extensions(filters: str) -> tuple[str, ...]:
+    """Canonical extensions advertised by a Qt file-dialog filter string."""
+    extensions = []
+    for token in re.findall(r"\*\.(?:[A-Za-z0-9]+)", filters or ""):
+        extension = token[1:].lower()
+        if extension not in extensions:
+            extensions.append(extension)
+    return tuple(extensions)
 
 
-def remember_image_save(path: str) -> None:
-    """Remember the folder an image was just saved to."""
+def image_save_type(filters: str = "") -> str:
+    """Last image extension, provided it is available in *filters*."""
+    extension = str(get_settings().value(LAST_IMAGE_SAVE_TYPE_KEY, "") or "").lower()
+    if extension not in IMAGE_SAVE_TYPES:
+        return ""
+    offered = _image_extensions(filters)
+    return extension if not offered or extension in offered else ""
+
+
+def image_save_filter(filters: str) -> str:
+    """Filter entry matching the last saved image type, or an empty string."""
+    extension = image_save_type(filters)
+    if not extension:
+        return ""
+    return next((entry for entry in filters.split(";;")
+                 if extension in _image_extensions(entry)), "")
+
+
+def image_save_default(filename: str, filters: str = "") -> str:
+    """A default filename in the last image folder and, when valid, type."""
+    basename = os.path.basename(filename or "")
+    # Callers with a format-specific dialog intentionally omit ``filters``;
+    # their fixed suffix must not be replaced by an unrelated remembered one.
+    extension = image_save_type(filters) if filters else ""
+    if extension:
+        basename = os.path.splitext(basename)[0] + extension
+    return os.path.join(image_save_dir(), basename)
+
+
+def remember_image_save(path: str, selected_filter: str = "") -> None:
+    """Remember the folder and file type selected for an image save."""
     if not path:
         return
     folder = os.path.dirname(os.path.abspath(path))
     if os.path.isdir(folder):
-        get_settings().setValue(LAST_IMAGE_SAVE_DIR_KEY, folder)
+        settings = get_settings()
+        settings.setValue(LAST_IMAGE_SAVE_DIR_KEY, folder)
+        extension = os.path.splitext(path)[1].lower()
+        if not extension:
+            offered = _image_extensions(selected_filter)
+            extension = offered[0] if offered else ""
+        if extension in IMAGE_SAVE_TYPES:
+            settings.setValue(LAST_IMAGE_SAVE_TYPE_KEY, extension)
         set_last_dialog_dir(folder)
 
 

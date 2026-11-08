@@ -2,11 +2,13 @@
 """StackMFF V3 back-end: pixel-wise source classification over the stack.
 
 The network predicts, for every pixel, a probability distribution over the N
-input frames. Two output modes consume that distribution:
+input frames. Three output modes consume that distribution:
 
 * ``soft`` — probability-weighted blend of the observed frame values. This is
   the paper's default: probabilities are averaged over the inference scales
   and lightly smoothed, then used as weights.
+* ``conservative`` — Hard Pick in supported subject/detail regions and one
+  global fallback in background-like regions (experimental; no blending).
 * ``hard`` — the value of the most probable frame (argmax), a pure pixel pick
   with no interpolation between frames. Same scales, no smoothing (the
   reference implementation's ``--hard``).
@@ -33,7 +35,7 @@ PAD_ALIGN = common.ATTENTION_PAD_ALIGN
 INFER_SCALES = (1.0, 0.75)
 SOFT_SIGMA = 0.5
 
-VALID_MODES = ("soft", "hard")
+VALID_MODES = ("soft", "hard", "conservative")
 
 
 def _resolve_device(use_gpu):
@@ -70,17 +72,31 @@ def _forward_probabilities(batch_input, model, device, sigma, should_cancel, thr
 
 def _probabilities(batch_input, model, device, mode, should_cancel=None, threads=1):
     return _forward_probabilities(batch_input, model, device,
-                                  0.0 if mode == 'hard' else SOFT_SIGMA,
+                                  SOFT_SIGMA if mode == 'soft' else 0.0,
                                   should_cancel, threads)
 
 
-def _blend_tile(probs, frames, mode, should_cancel=None):
+def _blend_tile(probs, frames, mode, should_cancel=None, *, fallback='first',
+                confidence=.4, sharpness_advantage=.25, diagnostics=None):
     """Combine probabilities with one source frame at a time in 0-255."""
     _cancel(should_cancel)
     height, width = frames[0].shape[:2]
     channels = frames[0].shape[2] if frames[0].ndim == 3 else 1
     result = np.zeros((height, width, channels), dtype=np.float32)
     normalize_stack = any(frame.dtype == np.uint16 for frame in frames)
+    if mode == 'conservative':
+        from fusion_methods.conservative_selection import selection_rows
+        for row, stop, selected, maps in selection_rows(
+                probs, frames, fallback, confidence, sharpness_advantage, should_cancel):
+            for index, frame in enumerate(frames):
+                _cancel(should_cancel)
+                source = common.working_frame(frame[row:stop], normalize_stack)
+                if source.ndim == 2:
+                    source = source[:, :, None]
+                np.copyto(result[row:stop], source, where=(selected == index)[:, :, None])
+            if diagnostics is not None:
+                diagnostics(row, stop, maps)
+        return result
     for row in range(0, height, 256):
         _cancel(should_cancel)
         stop = min(row + 256, height)
@@ -144,7 +160,9 @@ def _prepare_inference(frames, model_path, use_gpu, thread_count=None,
 
 def _stackmffv3_batch_impl(tiles_list, model_path, use_gpu, mode='soft',
                           should_cancel=None, thread_count=None,
-                          resource_preference='balanced', execution_plan=None):
+                          resource_preference='balanced', execution_plan=None, *,
+                          fallback='first', confidence=.4, sharpness_advantage=.25,
+                          diagnostics=None):
     """Fuse tiles in order with B=1 until true batching passes GPU gates.
 
     A supplied plan means the caller owns the heavy-job lease, including when
@@ -162,9 +180,17 @@ def _stackmffv3_batch_impl(tiles_list, model_path, use_gpu, mode='soft',
             return []
         _validate_tiles(tiles_list)
         mode = normalize_mode(mode)
+        extra = 0
+        if mode == 'conservative':
+            from fusion_methods.conservative_selection import scratch_bytes
+            from core.algorithms import resolve_fusion_parameters
+            resolve_fusion_parameters('stackmffv3', dict(
+                mode=mode, fallback=fallback, confidence=confidence,
+                sharpness_advantage=sharpness_advantage))
+            extra = scratch_bytes(*tiles_list[0][0].shape[:2])
         model, device, plan = _prepare_inference(
             tiles_list[0], model_path, use_gpu, thread_count,
-            resource_preference, execution_plan, len(tiles_list))
+            resource_preference, execution_plan, len(tiles_list), fixed_bytes=extra)
         results = []
         for tile in tiles_list:
             _cancel(should_cancel)
@@ -176,7 +202,9 @@ def _stackmffv3_batch_impl(tiles_list, model_path, use_gpu, mode='soft',
             h, w = frames[0].shape[:2]
             # Color mixing does not need an N-frame color stack.
             grayscale = frames[0].ndim == 2
-            fused = _blend_tile(probs[0, :, :h, :w], frames, mode, should_cancel)
+            fused = _blend_tile(probs[0, :, :h, :w], frames, mode, should_cancel,
+                                fallback=fallback, confidence=confidence,
+                                sharpness_advantage=sharpness_advantage, diagnostics=diagnostics)
             del probs
             if not is_16bit and fuse_output_dtype(frames) is np.uint8:
                 fused = np.clip(np.round(fused), 0, 255).astype(np.uint8)
@@ -197,7 +225,8 @@ def _read_stack(input_source, img_resize, should_cancel=None, execution_plan=Non
 def _stackmffv3_impl(input_source, img_resize, model_path, use_gpu,
                      mode='soft', progress_callback=None, should_cancel=None,
                      thread_count=None, resource_preference='balanced',
-                     execution_plan=None):
+                     execution_plan=None, *, fallback='first', confidence=.4,
+                     sharpness_advantage=.25, diagnostics=None):
     """Whole-frame fusion with the same resource contract as tiled fusion."""
     from core.resource_policy import heavy_job
 
@@ -207,12 +236,17 @@ def _stackmffv3_impl(input_source, img_resize, model_path, use_gpu,
         frames = _read_stack(input_source, img_resize, should_cancel, execution_plan)
         if len(frames) < 2:
             raise ValueError("At least two images are required for fusion")
+        if mode == 'conservative':
+            source = 1 if fallback == 'first' else len(frames)
+            print(f"Conservative fallback: processed source #{source} of {len(frames)}")
         if progress_callback is not None:
             progress_callback(0, 1)
         out = _stackmffv3_batch_impl(
             [frames], model_path, use_gpu, mode,
             should_cancel=should_cancel, thread_count=thread_count,
-            resource_preference=resource_preference, execution_plan=execution_plan)[0]
+            resource_preference=resource_preference, execution_plan=execution_plan,
+            fallback=fallback, confidence=confidence, sharpness_advantage=sharpness_advantage,
+            diagnostics=diagnostics)[0]
         _cancel(should_cancel)
         if progress_callback is not None:
             progress_callback(1, 1)

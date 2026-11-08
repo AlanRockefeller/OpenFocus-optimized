@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Gebalanceerd houdt ruimte voor de desktop; Responsief gebruikt minder CPU en geheugen; Maximaal gebruikt alles wat de machine toestaat. Geen ervan verandert het beeld.",
     "advanced_storage_directory": "Tijdelijke map",
     "advanced_storage_default": "Systeemstandaard",
+    "advanced_storage_hint": "OpenFocus maakt hier een geïsoleerde uitvoermap en verwijdert achtergelaten uitvoermappen bij de volgende start. Grote RAW-stapels kunnen meerdere keren hun gedecodeerde grootte vereisen.",
     "advanced_storage_browse": "Bladeren…",
     "advanced_storage_invalid": "Deze tijdelijke map kan niet worden gebruikt: {error}",
     "advanced_storage_fallback": "De opgeslagen tijdelijke map kan niet worden gebruikt: {path}\n{error}\nIn plaats daarvan wordt de tijdelijke systeemmap gebruikt.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Rotatie",
     "mosaic_aligned_geometry": "{count} overlappingen uitgelijnd; mediaanresidu {residual:.2f} px; schaal {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Conservatieve selectie (experimenteel)',
+    'label_conservative_fallback': 'Terugvalbron (verwerkingsvolgorde)',
+    'fallback_first': 'Eerste verwerkte beeld (#1)',
+    'fallback_last': 'Laatste verwerkte beeld (#N)',
+    'label_conservative_confidence': 'Betrouwbaarheidsdrempel',
+    'label_conservative_sharpness': 'Minimaal scherptevoordeel',
+    'conservative_fallback_hint': 'Eén bron voor het hele beeld. Eerste/laatste verwijst naar de verwerkingsvolgorde, niet noodzakelijk naar dichtbij/veraf scherpstellen. N is het aantal verwerkte beelden.',
+    'conservative_confidence_hint': 'Experimentele relatieve score, geen gekalibreerde scherpstelkans. Hogere waarden accepteren minder wijzigingen. Standaard: 0.40.',
+    'conservative_sharpness_hint': 'Verbetering van genormaliseerd lokaal contrast. 0.25 vereist 25% verbetering boven de gestabiliseerde terugvalscore. Hogere waarden accepteren minder wijzigingen.',
+    'conservative_selected_source': 'Conservatieve terugval: verwerkte bron #{source} van {count}',
+})

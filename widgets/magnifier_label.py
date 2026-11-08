@@ -324,6 +324,21 @@ class MagnifierLabel(QLabel):
             super().wheelEvent(event)
             return
 
+        # A precision touchpad supplies pixelDelta(), while a conventional
+        # mouse wheel normally supplies only angleDelta().  Treat the native
+        # two-finger gesture as direct manipulation of the image.  Requiring
+        # Space+drag is unusable on desktops where libinput disables the
+        # touchpad while a keyboard key is held.  Ctrl deliberately retains
+        # zoom behavior below.
+        pixel_delta = event.pixelDelta()
+        if (not pixel_delta.isNull()
+                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._pan_offset += QPointF(pixel_delta)
+            self._clamp_pan_offset()
+            self._update_scaled_pixmap()
+            event.accept()
+            return
+
         delta = event.angleDelta().y()
         if delta == 0:
             event.ignore()

@@ -259,13 +259,15 @@ class ROIAlignmentWorker(QThread):
                         self.error_signal.emit("CANCELLED: alignment cancelled")
                     except Exception as e:
                         operation.fail()
-                        self.error_signal.emit(str(e))
+                        from utils.error_messages import processing_error
+                        self.error_signal.emit(processing_error(e))
             except RegistrationCancelled:
                 operation.cancel()
                 self.error_signal.emit("CANCELLED: alignment cancelled")
             except Exception as e:
                 operation.fail()
-                self.error_signal.emit(str(e))
+                from utils.error_messages import processing_error
+                self.error_signal.emit(processing_error(e))
 
     def _run_admitted(self):
         """在线程中执行ECC配准"""
@@ -379,19 +381,23 @@ class RenderWorker(QThread):
                 with heavy_job(lambda: self.is_cancelled):
                     try:
                         self.stage_signal.emit("prepare")
-                        self._run_admitted()
+                        result = self._run_admitted()
+                        if result is not None:
+                            self.finished_signal.emit(*result)
                     except RegistrationCancelled:
                         operation.cancel()
                         self.error_signal.emit("CANCELLED: render cancelled")
                     except Exception as e:
                         operation.fail()
-                        self.error_signal.emit(str(e))
+                        from utils.error_messages import processing_error
+                        self.error_signal.emit(processing_error(e))
             except RegistrationCancelled:
                 operation.cancel()
                 self.error_signal.emit("CANCELLED: render cancelled")
             except Exception as e:
                 operation.fail()
-                self.error_signal.emit(str(e))
+                from utils.error_messages import processing_error
+                self.error_signal.emit(processing_error(e))
 
     def _run_admitted(self):
         """在线程中执行图像处理流程"""
@@ -545,7 +551,7 @@ class RenderWorker(QThread):
         logger.info("render final result device=%s alignment_reused=%s alignment_seconds=%.6f "
                     "fusion_seconds=%.6f pixels=%s", device_name,
                     self.alignment_reused, alignment_time, fusion_time, result_details)
-        self.finished_signal.emit(
+        return (
             processed_images,
             fusion_result,
             registration_performed,

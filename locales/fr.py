@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Équilibré garde de la marge pour le bureau ; Réactif utilise moins de CPU et de mémoire ; Maximal utilise tout ce que la machine permet. Aucun ne change l'image.",
     "advanced_storage_directory": "Dossier temporaire",
     "advanced_storage_default": "Valeur système par défaut",
+    "advanced_storage_hint": "OpenFocus crée ici un dossier isolé pour chaque exécution et supprime les dossiers abandonnés au prochain démarrage. Les grandes piles RAW peuvent nécessiter plusieurs fois leur taille décodée.",
     "advanced_storage_browse": "Parcourir…",
     "advanced_storage_invalid": "Impossible d’utiliser ce dossier temporaire : {error}",
     "advanced_storage_fallback": "Le dossier temporaire enregistré est inutilisable : {path}\n{error}\nLe dossier temporaire du système sera utilisé à la place.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Rotation",
     "mosaic_aligned_geometry": "{count} chevauchements alignés ; résidu médian {residual:.2f} px ; échelle {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Sélection conservatrice (expérimentale)',
+    'label_conservative_fallback': 'Source de repli (ordre traité)',
+    'fallback_first': 'Première image traitée (#1)',
+    'fallback_last': 'Dernière image traitée (#N)',
+    'label_conservative_confidence': 'Sélectivité de confiance',
+    'label_conservative_sharpness': 'Gain minimal de netteté',
+    'conservative_fallback_hint': 'Une seule source pour toute l’image. Première/dernière désignent l’ordre traité, pas nécessairement la mise au point proche/lointaine. N est le nombre d’images traitées.',
+    'conservative_confidence_hint': 'Score relatif expérimental, pas une probabilité de mise au point étalonnée. Une valeur élevée accepte moins de changements. Par défaut : 0.40.',
+    'conservative_sharpness_hint': 'Gain de contraste local normalisé. La valeur 0.25 exige 25% de gain par rapport au score de repli stabilisé. Une valeur élevée accepte moins de changements.',
+    'conservative_selected_source': 'Repli conservateur : source traitée nº {source} sur {count}',
+})

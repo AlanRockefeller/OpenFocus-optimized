@@ -584,6 +584,8 @@ class MultiFocusFusion:
             if key in parameter_keys:
                 values[key] = kwargs.pop(key)
         runtime_keys = {'thread_count', 'model_path', 'execution_plan', 'block_size'}
+        if self.algorithm == 'stackmffv3':
+            runtime_keys.add('diagnostics')
         unknown = set(kwargs) - runtime_keys
         if unknown:
             raise ValueError(f'Unknown fusion parameters: {sorted(unknown)}')
@@ -915,6 +917,10 @@ class MultiFocusFusion:
             thread_count=kwargs.get('thread_count'),
             resource_preference=self.resource_preference,
             execution_plan=kwargs.get('execution_plan'),
+            fallback=kwargs.get('fallback', 'first'),
+            confidence=kwargs.get('confidence', .4),
+            sharpness_advantage=kwargs.get('sharpness_advantage', .25),
+            diagnostics=kwargs.get('diagnostics'),
         )
 
     def _fuse_stackmff(self, input_source, img_resize=None,
@@ -1506,6 +1512,11 @@ class MultiFocusFusion:
             itemsize=(max(frame.dtype.itemsize for frame in imgs)
                       if imgs is not None else np.dtype(out_dtype).itemsize),
             preference=self.resource_preference, user_threads=thread_count)
+        if self.algorithm == 'stackmffv3' and kwargs.get(
+                'mode', self.fusion_parameters.get('mode')) == 'conservative':
+            # Two score halos keep ownership boundaries outside filter padding.
+            from fusion_methods.conservative_selection import HALO
+            overlap = max(overlap, 2 * HALO)
         block_size, _, tile_coords = _ai_effective_tiling(
             count, block_size, h, w, overlap, self.ai_batch_size)
         overlap = max(0, min(int(overlap), block_size // 2))
@@ -1515,7 +1526,7 @@ class MultiFocusFusion:
         if mode_normalizer is not None:
             kwargs['mode'] = mode_normalizer(
                 kwargs.get('mode', self.fusion_parameters.get('mode', 'soft')))
-        hard_pick = self.algorithm == 'stackmffv3' and kwargs.get('mode') == 'hard'
+        hard_pick = self.algorithm == 'stackmffv3' and kwargs.get('mode') in ('hard', 'conservative')
 
 
         def crop_frames(coords):
@@ -1562,6 +1573,17 @@ class MultiFocusFusion:
             if index:
                 crops = crop_frames(coords)
             runner_parameters = dict(kwargs)
+            x0, y0, x1, y1 = coords
+            fh, fw = crops[0].shape[:2]
+            weight2d = self._compute_tile_weights(
+                x0, y0, x1, y1, fw, fh, w, h, overlap)
+            diagnostics = kwargs.get('diagnostics')
+            if hard_pick and diagnostics is not None:
+                owned = weight2d > weight[y0:y1, x0:x1, 0]
+                def tile_diagnostics(row, stop, maps):
+                    diagnostics(row + y0, stop + y0, maps,
+                                x=x0, mask=owned[row:stop])
+                runner_parameters['diagnostics'] = tile_diagnostics
             runner_parameters.update(model_path=model_path,
                 should_cancel=should_cancel, thread_count=thread_count, execution_plan=plan)
             fused_tile = resolve_runner(self.descriptor.runner)(self, crops, None, **runner_parameters)
@@ -1570,10 +1592,6 @@ class MultiFocusFusion:
                 raise RuntimeError("Fusion returned None for a tile")
             if fused_tile.ndim == 2:
                 fused_tile = fused_tile[:, :, np.newaxis]
-            x0, y0, x1, y1 = coords
-            fh, fw = fused_tile.shape[:2]
-            weight2d = self._compute_tile_weights(
-                x0, y0, x1, y1, fw, fh, w, h, overlap)
             if hard_pick:
                 # A hard result selects one source frame per pixel. In the
                 # overlap, take the tile whose interior weight is greatest

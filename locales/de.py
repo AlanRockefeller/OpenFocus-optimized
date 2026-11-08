@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Ausgeglichen lässt Reserve für den Desktop; Reaktionsschnell nutzt weniger CPU und Speicher; Maximal nutzt alles, was der Rechner erlaubt. Keiner ändert das Bild.",
     "advanced_storage_directory": "Temporäres Verzeichnis",
     "advanced_storage_default": "Systemstandard",
+    "advanced_storage_hint": "OpenFocus erstellt hier einen isolierten Laufordner und entfernt verwaiste Laufordner beim nächsten Start. Große RAW-Stapel können ein Mehrfaches ihrer dekodierten Stapelgröße benötigen.",
     "advanced_storage_browse": "Durchsuchen…",
     "advanced_storage_invalid": "Dieses temporäre Verzeichnis kann nicht verwendet werden: {error}",
     "advanced_storage_fallback": "Das gespeicherte temporäre Verzeichnis kann nicht verwendet werden: {path}\n{error}\nStattdessen wird das temporäre Systemverzeichnis verwendet.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Drehung",
     "mosaic_aligned_geometry": "{count} Überlappungen ausgerichtet; medianer Restfehler {residual:.2f} px; Skalierung {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Konservative Auswahl (experimentell)',
+    'label_conservative_fallback': 'Rückfallquelle (Verarbeitungsreihenfolge)',
+    'fallback_first': 'Erstes verarbeitetes Bild (#1)',
+    'fallback_last': 'Letztes verarbeitetes Bild (#N)',
+    'label_conservative_confidence': 'Konfidenzschwelle',
+    'label_conservative_sharpness': 'Minimaler Schärfevorteil',
+    'conservative_fallback_hint': 'Eine Quelle für das gesamte Bild. Erstes/letztes bezieht sich auf die Verarbeitungsreihenfolge, nicht zwingend auf Nah-/Fernfokus. N ist die Anzahl verarbeiteter Bilder.',
+    'conservative_confidence_hint': 'Experimenteller relativer Wert, keine kalibrierte Fokuswahrscheinlichkeit. Höhere Werte erlauben weniger Änderungen. Standard: 0.40.',
+    'conservative_sharpness_hint': 'Verbesserung des normalisierten lokalen Kontrasts. 0.25 verlangt 25% Verbesserung gegenüber dem stabilisierten Rückfallwert. Höhere Werte erlauben weniger Änderungen.',
+    'conservative_selected_source': 'Konservative Rückfallquelle: verarbeitetes Bild #{source} von {count}',
+})

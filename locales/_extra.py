@@ -990,6 +990,7 @@ EXTRA_TRANSLATIONS = {
         "advanced_resource_hint": "バランスはデスクトップ用の余裕を残します。応答優先は CPU とメモリを控えめに使い、最大はマシンの許す限り使います。いずれも画像結果は変わりません。",
         "advanced_storage_directory": "一時フォルダー",
         "advanced_storage_default": "システムの既定",
+        "advanced_storage_hint": "OpenFocus はここに実行ごとの分離フォルダーを作成し、次回起動時に残されたフォルダーを削除します。大きな RAW スタックにはデコード後サイズの数倍の領域が必要な場合があります。",
         "advanced_storage_browse": "参照…",
         "advanced_storage_invalid": "この一時フォルダーを使用できません: {error}",
         "advanced_storage_fallback": "保存された一時フォルダーを使用できません: {path}\n{error}\n代わりにシステムの一時フォルダーを使用します。",
@@ -2173,6 +2174,7 @@ EXTRA_TRANSLATIONS = {
         "advanced_resource_hint": "Equilibrado deja margen para el escritorio; Priorizar respuesta usa menos CPU y memoria; Máximo usa todo lo que permite el equipo. Ninguno cambia la imagen.",
         "advanced_storage_directory": "Carpeta temporal",
         "advanced_storage_default": "Predeterminada del sistema",
+        "advanced_storage_hint": "OpenFocus crea aquí una carpeta aislada por ejecución y elimina las carpetas abandonadas en el siguiente inicio. Las pilas RAW grandes pueden necesitar varias veces su tamaño decodificado.",
         "advanced_storage_browse": "Examinar…",
         "advanced_storage_invalid": "No se puede usar esta carpeta temporal: {error}",
         "advanced_storage_fallback": "No se puede usar la carpeta temporal guardada: {path}\n{error}\nSe usará la carpeta temporal del sistema.",
@@ -2378,3 +2380,31 @@ EXTRA_TRANSLATIONS = {
         "mosaic_aligned_geometry": "{count} solapamientos alineados; residuo mediano {residual:.2f} px; escala {minimum:.3f}–{maximum:.3f}%",
     },
 }
+
+# Experimental V3 Conservative Selection.
+EXTRA_TRANSLATIONS['ja'].update({
+    'radio_ai_conservative': '保守的選択（実験的）',
+    'label_conservative_fallback': 'フォールバック元（処理順）',
+    'fallback_first': '処理順の最初のフレーム（#1）',
+    'fallback_last': '処理順の最後のフレーム（#N）',
+    'label_conservative_confidence': '信頼度の選択しきい値',
+    'label_conservative_sharpness': '最小鮮鋭度向上',
+    'conservative_fallback_hint': '画像全体で同じ元フレームを使います。最初/最後は処理順で、近焦点/遠焦点とは限りません。N は処理フレーム数です。',
+    'conservative_confidence_hint': '実験的な相対スコアで、校正された合焦確率ではありません。高いほど変更が減ります。既定値 0.40。',
+    'conservative_sharpness_hint': '正規化した局所コントラストの向上。既定値 0.25 は安定化した基準スコアから 25% の向上を要求します。高いほど変更が減ります。',
+    'conservative_selected_source': '保守的選択の基準：処理元 #{source} / {count}',
+})
+
+# Experimental V3 Conservative Selection.
+EXTRA_TRANSLATIONS['es'].update({
+    'radio_ai_conservative': 'Selección conservadora (experimental)',
+    'label_conservative_fallback': 'Fuente de reserva (orden procesado)',
+    'fallback_first': 'Primer fotograma procesado (#1)',
+    'fallback_last': 'Último fotograma procesado (#N)',
+    'label_conservative_confidence': 'Selectividad de confianza',
+    'label_conservative_sharpness': 'Ventaja mínima de nitidez',
+    'conservative_fallback_hint': 'Una fuente para toda la imagen. Primero/último indican el orden procesado, no necesariamente el enfoque cercano/lejano. N es el total procesado.',
+    'conservative_confidence_hint': 'Puntuación relativa experimental, no probabilidad de enfoque calibrada. Un valor mayor acepta menos cambios. Predeterminado: 0.40.',
+    'conservative_sharpness_hint': 'Mejora del contraste local normalizado. El valor 0.25 exige una mejora del 25% sobre la puntuación estabilizada de reserva. Un valor mayor acepta menos cambios.',
+    'conservative_selected_source': 'Reserva conservadora: fuente procesada #{source} de {count}',
+})

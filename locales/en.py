@@ -750,8 +750,9 @@ EN = {
     "advanced_resource_responsive": "Responsive",
     "advanced_resource_maximum": "Maximum",
     "advanced_resource_hint": "Balanced keeps headroom for the desktop; Responsive uses less CPU and memory; Maximum uses everything the machine allows. None of them changes the image.",
-    "advanced_storage_directory": "Temporary directory",
-    "advanced_storage_default": "System default",
+    "advanced_storage_directory": "Temporary storage parent",
+    "advanced_storage_default": "System temporary directory",
+    "advanced_storage_hint": "OpenFocus creates an isolated run folder here and removes abandoned run folders at the next startup. Large RAW stacks can require several times their decoded stack size.",
     "advanced_storage_browse": "Browse…",
     "advanced_storage_invalid": "Cannot use this temporary directory: {error}",
     "advanced_storage_fallback": "The saved temporary directory cannot be used: {path}\n{error}\nThe system temporary directory will be used instead.",
@@ -1182,3 +1183,17 @@ EN = {
     "converter_no_preview": "No bounded embedded preview is available; conversion is still available.",
     "converter_item_state": "Completed: {completed}/{pages} · Failed: {failed}",
 }
+
+# Experimental V3 Conservative Selection.
+EN.update({
+    'radio_ai_conservative': 'Conservative Selection (experimental)',
+    'label_conservative_fallback': 'Fallback source (processed order)',
+    'fallback_first': 'First processed frame (#1)',
+    'fallback_last': 'Last processed frame (#N)',
+    'label_conservative_confidence': 'Confidence selectivity',
+    'label_conservative_sharpness': 'Minimum sharpness advantage',
+    'conservative_fallback_hint': 'One source across the image. First/last refer to processed order, not necessarily front/back focus. N is the processed stack count.',
+    'conservative_confidence_hint': 'Experimental relative score, not calibrated focus probability. Decisive choices can retain subject detail independently. Higher values accept fewer confidence-supported changes. Default 0.40.',
+    'conservative_sharpness_hint': 'Independent normalized local-contrast evidence. Default 0.25 requires 25% improvement above the stabilized fallback score when confidence alone does not support the choice. Higher values accept fewer sharpness-supported changes.',
+    'conservative_selected_source': 'Conservative fallback: processed source #{source} of {count}',
+})

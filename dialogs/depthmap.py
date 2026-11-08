@@ -44,7 +44,8 @@ from widgets.flow_layout import FlowPanel
 from widgets.stepper import StepperSpinBox
 from utils import colormap as cmap
 from utils.image_utils import imwrite_auto
-from utils.settings_store import get_settings, image_save_dir, remember_image_save
+from utils.settings_store import (get_settings, image_save_default, image_save_filter,
+                                  image_save_dir, remember_image_save)
 from utils.logging_setup import frame_details, log_operation
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
@@ -1608,11 +1609,13 @@ class DepthMapDialog(QDialog):
             return
         start_dir = image_save_dir()
         if colorized:
-            path, _ = FileDialog.getSaveFileName(
+            filters = "PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif *.tiff);;BMP (*.bmp)"
+            path, selected_filter = FileDialog.getSaveFileName(
                 self, trans.t("depth_save_color"),
-                self._default_path(start_dir), "PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif *.tiff);;BMP (*.bmp)")
+                image_save_default(self._default_path(start_dir), filters), filters,
+                image_save_filter(filters))
         else:
-            path, _ = FileDialog.getSaveFileName(
+            path, selected_filter = FileDialog.getSaveFileName(
                 self, trans.t("depth_save_raw"),
                 self._default_path(start_dir, raw=True), "TIFF 16-bit (*.tif *.tiff)")
         if not path:
@@ -1628,7 +1631,7 @@ class DepthMapDialog(QDialog):
         except ValueError as exc:
             self.status_lbl.setText(str(exc))
             return
-        remember_image_save(path)
+        remember_image_save(path, selected_filter)
         try:
             if colorized:
                 ok = imwrite_auto(path, self._colorized_full())

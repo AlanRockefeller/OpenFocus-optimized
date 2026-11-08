@@ -71,7 +71,10 @@ sys.stdout = _output_stream(sys.stdout, -11)
 sys.stderr = _output_stream(sys.stderr, -12)
 
 if __name__ == "__main__":
-
+    # Required for the crash-isolated render subprocess in frozen Windows and
+    # macOS bundles. It is a no-op for ordinary source launches.
+    import multiprocessing as _multiprocessing
+    _multiprocessing.freeze_support()
 
     # Bootstrap before GUI imports: CLI and import-time failures share the
     # same diagnostics, including on systems without Qt installed.
@@ -257,7 +260,11 @@ def _shutdown_worker(worker, timeout_ms=1500):
     if worker.isRunning():
         worker.quit()  # no-op for run() overrides, harmless otherwise
         if not worker.wait(timeout_ms):
-            _ORPHAN_THREADS.append(worker)
+            if getattr(worker, "process_isolated", False):
+                worker.terminate()
+                worker.wait(1000)
+            else:
+                _ORPHAN_THREADS.append(worker)
 
 
 def _apply_font_family(qss: str, ui_font: str, mono_font: str) -> str:
@@ -765,6 +772,9 @@ class OpenFocus(QMainWindow):
             capability = neural_device_kind()
             if capability is None and is_ai_fusion_available():
                 self._probe_device_kind_async()
+            # A verified provider that cannot be admitted (unknown free memory)
+            # is shown as the CPU it will actually run on.
+            capability = neural_runtime.admitted_kind(capability)
             neural = self._ai_method_selected()
             checkpoint = (get_fusion(self.combo_fusion.currentData()).weights or ''
                           if neural else '')
@@ -780,7 +790,9 @@ class OpenFocus(QMainWindow):
                 hardware,
                 'ONNX Runtime: ' + ', '.join(diagnostics['providers']),
                 trans.t('env_gpu_accel') + ': ' + neural_runtime.display_name(capability)
-                if neural_runtime.is_accelerator(capability) else trans.t('env_no_gpu'),
+                if neural_runtime.is_accelerator(neural_runtime.admitted_kind(capability))
+                else trans.t('env_no_gpu'),
+                neural_runtime.admission_note(),
                 trans.t('status_gpu').format(kind),
                 trans.t('msg_gpu_accel_hint'),
                 '\n'.join(diagnostics['probe_errors'])))))

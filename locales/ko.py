@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "균형은 데스크톱을 위한 여유를 남깁니다. 응답 우선은 CPU와 메모리를 적게 쓰고, 최대는 시스템이 허용하는 만큼 사용합니다. 모두 이미지 결과는 바꾸지 않습니다.",
     "advanced_storage_directory": "임시 폴더",
     "advanced_storage_default": "시스템 기본값",
+    "advanced_storage_hint": "OpenFocus는 여기에 실행별 격리 폴더를 만들고 다음 시작 시 남겨진 실행 폴더를 제거합니다. 대형 RAW 스택에는 디코딩된 스택 크기의 몇 배가 필요할 수 있습니다.",
     "advanced_storage_browse": "찾아보기…",
     "advanced_storage_invalid": "이 임시 폴더를 사용할 수 없습니다: {error}",
     "advanced_storage_fallback": "저장된 임시 폴더를 사용할 수 없습니다: {path}\n{error}\n대신 시스템 임시 폴더를 사용합니다.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "회전",
     "mosaic_aligned_geometry": "겹침 영역 {count}개 정렬됨; 잔차 중앙값 {residual:.2f} px; 배율 {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': '보수적 선택 (실험적)',
+    'label_conservative_fallback': '기본 소스 (처리 순서)',
+    'fallback_first': '첫 번째 처리 프레임 (#1)',
+    'fallback_last': '마지막 처리 프레임 (#N)',
+    'label_conservative_confidence': '신뢰도 선택 기준',
+    'label_conservative_sharpness': '최소 선명도 향상',
+    'conservative_fallback_hint': '전체 이미지에 하나의 기본 소스를 사용합니다. 처음/마지막은 처리 순서이며 근거리/원거리 초점을 뜻하지 않을 수 있습니다. N은 처리 프레임 수입니다.',
+    'conservative_confidence_hint': '실험적인 상대 점수이며 보정된 초점 확률이 아닙니다. 높을수록 변경이 줄어듭니다. 기본값: 0.40.',
+    'conservative_sharpness_hint': '정규화된 국소 대비 향상입니다. 기본값 0.25는 안정화된 기본 점수보다 25% 향상을 요구합니다. 높을수록 변경이 줄어듭니다.',
+    'conservative_selected_source': '보수적 선택 기본 소스: 처리 프레임 #{source} / {count}',
+})

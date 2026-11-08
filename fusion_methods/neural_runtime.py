@@ -27,6 +27,7 @@ _ACTUAL_CHECKPOINT = None
 _AVAILABLE_PROVIDERS = ()
 _HARDWARE_ADAPTERS = ()
 _PROBE_ERRORS = ()
+_ADMISSION_NOTE = ''
 
 
 def device_diagnostics():
@@ -34,7 +35,35 @@ def device_diagnostics():
     return {'hardware': _HARDWARE_ADAPTERS, 'providers': _AVAILABLE_PROVIDERS,
             'selected': _DEVICE, 'adapter': _DIRECTML_ADAPTER_NAME,
             'actual': _ACTUAL_DEVICE, 'checkpoint': _ACTUAL_CHECKPOINT,
-            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS}
+            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS,
+            'admission': _ADMISSION_NOTE}
+
+
+def admission_note():
+    """Why a verified accelerator will not run AI jobs, or '' when admitted."""
+    return _ADMISSION_NOTE
+
+
+def admitted_kind(kind):
+    """The device AI jobs will actually be admitted to: CPU if not admitted."""
+    if is_accelerator(kind) and _ADMISSION_NOTE:
+        return 'CPU'
+    return kind
+
+
+def _admission_note(kind):
+    """Explain why a verified provider is not admitted by the job-time memory gate.
+
+    logits() sends accelerator jobs to CPU whenever free device memory is
+    unknown, so a verified provider in that state must not be shown as running.
+    """
+    if kind not in ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO'):
+        return ''
+    from core.resource_policy import probe_resources
+    if probe_resources(kind).vram_known:
+        return ''
+    return (f'{display_name(kind)} passed the probe, but its free memory cannot be read, '
+            'so AI jobs run on CPU.')
 
 
 def start_inference_job():
@@ -137,9 +166,10 @@ def resolve_device(use_gpu):
     if not use_gpu:
         return 'CPU'
     global _DEVICE, _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME
-    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS
+    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS, _ADMISSION_NOTE
     with _LOCK:
         if _DEVICE is None:
+            _ADMISSION_NOTE = ''
             import onnxruntime as ort
             from utils.weights import weights_path
             available = ort.get_available_providers()
@@ -181,6 +211,7 @@ def resolve_device(use_gpu):
                             set_directml_adapter(adapter_index)
                         if kind == 'DIRECTML':
                             _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME = adapter_index, adapter_name
+                        _ADMISSION_NOTE = _admission_note(kind)
                         device = kind
                         break
                     except Exception as error:

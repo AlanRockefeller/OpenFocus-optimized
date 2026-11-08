@@ -1,6 +1,9 @@
 """Regression coverage for temporary frame admission and rejected imports."""
 import gc
+import errno
 import os
+from pathlib import Path
+import time
 import weakref
 from collections import namedtuple
 from types import SimpleNamespace
@@ -15,6 +18,7 @@ from core import frame_storage, workers
 @pytest.fixture(autouse=True)
 def isolated_storage_directory(monkeypatch):
     monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_storage_parent', None)
 
 
 def test_switching_directories_preserves_existing_mapping(tmp_path):
@@ -24,12 +28,12 @@ def test_switching_directories_preserves_existing_mapping(tmp_path):
     second.mkdir()
     frame_storage.configure_storage_directory(first)
     old = frame_storage.create_frame((2, 2), np.uint8)
-    old_path = first / os.path.basename(old.filename)
+    old_path = Path(old.filename)
     view = old[:]
     old[:] = 37
     frame_storage.configure_storage_directory(second)
     new = frame_storage.create_frame((2, 2), np.uint8)
-    new_path = second / os.path.basename(new.filename)
+    new_path = Path(new.filename)
     assert old_path.exists() and new_path.exists()
     assert np.all(old == 37)
     del old
@@ -42,7 +46,7 @@ def test_switching_directories_preserves_existing_mapping(tmp_path):
     gc.collect()
     assert not new_path.exists()
     frame_storage.configure_storage_directory('')
-    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+    assert Path(frame_storage.storage_directory()).parent == Path(frame_storage.tempfile.gettempdir())
 
 
 @pytest.mark.parametrize('layout', ['crop', 'transpose', 'reverse'])
@@ -71,13 +75,13 @@ def test_invalid_directory_keeps_previous_configuration(monkeypatch, tmp_path):
     frame_storage.configure_storage_directory(tmp_path)
     with pytest.raises(OSError):
         frame_storage.configure_storage_directory(tmp_path / 'missing')
-    assert frame_storage.storage_directory() == str(tmp_path)
+    assert frame_storage.storage_parent_directory() == str(tmp_path)
     def denied(*args, **kwargs):
         raise PermissionError('denied')
     monkeypatch.setattr(frame_storage.tempfile, 'mkstemp', denied)
     with pytest.raises(OSError):
         frame_storage.configure_storage_directory(tmp_path)
-    assert frame_storage.storage_directory() == str(tmp_path)
+    assert frame_storage.storage_parent_directory() == str(tmp_path)
 
 
 def test_mapping_checks_and_creates_in_same_captured_directory(monkeypatch, tmp_path):
@@ -94,8 +98,8 @@ def test_mapping_checks_and_creates_in_same_captured_directory(monkeypatch, tmp_
         return usage(20 * 1024**3, 0, 2 * 1024**3)
     monkeypatch.setattr(frame_storage.shutil, 'disk_usage', disk_usage)
     image = frame_storage.create_frame((2, 2), np.uint8)
-    assert checked == [str(first)]
-    assert os.path.dirname(image.filename) == str(first)
+    assert checked == [str(first / f'openfocus-run-{os.getpid()}')]
+    assert os.path.dirname(image.filename) == checked[0]
     del image
     gc.collect()
 
@@ -125,7 +129,43 @@ def test_mapping_checks_disk_before_creating_file(monkeypatch, tmp_path):
     _limit_temp_space(monkeypatch, tmp_path, 0)
     with pytest.raises(OSError, match='Insufficient temporary disk space'):
         frame_storage.create_frame((2, 2, 3), np.uint16)
-    assert list(tmp_path.iterdir()) == []
+    assert not list(Path(frame_storage.storage_directory()).iterdir())
+
+
+def test_allocation_failure_explains_units_location_and_remedy(monkeypatch, tmp_path):
+    frame_storage.configure_storage_directory(tmp_path)
+    monkeypatch.setattr(frame_storage, 'require_disk_space', lambda *args, **kwargs: None)
+
+    def full(fd, offset, size):
+        raise OSError(errno.ENOSPC, 'No space left on device')
+
+    monkeypatch.setattr(frame_storage.os, 'posix_fallocate', full, raising=False)
+    with pytest.raises(frame_storage.TemporaryStorageError) as error:
+        frame_storage.create_frame((4, 5, 3), np.uint8)
+    message = str(error.value)
+    assert '60 bytes' in message
+    assert str(tmp_path) in message
+    assert 'temporary disk is full' in message
+    assert 'Advanced Settings' in message
+    assert not list(Path(frame_storage.storage_directory()).iterdir())
+
+
+def test_partial_frame_write_reports_byte_counts_and_removes_file(monkeypatch, tmp_path):
+    frame_storage.configure_storage_directory(tmp_path)
+    monkeypatch.setattr(frame_storage, 'require_disk_space', lambda *args, **kwargs: None)
+
+    def partial(image, stream):
+        stream.write(memoryview(np.asarray(image)).cast('B')[:7])
+        raise OSError(errno.ENOSPC, 'No space left on device')
+
+    monkeypatch.setattr(frame_storage, '_write_frame', partial)
+    with pytest.raises(frame_storage.TemporaryStorageError) as error:
+        frame_storage.store_frame(np.zeros((4, 5, 3), np.uint8))
+    message = str(error.value)
+    assert '60 bytes requested, 7 bytes written' in message
+    assert str(tmp_path) in message
+    assert 'Advanced Settings' in message
+    assert not list(Path(frame_storage.storage_directory()).iterdir())
 
 
 @pytest.mark.parametrize('multipage', [False, True])
@@ -162,7 +202,37 @@ def test_processing_stack_rejected_before_allocations(monkeypatch, tmp_path, reg
     _limit_temp_space(monkeypatch, tmp_path, frames[0].nbytes)
     with pytest.raises(OSError, match='Insufficient temporary disk space'):
         workers._check_processing_space(frames, registration_steps)
-    assert list(tmp_path.iterdir()) == []
+    assert not list(Path(frame_storage.storage_directory()).iterdir())
+
+
+def test_locked_run_is_namespace_safe_and_lockless_legacy_run_is_preserved(
+        monkeypatch, tmp_path):
+    lockless = tmp_path / 'openfocus-run-12345'
+    live = tmp_path / 'openfocus-run-67890'
+    lockless.mkdir()
+    live.mkdir()
+    (lockless / 'frame.bin').write_bytes(b'unknown-owner')
+    (live / 'frame.bin').write_bytes(b'live')
+    live_lock = frame_storage._try_owner_lock(live, create=True)
+    assert live_lock is not None
+    legacy = tmp_path / 'openfocus-frame-abandoned.bin'
+    legacy.write_bytes(b'old')
+    old = time.time() - frame_storage._LEGACY_MIN_AGE_SECONDS - 1
+    os.utime(legacy, (old, old))
+    # This is exactly the false answer produced from a different PID namespace.
+    monkeypatch.setattr(frame_storage, '_pid_is_alive', lambda pid: False)
+
+    try:
+        removed = frame_storage.cleanup_stale_storage(tmp_path)
+        assert str(legacy) in removed
+        assert live.exists() and (live / 'frame.bin').exists()
+        assert lockless.exists() and (lockless / 'frame.bin').exists()
+    finally:
+        live_lock.close()
+
+    removed = frame_storage.cleanup_stale_storage(tmp_path)
+    assert str(live) in removed and not live.exists()
+    assert lockless.exists() and not legacy.exists()
 
 
 def test_large_disk_reserve_is_capped(monkeypatch, tmp_path):

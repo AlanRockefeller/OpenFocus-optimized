@@ -719,6 +719,7 @@ PACK = {
     "advanced_resource_hint": "Zrównoważony zostawia zapas dla pulpitu; Responsywny zużywa mniej CPU i pamięci; Maksymalny używa wszystkiego, na co pozwala maszyna. Żaden nie zmienia obrazu.",
     "advanced_storage_directory": "Folder tymczasowy",
     "advanced_storage_default": "Domyślny systemowy",
+    "advanced_storage_hint": "OpenFocus tworzy tutaj odizolowany folder uruchomienia i usuwa porzucone foldery przy następnym starcie. Duże stosy RAW mogą wymagać kilku razy więcej miejsca niż ich rozmiar po dekodowaniu.",
     "advanced_storage_browse": "Przeglądaj…",
     "advanced_storage_invalid": "Nie można użyć tego folderu tymczasowego: {error}",
     "advanced_storage_fallback": "Nie można użyć zapisanego folderu tymczasowego: {path}\n{error}\nZostanie użyty systemowy folder tymczasowy.",
@@ -1180,3 +1181,17 @@ PACK = {
     "mosaic_rotation": "Obrót",
     "mosaic_aligned_geometry": "Wyrównano nakładające się obszary: {count}; mediana błędu resztkowego {residual:.2f} px; skala {minimum:.3f}–{maximum:.3f}%",
 }
+
+# Experimental V3 Conservative Selection.
+PACK.update({
+    'radio_ai_conservative': 'Wybór zachowawczy (eksperymentalny)',
+    'label_conservative_fallback': 'Źródło bazowe (kolejność przetwarzania)',
+    'fallback_first': 'Pierwsza przetworzona klatka (#1)',
+    'fallback_last': 'Ostatnia przetworzona klatka (#N)',
+    'label_conservative_confidence': 'Próg pewności',
+    'label_conservative_sharpness': 'Minimalna przewaga ostrości',
+    'conservative_fallback_hint': 'Jedno źródło dla całego obrazu. Pierwsza/ostatnia oznacza kolejność przetwarzania, niekoniecznie bliską/daleką ostrość. N to liczba przetworzonych klatek.',
+    'conservative_confidence_hint': 'Eksperymentalny wynik względny, nie skalibrowane prawdopodobieństwo ostrości. Wyższe wartości dopuszczają mniej zmian. Domyślnie: 0.40.',
+    'conservative_sharpness_hint': 'Wzrost znormalizowanego kontrastu lokalnego. 0.25 wymaga wzrostu o 25% względem ustabilizowanego wyniku bazowego. Wyższe wartości dopuszczają mniej zmian.',
+    'conservative_selected_source': 'Baza wyboru zachowawczego: przetworzone źródło #{source} z {count}',
+})

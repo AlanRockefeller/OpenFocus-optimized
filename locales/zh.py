@@ -749,6 +749,7 @@ ZH = {
     "advanced_resource_hint": "均衡为桌面留出余量；优先流畅占用更少 CPU 与内存；全速使用机器允许的全部资源。三者都不会改变图像结果。",
     "advanced_storage_directory": "临时目录",
     "advanced_storage_default": "系统默认",
+    "advanced_storage_hint": "OpenFocus 会在此创建独立的运行目录，并在下次启动时清理遗留目录。大型 RAW 堆栈可能需要其解码后大小数倍的空间。",
     "advanced_storage_browse": "浏览…",
     "advanced_storage_invalid": "无法使用此临时目录：{error}",
     "advanced_storage_fallback": "保存的临时目录无法使用：{path}\n{error}\n将改用系统临时目录。",
@@ -1180,3 +1181,17 @@ ZH = {
     "converter_no_preview": "没有可安全读取的内嵌预览；仍可转换此文件。",
     "converter_item_state": "已完成：{completed}/{pages} · 失败：{failed}",
 }
+
+# Experimental V3 Conservative Selection.
+ZH.update({
+    'radio_ai_conservative': '保守选择（实验性）',
+    'label_conservative_fallback': '回退源（处理顺序）',
+    'fallback_first': '首个处理帧（#1）',
+    'fallback_last': '最后处理帧（#N）',
+    'label_conservative_confidence': '置信度选择阈值',
+    'label_conservative_sharpness': '最小清晰度优势',
+    'conservative_fallback_hint': '整幅图像使用同一个回退源。首个/最后指处理顺序，不一定是近焦/远焦。N 为处理帧数。',
+    'conservative_confidence_hint': '实验性相对分数，不是校准后的对焦概率。越高，替换越少。默认 0.40。',
+    'conservative_sharpness_hint': '归一化局部对比度提升。默认 0.25 要求相对稳定化回退分数提升 25%。越高，替换越少。',
+    'conservative_selected_source': '保守选择回退：处理源 #{source}，共 {count} 帧',
+})

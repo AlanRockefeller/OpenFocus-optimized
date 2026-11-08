@@ -20,7 +20,8 @@ from core.registration import RegistrationCancelled
 from core.resource_policy import heavy_job, require_memory
 from locales import trans
 from utils.image_utils import cv2_to_pixmap, imwrite_auto
-from utils.settings_store import (get_last_dialog_dir, image_save_dir, remember_image_save,
+from utils.settings_store import (get_last_dialog_dir, image_save_dir, image_save_filter,
+                                  image_save_type, remember_image_save,
                                   set_last_dialog_dir)
 from utils.path_identity import same_path
 
@@ -741,12 +742,15 @@ class MosaicDialog(QDialog):
     def _save(self):
         if self.worker is not None or not self.frames:
             return
-        path, _ = FileDialog.getSaveFileName(self, trans.t('mosaic_save'),
-                                              image_save_dir(), trans.t('mosaic_save_filter'))
+        filters = trans.t('mosaic_save_filter')
+        path, selected_filter = FileDialog.getSaveFileName(
+            self, trans.t('mosaic_save'), image_save_dir(), filters,
+            image_save_filter(filters))
         if not path:
             return
         if not os.path.splitext(path)[1]:
-            path += '.tif'
+            remembered = image_save_type(filters)
+            path += remembered or '.tif'
         ext = os.path.splitext(path)[1].lower()
         if ext not in ('.tif', '.tiff', '.png'):
             QMessageBox.warning(self, trans.t('mosaic_title'), trans.t('mosaic_save_type'))
@@ -754,7 +758,7 @@ class MosaicDialog(QDialog):
         if any(same_path(frame.source_path, path) for frame in self.frames):
             QMessageBox.warning(self, trans.t('mosaic_title'), trans.t('mosaic_source_conflict'))
             return
-        remember_image_save(path)
+        remember_image_save(path, selected_filter)
         frames = tuple(self.frames)
         transforms = self._current_transforms()
 

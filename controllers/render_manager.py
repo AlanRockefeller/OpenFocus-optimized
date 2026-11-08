@@ -10,7 +10,7 @@ from utils import show_message_box, show_warning_box
 from utils.image_utils import cv2_to_pixmap
 from core.multi_focus_fusion import is_ai_fusion_available
 from core.render_context import build_render_context
-from core.workers import RenderWorker
+from core.render_process import RenderProcessWorker as RenderWorker
 from dialogs import ROIRenderOptionsDialog  # Import the new dialog
 from locales import trans
 from core.algorithms import fusion_algorithms, get_fusion, get_registration, alignment_steps
@@ -971,7 +971,12 @@ class RenderManager:
         self.worker.stage_signal.connect(self.on_render_stage)
         window.statusBar().clearMessage()  # stale "loading…" etc.
         self._show_progress_bar(trans.t('render_stage_waiting'))
-        self.worker.start()
+        try:
+            self.worker.start()
+        except Exception as exc:
+            from utils.error_messages import processing_error
+            self.on_render_error(
+                "The render worker process could not be started: " + processing_error(exc))
 
     def _stack_changed_since(self, context) -> bool:
         """True when the stack (or the settings it was rendered with) is no
@@ -1296,6 +1301,12 @@ class RenderManager:
                 info_lines.append(trans.t("info_fusion_time").format(fusion_time))
                 info_lines.append(trans.t("info_proc_unit").format(device_name))
 
+            params = getattr(self.worker, 'fusion_parameters', {})
+            if (getattr(self.worker, 'algorithm', None) == 'stackmffv3'
+                    and params.get('mode') == 'conservative'):
+                count = len(processed_images)
+                source = 1 if params.get('fallback', 'first') == 'first' else count
+                info_lines.append(trans.t('conservative_selected_source').format(source=source, count=count))
             info_lines.append(trans.t("info_total_time").format(total_time))
             if self.alignment_diagnostics[0]:
                 fallback_count = len({entry['frame_index'] for entry in self.alignment_diagnostics[0]

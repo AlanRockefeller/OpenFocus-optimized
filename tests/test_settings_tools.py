@@ -91,6 +91,7 @@ def test_storage_directory_browse_cancel_and_save(settings_window, tmp_path, mon
     from utils import settings_store
 
     monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_storage_parent', None)
     store = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
     monkeypatch.setattr(settings_store, 'get_settings', lambda: store)
     monkeypatch.setattr(advanced_settings.FileDialog, 'getExistingDirectory',
@@ -100,7 +101,7 @@ def test_storage_directory_browse_cancel_and_save(settings_window, tmp_path, mon
     dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
     dialog._browse_storage_directory()
     dialog.reject()
-    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+    assert Path(frame_storage.storage_directory()).parent == Path(frame_storage.tempfile.gettempdir())
     assert not store.contains('rendering/storage_directory')
 
     dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
@@ -108,7 +109,7 @@ def test_storage_directory_browse_cancel_and_save(settings_window, tmp_path, mon
     dialog._apply()
     assert dialog.result() == QDialog.DialogCode.Accepted
     image = frame_storage.create_frame((2, 2), np.uint8)
-    assert Path(image.filename).parent == tmp_path
+    assert Path(image.filename).parent.parent == tmp_path
     restored = SimpleNamespace()
     settings_store.load_window_settings(restored)
     assert restored.storage_directory == str(tmp_path)
@@ -117,7 +118,7 @@ def test_storage_directory_browse_cancel_and_save(settings_window, tmp_path, mon
     dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
     dialog.storage_directory.clear()
     dialog._apply()
-    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+    assert Path(frame_storage.storage_directory()).parent == Path(frame_storage.tempfile.gettempdir())
     assert store.value('rendering/storage_directory') == ''
 
 
@@ -126,6 +127,7 @@ def test_invalid_storage_directory_keeps_previous_settings(settings_window, tmp_
     from dialogs import advanced_settings
 
     monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_storage_parent', None)
     previous = tmp_path / 'previous'
     previous.mkdir()
     frame_storage.configure_storage_directory(previous)
@@ -135,7 +137,7 @@ def test_invalid_storage_directory_keeps_previous_settings(settings_window, tmp_
     dialog.spin_block.setValue(512)
     dialog._apply()
     assert dialog.result() != QDialog.DialogCode.Accepted
-    assert frame_storage.storage_directory() == settings_window.storage_directory == str(previous)
+    assert frame_storage.storage_parent_directory() == settings_window.storage_directory == str(previous)
     assert settings_window.tile_block_size == 1024
     assert dialog.status.text()
     assert not settings_window.saved
@@ -146,6 +148,7 @@ def test_storage_directory_rolls_back_when_save_fails(settings_window, tmp_path,
     from dialogs import advanced_settings
 
     monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_storage_parent', None)
     previous, requested = tmp_path / 'previous', tmp_path / 'requested'
     previous.mkdir()
     requested.mkdir()
@@ -157,7 +160,7 @@ def test_storage_directory_rolls_back_when_save_fails(settings_window, tmp_path,
     dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
     dialog.storage_directory.setText(str(requested))
     dialog._apply()
-    assert frame_storage.storage_directory() == settings_window.storage_directory == str(previous)
+    assert frame_storage.storage_parent_directory() == settings_window.storage_directory == str(previous)
     assert dialog.result() != QDialog.DialogCode.Accepted
 
 
@@ -166,14 +169,15 @@ def test_saved_storage_directory_restores_or_reports_fallback(tmp_path, monkeypa
     from core import frame_storage
 
     monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_storage_parent', None)
     window = SimpleNamespace(storage_directory=str(tmp_path))
     assert main._restore_storage_directory(window) is None
-    assert frame_storage.storage_directory() == str(tmp_path)
+    assert frame_storage.storage_parent_directory() == str(tmp_path)
     missing = str(tmp_path / 'missing')
     window.storage_directory = missing
     warning = main._restore_storage_directory(window)
     assert window.storage_directory == ''
-    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+    assert frame_storage.storage_parent_directory() == frame_storage.tempfile.gettempdir()
     assert missing in warning
 
 
@@ -788,8 +792,14 @@ def test_image_save_dialogs_start_where_the_last_image_was_saved(tmp_path, monke
     saved.mkdir()
     store.remember_image_save(str(saved / "stack.tif"))
     assert store.image_save_dir() == str(saved)
-    assert store.image_save_default("next.png") == str(saved / "next.png")
-    assert store.image_save_default("/elsewhere/next.png") == str(saved / "next.png")
+    filters = "PNG (*.png);;TIFF (*.tif *.tiff);;JPEG (*.jpg *.jpeg)"
+    assert store.image_save_default("next.png", filters) == str(saved / "next.tif")
+    assert store.image_save_default("/elsewhere/next.png", filters) == str(saved / "next.tif")
+    assert store.image_save_filter(filters) == "TIFF (*.tif *.tiff)"
+    assert store.image_save_default("mask.png", "PNG (*.png)") == str(saved / "mask.png")
+    assert store.image_save_default("animation.gif") == str(saved / "animation.gif")
+    store.remember_image_save(str(saved / "model.obj"))
+    assert store.image_save_type(filters) == ".tif"
     assert store.get_last_dialog_dir() == str(saved)
     saved.rmdir()                                       # a vanished folder is not offered
     assert store.image_save_dir() == str(home)

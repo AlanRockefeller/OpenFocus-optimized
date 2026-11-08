@@ -22,6 +22,7 @@ class ParameterSpec:
     odd: bool = False
     hint_key: str | None = None
     choice_labels: tuple = ()
+    visible_when: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -167,6 +168,10 @@ def _parameters(specs):
                 raise ValueError(f'Invalid numeric bounds: {spec.key}')
             if spec.odd and spec.decimals:
                 raise ValueError(f'Odd parameters must be integers: {spec.key}')
+        if spec.visible_when:
+            if (not isinstance(spec.visible_when, tuple) or len(spec.visible_when) != 2
+                    or spec.visible_when[0] not in {item.key for item in specs}):
+                raise ValueError(f'Invalid parameter visibility: {spec.key}')
         validate_parameter(spec, spec.default)
 
 
@@ -334,12 +339,20 @@ _K_OF = ParameterSpec('kernel_size', 'label_kernel_of', 11, 1, 21, 2, odd=True)
 _SM_B = ParameterSpec('depth_smoothing', 'label_depth_smoothing', 1.2, 0, 8, .2, 1)
 _SM_C = ParameterSpec('blend_smoothing', 'label_blend_smoothing', 3.0, 0, 8, .2, 1)
 _LEVELS = ParameterSpec('N', 'compare_levels', 4, 1, 6)
-_MODE = ParameterSpec('mode', 'label_ai_mode', 'soft', choices=('soft', 'hard'), choice_labels=('radio_ai_soft', 'radio_ai_hard'))
+_MODE = ParameterSpec('mode', 'label_ai_mode', 'soft', choices=('soft', 'hard', 'conservative'), choice_labels=('radio_ai_soft', 'radio_ai_hard', 'radio_ai_conservative'))
+_CONSERVATIVE = (
+    ParameterSpec('fallback', 'label_conservative_fallback', 'first', choices=('first', 'last'),
+                  choice_labels=('fallback_first', 'fallback_last'), visible_when=('mode', 'conservative'), hint_key='conservative_fallback_hint'),
+    ParameterSpec('confidence', 'label_conservative_confidence', .4, 0., 1., .05, 2,
+                  visible_when=('mode', 'conservative'), hint_key='conservative_confidence_hint'),
+    ParameterSpec('sharpness_advantage', 'label_conservative_sharpness', .25, 0., 10., .1, 2,
+                  visible_when=('mode', 'conservative'), hint_key='conservative_sharpness_hint'),
+)
 _ADAPTER = 'core.algorithm_adapters:'
 _ALIGN_FAILURE = ParameterSpec('failure_policy', 'label_align_failure_policy', 'continue', choices=('continue', 'fail'), choice_labels=('align_failure_continue', 'align_failure_fail'))
 _FUSION_CLASS = 'core.multi_focus_fusion:MultiFocusFusion.'
 
-register_fusion(FusionAlgorithm('stackmffv3', 'radio_stackmff', 'StackMFF V3', 'StackMFFV3', _FUSION_CLASS + '_fuse_stackmffv3', (_MODE,), DepthSpec(_ADAPTER + 'depth_neural', (_MODE,)), hint_key='radio_stackmff_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, roi=_ADAPTER + 'roi_neural', promotes_color=True, tile_decider=_ADAPTER + 'neural_needs_tiles', tile_runner=_FUSION_CLASS + '_fuse_tiled_ai_batched', depth_planner='core.depth_map:_plan_neural_depth', weights='weights/stackmff_v3_final.onnx', category='ai'))
+register_fusion(FusionAlgorithm('stackmffv3', 'radio_stackmff', 'StackMFF V3', 'StackMFFV3', _FUSION_CLASS + '_fuse_stackmffv3', (_MODE,) + _CONSERVATIVE, DepthSpec(_ADAPTER + 'depth_neural', (_MODE,)), hint_key='radio_stackmff_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, roi=_ADAPTER + 'roi_neural', promotes_color=True, tile_decider=_ADAPTER + 'neural_needs_tiles', tile_runner=_FUSION_CLASS + '_fuse_tiled_ai_batched', depth_planner='core.depth_map:_plan_neural_depth', weights='weights/stackmff_v3_final.onnx', category='ai'))
 register_fusion(FusionAlgorithm('stackmffv2', 'radio_stackmff_v2', 'StackMFF V2', 'StackMFFV2', _FUSION_CLASS + '_fuse_stackmffv2', (), DepthSpec(_ADAPTER + 'depth_stackmffv2', ()), hint_key='radio_stackmff_v2_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, order_sensitive=True, promotes_color=True, tile_decider=_ADAPTER + 'stackmffv2_needs_tiles', depth_planner='core.depth_map:_plan_stackmffv2_depth', weights='weights/stackmff_v2_final.onnx', category='ai'))
 register_fusion(FusionAlgorithm('stackmff', 'radio_stackmff_v1', 'StackMFF', 'StackMFF', _FUSION_CLASS + '_fuse_stackmff', (), hint_key='radio_stackmff_v1_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, promotes_color=True, tile_decider=_ADAPTER + 'neural_needs_tiles', tile_runner=_FUSION_CLASS + '_fuse_tiled_stackmff', weights='weights/stackmff_final.onnx', category='ai'))
 register_fusion(FusionAlgorithm('openfocus_a', 'radio_openfocus_a', 'OpenFocus A', 'OpenFocusA', _FUSION_CLASS + '_fuse_openfocus_a', (_K_OF, ParameterSpec('blend_smoothing', 'label_blend_smoothing', 2.0, 0, 8, .2, 1)), hint_key='radio_openfocus_a_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_a_resources', tile_decider=_ADAPTER + 'openfocus_a_needs_tiles', roi=_ADAPTER + 'roi_openfocus_a', default_base_correct=True, category='spatial', resize_interpolation='area', external_tiling_default=False))

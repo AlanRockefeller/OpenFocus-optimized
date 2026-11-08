@@ -108,3 +108,21 @@ ranking is implied.
 See [Performance](PERFORMANCE.md) for resource management and historical
 measurements. See the [user manual](USER_MANUAL_EN.md) for controls, workflow,
 and output options.
+
+## V3 Conservative Selection (experimental)
+
+`mode=conservative` keeps Hard Pick in locally detailed subject regions when
+model confidence, normalized local sharpness, or coherent same-source structure
+supports the choice, and uses one fallback source (`first`, default, or `last`
+in processed order) in
+background-like regions. Defaults: `confidence=0.40`,
+`sharpness_advantage=0.25`. The GUI shows these controls only in this mode;
+CLI `--ai-mode conservative --param 'fallback="last"' ` and batch
+`fusion_parameters` use the same registry. Soft remains the default.
+
+This mode never invokes Auto Background. It preserves processed source pixels,
+including 16-bit precision, and uses deterministic tile ownership instead of
+averaging conflicting picks. Conservative focus-depth export is unsupported;
+optional diagnostic maps describe provenance only. Fallback spill, occlusion,
+noise, broad smooth interiors, false detail and tile-dependent model predictions
+remain limitations. See [policy, thresholds, tests and comparison workflow](CONSERVATIVE_SELECTION.md).

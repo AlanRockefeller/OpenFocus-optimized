@@ -72,17 +72,11 @@ PREVIEW_CACHE = FrameCache(64 * 1024 * 1024)
 class PreviewPixels:
     """A preview's disk lifetime without pinning its pixel allocation."""
     def __init__(self, image):
-        from core.frame_storage import storage_directory, require_disk_space
-        require_disk_space(image.nbytes)
-        fd, self.path = tempfile.mkstemp(prefix='openfocus-preview-', dir=storage_directory())
+        from core.frame_storage import _remove, describe_frame, store_frame
+        mapped = store_frame(image)
+        self.path = describe_frame(mapped, transfer=True)['path']
         self.shape, self.dtype = image.shape, image.dtype
-        try:
-            with os.fdopen(fd, 'wb') as stream:
-                image.tofile(stream)
-        except BaseException:
-            os.unlink(self.path)
-            raise
-        weakref.finalize(self, os.unlink, self.path)
+        weakref.finalize(self, _remove, self.path)
 
     @property
     def nbytes(self):
@@ -492,7 +486,8 @@ def materialize_frames(frames, should_cancel=None):
         image = resolve_frame(frame)
         if should_cancel is not None and should_cancel():
             raise RegistrationCancelled()
-        mapped = isinstance(image, np.memmap) and getattr(image, 'filename', None) is not None
+        from core.frame_storage import is_file_backed_frame
+        mapped = is_file_backed_frame(image)
         result.append(image if mapped else store_frame(image))
         del image
     if should_cancel is not None and should_cancel():
