@@ -144,14 +144,14 @@ class ElidingButton(QPushButton):
         # An explicitly assigned tooltip survives setText(); None means the
         # caption itself is the tooltip and must follow language changes.
         self._explicit_tip = None
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Fixed)
         # Qt clips a label at the padded contents edge, and the theme's 12 px
         # side padding took a fifth of a ~130 px panel button: "Render All
         # Methods…" lost its last letters with room to spare.  Narrower side
         # padding on these shared-width buttons gives the words that room.
         self.setStyleSheet("padding-left: 5px; padding-right: 5px;")
-        # Apply the elided form now: the constructor's text is full-width and
-        # would otherwise influence the first layout pass (the panel splits
-        # its width between up to three buttons).
+        # Only painting uses the elided caption; layout keeps the full width.
         self.setText(text)
 
     def setText(self, text: str) -> None:  # noqa: N802 (Qt casing)
@@ -160,6 +160,7 @@ class ElidingButton(QPushButton):
         super().setToolTip(
             self._explicit_tip if self._explicit_tip is not None
             else self._full_text)
+        self.updateGeometry()
 
     def setToolTip(self, text: str) -> None:  # noqa: N802 (Qt casing)
         self._explicit_tip = text or ""
@@ -167,6 +168,20 @@ class ElidingButton(QPushButton):
 
     def full_text(self) -> str:
         return self._full_text
+
+    def sizeHint(self):  # noqa: N802 (Qt casing)
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = self._full_text
+        contents = self.fontMetrics().size(
+            Qt.TextFlag.TextShowMnemonic, self._full_text)
+        return self.style().sizeFromContents(
+            QStyle.ContentsType.CT_PushButton, option, contents, self)
+
+    def minimumSizeHint(self):  # noqa: N802 (Qt casing)
+        hint = self.sizeHint()
+        hint.setWidth(0)
+        return hint
 
     def resizeEvent(self, event):  # noqa: N802 (Qt casing)
         super().resizeEvent(event)
@@ -268,8 +283,6 @@ class RightPanelComponents:
     btn_select_all: QPushButton
     btn_select_none: QPushButton
     btn_review_stack: QPushButton
-    btn_retouch: QPushButton
-    review_status: QLabel
     file_list: QListWidget
     output_label: QLabel
     output_list: QListWidget
@@ -447,24 +460,16 @@ def create_right_panel() -> RightPanelComponents:
     btn_none.setObjectName("secondaryButton")
     btn_none.setFixedHeight(24)
     btn_none.setToolTip(trans.t('btn_select_none_hint'))
-    source_header.addWidget(btn_all)
-    source_header.addWidget(btn_none)
-    source_list_layout.addLayout(source_header)
-    review_row = QHBoxLayout()
     btn_review_stack = ElidingButton(trans.t('stack_review_button'))
     btn_review_stack.setObjectName("secondaryButton")
     btn_review_stack.setToolTip(
         trans.t('stack_review_button') + "\n" + trans.t('stack_review_hint'))
     btn_review_stack.setEnabled(False)
-    review_status = QLabel()
-    review_status.setWordWrap(True)
-    review_row.addWidget(btn_review_stack)
-    btn_retouch = ElidingButton(trans.t('action_retouch'))
-    btn_retouch.setObjectName("secondaryButton")
-    btn_retouch.setToolTip(trans.t('action_retouch') + "\n" + trans.t('action_retouch_hint'))
-    review_row.addWidget(btn_retouch)
-    review_row.addWidget(review_status, 1)
-    source_list_layout.addLayout(review_row)
+    btn_review_stack.setFixedHeight(24)
+    source_header.addWidget(btn_review_stack)
+    source_header.addWidget(btn_all)
+    source_header.addWidget(btn_none)
+    source_list_layout.addLayout(source_header)
 
     file_list = QListWidget()
     file_list.setIconSize(QSize(40, 40))
@@ -488,7 +493,9 @@ def create_right_panel() -> RightPanelComponents:
     output_list_layout = QVBoxLayout(output_list_widget)
     output_list_layout.setContentsMargins(10, 10, 10, 10)
     output_label = QLabel(trans.t('label_output').format(0))
-    output_list_layout.addWidget(output_label)
+    output_header = QHBoxLayout()
+    output_header.addWidget(output_label, 1)
+    output_list_layout.addLayout(output_header)
     output_list = OutputListWidget()
     output_list.setIconSize(QSize(40, 40))
     output_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -577,8 +584,6 @@ def create_right_panel() -> RightPanelComponents:
         btn_select_all=btn_all,
         btn_select_none=btn_none,
         btn_review_stack=btn_review_stack,
-        btn_retouch=btn_retouch,
-        review_status=review_status,
         file_list=file_list,
         output_label=output_label,
         output_list=output_list,
@@ -609,7 +614,6 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     components.btn_select_none.clicked.connect(
         lambda: _set_all_source_checks(False))
     components.btn_review_stack.clicked.connect(window.source_manager.toggle_stack_review)
-    components.btn_retouch.clicked.connect(lambda _checked=False: window.show_retouch_dialog())
 
     components.combo_fusion.currentIndexChanged.connect(
         window.refresh_algorithm_parameters)

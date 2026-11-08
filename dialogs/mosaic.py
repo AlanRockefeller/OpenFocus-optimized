@@ -1,4 +1,5 @@
 """Independent workspace for arranging and exporting microscope mosaics."""
+import math
 import os
 import threading
 
@@ -147,9 +148,6 @@ class MosaicDialog(QDialog):
 
     def _build_ui(self):
         outer = QVBoxLayout(self)
-        intro = QLabel(trans.t('mosaic_intro'))
-        intro.setWordWrap(True)
-        outer.addWidget(intro)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         outer.addWidget(splitter, 1)
         panel = QWidget()
@@ -209,8 +207,19 @@ class MosaicDialog(QDialog):
             spin.setRange(-1000000000, 1000000000)
             spin.setDecimals(1)
             spin.setSingleStep(1)
+            spin.setToolTip("\n\n".join((trans.t('mosaic_intro'), trans.t('mosaic_manual'))))
         position.addRow(trans.t('label_x'), self.x_spin)
         position.addRow(trans.t('label_y'), self.y_spin)
+        self.scale_spin, self.rotation_spin = QDoubleSpinBox(), QDoubleSpinBox()
+        self.scale_spin.setRange(0.01, 10000)
+        self.scale_spin.setDecimals(3)
+        self.scale_spin.setSuffix(' %')
+        self.scale_spin.setValue(100)
+        self.rotation_spin.setRange(-180, 180)
+        self.rotation_spin.setDecimals(3)
+        self.rotation_spin.setSuffix(' °')
+        position.addRow(trans.t('mosaic_scale'), self.scale_spin)
+        position.addRow(trans.t('mosaic_rotation'), self.rotation_spin)
         self.opacity = QSlider(Qt.Orientation.Horizontal)
         self.opacity.setRange(10, 100)
         self.opacity.setValue(100)
@@ -229,6 +238,7 @@ class MosaicDialog(QDialog):
         splitter.addWidget(scroll)
         self.scene = QGraphicsScene(self)
         self.canvas = _Canvas(self.scene)
+        self.canvas.setToolTip("\n\n".join((trans.t('mosaic_intro'), trans.t('mosaic_manual'))))
         splitter.addWidget(self.canvas)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([280, 900])
@@ -262,11 +272,10 @@ class MosaicDialog(QDialog):
         self.list.currentRowChanged.connect(self._select_row)
         self.x_spin.valueChanged.connect(self._position_changed)
         self.y_spin.valueChanged.connect(self._position_changed)
+        self.scale_spin.valueChanged.connect(self._geometry_changed)
+        self.rotation_spin.valueChanged.connect(self._geometry_changed)
         self.opacity.valueChanged.connect(self._opacity_changed)
         self.opacity.setToolTip(trans.t('mosaic_preview_hint'))
-        preview_hint = QLabel(trans.t('mosaic_preview_hint'))
-        preview_hint.setWordWrap(True)
-        left.addWidget(preview_hint)
         for button in (self.add_files, self.add_folder, self.add_outputs, self.remove, self.grid_apply,
                        self.auto, self.fit, self.cancel, self.save, self.close_button):
             button.setAutoDefault(False)
@@ -286,6 +295,8 @@ class MosaicDialog(QDialog):
         self.remove.setEnabled(not busy and selected)
         self.x_spin.setEnabled(not busy and selected)
         self.y_spin.setEnabled(not busy and selected)
+        self.scale_spin.setEnabled(not busy and selected)
+        self.rotation_spin.setEnabled(not busy and selected)
         self.opacity.setEnabled(not busy and selected)
         self.auto.setEnabled(not busy and len(self.frames) >= 2)
         self.fit.setEnabled(bool(self.frames))
@@ -494,8 +505,8 @@ class MosaicDialog(QDialog):
         picker = QDialog(self)
         picker.setWindowTitle(trans.t('label_outputs_all'))
         layout = QVBoxLayout(picker)
-        layout.addWidget(QLabel(trans.t('mosaic_choose_hint')))
         choices = QListWidget()
+        choices.setToolTip(trans.t('mosaic_choose_hint'))
         choices.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         for record in records:
             choices.addItem(record.label)
@@ -533,7 +544,7 @@ class MosaicDialog(QDialog):
         self.connected = [False] * len(self.frames)
         self._rebuild()
         self.list.setCurrentRow(len(self.frames) - 1)
-        self.status.setText(trans.t('mosaic_manual'))
+        self.status.clear()
         QTimer.singleShot(0, self._fit)
 
     def _remove_selected(self):
@@ -549,7 +560,7 @@ class MosaicDialog(QDialog):
         del self.preview_opacities[index]
         self._rebuild()
         self.list.setCurrentRow(min(index, len(self.frames) - 1))
-        self.status.setText(trans.t('mosaic_manual') if self.frames else trans.t('mosaic_empty'))
+        self.status.setText('' if self.frames else trans.t('mosaic_empty'))
 
     def _apply_grid(self):
         if self.worker is not None or not self.grid_apply.isEnabled():
@@ -648,6 +659,9 @@ class MosaicDialog(QDialog):
         with QSignalBlocker(self.x_spin), QSignalBlocker(self.y_spin):
             self.x_spin.setValue(float(transform[0, 2]))
             self.y_spin.setValue(float(transform[1, 2]))
+        with QSignalBlocker(self.scale_spin), QSignalBlocker(self.rotation_spin):
+            self.scale_spin.setValue(math.hypot(transform[0, 0], transform[1, 0]) * 100)
+            self.rotation_spin.setValue(math.degrees(math.atan2(transform[1, 0], transform[0, 0])))
 
     def _position_changed(self):
         index = self.list.currentRow()
@@ -656,6 +670,19 @@ class MosaicDialog(QDialog):
         matrix = self.transforms[index]
         self.items[index].setPos(QPointF(self.x_spin.value() - matrix[0, 2],
                                          self.y_spin.value() - matrix[1, 2]))
+
+    def _geometry_changed(self):
+        index = self.list.currentRow()
+        if self._updating or self.worker is not None or not 0 <= index < len(self.items):
+            return
+        self.transforms = self._current_transforms()
+        angle = math.radians(self.rotation_spin.value())
+        scale = self.scale_spin.value() / 100
+        a, b = scale * math.cos(angle), scale * math.sin(angle)
+        self.transforms[index][:2, :2] = ((a, -b), (b, a))
+        self.connected = [False] * len(self.frames)
+        self._rebuild()
+        self.status.setText(trans.t('mosaic_manual'))
 
     def _opacity_changed(self, value):
         index = self.list.currentRow()
@@ -698,8 +725,11 @@ class MosaicDialog(QDialog):
                 self.status.setText(trans.t('mosaic_unmatched').format(count=unmatched))
             else:
                 residual = float(np.median([match[3] for match in result.matches]))
-                self.status.setText(trans.t('mosaic_aligned').format(
-                    count=len(result.matches), residual=residual))
+                scales = [math.hypot(matrix[0, 0], matrix[1, 0]) * 100
+                          for matrix in result.transforms]
+                self.status.setText(trans.t('mosaic_aligned_geometry').format(
+                    count=len(result.matches), residual=residual,
+                    minimum=min(scales), maximum=max(scales)))
             self._fit()
 
         self._run(align, trans.t('render_stage_align'), complete)
