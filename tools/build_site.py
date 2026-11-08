@@ -1,4 +1,4 @@
-"""Build the OpenFocus marketing site into site/dist.
+"""Build the OpenFocus product site into site/dist.
 
 Zero dependencies beyond Pillow (already a runtime dependency of the app).
 
@@ -95,7 +95,7 @@ def render_downloads(locale: dict) -> str:
 def render_lang_menu(current: dict) -> str:
     links = []
     for code, locale in LOCALES.items():
-        href = f"/{locale['path']}"
+        href = f"/{locale['path']}?lang={code}"
         current_attr = ' aria-current="page"' if code == current["code"] else ""
         links.append(
             f'<a href="{href}" hreflang="{code}" lang="{locale["html_lang"]}"'
