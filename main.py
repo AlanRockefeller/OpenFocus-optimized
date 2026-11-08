@@ -159,7 +159,7 @@ from utils.settings_store import (
     restore_window_layout,
     get_settings,
 )
-from core.frame_storage import configure_storage_directory
+from core.frame_storage import configure_storage_directory, restore_storage_directory
 from ui.image_panels import create_source_panel, create_result_panel
 from ui.menus import setup_menus
 from ui.right_panel import bind_right_panel, create_right_panel, set_panel_label
@@ -294,8 +294,7 @@ def _restore_storage_directory(window):
         configure_storage_directory(window.storage_directory)
     except OSError as exc:
         path = window.storage_directory
-        configure_storage_directory("")
-        window.storage_directory = ""
+        restore_storage_directory(path)
         return trans.t("advanced_storage_fallback").format(path=path, error=str(exc))
     return None
 
@@ -412,10 +411,12 @@ class OpenFocus(QMainWindow):
         self.init_ui()
         self.apply_dark_theme()
         if storage_warning is not None:
+            def show_storage_warning():
+                if not getattr(self, "_shutting_down", False):
+                    QMessageBox.warning(self, trans.t("msg_warning"), storage_warning)
             self._storage_warning_timer = _QTimer(self)
             self._storage_warning_timer.setSingleShot(True)
-            self._storage_warning_timer.timeout.connect(
-                lambda: QMessageBox.warning(self, trans.t("msg_warning"), storage_warning))
+            self._storage_warning_timer.timeout.connect(show_storage_warning)
             self._storage_warning_timer.start(0)
 
         # Install global event filter to handle Space key for panning
@@ -432,8 +433,10 @@ class OpenFocus(QMainWindow):
 
         # Optionally re-load the last opened stack a moment after launch
         if getattr(self, "restore_last_stack", False):
-            from PyQt6.QtCore import QTimer as _QTimer
-            _QTimer.singleShot(1500, lambda: self.source_manager.restore_last_stack())
+            def restore_last_stack():
+                if not getattr(self, "_shutting_down", False):
+                    self.source_manager.restore_last_stack()
+            _QTimer.singleShot(1500, restore_last_stack)
 
         # Set initial text for drag hint if needed (it is set in image_panels or loaded later, 
         # but let's Ensure it matches current lang if empty)
@@ -1100,9 +1103,10 @@ class OpenFocus(QMainWindow):
         The worker touches no QObject; a window-owned QTimer polls the cache,
         so closing the window cannot leave a signal aimed at a deleted object.
         """
-        import threading
-        if getattr(self, "_device_probe_started", False):
+        if (getattr(self, "_shutting_down", False)
+                or getattr(self, "_device_probe_started", False)):
             return
+        import threading
         from core.multi_focus_fusion import neural_device_kind
         cached = neural_device_kind()
         if cached is not None:
@@ -1136,6 +1140,8 @@ class OpenFocus(QMainWindow):
 
     def _poll_device_probe(self) -> None:
         """UI-thread poll for the worker's cached backend decision."""
+        if getattr(self, "_shutting_down", False):
+            return
         from core.multi_focus_fusion import neural_device_kind
         kind = neural_device_kind()
         if kind is None:
@@ -1154,9 +1160,10 @@ class OpenFocus(QMainWindow):
         by the window polls a plain threading.Event, so a window destroyed
         mid-probe cannot be reached from the background thread.
         """
-        import threading
-        if getattr(self, "_stackmff_probe_started", False):
+        if (getattr(self, "_shutting_down", False)
+                or getattr(self, "_stackmff_probe_started", False)):
             return
+        import threading
         self._stackmff_probe_started = True
 
         done = threading.Event()
@@ -1188,6 +1195,8 @@ class OpenFocus(QMainWindow):
 
     def _poll_stackmff_probe(self) -> None:
         """UI-thread poll; applies the cached availability once warm."""
+        if getattr(self, "_shutting_down", False):
+            return
         event = getattr(self, "_stackmff_probe_event", None)
         if event is None or not event.is_set():
             return
@@ -1406,6 +1415,12 @@ class OpenFocus(QMainWindow):
         from PyQt6.QtWidgets import QHBoxLayout, QLabel, QProgressBar, QPushButton, QWidget
 
         bar = self.statusBar()
+        from PyQt6.QtWidgets import QSizePolicy
+
+        self._review_status = QLabel("", bar)
+        self._review_status.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                          QSizePolicy.Policy.Preferred)
+        bar.addWidget(self._review_status, 1)
         container = QWidget(bar)
         layout = QHBoxLayout(container)
         layout.setContentsMargins(6, 0, 6, 0)
@@ -1428,7 +1443,18 @@ class OpenFocus(QMainWindow):
         # swallowed every direct statusBar().showMessage call).
         bar.messageChanged.connect(self._on_status_message_changed)
         bar.setSizeGripEnabled(False)
+        bar.setVisible(True)
         self._update_indicator = container
+        self.source_manager.refresh_review_text()
+
+    def _set_review_status(self, text: str) -> None:
+        label = getattr(self, '_review_status', None)
+        if label is not None:
+            label.setText(text)
+            label.setToolTip(text)
+            label.setAccessibleName(text)
+            if text:
+                self.statusBar().setVisible(True)
 
     def _show_status_message(self, text: str, timeout_ms: int = 5000) -> None:
         bar = self.statusBar()
@@ -1492,8 +1518,7 @@ class OpenFocus(QMainWindow):
             show = False
         self._update_indicator.setVisible(show)
         bar = self.statusBar()
-        if show or not bar.currentMessage():
-            bar.setVisible(show)
+        bar.setVisible(True)
 
         action = getattr(self, 'ui_objs', {}).get('action_install_update')
         if action is not None:
@@ -1510,6 +1535,8 @@ class OpenFocus(QMainWindow):
         to READY, before any state_changed listener existed, so the banner is
         raised here explicitly.
         """
+        if getattr(self, "_shutting_down", False):
+            return
         self.update_manager.start_idle()
         staged = self.update_manager.staged_tag()
         if staged:
@@ -2198,20 +2225,13 @@ class OpenFocus(QMainWindow):
             dialog = RetouchDialog(self, record=record, apply_callback=apply_selected,
                                    input_paths=[result_path, *source_paths])
             dialog.exec()
-            if dialog.change_requested:
-                self.show_retouch_dialog()
         except Exception as exc:  # noqa: BLE001 - report file and preparation errors
             show_message_box(self, trans.t('msg_error'), trans.t('msg_proc_error'),
                              str(exc), QMessageBox.Icon.Critical)
 
     def show_retouch_dialog(self, item=None) -> None:
-        """Retouch one output selected by identity, not by row order.
-
-        `item` is the entry the user right-clicked; menu/shortcut calls pass
-        None, in which case the visible selection decides.  With no selection
-        a chooser lists every output and marks which ones have provenance.
-        """
-        from dialogs.retouch import RetouchDialog, RetouchResultChooser
+        """Retouch the right-clicked output or the single selected output."""
+        from dialogs.retouch import RetouchDialog
 
         # QAction.triggered passes a `checked` bool; treat it as "no item".
         if item is not None and not hasattr(item, "data"):
@@ -2232,52 +2252,30 @@ class OpenFocus(QMainWindow):
                 item = selected[0]
 
         if item is None:
-            chooser = RetouchResultChooser(self)
-            if not chooser.exec():
-                return
-            item = chooser.selected_item()
-            if item is None:
-                return
+            show_warning_box(self, trans.t("msg_warning"), trans.t("retouch_select_result"))
+            return
 
         self.output_list.clearSelection()
         item.setSelected(True)
         self.output_list.setCurrentItem(item)
 
-        while True:
-            record = self.output_manager.record_for_item(item)
-            if (record is not None and record.image is not None and record.image.ndim == 3
-                    and record.image.shape[2] == 4):
-                show_warning_box(self, trans.t('msg_warning'),
-                                 trans.t('transparent_desktop_unsupported').format(path=''))
-                return
-            if record is None or not record.retouchable:
-                show_warning_box(self, trans.t("msg_warning"),
-                                 trans.t("retouch_no_source"))
-                return
-
-            try:
-                dlg = RetouchDialog(
-                    self, record=record,
-                    apply_callback=self._apply_retouch_output)
-            except Exception as exc:  # noqa: BLE001 - preparation failure
-                show_message_box(
-                    self, trans.t("msg_error"), trans.t("msg_proc_error"),
-                    str(exc), QMessageBox.Icon.Critical)
-                return
-            dlg.exec()
-            if not getattr(dlg, "change_requested", False):
-                return
-
-            chooser = RetouchResultChooser(self)
-            if not chooser.exec():
-                return
-            new_item = chooser.selected_item()
-            if new_item is None:
-                return
-            item = new_item
-            self.output_list.clearSelection()
-            item.setSelected(True)
-            self.output_list.setCurrentItem(item)
+        record = self.output_manager.record_for_item(item)
+        if (record is not None and record.image is not None and record.image.ndim == 3
+                and record.image.shape[2] == 4):
+            show_warning_box(self, trans.t('msg_warning'),
+                             trans.t('transparent_desktop_unsupported').format(path=''))
+            return
+        if record is None or not record.retouchable:
+            show_warning_box(self, trans.t("msg_warning"), trans.t("retouch_no_source"))
+            return
+        try:
+            dlg = RetouchDialog(self, record=record,
+                                apply_callback=self._apply_retouch_output)
+        except Exception as exc:  # noqa: BLE001 - preparation failure
+            show_message_box(self, trans.t("msg_error"), trans.t("msg_proc_error"),
+                             str(exc), QMessageBox.Icon.Critical)
+            return
+        dlg.exec()
 
     def _apply_retouch_output(self, base_record, image):
         """Publish the edited buffer; the dialog stays open on failure."""
@@ -2299,6 +2297,61 @@ class OpenFocus(QMainWindow):
         """One page for tiling, registration, AI and the convenience toggles."""
         from dialogs.advanced_settings import AdvancedSettingsDialog
         AdvancedSettingsDialog(self).exec()
+
+    def _settings_reset_busy(self) -> bool:
+        render = self.render_manager
+        return (self._has_work_in_flight() or self.source_manager._reset_busy()
+                or self.source_manager._review_worker is not None
+                or bool(getattr(render, '_render_pending', False))
+                or render._render_after_load is not None or render._compare_mode
+                or self.update_manager.is_busy()
+                or QApplication.activeModalWidget() is not None
+                or any(dialog.isVisible() for dialog in self.findChildren(QDialog)))
+
+    def restore_default_settings(self) -> None:
+        """Confirm before changing preferences; an open workspace remains intact."""
+        if self._settings_reset_busy():
+            show_warning_box(self, trans.t('action_restore_defaults'),
+                             trans.t('restore_defaults_busy'))
+            return
+        box = QMessageBox(self)
+        style_message_box(box)
+        box.setWindowTitle(trans.t('action_restore_defaults'))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(trans.t('restore_defaults_confirm'))
+        restore = box.addButton(trans.t('restore_defaults_button'),
+                                QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(trans.t('btn_cancel'), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        accepted = box.clickedButton() is restore
+        box.deleteLater()
+        if not accepted:
+            return
+        # A timer/control request may start work during the confirmation.
+        if self._settings_reset_busy():
+            show_warning_box(self, trans.t('action_restore_defaults'),
+                             trans.t('restore_defaults_busy'))
+            return
+        from utils.settings_store import restore_default_settings
+        try:
+            with self._restore_scope():
+                restore_default_settings(self)
+                configure_storage_directory(self.storage_directory)
+                self.drag_export_format = '.jpg'
+                self.chk_quick_preview.setChecked(False)
+                self.reset_to_default()
+                self.apply_theme(self.ui_theme)
+                self.set_use_gpu(self.use_gpu)
+            self.persist_settings()
+        except Exception as exc:
+            show_message_box(self, trans.t('msg_error'), trans.t('msg_save_failed_text'),
+                             str(exc), QMessageBox.Icon.Critical)
+            return
+        self.update_ui_text()
+        self.statusBar().showMessage(trans.t('restore_defaults_done'), 5000)
+
 
     def show_compare_dialog(self) -> None:
         """Side-by-side comparison of several fusion methods on this stack."""
@@ -2448,10 +2501,14 @@ class OpenFocus(QMainWindow):
             if old_request != request:
                 old_worker.request_cancel()
         indices = ([selected_index] if selected_index is not None else
-                   [index for index, frame in enumerate(self.raw_images) if not preview_ready(frame)])
+                   [index for index, frame in enumerate(self.raw_images)
+                    if not preview_ready(frame) or
+                    (self.file_list.item(index) is not None and
+                     self.file_list.item(index).icon().isNull())])
         if not indices:
             return
-        worker = SourcePreviewWorker(self.raw_images, request, indices)
+        worker = (SourcePreviewWorker(self.raw_images, request, indices, selected_display=True)
+                  if selected_index is not None else SourcePreviewWorker(self.raw_images, request, indices))
         workers[request] = worker
         def accept(key, index, identity, thumb):
             if (getattr(self, '_shutting_down', False) or key[0] != getattr(self, 'source_revision', 0)
@@ -2462,6 +2519,7 @@ class OpenFocus(QMainWindow):
             if item is not None:
                 item.setIcon(QIcon(cv2_to_pixmap(thumb)))
             if index == getattr(self, 'current_display_index', -1):
+                self.stack_images[index] = None
                 self.update_source_view(index)
         def failed(key, message):
             if key[0] == getattr(self, 'source_revision', 0):
@@ -2538,7 +2596,9 @@ class OpenFocus(QMainWindow):
                 if pending_key != key:
                     worker.request_cancel()
             from core.source_frames import preview_ready
-            if not preview_ready(self.raw_images[index]):
+            from core.image_loader import is_raw_source
+            if (not preview_ready(frame) or
+                    (not getattr(frame, 'preview_is_available', True) and is_raw_source(frame.path))):
                 self.lbl_source_img.clear()
                 self.lbl_source_img.setText(trans.t('msg_loading_stack'))
                 self.lbl_stack_info.setText(f'{index + 1} / {len(self.stack_images)}')
@@ -3142,7 +3202,6 @@ class OpenFocus(QMainWindow):
             # 需要重新对齐，禁用按钮，显示处理中状态
             self.btn_preview_roi.setEnabled(False)
             self.btn_preview_roi.setText(trans.t("roi_aligning"))
-            QApplication.processEvents()
             
             # 启动ECC配准线程
             # Snapshot the list (mid-run frame deletes mutate the live list)
@@ -3169,6 +3228,9 @@ class OpenFocus(QMainWindow):
             worker = getattr(self, "roi_alignment_worker", None)
             if worker is not None and worker.isRunning():
                 worker.cancel()
+            key = getattr(self, '_roi_display_key', None)
+            if key is not None:
+                self._release_roi_regions(key)
             # 退出ROI模式
             self.roi_mode_active = False
             if hasattr(self, 'lbl_result_img'):
@@ -3262,31 +3324,84 @@ class OpenFocus(QMainWindow):
             self.roi_alignment_worker = None
         worker.deleteLater()
 
-    def _display_roi_aligned_image(self, index: int):
-        """在右侧结果面板显示ROI模式下对齐后的图像"""
-        if not self.roi_aligned_images or index < 0 or index >= len(self.roi_aligned_images):
+    def _release_roi_regions(self, key):
+        for worker in tuple(getattr(self, '_roi_preview_workers', {}).values()):
+            if worker.next_request is not None and worker.next_request[0] == key:
+                worker.next_request = None
+            if worker.key == key:
+                worker.request_cancel()
+        if key == getattr(self, '_roi_display_key', None):
+            self._roi_display_key = None
+
+    def _request_roi_region(self, key, request):
+        if (key != getattr(self, '_roi_display_key', None) or not self.roi_mode_active
+                or getattr(self, '_shutting_down', False)):
             return
-        
-        # 保存当前ROI区域，以便在切换图像时保持ROI选择
-        current_roi = None
-        if hasattr(self, 'lbl_result_img') and self.lbl_result_img.get_roi_rect() is not None:
-            current_roi = self.lbl_result_img.get_roi_rect()
-        
-        try:
-            image = self.roi_aligned_images[index]
-            if self.linear_dng_metadata is not None:
-                from utils.linear_dng import develop_linear
-                image = develop_linear(image, self.linear_dng_metadata)
-            self.lbl_result_img.set_display_pixmap(cv2_to_pixmap(image))
-            self.lbl_result_info.setText(f"{index + 1} / {len(self.roi_aligned_images)}")
-            # ROI模式下保持控制栏可见，以便用户切换图像
-            self.result_control_bar.setVisible(True)
-            
-            # 恢复之前的ROI选择区域
-            if current_roi is not None:
-                self.lbl_result_img.set_roi_rect(current_roi)
-        except Exception as exc:
-            show_error_box(self, trans.t("msg_error"), trans.t("roi_display_failed"), str(exc))
+        workers = self.__dict__.setdefault('_roi_preview_workers', {})
+        # Preview, viewport and loupe each own one active/retiring slot across
+        # all frame generations, with only their latest request pending.
+        slot = request[0]
+        if slot in workers:
+            worker = workers[slot]
+            worker.next_request = (key, request)
+            if worker.key != key:
+                worker.request_cancel()
+            return
+        from core.workers import ROIFramePreviewWorker
+        frame = self.roi_aligned_images[key[3]]
+        worker = ROIFramePreviewWorker(frame, key, request,
+            metadata=getattr(frame, 'linear_metadata', None) or self.linear_dng_metadata)
+        workers[slot] = worker
+
+        def accept(decoded_key, completed_request, image, rect):
+            if (decoded_key != getattr(self, '_roi_display_key', None) or image is None
+                    or worker.next_request is not None or not self.roi_mode_active
+                    or getattr(self, '_shutting_down', False)):
+                return
+            if completed_request[0] == 'preview':
+                self.lbl_result_img.set_display_pixmap(cv2_to_pixmap(image),
+                    source_size=(frame.shape[1], frame.shape[0]), source_key=key)
+            else:
+                self.lbl_result_img.set_source_region(cv2_to_pixmap(image), rect,
+                    source_key=key, request=completed_request)
+
+        def failed(decoded_key, message):
+            if decoded_key == getattr(self, '_roi_display_key', None):
+                show_error_box(self, trans.t('msg_error'), trans.t('roi_display_failed'), message)
+
+        def finished():
+            pending = worker.next_request
+            if workers.get(slot) is worker:
+                workers.pop(slot, None)
+            worker.deleteLater()
+            if pending is not None:
+                self._request_roi_region(*pending)
+
+        worker.ready.connect(accept)
+        worker.failed.connect(failed)
+        worker.finished.connect(finished)
+        worker.start()
+
+    def _display_roi_aligned_image(self, index: int):
+        """Display bounded background pixels in the aligned source coordinates."""
+        if not self.roi_aligned_images or not 0 <= index < len(self.roi_aligned_images):
+            return
+        frame = self.roi_aligned_images[index]
+        if not getattr(self, '_roi_regions_connected', False):
+            self.lbl_result_img.sourceRegionRequested.connect(self._request_roi_region)
+            self.lbl_result_img.sourceRegionsReleased.connect(self._release_roi_regions)
+            self._roi_regions_connected = True
+        previous_key = getattr(self, '_roi_display_key', None)
+        if previous_key is not None:
+            self._release_roi_regions(previous_key)
+        self.lbl_result_img.clear()
+        self._roi_display_serial = getattr(self, '_roi_display_serial', 0) + 1
+        key = ('roi', getattr(self, 'source_revision', 0), id(self.roi_aligned_images),
+               index, id(frame), self._roi_display_serial)
+        self._roi_display_key = key
+        self._request_roi_region(key, ('preview', 0, (0, 0, frame.shape[1], frame.shape[0]), (766, 766)))
+        self.lbl_result_info.setText(f'{index + 1} / {len(self.roi_aligned_images)}')
+        self.result_control_bar.setVisible(True)
 
     def _on_roi_mode_exit_requested(self):
         """处理ROI模式退出请求（点击X按钮或右键点击非ROI区域）"""
@@ -3541,6 +3656,12 @@ class OpenFocus(QMainWindow):
         load_worker = getattr(source_manager, '_load_worker', None) if source_manager else None
         if load_worker is not None:
             running.append(load_worker.isRunning())
+        if source_manager is not None:
+            review = getattr(source_manager, '_review_worker', None)
+            if review is not None:
+                running.append(review.isRunning())
+            running.extend(worker.isRunning() for worker in
+                           getattr(source_manager, '_retiring_review_workers', ()))
         # 深度图对话框关闭后仍在跑的 worker（AI 可达数分钟）也要算数，
         # 否则退出时模块级集合随解释器清理，QThread 运行中被析构 -> abort
         try:
@@ -3630,10 +3751,18 @@ class OpenFocus(QMainWindow):
                 worker.requestInterruption()
                 shutdown_running = True
         self._source_display_key = None
-        for name in ('_source_decode_workers', '_source_preview_workers'):
+        for name in ('_source_decode_workers', '_source_preview_workers', '_roi_preview_workers'):
             for worker in tuple(getattr(self, name, {}).values()):
+                if name == '_roi_preview_workers':
+                    worker.next_request = None
                 worker.request_cancel()
                 shutdown_running = worker.isRunning() or shutdown_running
+        from dialogs.roi import ROIRenderOptionsDialog, _ROI_PREVIEW_WORKERS
+        for dialog in self.findChildren(ROIRenderOptionsDialog):
+            dialog._cancel_previews()
+        for worker in tuple(_ROI_PREVIEW_WORKERS):
+            worker.request_cancel()
+            shutdown_running = worker.isRunning() or shutdown_running
         output_manager = getattr(self, 'output_manager', None)
         cancel_thumbnails = getattr(output_manager, 'cancel_stack_thumbnails', None)
         if callable(cancel_thumbnails):
@@ -3679,6 +3808,8 @@ class OpenFocus(QMainWindow):
         if hasattr(self, 'source_manager'):
             _shutdown_worker(getattr(self.source_manager, '_load_worker', None))
             _shutdown_worker(getattr(self.source_manager, '_review_worker', None))
+            for worker in tuple(getattr(self.source_manager, '_retiring_review_workers', ())):
+                _shutdown_worker(worker)
             self.source_manager._load_worker = None
 
         # Stop update download/stage workers if running. The background
@@ -4021,9 +4152,6 @@ class OpenFocus(QMainWindow):
         # Panel titles are QLabels built once at startup; without this they
         # kept the language the app was launched in ("Source Stack"/"Output"
         # stayed English after switching to Polish).
-        if getattr(c, 'btn_retouch', None) is not None:
-            c.btn_retouch.setText(trans.t('action_retouch'))
-            c.btn_retouch.setToolTip(trans.t('action_retouch') + "\n" + trans.t('action_retouch_hint'))
         if hasattr(self, 'lbl_source_title'):
             self.lbl_source_title.setText(' ' + trans.t('panel_source_stack'))
         if hasattr(self, 'lbl_result_title'):
@@ -4037,6 +4165,7 @@ class OpenFocus(QMainWindow):
         # ROI Button
         if hasattr(self, 'btn_preview_roi'):
             self.btn_preview_roi.setText(trans.t('btn_roi'))
+            self.btn_preview_roi.setToolTip(trans.t('btn_roi_hint'))
 
         # Lists labels
         count = self.file_list.count()
@@ -4140,6 +4269,8 @@ if __name__ == "__main__":
         _log.exception("Could not start the control channel")
 
     def _on_second_instance(paths_json: str) -> None:
+        if getattr(window, "_shutting_down", False):
+            return
         try:
             paths = _json.loads(paths_json)
         except ValueError:
@@ -4267,6 +4398,10 @@ if __name__ == "__main__":
     from utils.settings_store import get_settings
     if str(get_settings().value("ui/first_run_done", "") or "") != "1":
         def _show_welcome():
+            # A slow cooperative close can make this timer overdue. Entering
+            # exec() now would consume Qt's posted last-window Quit event.
+            if getattr(window, "_shutting_down", False):
+                return
             from dialogs.welcome import WelcomeDialog
             dlg = WelcomeDialog(window, main_window=window)
             dlg.exec()

@@ -1,5 +1,5 @@
 """Lazy backend translations and execution capability hooks."""
-from math import ceil, log2
+from math import ceil
 
 
 # Native compiler startup is resident state, even for a very small image.
@@ -36,31 +36,24 @@ def roi_openfocus_b(parameters, width, height):
 
 
 def roi_openfocus_c(parameters, width, height):
-    levels = max(2, min(7, int(log2(max(2, min(width, height)))) - 1))
-    grid = 2 ** (levels - 1)
-    return max(96, ceil((8 + 4 * parameters['blend_smoothing']) * grid)), grid
+    # Global depth recurrences require the full context. Half-scale gray
+    # sampling uses a two-pixel grid; C does not reconstruct RGB pyramids.
+    return max(width, height), 2
 
 
-# OpenFocus retains fixed global maps/pyramids and a bounded set of independent
-# source producers. Charge their live planes, not N float colour frames.
-# These envelopes include mapped planes: fitting them in RAM avoids relying on
-# paging for the preferred whole-image path. The fallback still uses mappings.
+# Serial OpenFocus passes retain global planes in mappings and use bounded
+# row scratch. Reserve one float BGRA frame for a requested native resize;
+# concurrent producers are admitted separately by _frame_pass_workers.
 def openfocus_a_resources(height, width, parameters, frames):
-    pixels = height * width
-    # Shared output/best planes (16 B/px), independent frame/response producer
-    # and completed result (80 B/px). Sum preserves the serial envelope.
-    return 4 * 1024 * 1024 + pixels * 16, pixels * 80
+    return 4 * 1024 * 1024 + min(height, 128) * width * 96, height * width * 16
 
 
 def openfocus_b_resources(height, width, parameters, frames):
-    pixels = height * width
-    # Global selection/smoothing/reconstruction plus independent activity work.
-    return 4 * 1024 * 1024 + pixels * 160, pixels * 80
+    return 4 * 1024 * 1024 + min(height, 128) * width * 256, height * width * 16
 
 
 def openfocus_c_resources(height, width, parameters, frames):
-    pixels = height * width
-    return 4 * 1024 * 1024 + pixels * 304, pixels * 80
+    return openfocus_b_resources(height, width, parameters, frames)
 
 
 def guided_resources(height, width, parameters, frames):
@@ -78,27 +71,22 @@ def dct_resources(height, width, parameters, frames):
     return 4 * 1024 * 1024, (height + 8) * (width + 8) * 64
 
 
-def _openfocus_needs_tiles(algorithm, frames, threshold):
-    from core.multi_focus_fusion import (
-        _DEFAULT_TILE_THRESHOLD, estimate_peak_bytes, memory_budget_bytes)
-    if not frames:
-        return False
-    # A non-default threshold remains an explicit spatial cap (also useful for
-    # reproducible tiled renders). The default chooses by actual RAM headroom.
-    forced = threshold != _DEFAULT_TILE_THRESHOLD and max(frames[0].shape[:2]) > threshold
-    return forced or estimate_peak_bytes(algorithm, frames) > memory_budget_bytes()
+def _openfocus_needs_tiles(frames, threshold):
+    from core.multi_focus_fusion import _DEFAULT_TILE_THRESHOLD
+    # Global maps are streamed through bounded rows/mappings. Memory pressure
+    # must not silently replace that context with independently fused crops.
+    return bool(frames and threshold != _DEFAULT_TILE_THRESHOLD
+                and max(frames[0].shape[:2]) > threshold)
 
 
 def openfocus_a_needs_tiles(frames, threshold):
-    return _openfocus_needs_tiles('openfocus_a', frames, threshold)
+    return _openfocus_needs_tiles(frames, threshold)
 
 
 def openfocus_b_needs_tiles(frames, threshold):
-    return _openfocus_needs_tiles('openfocus_b', frames, threshold)
+    return _openfocus_needs_tiles(frames, threshold)
 
 
-def openfocus_c_needs_tiles(frames, threshold):
-    return _openfocus_needs_tiles('openfocus_c', frames, threshold)
 
 
 def dtcwt_resources(height, width, parameters, frames):
@@ -126,11 +114,13 @@ def registration_ecc(registration, images, thread_count=4, should_cancel=None, *
 
 
 def registration_openfocus(registration, images, thread_count=4, should_cancel=None, **parameters):
-    from core.registration import _align_openfocus_impl
-    return _align_openfocus_impl(images, downscale_width=registration.downscale_width,
-        thread_count=thread_count, should_cancel=should_cancel,
-        max_shift_ratio=parameters['max_shift_ratio'], brightness_reference=registration.brightness_reference,
-        failure_policy=parameters['failure_policy'], reference_frame=parameters['reference_frame'])
+    from core.registration import _align_helicon_impl
+    return _align_helicon_impl(images, should_cancel=should_cancel,
+        max_shift_ratio=parameters['max_shift_ratio'],
+        failure_policy=parameters['failure_policy'], reference_frame=parameters['reference_frame'],
+        rotation=parameters['rotation'], magnification=parameters['magnification'],
+        defer_warps=registration.defer_warps, output_path=parameters.get('output_path'),
+        plan_callback=lambda plan: setattr(registration, 'alignment_plan', plan))
 
 
 def depth_dct(images, progress_callback=None, should_cancel=None, **parameters):
@@ -185,10 +175,12 @@ def depth_openfocus_b(images, progress_callback=None, should_cancel=None, **para
     from fusion_methods.openfocus_depth import depth_map
     smoothing = parameters['depth_smoothing'] * (5.0 / 1.2)
     return depth_map(images, None, parameters['kernel_size'], smoothing,
-                     should_cancel, progress_callback)
+                     should_cancel, progress_callback,
+                     thread_count=parameters.get('thread_count'))
 
 
 def depth_openfocus_c(images, progress_callback=None, should_cancel=None, **parameters):
     from fusion_methods.openfocus_depth import depth_map
     smoothing = parameters['blend_smoothing'] * (5.0 / 3.0)
-    return depth_map(images, None, 11, smoothing, should_cancel, progress_callback)
+    return depth_map(images, None, 17, smoothing, should_cancel, progress_callback,
+                     thread_count=parameters.get('thread_count'), half_resolution=True)

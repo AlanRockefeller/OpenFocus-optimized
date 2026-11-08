@@ -4,17 +4,20 @@ from typing import List
 
 import cv2
 import numpy as np
+from constants import FRAME_RAM_BUDGET_BYTES, HF9_MAX_IN_FLIGHT_FRAMES
 
 from utils.sorting import natural_sort_key
-from core.frame_storage import store_frame
+from core.frame_storage import capture_scratch, create_frame, run_with_scratch, store_frame
 
 
 def _collect_images(input_source, *, normalize=True, should_cancel=None) -> List[np.ndarray]:
     """Load frames; public callers retain the historical 0–255 normalization."""
     _check_cancel(should_cancel)
     if isinstance(input_source, (list, tuple)):
-        from core.source_frames import materialize_frames
-        frames = materialize_frames([f for f in input_source if f is not None], should_cancel)
+        frames = [f for f in input_source if f is not None]
+        if normalize:
+            from core.source_frames import materialize_frames
+            frames = materialize_frames(frames, should_cancel)
         if len(frames) < 2:
             raise ValueError("OpenFocus A/B fusion needs at least 2 frames")
         # Same 0-255 domain as the directory loader: a uint16 list used to
@@ -25,6 +28,18 @@ def _collect_images(input_source, *, normalize=True, should_cancel=None) -> List
                 else f for f in frames]
 
     if isinstance(input_source, str) and os.path.isdir(input_source):
+        if not normalize:
+            from core.source_frames import scan_source
+            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+            frames = []
+            for name in sorted(os.listdir(input_source), key=natural_sort_key):
+                _check_cancel(should_cancel)
+                if name.lower().endswith(exts):
+                    frames.extend(scan_source(os.path.join(input_source, name), header_only=True,
+                                              should_cancel=should_cancel))
+            if len(frames) < 2:
+                raise ValueError(f'OpenFocus A/B fusion needs at least 2 images in {input_source}')
+            return frames
         from core.image_loader import admit_image_decode, decode_image
 
         exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
@@ -58,39 +73,41 @@ def _check_cancel(should_cancel):
 
 def _frame_pass_workers(frames, img_resize, algorithm, thread_count, *, activity_only=False):
     """Admit complete independent producers, including their retained result."""
+    from fusion_methods._hf9_execution import uses_rows, frame_parallelism_allowed
+    if uses_rows() or not frame_parallelism_allowed():
+        return 1
     if thread_count == 1 or len(frames) < 2:
         return 1
     from core import resource_policy as policy
-    from core.algorithms import get_fusion, resolve_runner, fusion_defaults
     from core.multi_focus_fusion import memory_budget_bytes
     h, w = frames[0].shape[:2]
     if img_resize:
         w, h = map(int, img_resize)
-    spec = get_fusion(algorithm)
-    fixed, per_worker = resolve_runner(spec.resource_estimator)(h, w, fusion_defaults(algorithm), len(frames))
-    if activity_only:
-        # Only best activity + winner are shared in FirstPass. Global depth
-        # smoothing and C's reconstruction pyramids run after producers drain.
-        # Each producer envelope includes its source, integer filter maps,
-        # row scratch and a completed activity plane waiting for reduction.
-        fixed, per_worker = 4 * 1024 * 1024 + h * w * 12, h * w * 80
+    # Parallel producers must fit as complete resident planes. The public
+    # estimator admits serial mappings/row scratch and cannot size this window.
+    fixed = 4 * 1024 * 1024 + h * w * (12 if activity_only else 16)
+    per_worker = h * w * 80
     if img_resize:
-        # _prepare_frame must convert uint16 BEFORE resizing to preserve its
-        # fractional interpolation. A small destination cannot hide multiple
-        # concurrently converted full-size sources from the worker budget.
+        # Native frame_codes creates full-source int32 codes and a float32
+        # resize input for every source dtype, including uint8. The resized
+        # float32 pixels and int32 result also overlap in lifetime.
         for source in frames:
-            if source.dtype == np.uint16:
-                sh, sw = source.shape[:2]
-                channels = source.shape[2] if len(source.shape) == 3 else 1
-                per_worker = max(per_worker, sh * sw * channels * 8 + h * w * channels * 4)
-    budget = memory_budget_bytes()
+            sh, sw = source.shape[:2]
+            channels = source.shape[2] if len(source.shape) == 3 else 1
+            per_worker = max(per_worker, (sh * sw + h * w) * channels * 8)
+    from core.source_frames import frame_resolution_bytes, source_cache_growth_bytes
+    decode_bytes = max((frame_resolution_bytes(frame) for frame in frames), default=0)
+    per_worker += decode_bytes
+    fixed += source_cache_growth_bytes(frames)
+    budget = min(memory_budget_bytes(), FRAME_RAM_BUDGET_BYTES)
     # Serial mapping/strip execution remains the low-RAM path. Parallel
     # producers are admitted only when their full resident envelopes fit.
     if fixed + 2 * per_worker > budget:
         return 1
     plan = policy.plan_execution(policy.Workload(
         algorithm=algorithm, frames=len(frames), height=h, width=w,
-        fixed_bytes=fixed, per_worker_bytes=per_worker, outer_tasks=len(frames)),
+        fixed_bytes=fixed, per_worker_bytes=per_worker,
+        outer_tasks=min(len(frames), HF9_MAX_IN_FLIGHT_FRAMES)),
         preference='maximum' if thread_count is not None else 'balanced', user_threads=thread_count,
         ram_budget_override=budget)
     return plan.workers
@@ -107,6 +124,7 @@ def _ordered_frame_results(count, produce, workers, should_cancel):
     from collections import deque
     from concurrent.futures import ThreadPoolExecutor, wait
     from threading import Event
+    from fusion_methods._hf9_execution import _worker_native_limit
     stop = Event()
 
     def cancelled():
@@ -117,12 +135,13 @@ def _ordered_frame_results(count, produce, workers, should_cancel):
             _check_cancel(cancelled)
             yield index, produce(index, cancelled)
         return
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    scratch = capture_scratch()
+    with ThreadPoolExecutor(max_workers=workers, initializer=_worker_native_limit) as pool:
         window = deque()
         next_index = 0
         try:
             while next_index < min(workers, count):
-                window.append(pool.submit(produce, next_index, cancelled))
+                window.append(pool.submit(run_with_scratch, scratch, produce, next_index, cancelled))
                 next_index += 1
             index = 0
             while window:
@@ -142,7 +161,7 @@ def _ordered_frame_results(count, produce, workers, should_cancel):
                 index += 1
                 _check_cancel(cancelled)
                 if next_index < count:
-                    window.append(pool.submit(produce, next_index, cancelled))
+                    window.append(pool.submit(run_with_scratch, scratch, produce, next_index, cancelled))
                     next_index += 1
         finally:
             stop.set()
@@ -152,14 +171,26 @@ def _ordered_frame_results(count, produce, workers, should_cancel):
 
 
 def _prepare_frame(frame, img_resize, should_cancel):
-    """Keep the baseline conversion/resize order without retaining a float stack."""
+    """Convert one frame in rows; retain conversion-before-resize semantics."""
     _check_cancel(should_cancel)
-    frame = np.asarray(frame)
+    from core.source_frames import resolve_frame
+    frame = np.asarray(resolve_frame(frame))
+    if img_resize is None:
+        if frame.dtype == np.float32:
+            return frame
+        result = create_frame(frame.shape, np.float32)
+        for start in range(0, frame.shape[0], 128):
+            _check_cancel(should_cancel)
+            rows = slice(start, min(frame.shape[0], start + 128))
+            if frame.dtype == np.uint16:
+                result[rows] = frame[rows].astype(np.float32) * (255.0 / 65535.0)
+            else:
+                result[rows] = frame[rows]
+        return result
     if frame.dtype == np.uint16:
-        frame = frame.astype(np.float32) * (255.0 / 65535.0)
-    if img_resize is not None:
-        w, h = img_resize
-        frame = cv2.resize(frame, (int(w), int(h)), interpolation=cv2.INTER_AREA)
+        frame = _prepare_frame(frame, None, should_cancel)
+    w, h = img_resize
+    frame = cv2.resize(frame, (int(w), int(h)), interpolation=cv2.INTER_AREA)
     return frame if frame.dtype == np.float32 else frame.astype(np.float32)
 
 

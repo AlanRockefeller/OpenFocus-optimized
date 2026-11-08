@@ -23,19 +23,6 @@ def setup_menus(window: QMainWindow) -> None:
     file_menu.addAction(open_action)
     window.ui_objs['action_open_folder'] = open_action
 
-    linear_raw_action = QAction(trans.t('linear_raw_open'), window)
-    def update_linear_raw_hint():
-        hint = trans.t('linear_raw_profile_hint')
-        linear_raw_action.setToolTip(hint)
-        linear_raw_action.setStatusTip(hint)
-
-    update_linear_raw_hint()
-    file_menu.setToolTipsVisible(True)
-    file_menu.aboutToShow.connect(update_linear_raw_hint)
-    linear_raw_action.triggered.connect(window.source_manager.prompt_and_load_linear_raw)
-    file_menu.addAction(linear_raw_action)
-    window.ui_objs['linear_raw_open'] = linear_raw_action
-
     open_video_action = QAction(trans.t('action_open_video'), window)
     open_video_action.setShortcut("Ctrl+Shift+O")
     open_video_action.triggered.connect(window.open_video_dialog)
@@ -444,6 +431,13 @@ def setup_menus(window: QMainWindow) -> None:
         lang_group.addAction(act)
         lang_menu.addAction(act)
         window.ui_objs[f'action_lang_{code}'] = act
+    settings_menu.addSeparator()
+    restore_action = QAction(trans.t('action_restore_defaults'), window)
+    restore_action.setProperty('trans_key', 'action_restore_defaults')
+    restore_action.triggered.connect(window.restore_default_settings)
+    settings_menu.addAction(restore_action)
+    window.ui_objs['action_restore_defaults'] = restore_action
+
 
     # --- Help Menu ---
     help_menu = menubar.addMenu(trans.t('menu_help'))

@@ -1,5 +1,7 @@
 """Source-safe conversion with bounded resource admission and atomic outputs."""
 import os
+import errno
+import operator
 import shutil
 import tempfile
 from pathlib import Path
@@ -22,17 +24,33 @@ from locales import trans
 
 INPUT_EXTENSIONS = image_loader.RAW_FORMATS | {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.tif', '.tiff', '.bmp', '.webp', '.heic', '.heif'}
 OUTPUT_EXTENSIONS = {'DNG': '.dng', 'JPEG': '.jpg', 'PNG': '.png', 'TIFF': '.tif', 'BMP': '.bmp', 'WebP': '.webp'}
+# Ordinary formats first: dict order is not a UI default, and DNG is a
+# RAW-only conversion target rather than the expected everyday output.
+DEFAULT_OUTPUT_FORMAT = 'PNG'
+OUTPUT_FORMAT_ORDER = ('PNG', 'JPEG', 'TIFF', 'BMP', 'WebP', 'DNG')
 
 
 
 
-def estimate_job(path, page=0):
+def estimate_job(path, page=0, ext=None):
     """Read headers only, including the full sensor bounds before RAW unpack."""
     if image_loader.is_raw_source(path):
         with image_loader.rawpy.RawPy() as raw:
             raw.open_file(os.fspath(path))
             width, height = raw.sizes.raw_width, raw.sizes.raw_height
+            if width <= 0 or height <= 0:
+                raise ValueError('Invalid image dimensions.')
         compressed = os.path.getsize(path)
+        if ext == '.dng':
+            try:
+                with tifffile.TiffFile(path) as tif:
+                    existing_dng = bool(tif.is_dng)
+            except (OSError, ValueError, tifffile.TiffFileError):
+                existing_dng = False
+            if existing_dng:
+                # Original DNGs are copied in 1 MiB chunks. Sensor dimensions
+                # must not reserve demosaic buffers for that validated copy.
+                return 64 * 1024**2, compressed + 1024**2
     elif Path(path).suffix.lower() in ('.tif', '.tiff'):
         with tifffile.TiffFile(path) as tif:
             entry = tif.pages[page]
@@ -41,6 +59,11 @@ def estimate_job(path, page=0):
     else:
         width, height = image_loader.source_dimensions(path, page)
         compressed = os.path.getsize(path)
+    if image_loader.is_raw_source(path) and ext == '.jpg':
+        # LibRaw unpack/demosaic and the 16-bit RGB/BGR buffers coexist.
+        # Keep substantial headroom over the measured RAW-to-JPEG peak;
+        # other outputs retain the larger generic encoding allowance.
+        return width * height * 32 + compressed * 2, width * height * 16 + 64 * 1024 * 1024
     return _image_requirements(width, height, compressed)
 
 
@@ -50,7 +73,7 @@ def _image_requirements(width, height, compressed):
     return width * height * 64 + compressed * 2, width * height * 16 + 64 * 1024 * 1024
 
 
-def _estimate_source(path, cancelled):
+def _estimate_source(path, cancelled, ext=None):
     """Walk TIFF headers once, checking cancellation before each page estimate."""
     def check_cancel():
         if cancelled():
@@ -78,18 +101,20 @@ def _estimate_source(path, cancelled):
                     raise ValueError('TIFF contains no pages.')
                 return count, need_ram, need_disk
     check_cancel()
-    ram, disk = estimate_job(path)
+    ram, disk = estimate_job(path, 0, ext)
     check_cancel()
     return 1, ram, disk
 
 
-def _admit(path, page, output_dir):
-    estimate, disk = estimate_job(path, page)
+def _admit(path, page, output_dir, ext=None):
+    estimate, disk = estimate_job(path, page, ext)
     available = available_memory_bytes()
-    if not available or estimate > available // 2:
-        raise MemoryError('Insufficient available memory for this image.')
+    if not available:
+        raise MemoryError(trans.t('converter_memory_unknown'))
+    if estimate > available // 2:
+        raise MemoryError(trans.t('converter_memory_error'))
     if shutil.disk_usage(output_dir).free < disk:
-        raise OSError('Insufficient free disk space for this image.')
+        raise OSError(trans.t('converter_space_error'))
 
 
 def _decode(path, page):
@@ -115,7 +140,9 @@ def _decode(path, page):
                     raise ValueError(f'Could not decode TIFF page {page + 1}.')
                 a = decoded[0]
             else:
-                a = p.asarray()
+                # Uncompressed TIFFs can be read directly from their source
+                # mapping. Keep compressed codec work in this one pool layer.
+                a = p.asarray(out='memmap' if p.is_memmappable else None, maxworkers=1)
             orientation = int(p.tags['Orientation'].value) if 'Orientation' in p.tags else 1
             if a.dtype not in (np.uint8, np.uint16):
                 raise ValueError('Only 8-bit and 16-bit integer TIFF pages are supported.')
@@ -125,7 +152,7 @@ def _decode(path, page):
                 if p.samplesperpixel == 4 and (not p.extrasamples or p.extrasamples[0].name != 'UNASSALPHA'):
                     raise ValueError('Unsupported TIFF alpha representation.')
                 if not opencv_page:
-                    a = a[..., [2, 1, 0, 3] if a.shape[-1] == 4 else [2, 1, 0]]
+                    a = cv2.cvtColor(a, cv2.COLOR_RGBA2BGRA if a.shape[-1] == 4 else cv2.COLOR_RGB2BGR)
             elif p.samplesperpixel != 1 or a.ndim != 2 or p.photometric.name != 'MINISBLACK':
                 raise ValueError('Unsupported TIFF page layout or color space.')
             # OpenCV's TIFF decoder already applies the TIFF orientation,
@@ -133,10 +160,12 @@ def _decode(path, page):
             transform = None if opencv_page else image_loader._EXIF_TRANSFORMS.get(orientation)
             return np.ascontiguousarray(transform(a) if transform else a)
     if ext in image_loader.RAW_FORMATS or image_loader._is_dng_tiff(path):
-        with open(path, 'rb') as stream, image_loader.rawpy.imread(stream) as raw:
+        # Admission already opens this native path, including Unicode names.
+        # open_buffer(file) otherwise reads the entire RAW into a Python bytes.
+        with image_loader.rawpy.imread(os.fspath(path)) as raw:
             rgb = raw.postprocess(use_camera_wb=True, output_bps=16, no_auto_bright=True,
                                   gamma=(2.4, 12.92))
-        image = np.ascontiguousarray(rgb[:, :, ::-1])
+        image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     elif ext in ('.heic', '.heif'):
         import pillow_heif
         heif = pillow_heif.open_heif(path, convert_hdr_to_8bit=False, bgr_mode=True)
@@ -181,7 +210,7 @@ def _reserve(directory, stem, ext):
             index += 1
 
 
-def _write(path, pixels, source, page, ext):
+def _write(path, pixels, source, page, ext, cancelled=None):
     if pixels.ndim == 3 and pixels.shape[2] == 4 and ext != '.png':
         if image_loader._has_transparency(pixels):
             raise ValueError('This output format cannot safely preserve transparency; choose PNG.')
@@ -208,11 +237,12 @@ def _write(path, pixels, source, page, ext):
         params = [cv2.IMWRITE_JPEG_QUALITY, 95]
         if hasattr(cv2, 'IMWRITE_JPEG_SAMPLING_FACTOR_444'):
             params += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
-    if not imwrite_auto(path, pixels, params=params, exif=exif, icc_profile=profile):
+    if not imwrite_auto(path, pixels, params=params, exif=exif, icc_profile=profile,
+                        stream_tiff=ext == '.tif', should_cancel=cancelled):
         raise OSError('Image encoding or writing failed.')
 
 
-def convert_one(source, output_dir, ext, page=0, pages=1, cancelled=lambda: False):
+def convert_one(source, output_dir, ext, page=0, pages=1, cancelled=lambda: False, *, _admitted=False):
     """Write one frame, reserving a unique name without touching existing files."""
     with log_operation('converter.page', source=os.fspath(source), page=page + 1,
                        pages=pages, format=ext, output_dir=os.fspath(output_dir)) as operation:
@@ -222,7 +252,8 @@ def convert_one(source, output_dir, ext, page=0, pages=1, cancelled=lambda: Fals
                 raise ValueError('Unsupported conversion output format')
             if ext == '.dng' and not image_loader.is_raw_source(source):
                 raise ValueError('DNG requires camera RAW input; developed images are not sensor RAW')
-            _admit(source, page, output_dir)
+            if not _admitted:
+                _admit(source, page, output_dir, ext)
             if cancelled():
                 raise InterruptedError()
             pixels = None if ext == '.dng' else _decode(source, page)
@@ -236,7 +267,7 @@ def convert_one(source, output_dir, ext, page=0, pages=1, cancelled=lambda: Fals
                 from utils.linear_dng import convert_raw_to_dng
                 convert_raw_to_dng(part, source, should_cancel=cancelled)
             else:
-                _write(part, pixels, source, page, ext)
+                _write(part, pixels, source, page, ext, cancelled)
             if cancelled():
                 raise InterruptedError()
             os.replace(part, destination)
@@ -250,6 +281,8 @@ def convert_one(source, output_dir, ext, page=0, pages=1, cancelled=lambda: Fals
                 operation.cancel()
             if destination is not None:
                 os.unlink(destination)
+            if isinstance(exc, RegistrationCancelled):
+                raise InterruptedError() from exc
             raise
         finally:
             if part and os.path.exists(part):
@@ -266,6 +299,19 @@ def page_count(path):
     return 1
 
 
+def _error_text(exc):
+    detail = str(exc)
+    if isinstance(exc, MemoryError):
+        unknown = (detail == trans.t('converter_memory_unknown') or
+                   detail == 'Available physical memory could not be determined')
+        message = trans.t('converter_memory_unknown' if unknown else 'converter_memory_error')
+    elif isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        message = trans.t('converter_space_error')
+    else:
+        return detail
+    return f'{message} {detail}' if detail and detail != message else message
+
+
 def _convert_source(index, source, directory, ext, count, cancelled, item):
     from core.registration import RegistrationCancelled
     outputs, errors = [], []
@@ -276,12 +322,12 @@ def _convert_source(index, source, directory, ext, count, cancelled, item):
                 break
             item(index, '\n'.join(outputs + errors + [f'{page + 1}/{count} …']))
             try:
-                outputs.append(convert_one(source, directory, ext, page, count, cancelled))
+                outputs.append(convert_one(source, directory, ext, page, count, cancelled, _admitted=True))
             except (InterruptedError, RegistrationCancelled):
                 operation.cancel()
                 break
             except Exception as exc:
-                errors.append(f'{page + 1}/{count}: {exc}')
+                errors.append(f'{page + 1}/{count}: {_error_text(exc)}')
                 operation.fail(exc)
             state = trans.t('converter_item_state').format(completed=len(outputs), pages=count, failed=len(errors))
             item(index, '\n'.join(outputs + errors + [state]))
@@ -291,10 +337,10 @@ def _convert_source(index, source, directory, ext, count, cancelled, item):
         return not errors and not interrupted, bool(errors)
 
 
-def _serial_native_worker():
+def _native_worker(threads):
     # OpenMP limits are thread-local on some runtimes. Set them in each pool
     # thread too; the owner's context restores process-wide BLAS settings.
-    threadpool_limits(limits=1)
+    threadpool_limits(limits=threads)
 
 
 def convert_batch(sources, directory, ext, cancelled, item, progress):
@@ -304,10 +350,14 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
     with log_operation('converter.batch', files=len(sources), format=ext, output_dir=directory) as operation:
         try:
             with resource_policy.heavy_job(cancelled):
+                if cancelled():
+                    raise InterruptedError()
+                os.makedirs(directory, exist_ok=True)
                 plan = resource_policy.plan_execution(resource_policy.Workload(
                     fixed_bytes=0, per_worker_bytes=1, outer_tasks=max(1, len(sources))))
+                native_threads = plan.native_threads if plan.workers == 1 else 1
                 log_action('converter.resources', plan=plan.describe(), budget=plan.ram_budget,
-                           native_threads=1)
+                           native_threads=native_threads)
                 previous_threads = cv2.getNumThreads()
                 heif_options = None
                 if any(Path(source).suffix.lower() in ('.heic', '.heif') for source in sources):
@@ -317,11 +367,12 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
                         pass  # The affected input reports its missing codec per item.
                 previous_heif_threads = heif_options.DECODE_THREADS if heif_options is not None else None
                 try:
-                    cv2.setNumThreads(1)
+                    cv2.setNumThreads(native_threads)
                     if heif_options is not None:
-                        heif_options.DECODE_THREADS = 1
-                    with threadpool_limits(limits=1), ThreadPoolExecutor(
-                            max_workers=plan.workers, initializer=_serial_native_worker) as pool:
+                        heif_options.DECODE_THREADS = native_threads
+                    with threadpool_limits(limits=native_threads), ThreadPoolExecutor(
+                            max_workers=plan.workers, initializer=_native_worker,
+                            initargs=(native_threads,)) as pool:
                         pending, active = None, {}
                         sources_iter = iter(enumerate(sources))
                         exhausted = False
@@ -342,7 +393,7 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
                                         exhausted = True
                                         break
                                     try:
-                                        count, need_ram, need_disk = _estimate_source(source, cancelled)
+                                        count, need_ram, need_disk = _estimate_source(source, cancelled, ext)
                                         pending = index, source, count, need_ram, need_disk
                                     except (InterruptedError, RegistrationCancelled):
                                         item(index, 'Cancelled')
@@ -352,21 +403,27 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
                                         operation.cancel()
                                         break
                                     except Exception as exc:
-                                        item(index, str(exc))
+                                        item(index, _error_text(exc))
                                         log_action('converter.admission_failed', source=source, reason=str(exc))
                                         failed += 1
                                         completed += 1
                                         progress(completed)
                                         continue
                                 index, source, count, need_ram, need_disk = pending
-                                free_ram = min(plan.ram_budget - used_ram,
-                                               resource_policy.ram_budget(resource_policy.probe_resources()))
+                                snapshot = resource_policy.probe_resources()
+                                # The fixed budget bounds all commitments. The live
+                                # ceiling also reserves room for active jobs that
+                                # may not have allocated their full footprint yet.
+                                ceiling = resource_policy.ram_ceiling(snapshot)
+                                free_ram = (min(plan.ram_budget - used_ram, ceiling - used_ram)
+                                            if active or need_ram <= plan.ram_budget else ceiling)
                                 free_disk = shutil.disk_usage(directory).free - used_disk
                                 if need_ram > free_ram or need_disk > free_disk:
                                     if active:
                                         break
-                                    reason = ('Insufficient available memory for this image.' if need_ram > free_ram
-                                              else 'Insufficient free disk space for this image.')
+                                    reason = ((trans.t('converter_memory_error') if snapshot.ram_known
+                                               else trans.t('converter_memory_unknown'))
+                                              if need_ram > free_ram else trans.t('converter_space_error'))
                                     item(index, reason)
                                     log_action('converter.admission_failed', source=source, reason=reason,
                                                need_ram=need_ram, free_ram=free_ram,
@@ -400,7 +457,7 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
                                     success += int(ok)
                                     failed += int(error)
                                 except Exception as exc:
-                                    item(index, str(exc))
+                                    item(index, _error_text(exc))
                                     failed += 1
                                     operation.fail(exc)
                                 completed += 1
@@ -416,7 +473,7 @@ def convert_batch(sources, directory, ext, cancelled, item, progress):
             # Planning failures are visible for every source, never a silent
             # successful completion with no output.
             for index in range(len(sources)):
-                item(index, str(exc))
+                item(index, _error_text(exc))
             failed = len(sources)
         if failed:
             operation.fail()
@@ -445,6 +502,35 @@ def _raw_preview_pages(tif, should_cancel=None):
         yield page
         if depth < 8 and page.pages:
             pending.append((iter(page.pages), depth + 1))
+
+
+def _tiff_tag_integers(tag):
+    """Normalize a TIFF offset/length tag to non-negative integers.
+
+    JPEG interchange tags are vectors per the TIFF specification: tifffile
+    returns a tuple even for the single-value tags common in NEF previews,
+    while other readers may return a scalar. Accept both shapes. A value that
+    is empty, negative, or not a true integer is malformed and must not be
+    turned into a plausible-looking container offset.
+    """
+    if tag is None:
+        return None
+    try:
+        value = tag.value
+    except (OSError, TypeError, ValueError, struct.error, tifffile.TiffFileError):
+        return None
+    if isinstance(value, np.ndarray):
+        value = value.ravel().tolist()
+    values = value if isinstance(value, (tuple, list)) else (value,)
+    if not values:
+        return None
+    try:
+        integers = tuple(operator.index(item) for item in values)
+    except TypeError:
+        return None
+    if any(integer < 0 for integer in integers):
+        return None
+    return integers
 
 
 def _embedded_raw_jpegs(path, should_cancel=None):
@@ -484,10 +570,14 @@ def _embedded_raw_jpegs(path, should_cancel=None):
                                           else -p.imagewidth * p.imagelength))
             seen = set()
             for page in candidates:
-                offset, length = page.tags.get(513), page.tags.get(514)
                 ranges = []
-                if offset is not None and length is not None:
-                    ranges.append((int(offset.value), int(length.value)))
+                offsets = _tiff_tag_integers(page.tags.get(513))
+                lengths = _tiff_tag_integers(page.tags.get(514))
+                # Parallel vectors describe one pair per index. A mismatched
+                # count is ambiguous: never truncate to the short vector or
+                # broadcast one value across several ranges.
+                if offsets is not None and lengths is not None and len(offsets) == len(lengths):
+                    ranges.extend(zip(offsets, lengths))
                 if (page.photometric.name in ('RGB', 'YCBCR')
                         and page.compression.value in (6, 7) and len(page.dataoffsets) == 1):
                     ranges.append((page.dataoffsets[0], page.databytecounts[0]))

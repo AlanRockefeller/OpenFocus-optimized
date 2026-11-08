@@ -33,11 +33,15 @@ WINDOW_GEOMETRY_KEY = "ui/window_geometry"
 MAIN_SPLITTER_KEY = "ui/main_splitter"
 RIGHT_SPLITTER_KEY = "ui/right_splitter"
 DRAG_FORMAT_KEY = "export/drag_format"
+# Last explicitly chosen Batch Image Converter target; dict order must not
+# decide it, and a missing/corrupt value falls back to lossless PNG.
+CONVERTER_FORMAT_KEY = "export/converter_format"
 LAST_UPDATE_CHECK_KEY = "updates/last_check_epoch"
 # Release tag whose startup banner the user dismissed: the same
 # version must not nag again, a newer one re-shows the banner.
 UPDATE_BANNER_DISMISSED_KEY = "updates/banner_dismissed_tag"
 LAST_STACK_FOLDER_KEY = "ui/last_stack_folder"
+LAST_STACK_MODE_KEY = "ui/last_stack_mode"
 LAST_DIALOG_DIR_KEY = "ui/last_dialog_dir"
 LAST_IMAGE_SAVE_DIR_KEY = "ui/last_image_save_dir"
 # The "AI runs on the CPU" warning is informational and repeat-per-launch
@@ -373,6 +377,52 @@ def save_window_settings(window) -> None:
     if settings.status() != QSettings.Status.NoError:
         raise OSError("Could not write OpenFocus settings")
 
+def restore_default_settings(window) -> None:
+    """Reset preferences without touching files, outputs or location history.
+
+    Use the same defaults as a fresh settings store. User-created colour
+    schemes, recent paths, update state and installation identity are data,
+    so they are deliberately outside this preference reset.
+    """
+    settings = get_settings()
+    keys = {key for key, _default, _kind in _PERSISTED_FIELDS.values()}
+    keys.update((BRIGHTNESS_BY_METHOD_KEY, METHOD_PARAMETERS_KEY,
+                 REGISTRATION_PARAMETERS_KEY, SMOOTHING_BY_METHOD_KEY,
+                 KERNEL_BY_MODE_KEY, DRAG_FORMAT_KEY, CONVERTER_FORMAT_KEY,
+                 AI_CPU_WARNING_DISMISSED_KEY,
+                 'fusion/ai_mode', 'fusion/dtcwt_levels',
+                 'fusion/ofb_depth_smoothing', 'fusion/of_blend_smoothing',
+                 'retouch/auto_bg_mode', 'retouch/auto_bg_clean',
+                 'retouch/auto_bg_soft_parts', 'compare/preview_size',
+                 'depthmap/colormap', 'depthmap/gamma', 'depthmap/smooth',
+                 'depthmap/invert', 'depthmap/relief'))
+    previous = {key: settings.value(key) for key in keys if settings.contains(key)}
+    attributes = {attr: getattr(window, attr, default)
+                  for attr, (_key, default, _kind) in _PERSISTED_FIELDS.items()}
+    memories = {name: getattr(window, name, {}) for name in (
+        '_brightness_by_method', '_fusion_parameters_by_method',
+        '_registration_parameters_by_method')}
+    try:
+        for key in keys:
+            settings.remove(key)
+        for attr, (_key, default, _kind) in _PERSISTED_FIELDS.items():
+            setattr(window, attr, default)
+        for name in memories:
+            setattr(window, name, {})
+        save_window_settings(window)
+    except Exception:
+        for attr, value in attributes.items():
+            setattr(window, attr, value)
+        for name, value in memories.items():
+            setattr(window, name, value)
+        for key in keys:
+            settings.remove(key)
+        for key, value in previous.items():
+            settings.setValue(key, value)
+        settings.sync()
+        raise
+
+
 
 def _supported_languages():
     """Codes the running build can actually render.
@@ -472,6 +522,24 @@ def set_drag_export_format(window, fmt: str) -> None:
         return
     window.drag_export_format = fmt
     get_settings().setValue(DRAG_FORMAT_KEY, fmt)
+
+
+def get_converter_output_format() -> str:
+    """Last explicitly chosen Batch Image Converter format label."""
+    # Imported lazily: the converter module pulls in the image codecs, and
+    # this preference is only read when its dialog opens. Keeping the
+    # accepted labels in one place prevents the saved value and the combo
+    # from drifting apart.
+    from core.batch_converter import DEFAULT_OUTPUT_FORMAT, OUTPUT_EXTENSIONS
+    value = str(get_settings().value(CONVERTER_FORMAT_KEY, DEFAULT_OUTPUT_FORMAT) or "")
+    return value if value in OUTPUT_EXTENSIONS else DEFAULT_OUTPUT_FORMAT
+
+
+def set_converter_output_format(fmt: str) -> None:
+    """Persist a user-selected converter format, ignoring unknown labels."""
+    from core.batch_converter import OUTPUT_EXTENSIONS
+    if fmt in OUTPUT_EXTENSIONS:
+        get_settings().setValue(CONVERTER_FORMAT_KEY, fmt)
 
 
 def get_last_dialog_dir() -> str:
