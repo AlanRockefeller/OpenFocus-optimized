@@ -59,14 +59,37 @@ def admitted_kind(kind):
     return kind
 
 
-def _memory_unreadable(kind):
-    if kind not in VRAM_GATED_KINDS:
-        return False
+def _vram_snapshot(kind):
+    """Probe kind's free memory; None when the probe itself fails.
+
+    Provider selection and every job read it the same way, so a probe error
+    means unknown memory (CPU) in both places instead of failing the job.
+    """
     from core.resource_policy import probe_resources
     try:
-        return not probe_resources(kind).vram_known
+        return probe_resources(kind)
     except Exception:
-        return True
+        _LOG.warning('%s memory probe failed; treating free memory as unknown',
+                     kind, exc_info=True)
+        return None
+
+
+def _vram_unknown(snapshot):
+    return snapshot is None or not snapshot.vram_known
+
+
+def _memory_unreadable(kind):
+    return kind in VRAM_GATED_KINDS and _vram_unknown(_vram_snapshot(kind))
+
+
+def _record_admission(kind, snapshot):
+    """Keep the reported admission tied to the latest probe a job acted on."""
+    global _UNADMITTED
+    with _LOCK:
+        if _vram_unknown(snapshot):
+            _UNADMITTED = kind
+        elif _UNADMITTED == kind:
+            _UNADMITTED = None
 
 
 def start_inference_job():
@@ -316,14 +339,17 @@ def logits(planes, path, device, threads, should_cancel=None):
     if _FALLBACK_CPU:
         device = 'CPU'
     if device in VRAM_GATED_KINDS:
-        from core.resource_policy import probe_resources, vram_budget
-        snapshot = probe_resources(device)
+        from core.resource_policy import vram_budget
+        snapshot = _vram_snapshot(device)
+        _record_admission(device, snapshot)
+        known = not _vram_unknown(snapshot)
+        budget = vram_budget(snapshot) if known else 0
         n, hp, wp = shape
         required = estimate_inference_bytes(n, hp, wp, device) + n * hp * wp * 4 * 6
-        if not snapshot.vram_known or required > vram_budget(snapshot):
+        if not known or required > budget:
             _LOG.warning('%s checkpoint=%s shape=%s memory required=%s budget=%s known=%s; using CPU for this job',
                          device, os.path.basename(path), shape, required,
-                         vram_budget(snapshot), snapshot.vram_known)
+                         budget, known)
             _FALLBACK_CPU = True
             _SESSIONS.clear()
             device = 'CPU'

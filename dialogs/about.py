@@ -164,9 +164,12 @@ class EnvironmentInfoDialog(QDialog):
                 info_lines.append(f"  ✓ {trans.t('env_gpu_accel')} ({available['device']})")
             else:
                 if unadmitted:
+                    # The provider was verified; say why it is not used
+                    # instead of claiming no provider passed.
                     info_lines.append("  ⚠ " + trans.t('env_gpu_memory_unknown').format(
                         device=neural_runtime.display_name(unadmitted)))
-                info_lines.append(f"  ⚠ {trans.t('env_no_gpu')}")
+                else:
+                    info_lines.append(f"  ⚠ {trans.t('env_no_gpu')}")
                 info_lines.append(f"  ✓ {trans.t('env_cpu_mode')}")
             info_lines.append('  ' + trans.t('msg_gpu_accel_hint'))
         except Exception as exc:
