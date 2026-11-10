@@ -93,3 +93,22 @@ def test_cli_temp_dir_must_be_writable(monkeypatch, tmp_path, capsys):
     assert code == 2
     assert '--temp-dir is not a writable directory' in capsys.readouterr().err
     assert frame_storage._storage_directory is None
+
+
+def test_cli_assesses_every_page_of_a_multipage_tiff(monkeypatch, tmp_path, capsys):
+    """A multipage TIFF is rendered as a whole stack, so the warning counts every page."""
+    import tifffile
+    pages = np.stack([np.full((24, 32, 3), 40 + index * 60, np.uint8) for index in range(3)])
+    source = tmp_path / 'pages.tif'
+    tifffile.imwrite(source, pages, photometric='rgb')
+    estimates = []
+
+    def assess(minimum, expected, optional=0, source_paths=(), *, directory=None):
+        estimates.append(optional)
+        return _assessment('ok')
+    monkeypatch.setattr(frame_storage, 'assess_scratch', assess)
+    code = _cli(monkeypatch, tmp_path, '--input', str(source), '--output', str(tmp_path / 'o.png'),
+                '--method', 'dct')
+    assert code == 0, capsys.readouterr().err
+    # The cache working set of all three pages, plus its one-frame staging floor.
+    assert estimates == [pages.nbytes + 64 * 1024 ** 2]

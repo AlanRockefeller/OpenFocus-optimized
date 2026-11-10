@@ -1534,7 +1534,8 @@ def _warn_low_storage(args, paths):
         from core.storage_preflight import render_storage_estimate
         frames = []
         for path in paths:
-            frames.extend(scan_source(path, header_only=True, page_index=0))
+            # Every page: a multipage TIFF is rendered as a whole stack.
+            frames.extend(scan_source(path, header_only=True))
         minimum, expected, optional, sources = render_storage_estimate(
             frames, algorithm=args.method, alignment=args.align,
             exposure_match=bool(getattr(args, "exposure_match", False)),

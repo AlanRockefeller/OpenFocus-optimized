@@ -117,9 +117,14 @@ def test_estimate_follows_the_pipeline_materialization_rules(tmp_path, monkeypat
     with monkeypatch.context() as patch:
         patch.setattr(storage_preflight, 'get_fusion', lambda algorithm: descriptor)
         minimum, *_ = render_storage_estimate(arrays, algorithm='dct', alignment='ecc')
+        # ... and then stores one cleaned copy of every frame.
+        cleaned, *_ = render_storage_estimate(arrays, algorithm='dct', alignment='ecc',
+                                              cleanup=True)
     assert minimum == output + sum(a.nbytes for a in arrays)
-    cleaned, *_ = render_storage_estimate(arrays, algorithm='dct', alignment='none', cleanup=True)
-    assert cleaned == output + sum(a.nbytes for a in arrays)
+    assert cleaned == output + 2 * sum(a.nbytes for a in arrays)
+    # A streaming render keeps sensor cleanup lazy: it adds no mandatory disk.
+    lazy, *_ = render_storage_estimate(arrays, algorithm='dct', alignment='none', cleanup=True)
+    assert lazy == output
     paths = []
     for index, image in enumerate(arrays):
         path = tmp_path / f'f{index}.png'

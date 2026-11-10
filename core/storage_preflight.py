@@ -19,8 +19,10 @@ def render_storage_estimate(frames, *, algorithm, alignment, need_fusion=True,
     """Scratch estimate of a full render from frame metadata: no pixels decoded.
 
     Returns ``(minimum, expected, optional, source_paths)``. ``minimum`` is the
-    stack materialization a non-streaming render admits up front, sensor-cleanup
-    staging and the output buffers. ``expected`` adds the pipeline's staging
+    stack materialization a non-streaming render admits up front, the cleaned
+    copies sensor cleanup stores in that same case, and the output buffers.
+    A streaming render keeps both lazy, so neither is required of the disk.
+    ``expected`` adds the pipeline's staging
     reserve (``mandatory_staging_bytes``). ``optional`` is the resolution
     cache's working set plus its staging floor, which the cache admits by the
     same rule (it is disabled, not failed, when this does not fit).
@@ -33,10 +35,13 @@ def render_storage_estimate(frames, *, algorithm, alignment, need_fusion=True,
     steps = alignment_steps(alignment)
     deferred = defers_warps(steps, False, need_fusion, algorithm)
     lazy = need_fusion and get_fusion(algorithm).streaming_sources
-    unmapped = sum(frame.nbytes for frame in frames if not is_mapped_frame(frame))
-    minimum = 0 if deferred or (lazy and not steps) else unmapped
-    if cleanup:
-        minimum += sum(frame.nbytes for frame in frames)
+    minimum = 0
+    if not (deferred or (lazy and not steps)):
+        # The worker materializes the stack, and stores a cleaned copy of each
+        # frame. Otherwise both stay lazy descriptors resolved on demand.
+        minimum = sum(frame.nbytes for frame in frames if not is_mapped_frame(frame))
+        if cleanup:
+            minimum += sum(frame.nbytes for frame in frames)
     if need_fusion:
         height, width = frames[0].shape[:2]
         # Accumulator, weight and the quantized result (tiled fusion).
