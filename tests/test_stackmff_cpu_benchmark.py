@@ -39,6 +39,20 @@ def test_tile_sizes_replace_the_default_comparison_sizes():
     assert plan['description'].startswith('5 tiled renders')
 
 
+def test_overhead_plan_counts_warm_ups_and_every_arm(tmp_path):
+    def plan(*extra):
+        result = _run('overhead', '--full', *extra)
+        return json.loads(result.stderr[:result.stderr.rindex('}') + 1])['plan']
+    two_arms = plan()
+    assert two_arms['description'].startswith('10 timed renders (profiling off, on;')
+    assert '20 renders in all' in two_arms['description']
+    three_arms = plan('--baseline-root', str(tmp_path))
+    assert three_arms['description'].startswith('15 timed renders (profiling off, on, baseline;')
+    assert '30 renders in all' in three_arms['description']
+    assert three_arms['estimated_seconds'] == pytest.approx(
+        1.5 * two_arms['estimated_seconds'], abs=2)
+
+
 def test_each_finished_configuration_is_checkpointed(tmp_path, monkeypatch):
     import importlib.util
     spec = importlib.util.spec_from_file_location('stackmff_cpu_benchmark', TOOL)

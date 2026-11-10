@@ -508,12 +508,15 @@ def bench_overhead(args, root, scratch):
     from core.multi_focus_fusion import _ai_effective_tiling
     block, _, coords = _ai_effective_tiling(geometry['frames'], geometry['block'], geometry['height'],
                                             geometry['width'], geometry['overlap'], 1)
-    estimate = 2 * repetitions * len(coords) * estimate_tile_seconds(geometry['frames'], block, threads)
-    if not _plan(args, f'{2 * repetitions} alternating renders (profiling off/on)', estimate,
+    arms = ['off', 'on'] + (['baseline'] if args.baseline_root else [])
+    # Every timed render follows a warm-up render in the same fresh process.
+    timed = len(arms) * repetitions
+    estimate = 2 * timed * len(coords) * estimate_tile_seconds(geometry['frames'], block, threads)
+    if not _plan(args, f'{timed} timed renders (profiling {", ".join(arms)}; rotating order), '
+                       f'each after a warm-up render: {2 * timed} renders in all', estimate,
                  estimate_ram_bytes(geometry['frames'], geometry['height'], geometry['width'], block),
                  whole_render=True):
         return None
-    arms = ['off', 'on'] + (['baseline'] if args.baseline_root else [])
     times = {arm: [] for arm in arms}
     hashes = {}
     for index in range(repetitions):
