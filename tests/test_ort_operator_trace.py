@@ -38,6 +38,16 @@ def test_tracing_is_off_unless_requested(runtime, tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())
 
 
+def test_an_unusable_trace_folder_disables_tracing_not_inference(runtime, tmp_path, monkeypatch):
+    blocker = tmp_path / 'not-a-folder'
+    blocker.write_text('x')
+    monkeypatch.setenv(runtime.OPERATOR_PROFILE_ENV, '1')
+    monkeypatch.setenv(runtime.OPERATOR_PROFILE_DIR_ENV, str(blocker / 'traces'))
+    _run(runtime, (2, 64, 64))                      # the session still runs
+    assert runtime.operator_trace_directory() is None
+    assert not runtime._TRACED
+
+
 def test_traces_are_written_on_eviction_clear_and_finish(runtime, tmp_path, monkeypatch):
     monkeypatch.setenv(runtime.OPERATOR_PROFILE_ENV, '1')
     monkeypatch.setenv(runtime.OPERATOR_PROFILE_DIR_ENV, str(tmp_path))

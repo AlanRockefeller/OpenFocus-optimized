@@ -225,14 +225,20 @@ _TRACED = {}
 
 
 def operator_trace_directory():
-    """Configured trace directory, or None when operator tracing is off."""
+    """Configured trace directory, or None when operator tracing is off or unusable."""
     if os.environ.get(OPERATOR_PROFILE_ENV) != '1':
         return None
     directory = os.environ.get(OPERATOR_PROFILE_DIR_ENV)
     if not directory:
         from utils.logging_setup import logs_dir
         directory = os.path.join(str(logs_dir()), 'ort-traces')
-    os.makedirs(directory, exist_ok=True)
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        # A diagnostic must not fail the render it observes.
+        _LOG.warning('ONNX Runtime operator traces disabled: cannot use %s', directory,
+                     exc_info=True)
+        return None
     return directory
 
 

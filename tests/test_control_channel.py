@@ -1307,6 +1307,9 @@ def test_diagnostic_options_are_reachable_and_take_effect_at_once(server, contro
         assert options["profile_performance"] is True and options["debug_logging"] is True
         assert control_window.profile_performance is True
         assert logs.debug_enabled()
+        refused = call(server, "option.set", name="debug_logging", value="false")
+        assert refused["ok"] is False and refused["error"]["code"] == "invalid_argument"
+        assert logs.debug_enabled()                 # a string does not change the switch
         control_window.render_manager.performance_report = {"outcome": "completed"}
         assert call(server, "render.result")["result"]["performance"] == {"outcome": "completed"}
     finally:
