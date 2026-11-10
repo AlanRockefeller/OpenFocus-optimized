@@ -103,3 +103,27 @@ def test_cli_diagnostics_need_no_gui_packages(tmp_path):
     assert runtime['automatic_threads']['maximum'] >= 1
     log = next((tmp_path / 'logs').glob('openfocus-*.log')).read_text(encoding='utf-8')
     assert 'event=render_resources ' in log
+
+
+@pytest.mark.parametrize('target', ['frame', 'output', 'depth'])
+def test_cli_refuses_a_profile_file_that_is_an_input_or_another_output(tmp_path, capsys, target):
+    """The report is written last, even after a failure: it must never replace a
+    source frame (also one found by expanding an input folder) or another output."""
+    from core.cli import EXIT_USAGE, run_cli
+    from utils.image_utils import imwrite_auto
+    stack = tmp_path / 'stack'
+    stack.mkdir()
+    for index, image in enumerate(_stack()):
+        assert imwrite_auto(str(stack / f'f{index}.png'), image)
+    output = tmp_path / 'out.png'
+    destination = {'frame': stack / 'f1.png', 'output': output,
+                   'depth': tmp_path / 'out_depth.png'}[target]
+    before = (stack / 'f1.png').read_bytes()
+    code = run_cli(['--input', str(stack), '--output', str(output), '--method', 'dct',
+                    '--threads', '1', '--depth-map', '--profile-performance', str(destination)])
+    assert code == EXIT_USAGE
+    message = capsys.readouterr().err
+    assert '--profile-performance' in message
+    assert ('overwrite an input image' in message) == (target == 'frame')
+    assert (stack / 'f1.png').read_bytes() == before
+    assert not output.exists()
