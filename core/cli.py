@@ -844,7 +844,8 @@ def _validate_alignment_report_path(args, paths=()):
         raise ValueError("--alignment-report must differ from input and output paths")
 
 
-def _write_alignment_report(path, payload):
+def _replace_text_file(path, text, prefix):
+    """Create the folder, then replace ``path`` only once ``text`` is fully written."""
     import tempfile
 
     directory = os.path.dirname(os.path.abspath(path))
@@ -852,16 +853,20 @@ def _write_alignment_report(path, payload):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
-                                         prefix=".openfocus_alignment_", suffix=".tmp",
+                                         prefix=prefix, suffix=".tmp",
                                          delete=False) as stream:
             temporary = stream.name
-            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
-            stream.write("\n")
+            stream.write(text)
         os.replace(temporary, path)
         temporary = None
     finally:
         if temporary is not None:
             os.unlink(temporary)
+
+
+def _write_alignment_report(path, payload):
+    _replace_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2,
+                                        allow_nan=False) + "\n", ".openfocus_alignment_")
 
 
 def _save_depth(args, fused_out: str) -> None:
@@ -1598,8 +1603,9 @@ def _run_cli_profiled(args) -> int:
         log_action('render.performance', **performance_profile.compact(report))
         print(performance_profile.summary(report), file=sys.stderr)
         if isinstance(args.profile_performance, str):
-            with open(args.profile_performance, 'w', encoding='utf-8') as stream:
-                stream.write(performance_profile.dumps(report) + '\n')
+            # After a long render: a failed write must not cost an earlier report.
+            _replace_text_file(args.profile_performance,
+                               performance_profile.dumps(report) + '\n', ".openfocus_profile_")
     except Exception as exc:
         print(f"warning: --profile-performance: {exc}", file=sys.stderr)
     return result

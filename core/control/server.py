@@ -900,10 +900,11 @@ class ControlServer(QObject):
         elif name == "reg_downscale_width":
             window.reg_downscale_width = max(64, int(value))
         elif name == "profile_performance":
-            window.profile_performance = bool(value)
+            window.profile_performance = _boolean(args, "value", required=True)
         elif name == "debug_logging":
+            # A string such as "false" must not switch detail on.
             from utils.logging_setup import set_debug_logging
-            window.debug_logging = bool(value)
+            window.debug_logging = _boolean(args, "value", required=True)
             set_debug_logging(window.debug_logging)
         else:
             raise ControlError("invalid_argument", f"Unknown option: {name}")

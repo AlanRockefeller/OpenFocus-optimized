@@ -132,9 +132,10 @@ reports `finished:true` with the reason and leaves the previous frames alone.
 `thread_count`, `use_gpu`, `tile_enabled`, `tile_block_size`, `tile_overlap`,
 `tile_threshold`, `preview`, `ai_batch_size`, `resource_preference`,
 `reg_downscale_width`, `profile_performance`, `debug_logging`. The last two are
-the Advanced Settings diagnostics: `profile_performance` profiles the following
-renders, and `debug_logging` switches detailed (`DEBUG`) logging at once, for
-the window and its render process. `app.state` reports both under `options`.
+the Advanced Settings diagnostics and take a JSON boolean (anything else is
+`invalid_argument`): `profile_performance` profiles the following renders, and
+`debug_logging` switches detailed (`DEBUG`) logging at once, for the window and
+its render process. `app.state` reports both under `options`.
 
 ### Render
 

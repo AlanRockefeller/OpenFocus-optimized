@@ -58,7 +58,7 @@ def test_cli_profiles_a_classical_method(tmp_path):
     stack.mkdir()
     for index, image in enumerate(_stack()):
         assert imwrite_auto(str(stack / f'f{index}.png'), image)
-    report = tmp_path / 'profile.json'
+    report = tmp_path / 'reports' / 'profile.json'       # the folder is created
     result = subprocess.run(
         [sys.executable, os.path.join(PROJECT_ROOT, 'main.py'), '--input', str(stack),
          '--output', str(tmp_path / 'out.png'), '--method', 'guided_filter', '--threads', '1',
