@@ -35,9 +35,13 @@ def _menu_window(qapp):
         "save_stack_as_multipage_tiff": staticmethod(stub),
         "save_processed_input_stack": staticmethod(stub),
     })()
+    window.output_manager = type("O", (), {
+        "export_all_results": staticmethod(stub),
+    })()
     window.source_manager = type("S", (), {
         "clear_image_stack": staticmethod(stub),
         "reset_current_stack": staticmethod(stub),
+        "prompt_and_load_frames": staticmethod(stub),
     })()
     window.label_manager = type("L", (), {
         "show_add_label_dialog": staticmethod(stub),
@@ -62,7 +66,7 @@ def _menu_window(qapp):
             'restore_default_settings', 'set_use_gpu', 'apply_theme', 'set_language',
             "check_for_updates", "install_update_now", "open_logs_folder",
             "show_quick_start", "show_environment_info", "show_feedback_dialog",
-            "show_contact_info"):
+            "show_contact_info", "show_account_dialog"):
         setattr(window, name, stub)
     return window
 

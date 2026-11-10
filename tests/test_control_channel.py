@@ -28,12 +28,17 @@ from utils.image_utils import imwrite_auto
 def control_window(qapp, monkeypatch, tmp_path):
     from main import OpenFocus
     from utils import recovery, settings_store
+    from core import frame_storage
+
+    # Deferred storage replies are exercised separately in test_storage_preflight.
+    monkeypatch.setattr(frame_storage, "automatic_preflight_may_block", lambda: False)
 
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     settings.clear()
     settings.setValue("ui/first_run_done", "1")
     settings.setValue("updates/last_check_epoch", 9999999999)
     settings.setValue("rendering/ai_cpu_warning_dismissed", True)
+    settings.setValue('ui/experimental_features', True)
     settings_store._settings_singleton = settings
     monkeypatch.setattr(recovery, "_base_dir", lambda: str(tmp_path / "recovery"))
     monkeypatch.setenv("OPENFOCUS_CONTROL_FILE", str(tmp_path / "control.json"))
@@ -342,7 +347,7 @@ try:
     assert session.call("ping")["pong"] is True
     deadline = time.monotonic() + 10
     context = session.call("ui.context")
-    while not any(dialog["class"] == "WelcomeDialog"
+    while not any(dialog["class"] == "AccountDialog"
                   and dialog["visible"] and dialog["modal"]
                   for dialog in context["dialogs"]):
         assert time.monotonic() < deadline, context
@@ -357,7 +362,7 @@ finally:
         client = subprocess.run([sys.executable, "-c", script], cwd=root, env=env,
                                 capture_output=True, text=True, timeout=45)
         assert client.returncode == 0, client.stderr
-        assert gui.wait(timeout=30) == 0
+        assert gui.wait(timeout=30) == 0, log_path.read_text(encoding="utf-8", errors="replace")
         assert not discovery.exists()
     finally:
         if gui.poll() is None:
@@ -561,9 +566,13 @@ def test_mouse_keyboard_and_context(server, control_window):
     QTest.qWait(20)
 
 
-def test_generic_action_answers_file_dialog_and_loads_stack(server, stack_frames):
+def test_generic_action_answers_file_dialog_and_loads_stack(server, stack_frames, monkeypatch):
     from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QFileDialog
+    from utils import file_dialogs
 
+    # Avoid blocking the test in the OS picker if routing regresses.
+    monkeypatch.setattr(file_dialogs, "_native_folder_paths", lambda *args: [])
     token = server.token
     answered = {}
 
@@ -586,11 +595,21 @@ def test_generic_action_answers_file_dialog_and_loads_stack(server, stack_frames
     timer.setInterval(30)
     timer.timeout.connect(answer_when_open)
     timer.start()
+    watchdog = QTimer()
+    watchdog.setSingleShot(True)
+    def close_stranded():
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QFileDialog) and widget.isVisible():
+                widget.reject()
+    watchdog.timeout.connect(close_stranded)
+    watchdog.start(5000)
     scheduled = call(server, "ui.trigger", token=token, key="action_open_folder")
     assert scheduled["result"]["scheduled"] is True
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline and "value" not in answered:
         QTest.qWait(20)
+    watchdog.stop()
+    timer.stop()
     assert "error" not in answered, answered.get("error")
     assert answered["value"]["accepted"] is True
     deadline = time.monotonic() + 20
@@ -599,6 +618,100 @@ def test_generic_action_answers_file_dialog_and_loads_stack(server, stack_frames
         QTest.qWait(20)
         frames = call(server, "stack.frames", token=token)["result"]
     assert frames["count"] == 3
+
+
+@pytest.mark.parametrize("trigger", ["action", "click"])
+@pytest.mark.parametrize("picker,cancel", [
+    ("file", False), ("file", True), ("save", False),
+    ("folder", False), ("folder", True),
+])
+def test_control_action_uses_addressable_picker_and_restores_native(
+        server, control_window, tmp_path, monkeypatch, picker, cancel, trigger):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtGui import QAction
+    from PyQt6.QtWidgets import QFileDialog, QPushButton
+    from ui import control_surface
+    from utils import file_dialogs
+
+    source = tmp_path / "frame.tif"
+    source.write_bytes(b"picker test")
+    target = tmp_path if picker == "folder" else source
+    if picker == "save":
+        target = tmp_path / "output.tif"
+    result = {}
+    action = QAction(control_window)
+
+    def open_picker():
+        if picker == "folder":
+            result["selection"] = file_dialogs.FileDialog.getExistingDirectory(
+                control_window, "Choose folder", str(tmp_path))
+        elif picker == "save":
+            result["selection"] = file_dialogs.FileDialog.getSaveFileName(
+                control_window, "Save file", str(tmp_path), "TIFF (*.tif)")[0]
+        else:
+            result["selection"] = file_dialogs.FileDialog.getOpenFileName(
+                control_window, "Open file", str(tmp_path), "TIFF (*.tif)")[0]
+
+    action.triggered.connect(open_picker)
+    button = QPushButton("Open picker", control_window)
+    button.setObjectName("test_picker_button")
+    button.clicked.connect(open_picker)
+    button.show()
+    monkeypatch.setattr(control_surface, "find_action", lambda window, key: action)
+    # If the control context is missing, fail instead of showing an OS dialog.
+    def native_unexpected(*args, **kwargs):
+        result["native_called"] = True
+        return ([], "") if picker != "folder" else []
+    monkeypatch.setattr(file_dialogs, "_pick_native_file", native_unexpected)
+    monkeypatch.setattr(file_dialogs, "_native_folder_paths", native_unexpected)
+
+    def answer():
+        dialogs = call(server, "dialog.list")["result"]["dialogs"]
+        if any(item["class"] == "QFileDialog" for item in dialogs):
+            result["response"] = call(server, "dialog.file", cancel=cancel,
+                                      **({} if cancel else {"path": str(target)}))
+            if "error" in result["response"]:
+                call(server, "dialog.file", cancel=True)
+            timer.stop()
+
+    timer = QTimer()
+    timer.setInterval(20)
+    timer.timeout.connect(answer)
+    timer.start()
+    # A failed enumeration must not leave the nested dialog loop hanging.
+    def close_stranded():
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QFileDialog) and widget.isVisible():
+                widget.reject()
+    watchdog = QTimer()
+    watchdog.setSingleShot(True)
+    watchdog.timeout.connect(close_stranded)
+    watchdog.start(3000)
+    if trigger == "action":
+        assert call(server, "ui.trigger", key="picker")["result"]["scheduled"]
+    else:
+        matches = call(server, "ui.find", object_name="test_picker_button")["result"]["matches"]
+        assert len(matches) == 1
+        assert call(server, "ui.click", path=matches[0]["path"],
+                    **{"async": True})["result"]["scheduled"]
+    assert wait_until(lambda: "selection" in result, timeout=5), result
+    timer.stop()
+    watchdog.stop()
+    assert "native_called" not in result
+    assert "result" in result["response"], result
+    if cancel:
+        assert result["selection"] == ""
+    else:
+        assert Path(result["selection"]) == target
+    assert file_dialogs._use_native_file_dialog()
+    assert file_dialogs._use_native_folder_dialog()
+
+    # A subsequent ordinary picker still takes the native backend.
+    if picker == "folder":
+        file_dialogs.FileDialog.getExistingDirectory(control_window, "Ordinary")
+    else:
+        file_dialogs.FileDialog.getOpenFileName(control_window, "Ordinary")
+    assert result["native_called"]
 
 
 def test_unmanaged_message_box_is_addressable(server, control_window):
@@ -951,6 +1064,8 @@ def test_project_open_sets_lifecycle_state(server, control_window, monkeypatch):
     from utils import project_file
 
     assert getattr(control_window, "project_path", None) in (None, "")
+    # Fixture settings can mark the untitled project dirty before this test.
+    control_window._clear_project_dirty()
     captured = {}
 
     def fake_apply(window, state, on_loaded=None, on_error=None):
@@ -959,7 +1074,10 @@ def test_project_open_sets_lifecycle_state(server, control_window, monkeypatch):
     monkeypatch.setattr(project_file, "validate_project",
                         lambda path: (True, "", {"sources": []}))
     monkeypatch.setattr(project_file, "apply_project", fake_apply)
-    call(server, "project.open", path="life.ofproj")["result"]
+    result = call(server, "project.open", path="life.ofproj")
+    assert result["ok"], result
+    assert getattr(control_window, "project_path", None) in (None, "")
+    control_window._mark_project_dirty()
     captured["on_loaded"]()
     assert control_window.project_path == "life.ofproj"
     assert control_window._project_dirty is False
@@ -1292,6 +1410,27 @@ def test_option_set_keeps_checkboxes_in_sync(server, control_window, monkeypatch
     call(server, "option.set", name="reverse_order", value=False)
 
 
+def test_diagnostic_options_are_reachable_and_take_effect_at_once(server, control_window):
+    from utils import logging_setup as logs
+    assert call(server, "app.state")["result"]["options"]["profile_performance"] is False
+    try:
+        call(server, "option.set", name="profile_performance", value=True)
+        call(server, "option.set", name="debug_logging", value=True)
+        options = call(server, "app.state")["result"]["options"]
+        assert options["profile_performance"] is True and options["debug_logging"] is True
+        assert control_window.profile_performance is True
+        assert logs.debug_enabled()
+        refused = call(server, "option.set", name="debug_logging", value="false")
+        assert refused["ok"] is False and refused["error"]["code"] == "invalid_argument"
+        assert logs.debug_enabled()                 # a string does not change the switch
+        control_window.render_manager.performance_report = {"outcome": "completed"}
+        assert call(server, "render.result")["result"]["performance"] == {"outcome": "completed"}
+    finally:
+        call(server, "option.set", name="debug_logging", value=False)
+        call(server, "option.set", name="profile_performance", value=False)
+    assert not logs.debug_enabled()
+
+
 def test_output_delete_clears_the_result_and_protects_retouch(server, stack_frames):
     token = server.token
     call(server, "stack.load", token=token, folder=str(stack_frames))
@@ -1472,6 +1611,17 @@ def test_output_export_routes_aligned_records(server, control_window, monkeypatc
     assert result["kind"] == "aligned"
     assert Path(result["path"]).is_file()
     assert captured["destination"] == str(tmp_path)
+
+
+def test_control_channel_respects_experimental_opt_in(server, control_window):
+    from locales import trans
+
+    control_window.experimental_features = False
+    control_window.apply_experimental_features()
+    response = call(server, 'method.set', id='guided_filter')
+    assert response['error']['code'] == 'invalid_argument'
+    assert response['error']['message'] == trans.t('experimental_locked_hint')
+    assert control_window.current_fusion_method() != 'guided_filter'
 
 
 def test_alignment_only_selection_is_accepted(server, control_window):
