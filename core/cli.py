@@ -936,11 +936,18 @@ def _result_outputs(args, fused_out: str):
     return outputs
 
 
+def _profile_destination(args):
+    """The --profile-performance FILE, or None when no file was requested."""
+    path = getattr(args, "profile_performance", None)
+    return path if isinstance(path, str) else None
+
+
 def _run_outputs(args, fused_out: str):
-    """`_result_outputs` plus the run-wide JSON summary and alignment report."""
+    """`_result_outputs` plus the run-wide JSON summary, alignment report and profile."""
     outputs = _result_outputs(args, fused_out)
     for flag, path in (("--json", getattr(args, "json", None)),
-                       ("--alignment-report", getattr(args, "alignment_report", None))):
+                       ("--alignment-report", getattr(args, "alignment_report", None)),
+                       ("--profile-performance", _profile_destination(args))):
         if path:
             outputs.append((flag, path))
     return outputs
@@ -1616,13 +1623,6 @@ def _run_cli_parsed(args) -> int:
         if args.suggest_duplicates or args.output_dir or args.group_size or args.dry_run:
             print("error: --profile-performance requires a single, non-grouped fusion run", file=sys.stderr)
             return EXIT_USAGE
-        from utils.path_identity import same_path
-        if isinstance(args.profile_performance, str) and any(
-                path and same_path(args.profile_performance, path)
-                for path in (args.output, args.json, args.alignment_report, *args.input)):
-            print("error: --profile-performance FILE must differ from the inputs and other outputs",
-                  file=sys.stderr)
-            return EXIT_USAGE
     if args.alignment_report:
         if args.suggest_duplicates or args.output_dir or args.group_size or args.dry_run:
             print("error: --alignment-report requires a single, non-grouped fusion run", file=sys.stderr)
@@ -1842,7 +1842,7 @@ def _run_cli_parsed(args) -> int:
                 if batch_mode:
                     _validate_native_paths(paths)
             _validate_native_paths(all_paths)
-            destinations = [args.json, args.alignment_report]
+            destinations = [args.json, args.alignment_report, _profile_destination(args)]
             if batch_mode:
                 destinations.extend(os.path.join(args.output_dir,
                     (os.path.basename(os.path.abspath(folder)) or "stack") + args._batch_ext)
