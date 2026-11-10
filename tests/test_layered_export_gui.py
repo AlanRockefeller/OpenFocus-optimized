@@ -11,6 +11,8 @@ from controllers.export_manager import ExportManager, LayeredTiffWorker
 from controllers.output_manager import OutputRecord
 from core.render_context import RenderContext, SourceFrame
 
+pytestmark = pytest.mark.usefixtures('isolated_clipboard')
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -149,8 +151,10 @@ def test_cancel_or_failure_does_not_mark_output_exported(qapp, monkeypatch, tmp_
     monkeypatch.setattr('controllers.export_manager.show_error_box', lambda *args: None)
     monkeypatch.setattr(LayeredTiffWorker, 'start', lambda worker: None)
     manager = window.export_manager
+    qapp.clipboard().setText('sentinel')
     manager.export_layered_tiff(record, record, str(tmp_path / 'result.tif'))
     manager._layered_tiff_completed(False, message)
+    assert qapp.clipboard().text() == 'sentinel'
     assert not record.exported and record.protected and not record.export_path
     manager._layered_tiff_finished()
     window.close()
@@ -217,6 +221,7 @@ def test_save_as_linear_dng_writes_original_camera_pixels(qapp, monkeypatch, tmp
     window.output_manager.save_output_image_as(item)
     _wait_for_export(qapp, lambda: window.output_manager.linear_dng_worker)
     assert not errors and record.exported
+    assert qapp.clipboard().text() == str(target)
     with tifffile.TiffFile(target) as tif:
         assert tif.pages[0].photometric.value == 34892
         np.testing.assert_array_equal(tif.asarray(), image[..., ::-1])
@@ -241,6 +246,7 @@ def test_save_as_layered_tiff_keeps_source_layers(qapp, monkeypatch, tmp_path):
     window.output_manager.save_output_image_as(item)
     _wait_for_export(qapp, lambda: window.export_manager.layered_worker)
     assert not errors and record.exported
+    assert qapp.clipboard().text() == str(target)
     layers = TiffImageSourceData.fromtiff(target).layers.layers
     assert len(layers) == 2
     assert not int(layers[0].flags) & 2 and int(layers[1].flags) & 2

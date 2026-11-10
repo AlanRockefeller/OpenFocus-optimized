@@ -12,7 +12,7 @@ on:
         type: boolean
         default: true
       run_engineering:
-        description: Run the remote HF9 large-source acceptance gates
+        description: Run the remote OpenFocus large-source acceptance gates
         type: boolean
         default: false
       run_mosaic_engineering:
@@ -48,10 +48,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Check macOS GUI shutdown
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONFAULTHANDLER: '1'
+        run: python -m pytest -o addopts='' tests/test_gui_lifecycle.py -x -q --timeout=60 --timeout-method=thread
+
+      - name: Check Windows GUI shutdown
+        if: runner.os == 'Windows'
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONFAULTHANDLER: '1'
+        run: python -m pytest -o addopts='' tests/test_gui_lifecycle.py tests/test_control_channel.py::test_default_gui_launch_and_cross_process_client tests/test_activity_logging.py -x -q --timeout=90 --timeout-method=thread
+
       - name: Run test suite
         id: pytest
         shell: bash
-        timeout-minutes: 15
+        timeout-minutes: 20
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONFAULTHANDLER: '1'
@@ -120,7 +134,7 @@ jobs:
           "$RUNNER_TEMP/openfocus-headless/bin/python" -I tools/headless_wheel_smoke.py
 
   engineering:
-    name: HF9 remote engineering acceptance
+    name: OpenFocus remote engineering acceptance
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_engineering }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -169,7 +183,7 @@ jobs:
           import tifffile
           cv2.setNumThreads(0)
           cv2.ocl.setUseOpenCL(False)
-          root = Path(os.environ['RUNNER_TEMP']) / 'hf9-engineering'
+          root = Path(os.environ['RUNNER_TEMP']) / 'openfocus-engineering'
           reports = root / 'reports'
           previews = root / 'previews'
           reports.mkdir(parents=True, exist_ok=True)
@@ -252,7 +266,7 @@ jobs:
           import sys
 
           os.sched_setaffinity(0, sorted(os.sched_getaffinity(0))[:2])
-          root = Path(os.environ['RUNNER_TEMP']) / 'hf9-engineering'
+          root = Path(os.environ['RUNNER_TEMP']) / 'openfocus-engineering'
           report_path = root / 'reports' / 'source-open.json'
           report_path.parent.mkdir(parents=True, exist_ok=True)
           command = [sys.executable, 'tools/source_open_benchmark.py',
@@ -279,10 +293,10 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: hf9-engineering-${{ github.run_id }}-${{ github.run_attempt }}
+          name: openfocus-engineering-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/hf9-engineering/reports/*.json
-            ${{ runner.temp }}/hf9-engineering/previews/*.png
+            ${{ runner.temp }}/openfocus-engineering/reports/*.json
+            ${{ runner.temp }}/openfocus-engineering/previews/*.png
           if-no-files-found: warn
           retention-days: 14
 

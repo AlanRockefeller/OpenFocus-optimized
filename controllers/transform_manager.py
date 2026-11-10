@@ -69,18 +69,20 @@ class TransformManager:
         base_scale = float(getattr(window, "base_scale_factor", 1.0) or 1.0)
         base_scale = min(1.0, max(0.01, base_scale))
         current_scale = min(base_scale, float(getattr(window, "current_scale_factor", 1.0) or 1.0))
-        dialog = DownsampleDialog(window, initial_scale=current_scale, max_scale=base_scale)
+        base_height, base_width = window.base_images[0].shape[:2]
+        dialog = DownsampleDialog(window, initial_scale=current_scale, max_scale=base_scale,
+                                  base_dimensions=(base_width, base_height))
         if not dialog.exec():
             return
 
         new_scale = dialog.get_scale_factor()
-        if abs(new_scale - current_scale) < 0.001:
+        if new_scale == current_scale:
             return
 
         window.push_undo()
         old_height, old_width = window.raw_images[0].shape[:2]
         try:
-            if abs(new_scale - base_scale) < 0.001:
+            if new_scale >= base_scale:
                 window.raw_images = list(window.base_images)
             else:
                 factor = new_scale / base_scale
@@ -106,7 +108,8 @@ class TransformManager:
             show_success_box(
                 window,
                 trans.t("msg_success"),
-                trans.t("msg_resize_success_text").format(percent=int(new_scale * 100)),
+                trans.t("msg_resize_success_text").format(
+                    percent=f'{new_scale * 100:.6f}'.rstrip('0').rstrip('.')),
             )
         except Exception as exc:  # pylint: disable=broad-except
             show_error_box(
@@ -121,6 +124,7 @@ class TransformManager:
         window = self.window
         try:
             if not window.raw_images:
+                self._update_sharpness_curve(window)
                 window.stack_images = []
                 window.source_manager.update_file_list([], [])
                 window.source_manager.update_slider_range()
@@ -239,13 +243,14 @@ class TransformManager:
                 img = display_image(img)
                 h, w = img.shape[:2]
                 scale = 320.0 / max(h, w)
-                small = cv2.resize(img, (int(w * scale), int(h * scale)),
+                small = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
                                    interpolation=cv2.INTER_AREA) if scale < 1.0 else img
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                gray = small if small.ndim == 2 else cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                 values.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
             curve.set_data(values)
             curve.set_current(window.current_display_index)
         except Exception as exc:
+            curve.clear()
             print(f"sharpness analysis failed: {exc}")
 
     def reset_roi_selection(self) -> None:
@@ -262,6 +267,7 @@ class TransformManager:
         window.roi_mode_active = False
         window.roi_source_revision = None
         window.roi_included_indices = None
+        window.roi_alignment_key = None
 
         result_view = getattr(window, "lbl_result_img", None)
         if result_view is not None:
@@ -298,6 +304,9 @@ class TransformManager:
         window._wipe_preview_record = None
         window.last_render_context = None
         render = getattr(window, "render_manager", None)
+        clear_prepared = getattr(render, 'clear_prepared_cache', None)
+        if callable(clear_prepared):
+            clear_prepared()
         if (render is not None and getattr(render, "worker", None) is None
                 and not getattr(render, "_render_pending", False)):
             render._render_context = None
@@ -309,6 +318,10 @@ class TransformManager:
         # 清空ROI对齐缓存（含结果视图上的选区与按钮状态）
         self.reset_roi_selection()
 
+        output = getattr(window, 'output_manager', None)
+        cancel = getattr(output, 'cancel_registration_preview', None)
+        if callable(cancel):
+            cancel()
         window.registration_results = []
         window.registration_frame_ids = []
         window.registered_source_indices = []
@@ -333,6 +346,10 @@ class TransformManager:
         else:
             window.fusion_result = None
             window.fusion_results = []
+
+            clear_previews = getattr(output, 'clear_registration_previews', None)
+            if callable(clear_previews):
+                clear_previews()
 
             if hasattr(window, "output_list"):
                 window.output_list.clear()
