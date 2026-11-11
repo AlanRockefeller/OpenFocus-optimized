@@ -6,6 +6,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 - Offer optional account sign-in with a skippable first-launch and update prompt.
 - Show the signed-in account in Help and provide browser account management and sign-out.
 - Restore an existing browser account at startup and open the account center using a short-lived handoff.
