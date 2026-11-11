@@ -54,6 +54,15 @@ def test_ram_only_admission_tracks_lost_and_unknown_memory(monkeypatch):
             policy.require_memory(required, policy.probe_memory())
 
 
+def test_ram_only_admission_does_not_query_cpu_topology(monkeypatch):
+    from core.multi_focus_fusion import memory_budget_bytes
+
+    monkeypatch.setattr(policy, 'cpu_limits',
+                        lambda: pytest.fail('CPU topology queried for RAM admission'))
+    _probe(monkeypatch, 8 * GiB)
+    assert memory_budget_bytes() == policy.ram_ceiling(_snapshot())
+
+
 def test_fixed_allocations_reduce_concurrency_before_workers():
     plan = policy.plan_execution(_workload(), _snapshot(), ram_budget_override=1100)
     assert (plan.workers, plan.native_threads, plan.max_in_flight) == (3, 1, 3)
