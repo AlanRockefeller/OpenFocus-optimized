@@ -338,3 +338,38 @@ def test_command_line_export_and_errors(tmp_path, capsys):
     assert "r1.png has changed" in capsys.readouterr().err
     assert tool.main([str(tmp_path / "absent.png")]) == 2
     assert "not found" in capsys.readouterr().err
+
+
+def _run_tool(*arguments, cwd=ROOT):
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    env.pop("QT_QPA_PLATFORMTHEME", None)
+    # A window would block until the timeout; the tool must exit first.
+    return subprocess.run([sys.executable, os.path.join(ROOT, "tools", "flip_review.py"),
+                           *arguments], cwd=cwd, env=env, capture_output=True, text=True,
+                          timeout=60)
+
+
+def test_command_line_fails_before_opening_a_window(tmp_path):
+    import cv2
+    import numpy as np
+    first, second = str(tmp_path / "a.png"), str(tmp_path / "b.png")
+    cv2.imwrite(first, np.zeros((12, 16, 3), np.uint8))
+    cv2.imwrite(second, np.zeros((13, 16, 3), np.uint8))
+    record = str(tmp_path / "review.json")
+    result = _run_tool(first, second, "--review", record)
+    assert result.returncode == 2
+    assert "16x12: a.png" in result.stderr and "16x13: b.png" in result.stderr
+
+    broken = tmp_path / "c.png"
+    broken.write_bytes(b"not an image")
+    result = _run_tool(first, str(broken), "--review", record)
+    assert result.returncode == 2 and "Cannot read c.png" in result.stderr
+
+    cv2.imwrite(second, np.full((12, 16, 3), 9, np.uint8))
+    review_set = model.resolve_inputs([first, second])
+    stale = model.ReviewRecord.new(review_set, [model.identify(first, 16, 12),
+                                                model.identify(first, 16, 12)], record)
+    stale.save()
+    result = _run_tool(first, second, "--review", record)
+    assert result.returncode == 2
+    assert "does not match" in result.stderr and "--new-review" in result.stderr

@@ -425,3 +425,142 @@ def test_jumping_to_a_pin_from_fit_shows_it_at_100_percent(qapp, tmp_path):
         assert viewer.canvas.selected_pin == pid
     finally:
         viewer.shutdown()
+
+
+_RATIO_SCRIPT = r'''
+import sys, time
+import cv2, numpy as np
+from PyQt6.QtCore import QPoint, QPointF, Qt
+from PyQt6.QtGui import QWheelEvent
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication
+app = QApplication([])
+from core import flip_review as model
+from widgets.flip_review import FlipReviewViewer
+folder, expected = sys.argv[1], float(sys.argv[2])
+rng = np.random.default_rng(3)
+paths = []
+for index in range(2):
+    path = f"{folder}/r{index}.png"
+    cv2.imwrite(path, rng.integers(0, 255, (300, 400, 3), dtype=np.uint8))
+    paths.append(path)
+viewer = FlipReviewViewer(model.resolve_inputs(paths), f"{folder}/review.json")
+viewer.resize(1000, 700)
+viewer.show()
+deadline = time.monotonic() + 30
+while viewer.record is None or any(e.loading for e in viewer._entries):
+    assert time.monotonic() < deadline and viewer.error is None
+    app.processEvents()
+canvas, view = viewer.canvas, viewer.canvas.view
+ratio = canvas.devicePixelRatioF()
+assert ratio == expected, ratio
+assert (view.view_w, view.view_h) == (round(canvas.width() * ratio), round(canvas.height() * ratio))
+# Fit is computed against the device size of the canvas.
+assert view.fit and abs(view.scale - min(view.view_w / 400, view.view_h / 300)) < 1e-9
+source = viewer.canvas.levels[0].array
+
+def check(scale):
+    view.zoom_to(scale)
+    view.center_on(200, 150)
+    viewer._view_changed()
+    canvas.labels_visible = False
+    image = canvas.grab().toImage()
+    assert (image.width(), image.height()) == (view.view_w, view.view_h)
+    ox, oy = view.origin()
+    block = int(scale)
+    for iy in range(140, 160, 3):
+        for ix in range(190, 210, 3):
+            b, g, r = (int(v) for v in source[iy, ix])
+            for dy in range(block):
+                for dx in range(block):
+                    c = image.pixelColor(int(ox + ix * block + dx), int(oy + iy * block + dy))
+                    assert (c.red(), c.green(), c.blue()) == (r, g, b), (scale, ix, iy, dx, dy)
+check(1.0)   # one image pixel per device pixel
+check(8.0)   # exact 8x8 device blocks
+# A click lands on the image pixel under it.
+ox, oy = view.origin()
+device = (ox + 203 * 8 + 4, oy + 151 * 8 + 4)
+QTest.mouseClick(canvas, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier,
+                 QPoint(round(device[0] / ratio), round(device[1] / ratio)))
+pin = viewer.record.pins[-1]
+assert (pin["x"], pin["y"]) == (203, 151), pin
+# The wheel keeps the image point under the cursor.
+view.zoom_to(4.0)
+view.center_on(200, 150)
+viewer._view_changed()
+logical = QPointF(canvas.width() / 2 - 31.0, canvas.height() / 2 + 17.0)
+before = view.view_to_image(logical.x() * ratio, logical.y() * ratio, exact=True)
+event = QWheelEvent(logical, canvas.mapToGlobal(logical), QPoint(0, 0), QPoint(0, 120),
+                    Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                    Qt.ScrollPhase.NoScrollPhase, False)
+app.sendEvent(canvas, event)
+after = view.view_to_image(logical.x() * ratio, logical.y() * ratio, exact=True)
+assert view.scale == 6.0 and max(abs(a - b) for a, b in zip(after, before)) < 1e-6
+viewer.shutdown()
+print("RATIO-OK", ratio)
+'''
+
+
+@pytest.mark.parametrize("ratio", ["2", "1.5"])
+def test_zoom_is_exact_in_device_pixels(tmp_path, ratio):
+    import subprocess
+    import sys
+    script = tmp_path / "ratio_check.py"
+    script.write_text(_RATIO_SCRIPT, encoding="utf-8")
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_SCALE_FACTOR=ratio,
+               PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env.pop("QT_QPA_PLATFORMTHEME", None)
+    result = subprocess.run([sys.executable, str(script), str(tmp_path), ratio], env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"RATIO-OK {float(ratio)}" in result.stdout
+
+
+def test_each_candidate_has_a_distinct_colour(viewer):
+    colours = [viewer.candidate_color(cid) for cid in viewer.order]
+    assert len(set(colours)) == 3 and None not in colours
+    assert viewer.canvas.hud_color == colours[0]
+    viewer.next()
+    assert viewer.canvas.hud_color == colours[1]
+    assert not viewer.panel.candidate_list.item(1).icon().isNull()
+
+
+def test_blind_colours_follow_letters_not_pictures(qapp, tmp_path):
+    from utils.design_tokens import CATEGORICAL
+    paths = _images(tmp_path, 4)
+    viewer = _viewer(qapp, tmp_path, paths)
+    try:
+        for seed in range(3):
+            viewer.record.stop_blind()
+            viewer.record.start_blind(__import__("random").Random(seed))
+            viewer._reorder(viewer.current_cid)
+            letters = {viewer._label(cid)[-1]: viewer.candidate_color(cid) for cid in viewer.order}
+            # A is always the first colour, whichever picture A is.
+            assert letters == {letter: CATEGORICAL[i] for i, letter in enumerate("ABCD")}
+        before = {cid: viewer.candidate_color(cid) for cid in viewer.order}
+        viewer.reveal()
+        assert {cid: viewer.candidate_color(cid) for cid in viewer.order} == before
+    finally:
+        viewer.shutdown()
+
+
+def test_fullscreen_hides_the_panel_and_restores_it(viewer):
+    canvas, panel = viewer.canvas, viewer.panel
+    assert not panel.isHidden()
+    QTest.keyClick(canvas, Qt.Key.Key_F)
+    assert viewer.window().isFullScreen() and panel.isHidden()
+    QTest.keyClick(canvas, Qt.Key.Key_N)
+    assert not panel.isHidden()
+    QTest.keyClick(canvas, Qt.Key.Key_N)
+    QTest.keyClick(canvas, Qt.Key.Key_Escape)
+    assert not viewer.window().isFullScreen() and not panel.isHidden()
+    # A panel hidden before fullscreen stays hidden afterwards.
+    QTest.keyClick(canvas, Qt.Key.Key_N)
+    QTest.keyClick(canvas, Qt.Key.Key_F11)
+    QTest.keyClick(canvas, Qt.Key.Key_F11)
+    assert not viewer.window().isFullScreen() and panel.isHidden()
+    # Leaving fullscreen through the window (not our keys) also restores it.
+    QTest.keyClick(canvas, Qt.Key.Key_N)
+    QTest.keyClick(canvas, Qt.Key.Key_F)
+    viewer.window().showNormal()
+    assert not panel.isHidden()

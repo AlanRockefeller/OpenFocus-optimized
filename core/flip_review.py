@@ -642,6 +642,14 @@ class ReviewRecord:
             return blind_letter(self._data["blind"]["order"].index(cid))
         return self.label(cid)
 
+    def color_index(self, cid: str) -> int:
+        """Stable colour slot: the blind position once a blind order exists,
+        so colours follow the neutral letters and never identify a picture."""
+        order = self._data["blind"]["order"]
+        if order and cid in order:
+            return order.index(cid)
+        return self.set_ids.index(cid)
+
     def start_blind(self, rng: Optional[random.Random] = None) -> None:
         """Shuffle the viewing order and hide labels until ``reveal()``."""
         order = self.set_ids

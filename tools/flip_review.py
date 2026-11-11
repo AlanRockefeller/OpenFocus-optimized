@@ -64,6 +64,49 @@ def _identities(review_set: model.ReviewSet):
     return identities
 
 
+def _header_size(path: str):
+    """Displayed (width, height) from the file header, without decoding pixels."""
+    from core.image_loader import source_dimensions
+    width, height = source_dimensions(path)
+    if not path.lower().endswith((".tif", ".tiff")):
+        # decode_image applies the EXIF orientation of these formats.
+        try:
+            from PIL import Image
+            with Image.open(path) as image:
+                if image.getexif().get(274) in (5, 6, 7, 8):
+                    width, height = height, width
+        except Exception:
+            pass
+    return int(width), int(height)
+
+
+def preflight(review_set: model.ReviewSet, record_path: str, *, new_review: bool = False):
+    """Fail before any window opens: unreadable files, unequal sizes, a
+    record for other pictures. Returns known SHA-256 values or None."""
+    sizes = []
+    for candidate in review_set.candidates:
+        name = os.path.basename(candidate.path)
+        try:
+            width, height = _header_size(candidate.path)
+        except Exception as exc:
+            raise model.ReviewError(f"Cannot read {name}: {exc}") from None
+        sizes.append((name, width, height))
+    model.check_dimensions(sizes)
+    if not os.path.exists(record_path):
+        return None
+    identities = [model.identify(c.path, w, h)
+                  for c, (_name, w, h) in zip(review_set.candidates, sizes)]
+    try:
+        model.ReviewRecord.open(record_path, review_set, identities)
+    except model.ReviewError:
+        if not new_review:
+            raise
+        model.start_new_record(record_path, review_set, identities)
+        print(f"kept the old record as a backup; starting a new one at {record_path}",
+              file=sys.stderr)
+    return [identity.sha256 for identity in identities]
+
+
 def _export(args, review_set) -> int:
     path = args.review or (review_set.default_record_path() if review_set else None)
     if not path:
@@ -93,7 +136,13 @@ def main(argv=None) -> int:
             _parser().print_usage(sys.stderr)
             print("error: give images, a folder or a review-set manifest", file=sys.stderr)
             return 2
-    except model.ReviewError as exc:
+        record_path = args.review or review_set.default_record_path()
+        known_sha256 = preflight(review_set, record_path, new_review=args.new_review)
+    except model.RecordMismatch as exc:
+        print(f"error: {exc}\n(pass --new-review to keep it as a backup and start a new "
+              "record, or --review PATH to use another record)", file=sys.stderr)
+        return 2
+    except (model.ReviewError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -107,37 +156,40 @@ def main(argv=None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     set_current_theme(args.theme)
     app.setStyleSheet(get_theme_style(args.theme))
-    record_path = args.review or review_set.default_record_path()
     viewer = FlipReviewViewer(
         review_set, record_path,
         memory_budget=args.memory_mb * (1 << 20) if args.memory_mb else None,
-        blind=args.blind, reviewer=args.reviewer)
+        blind=args.blind, reviewer=args.reviewer, known_sha256=known_sha256)
     viewer.setWindowTitle(text("window_title", title=review_set.title or text("untitled")))
     exit_code = {"value": 0}
 
     def failed(message):
+        # A decode failure the header check could not foresee: do not leave
+        # an empty window open.
+        print(f"error: {message}", file=sys.stderr)
+        exit_code["value"] = 1
+        app.exit(1)
+
+    def mismatch(message):
+        # Only reachable if the files changed after the preflight check.
+        print(f"error: {message}", file=sys.stderr)
+        exit_code["value"] = 2
+        app.exit(2)
+
+    def save_failed(message):
         print(f"error: {message}", file=sys.stderr)
         exit_code["value"] = 1
 
-    def mismatch(message):
-        if args.new_review:
-            viewer.start_new_record()
-            print(f"started a new review record at {record_path}", file=sys.stderr)
-        else:
-            print(f"warning: {message}\n(not saving; pass --new-review or --review PATH)",
-                  file=sys.stderr)
-
     viewer.loadFailed.connect(failed)
     viewer.recordMismatch.connect(mismatch)
-    viewer.saveFailed.connect(failed)
+    viewer.saveFailed.connect(save_failed)
     screen = QGuiApplication.primaryScreen()
     if screen is not None:
         area = screen.availableGeometry()
         viewer.resize(int(area.width() * 0.85), int(area.height() * 0.85))
+    viewer.show()
     if args.fullscreen:
-        viewer.showFullScreen()
-    else:
-        viewer.show()
+        viewer.toggle_fullscreen()
     viewer.focus_canvas()
     app.aboutToQuit.connect(viewer.shutdown)
     code = app.exec()

@@ -27,7 +27,7 @@ TEXT = {
         "Ctrl+1..9  show candidate k\n"
         "1..5  rate (press again to clear)    B  best of set\n"
         "+ / -  zoom    0  fit    Z  fit / 100 %    wheel: zoom at cursor\n"
-        "drag  pan    F or F11  fullscreen    Esc  leave fullscreen\n"
+        "drag  pan    F or F11  fullscreen (hides notes)    Esc  leave fullscreen\n"
         "H  hide labels    D  difference    Shift+D  difference gain\n"
         "R  use as difference reference    P or Ctrl+click  pin a note\n"
         "N  notes panel    C  comment    ? or F1  this help"),

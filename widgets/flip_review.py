@@ -29,8 +29,9 @@ from typing import List, Optional
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
+from PyQt6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QColor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen,
+                         QPixmap)
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QFrame, QGroupBox,
                              QHBoxLayout, QLabel, QLineEdit, QListWidget,
                              QListWidgetItem, QPlainTextEdit, QPushButton,
@@ -345,7 +346,14 @@ def _theme_palette():
 
 
 class FlipCanvas(QWidget):
-    """Paints the current candidate through the shared ViewState."""
+    """Paints the current candidate through the shared ViewState.
+
+    The view works in device pixels: 100 % is one image pixel per physical
+    screen pixel at any device pixel ratio (2, 1.25, 1.5 ...), and the image
+    is painted with a 1/ratio painter scale so every block lands on whole
+    device pixels. Events arrive in logical pixels and are multiplied by the
+    ratio; the label chip, status and pin markers keep a fixed logical size.
+    """
 
     pinPlaced = pyqtSignal(int, int)
     pinClicked = pyqtSignal(str)
@@ -360,6 +368,8 @@ class FlipCanvas(QWidget):
         self.image_size = None
         self.hud_lines: List[str] = []
         self.hud_badges: List[str] = []
+        self.hud_color: Optional[str] = None
+        self.ratio = 1.0
         self.status = ""
         self.message = ""
         self.pins: List[dict] = []
@@ -379,19 +389,48 @@ class FlipCanvas(QWidget):
         self.setProperty("controlId", "flipReviewCanvas")
         self.setAccessibleName("flip review image")
 
+    # -- device pixels --
+    def device_ratio(self) -> float:
+        ratio = float(self.devicePixelRatioF())
+        return ratio if ratio > 0 else 1.0
+
+    def sync_ratio(self, force: bool = False) -> bool:
+        """Follow the screen's device pixel ratio and the device size."""
+        ratio = self.device_ratio()
+        size = (max(1, round(self.width() * ratio)), max(1, round(self.height() * ratio)))
+        if force or ratio != self.ratio or size != (self.view.view_w, self.view.view_h):
+            self.ratio = ratio
+            self.view.set_viewport(*size)
+            return True
+        return False
+
+    def to_device(self, pos: QPointF):
+        return pos.x() * self.ratio, pos.y() * self.ratio
+
+    def to_logical(self, x: float, y: float):
+        return x / self.ratio, y / self.ratio
+
+    def event(self, event):  # noqa: N802
+        # Sent when the widget moves to a screen with another ratio or the
+        # ratio of its screen changes; paintEvent re-checks as well.
+        if event.type() == QEvent.Type.DevicePixelRatioChange:
+            if self.sync_ratio():
+                self._viewer._view_changed()
+        return super().event(event)
+
     # -- state --
     def set_image_size(self, size) -> None:
         if size != self.image_size:
             self.image_size = size
             self.view.set_image_size(*size)
-            self.view.set_viewport(self.width(), self.height())
+            self.sync_ratio(force=True)
 
     def set_levels(self, levels: List[_Level]) -> None:
         self.levels = levels
         self.update()
 
     def resizeEvent(self, event):  # noqa: N802
-        self.view.set_viewport(self.width(), self.height())
+        self.sync_ratio()
         super().resizeEvent(event)
 
     # -- painting --
@@ -410,6 +449,10 @@ class FlipCanvas(QWidget):
         return best
 
     def paintEvent(self, event):  # noqa: N802
+        if self.sync_ratio():
+            # Moved to a screen with another ratio: the fit percentage and
+            # the device viewport changed.
+            self._viewer._update_hud()
         painter = QPainter(self)
         theme = _theme_palette()
         painter.fillRect(self.rect(), QColor(theme["canvas"]))
@@ -450,10 +493,14 @@ class FlipCanvas(QWidget):
         tx1, ty1 = view.image_to_view(lx1 / sx, ly1 / sy)
         target = QRectF(tx0, ty0, tx1 - tx0, ty1 - ty0)
         # Below 100 % smooth from the nearest pyramid level; at 100 % and
-        # above every image pixel is drawn as a sharp block.
+        # above every image pixel is drawn as a sharp block. Coordinates are
+        # device pixels, so drawing happens at the screen's own resolution.
         smooth = view.scale < 1.0 - _EPS or level.factor > 1
+        painter.save()
+        painter.scale(1.0 / self.ratio, 1.0 / self.ratio)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, smooth)
         painter.drawImage(target, level.image, source)
+        painter.restore()
 
     def _paint_pins(self, painter: QPainter) -> None:
         accent = QColor(_overlay_palette()["accent"])
@@ -463,7 +510,7 @@ class FlipCanvas(QWidget):
         painter.setFont(font)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for number, pin in enumerate(self.pins, 1):
-            x, y = self.view.image_to_view(pin["x"] + 0.5, pin["y"] + 0.5)
+            x, y = self.to_logical(*self.view.image_to_view(pin["x"] + 0.5, pin["y"] + 0.5))
             if not (-20 <= x <= self.width() + 20 and -20 <= y <= self.height() + 20):
                 continue
             center = QPointF(x, y)
@@ -478,7 +525,7 @@ class FlipCanvas(QWidget):
                                     230 if own else 90))
             painter.drawEllipse(center, radius, radius)
             # The marked pixel itself stays uncovered at high zoom.
-            gap = max(2.0, self.view.scale / 2 + 1)
+            gap = max(2.0, self.view.scale / self.ratio / 2 + 1)
             painter.setPen(QPen(QColor(255, 255, 255), 1))
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 painter.drawLine(QPointF(x + dx * gap, y + dy * gap),
@@ -513,9 +560,20 @@ class FlipCanvas(QWidget):
             metrics = painter.fontMetrics()
             widths.append(metrics.horizontalAdvance(line))
             heights.append(metrics.height())
+        stripe = 8 if self.hud_color else 0
         max_width = max(40, self.width() - 40)
-        box = QRectF(12, 12, min(max_width, max(widths) + 32), sum(heights) + 14)
+        box = QRectF(12, 12, min(max_width, max(widths) + 32 + stripe), sum(heights) + 14)
         self._chip(painter, box, overlay)
+        if self.hud_color:
+            # The candidate's colour: a flip changes it at a glance.
+            colour = QColor(self.hud_color)
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(box.left() + 4, box.top() + 4, 6, box.height() - 8), 3, 3)
+            painter.fillPath(path, colour)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(colour, 2))
+            painter.drawRoundedRect(box.adjusted(1, 1, -1, -1), 6, 6)
+            box = box.adjusted(stripe, 0, 0, 0)
         y = box.top() + 7
         for (line, font), height in zip(lines, heights):
             painter.setFont(font)
@@ -561,7 +619,7 @@ class FlipCanvas(QWidget):
         if not self.labels_visible:
             return None
         for pin in reversed(self.pins):
-            x, y = self.view.image_to_view(pin["x"] + 0.5, pin["y"] + 0.5)
+            x, y = self.to_logical(*self.view.image_to_view(pin["x"] + 0.5, pin["y"] + 0.5))
             if (x - pos.x()) ** 2 + (y - pos.y()) ** 2 <= (self.PIN_RADIUS + 3) ** 2:
                 return pin["id"]
         return None
@@ -569,7 +627,7 @@ class FlipCanvas(QWidget):
     def image_pixel(self, pos: QPointF):
         if self.image_size is None:
             return None
-        x, y = self.view.view_to_image(pos.x(), pos.y())
+        x, y = self.view.view_to_image(*self.to_device(pos))
         if 0 <= x < self.image_size[0] and 0 <= y < self.image_size[1]:
             return int(x), int(y)
         return None
@@ -578,7 +636,7 @@ class FlipCanvas(QWidget):
         if self.image_size is None:
             return
         self._wheel_rest += event.angleDelta().y()
-        anchor = (event.position().x(), event.position().y())
+        anchor = self.to_device(event.position())
         while abs(self._wheel_rest) >= 120:
             if self._wheel_rest > 0:
                 self.view.zoom_in(anchor)
@@ -608,7 +666,7 @@ class FlipCanvas(QWidget):
         if self._drag_from is not None:
             delta = event.position() - self._drag_from
             self._drag_from = QPointF(event.position())
-            self.view.pan(delta.x(), delta.y())
+            self.view.pan(delta.x() * self.ratio, delta.y() * self.ratio)
             self._viewer._view_changed()
         super().mouseMoveEvent(event)
 
@@ -631,7 +689,7 @@ class FlipCanvas(QWidget):
 
     def mouseDoubleClickEvent(self, event):  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and not self.pin_mode:
-            self.view.toggle_actual((event.position().x(), event.position().y()))
+            self.view.toggle_actual(self.to_device(event.position()))
             self._viewer._view_changed()
             event.accept()
             return
@@ -879,7 +937,13 @@ class ReviewPanel(QScrollArea):
             self.reveal_button.setEnabled(enabled and record.blind_active)
             self.candidate_list.clear()
             for position, cid in enumerate(viewer.order):
-                self.candidate_list.addItem(QListWidgetItem(viewer.candidate_line(cid)))
+                item = QListWidgetItem(viewer.candidate_line(cid))
+                colour = viewer.candidate_color(cid)
+                if colour:
+                    swatch = QPixmap(12, 12)
+                    swatch.fill(QColor(colour))
+                    item.setIcon(QIcon(swatch))
+                self.candidate_list.addItem(item)
             if viewer.order:
                 self.candidate_list.setCurrentRow(viewer.position)
             if not enabled:
@@ -1005,7 +1069,8 @@ class FlipReviewViewer(QWidget):
     def __init__(self, review_set: model.ReviewSet, record_path: Optional[str] = None,
                  parent: Optional[QWidget] = None, *, memory_budget: Optional[int] = None,
                  blind: bool = False, reviewer: Optional[str] = None,
-                 criteria=model.CRITERIA, workers: int = 2, autostart: bool = True):
+                 criteria=model.CRITERIA, workers: int = 2, autostart: bool = True,
+                 known_sha256: Optional[List[str]] = None):
         super().__init__(parent)
         self.review_set = review_set
         self.record_path = os.path.abspath(record_path or review_set.default_record_path())
@@ -1039,6 +1104,9 @@ class FlipReviewViewer(QWidget):
         self.load_started = None
         self.load_seconds = None
         self._fullscreen_restore_maximized = False
+        self._panel_before_fullscreen: Optional[bool] = None
+        self._filtered_window = None
+        self._known_sha256 = list(known_sha256) if known_sha256 else None
 
         self.setProperty("controlId", "flipReviewViewer")
         self.canvas = FlipCanvas(self)
@@ -1090,6 +1158,15 @@ class FlipReviewViewer(QWidget):
         except (OSError, ValueError):
             return False
 
+    def candidate_color(self, cid: str) -> Optional[str]:
+        """Identification colour; follows the neutral letters while blind."""
+        from utils.design_tokens import CATEGORICAL
+        if self.record is not None:
+            return CATEGORICAL[self.record.color_index(cid) % len(CATEGORICAL)]
+        if self._conceal:
+            return None  # the blind order is not known yet: leak nothing
+        return CATEGORICAL[self._index_of(cid) % len(CATEGORICAL)]
+
     def _label(self, cid: str) -> str:
         if self.record is None and self._conceal:
             return text("blind_letter", letter="?")
@@ -1106,8 +1183,12 @@ class FlipReviewViewer(QWidget):
         self.load_started = time.perf_counter()
         for index in range(len(self._entries)):
             self._request_decode(index)
-            self._submit(("hash", index), model.file_sha256,
-                         self.review_set.candidates[index].path)
+            if self._known_sha256 is not None:
+                # The command line already hashed the files to check the record.
+                self._entries[index].sha256 = self._known_sha256[index]
+            else:
+                self._submit(("hash", index), model.file_sha256,
+                             self.review_set.candidates[index].path)
 
     def _submit(self, key, function, *args) -> None:
         if self._closed:
@@ -1359,6 +1440,7 @@ class FlipReviewViewer(QWidget):
             if self.record.best == cid:
                 details.append(text("best_marker"))
         self.canvas.hud_lines = [self._label(cid), "   ".join(details)]
+        self.canvas.hud_color = self.candidate_color(cid)
 
     def _view_changed(self) -> None:
         self._update_hud()
@@ -1571,11 +1653,15 @@ class FlipReviewViewer(QWidget):
         self.panel.setVisible(not self.panel.isVisible())
 
     def toggle_fullscreen(self) -> None:
+        """Fullscreen is for the picture: the notes panel hides (N shows it)."""
         window = self.window()
         if window.isFullScreen():
             self.leave_fullscreen()
             return
+        self._watch_window()
         self._fullscreen_restore_maximized = window.isMaximized()
+        self._panel_before_fullscreen = not self.panel.isHidden()
+        self.panel.hide()
         window.showFullScreen()
 
     def leave_fullscreen(self) -> bool:
@@ -1586,7 +1672,26 @@ class FlipReviewViewer(QWidget):
             window.showMaximized()
         else:
             window.showNormal()
+        self._restore_panel()
         return True
+
+    def _restore_panel(self) -> None:
+        if self._panel_before_fullscreen is not None:
+            self.panel.setVisible(self._panel_before_fullscreen)
+            self._panel_before_fullscreen = None
+
+    def _watch_window(self) -> None:
+        # Fullscreen can also end from the window manager.
+        window = self.window()
+        if window is not self._filtered_window:
+            window.installEventFilter(self)
+            self._filtered_window = window
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if (watched is self._filtered_window and event.type() == QEvent.Type.WindowStateChange
+                and not watched.isFullScreen()):
+            self._restore_panel()
+        return super().eventFilter(watched, event)
 
     # -- keys --
     def handle_key(self, event) -> bool:

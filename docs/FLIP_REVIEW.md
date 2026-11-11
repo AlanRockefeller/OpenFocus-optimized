@@ -11,9 +11,13 @@ python tools/flip_review.py renders/            # every image in the folder
 python tools/flip_review.py review-set.json     # a review-set manifest
 ```
 
-All candidates must have the same pixel dimensions; otherwise the viewer
-names the files and their sizes and shows nothing. A single image opens
-without flipping. TIFF (including LZW), PNG and JPEG in 8 or 16 bits, grey
+Before any window opens, the command line reads every file header and
+exits with status 2 and a message naming the files when an image cannot be
+read, the pixel dimensions differ, or an existing review record does not
+match the images (`--new-review` keeps that record as a backup and starts a
+new one; `--review PATH` chooses another). A decode failure that the header
+check could not foresee also ends the program with an error instead of
+leaving an empty window. A single image opens without flipping. TIFF (including LZW), PNG and JPEG in 8 or 16 bits, grey
 or colour, are decoded with the application's decoder and shown like the
 main window shows them (16-bit samples divided by 257).
 
@@ -25,12 +29,23 @@ and `--export OUT.json|OUT.md` with `--export-paths` / `--export-reviewer`.
 ## Viewing
 
 Zoom and pan are shared by every candidate: flipping swaps only the picture,
-so the same pixels stay under the eye. The zoom runs from fit to 800 % with
-exact steps at 100, 200, 400 and 800 %. Below 100 % the picture is smoothed
+so the same pixels stay under the eye. The zoom is defined in physical screen pixels: 100 % shows one image
+pixel per device pixel, and 200, 400 and 800 % show exact 2x2, 4x4 and 8x8
+device-pixel blocks, also on scaled displays (device pixel ratio 2, 1.5,
+1.25 ...). The fit level is computed from the device-pixel size of the view.
+The viewer follows the ratio of the screen it is on, including moves to
+another screen. The zoom runs from fit to 800 % with exact steps at 100,
+200, 400 and 800 %. Below 100 % the picture is smoothed at device resolution
 from an area-averaged pyramid; from 100 % up every image pixel is drawn as a
 sharp square. The candidate label, its position (`2 / 4`), the rating and
-the zoom level are drawn at a fixed place and size on a dark chip, legible
-over bright and dark content.
+the zoom level are drawn at a fixed place and logical size on a dark chip,
+legible over bright and dark content.
+
+Every candidate has its own colour, shown as a stripe and border on the
+label chip and as a swatch in the candidate list, so a flip is visible at a
+glance even between similar names. In blind review the colours belong to
+the neutral letters (A is always the first colour), so they reveal nothing;
+after reveal each picture keeps the colour it had.
 
 | Key | Action |
 | --- | --- |
@@ -43,7 +58,7 @@ over bright and dark content.
 | 0 | fit |
 | Z, double-click | toggle fit and 100 % |
 | drag | pan |
-| F or F11 | fullscreen; Esc leaves it |
+| F or F11 | fullscreen for the picture: the notes panel hides (N shows it); Esc leaves fullscreen and restores the panel as it was |
 | H | hide or show labels and pin markers |
 | D / Shift+D | amplified absolute difference to the reference / cycle the gain (x4, x16, x64) |
 | R | use the current candidate as the difference reference |
