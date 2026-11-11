@@ -2,6 +2,7 @@
 import gc
 import os
 from pathlib import Path
+import sys
 import time
 
 import numpy as np
@@ -23,9 +24,18 @@ def _crash_child(connection, cancel_event, request, budget, directory, language)
 
 
 def _abort_child(connection, cancel_event, request, budget, directory, language):
+    # The abort is the scenario under test, so keep the host's crash reporting
+    # (error dialog, core dump) out of it.
+    import ctypes
     if os.name == 'nt':
-        import ctypes
         ctypes.windll.kernel32.SetErrorMode(3)
+    else:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        if sys.platform == 'linux':
+            # A piped core handler is run regardless of the limit, but never
+            # for a process that is not dumpable.
+            ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
     os.abort()
 
 
