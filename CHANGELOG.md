@@ -177,6 +177,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   stack can still use camera-linear import and Linear DNG export.
 - Prepare source frames with bounded parallel decoding and publish thumbnails
   incrementally, while respecting the configured thread and memory budgets.
+- Reorder decoded camera RAW samples into the working channel order with a
+  faster native copy. Decoded pixels are unchanged.
 - Move frame-review messages to the bottom status bar, leaving more room for
   the source list while preserving temporary render and update messages.
 - Apply explicit descending frame order before OpenFocus registration, and
@@ -216,6 +218,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Image save dialogs preselect the format chosen last time, including the
   choice between Layered TIFF and TIFF. A name typed without an extension gets
   the selected format's extension before the replace-file confirmation.
+- Hash each registration source once per render when the transform is applied
+  to the same decoded pixels kept in the temporary frame cache. In-memory
+  arrays, sources decoded again and saved alignment plans are still verified by
+  content. Output pixels are unchanged.
 
 ### Fixed
 - Dispose closed windows before Qt application teardown during normal exit.
