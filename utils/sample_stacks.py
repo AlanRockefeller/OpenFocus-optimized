@@ -35,6 +35,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 
 SCHEMA = "openfocus-sample-stacks/1"
 MANIFEST_ENV = "OPENFOCUS_SAMPLE_MANIFEST"
@@ -883,8 +884,15 @@ def _zip_is_link(info: zipfile.ZipInfo) -> bool:
 
 
 def extract_members(archive: Union[str, Path], target: Union[str, Path],
-                    wanted: Iterable[str]) -> List[str]:
+                    wanted: Union[Iterable[str], Dict[str, int]]) -> List[str]:
     """Extract the regular-file members named in ``wanted`` into ``target``.
+
+    ``wanted`` is a collection of member names, or a mapping from member name
+    to its expected size in bytes. With sizes, a member whose archive header
+    declares another size is rejected before anything is written, and copying
+    stops with an error (removing the partial file) as soon as more bytes
+    arrive than expected; fewer bytes are an error too. ``fetch_stack`` always
+    passes the frame sizes from the manifest.
 
     Every member of the archive is checked first. Absolute names, ``..``,
     drive letters, backslashes, links and device entries reject the whole
@@ -892,7 +900,8 @@ def extract_members(archive: Union[str, Path], target: Union[str, Path],
     wanted member is missing. Returns the extracted names.
     """
     target = Path(target).absolute()
-    wanted = set(wanted)
+    sizes: Dict[str, Optional[int]] = (
+        dict(wanted) if isinstance(wanted, dict) else dict.fromkeys(wanted))
     archive = Path(archive)
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as bundle:
@@ -906,8 +915,12 @@ def extract_members(archive: Union[str, Path], target: Union[str, Path],
                     raise UnsafeArchiveError(f"{archive.name}: link member {name!r}")
                 if not info.is_dir():
                     members.append((str(relative), info))
-            return _extract_all(archive, target, wanted, members,
-                                lambda info: bundle.open(info))
+            try:
+                return _extract_all(archive, target, sizes, members,
+                                    lambda info: bundle.open(info),
+                                    lambda info: info.file_size)
+            except (zipfile.BadZipFile, zlib.error, EOFError) as exc:
+                raise IntegrityError(f"{archive.name}: damaged zip member ({exc})") from exc
     try:
         bundle = tarfile.open(archive, "r:*")
     except tarfile.TarError as exc:
@@ -924,10 +937,16 @@ def extract_members(archive: Union[str, Path], target: Union[str, Path],
                 raise UnsafeArchiveError(
                     f"{archive.name}: member {info.name!r} is a link or special file")
             members.append((str(relative), info))
-        return _extract_all(archive, target, wanted, members, bundle.extractfile)
+        try:
+            return _extract_all(archive, target, sizes, members, bundle.extractfile,
+                                lambda info: info.size)
+        except (tarfile.TarError, zlib.error, EOFError) as exc:
+            raise IntegrityError(f"{archive.name}: damaged tar member ({exc})") from exc
 
 
-def _extract_all(archive, target: Path, wanted, members, opener):
+def _extract_all(archive, target: Path, sizes: Dict[str, Optional[int]], members, opener,
+                 declared_size):
+    wanted = set(sizes)
     names = [name for name, _ in members]
     duplicates = {name for name in names if names.count(name) > 1}
     if duplicates & wanted:
@@ -935,6 +954,11 @@ def _extract_all(archive, target: Path, wanted, members, opener):
     missing = wanted - set(names)
     if missing:
         raise IntegrityError(f"{archive.name} lacks {len(missing)} frame(s): {sorted(missing)[:5]}")
+    for name, info in members:
+        expected = sizes.get(name)
+        if name in wanted and expected is not None and declared_size(info) != expected:
+            raise IntegrityError(f"{archive.name}: {name} is {declared_size(info)} bytes in the "
+                                 f"archive, the manifest says {expected}")
     extracted = []
     for name, info in members:
         if name not in wanted:
@@ -945,10 +969,29 @@ def _extract_all(archive, target: Path, wanted, members, opener):
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.parent.resolve() != target.resolve().joinpath(*PurePosixPath(name).parts[:-1]):
             raise UnsafeArchiveError(f"{archive.name}: {name!r} resolves outside the target")
-        with opener(info) as reader, open(destination, "xb") as writer:
-            shutil.copyfileobj(reader, writer, _CHUNK)
-            writer.flush()
-            os.fsync(writer.fileno())
+        limit = sizes[name] if sizes[name] is not None else declared_size(info)
+        writer = open(destination, "xb")  # never replaces an existing file
+        try:
+            with opener(info) as reader, writer:
+                written = 0
+                while True:
+                    block = reader.read(min(_CHUNK, limit - written + 1))
+                    if not block:
+                        break
+                    written += len(block)
+                    if written > limit:
+                        raise IntegrityError(f"{archive.name}: {name} holds more than the "
+                                             f"{limit} bytes expected")
+                    writer.write(block)
+                if written != limit:
+                    raise IntegrityError(f"{archive.name}: {name} holds {written} bytes, "
+                                         f"expected {limit}")
+                writer.flush()
+                os.fsync(writer.fileno())
+        except BaseException:
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            raise
         extracted.append(name)
     return extracted
 
@@ -1051,7 +1094,7 @@ def fetch_stack(stack: Stack, manifest: Optional[Manifest] = None, *,
                                          retries=retries, timeout=timeout, progress=progress,
                                          label=archive.name)
                 fetched.append(path)
-                extract_members(path, temporary, [f.path for f in by_archive[index]])
+                extract_members(path, temporary, {f.path: f.bytes for f in by_archive[index]})
             for frame in stack.frames:
                 if frame.archive is None:
                     path = download_verified(frame.url, frame.bytes, frame.sha256, downloads,

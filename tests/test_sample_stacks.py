@@ -540,3 +540,92 @@ def test_remote_manifest_is_cached_for_offline_use(tmp_path, server):
     assert len(samples.stack_files("demo", offline, offline=True)) == 5
     # A failing network falls back to the cached copy as well.
     assert samples.load_manifest(url).get("demo").title == "Demo"
+
+
+# ---- bounded extraction -----------------------------------------------------------------------
+
+def test_member_larger_than_manifest_size_is_rejected_before_writing(tmp_path):
+    archive = tmp_path / "big.tar"
+    _tar_with(archive, lambda b: (_add(b, "a.jpg", b"a" * 100), _add(b, "b.jpg", b"b" * 5000)))
+    target = tmp_path / "t"
+    target.mkdir()
+    with pytest.raises(samples.IntegrityError, match="b.jpg is 5000 bytes"):
+        samples.extract_members(archive, target, {"a.jpg": 100, "b.jpg": 50})
+    assert not any(target.iterdir())
+
+
+def _zip_understating_size(path, real, declared):
+    """Deflated zip whose headers declare ``declared`` bytes for ``real`` bytes of data."""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("bomb.jpg", b"\0" * real)
+    data = bytearray(path.read_bytes())
+    local = data.find(b"PK\x03\x04")
+    central = data.find(b"PK\x01\x02")
+    assert struct.unpack_from("<I", data, local + 22)[0] == real
+    struct.pack_into("<I", data, local + 22, declared)
+    struct.pack_into("<I", data, central + 24, declared)
+    path.write_bytes(bytes(data))
+
+
+def test_zip_member_expanding_past_its_declared_size_stops_copying(tmp_path):
+    archive = tmp_path / "bomb.zip"
+    _zip_understating_size(archive, real=8 * 1024 * 1024, declared=1000)
+    assert archive.stat().st_size < 64 * 1024
+    target = tmp_path / "t"
+    target.mkdir()
+    with pytest.raises(samples.IntegrityError):
+        samples.extract_members(archive, target, {"bomb.jpg": 1000})
+    assert not any(target.iterdir())
+    # Without sizes the header's size still bounds the copy.
+    with pytest.raises(samples.IntegrityError):
+        samples.extract_members(archive, target, ["bomb.jpg"])
+    assert not any(target.iterdir())
+
+
+def test_short_member_and_existing_files_are_handled(tmp_path):
+    archive = tmp_path / "ok.tar"
+    _tar_with(archive, lambda b: _add(b, "a.jpg", b"a" * 10))
+    target = tmp_path / "t"
+    target.mkdir()
+    assert samples.extract_members(archive, target, {"a.jpg": 10}) == ["a.jpg"]
+    assert (target / "a.jpg").read_bytes() == b"a" * 10
+    # An existing file is never overwritten or removed.
+    with pytest.raises(FileExistsError):
+        samples.extract_members(archive, target, {"a.jpg": 10})
+    assert (target / "a.jpg").read_bytes() == b"a" * 10
+
+
+def test_fetch_rejects_archive_member_with_wrong_size(tmp_path):
+    files, out, entry = _pack(tmp_path)
+    # Repack with one frame enlarged but keep the manifest's frame sizes and a correct archive hash.
+    files[2].write_bytes(files[2].read_bytes() * 3)
+    rebuilt, _ = samples.pack_stack(files, "demo", out_dir=out, use_exiftool=False,
+                                    width=8, height=8, bit_depth=8)
+    entry["archives"] = rebuilt["archives"]
+    manifest = samples.Manifest(dict(samples.empty_manifest(), stacks=[entry]),
+                                str(out / "m.json"))
+    with pytest.raises(samples.IntegrityError, match="frame_3.jpg is"):
+        samples.fetch_stack(manifest.get("demo"), manifest)
+    assert not list((tmp_path / "cache").rglob("frame_*.jpg"))
+
+
+def test_copy_stops_when_a_reader_delivers_more_than_declared(tmp_path):
+    """The size bound holds even if an archive reader ignores its header size."""
+    written = []
+
+    class Endless(io.RawIOBase):
+        def readable(self):
+            return True
+
+        def readinto(self, buffer):
+            written.append(len(buffer))
+            buffer[:] = b"z" * len(buffer)
+            return len(buffer)
+
+    target = tmp_path / "t"
+    target.mkdir()
+    with pytest.raises(samples.IntegrityError, match="more than the 1000 bytes"):
+        samples._extract_all(Path("fake.tar"), target, {"a.jpg": 1000}, [("a.jpg", None)],
+                             lambda info: Endless(), lambda info: 1000)
+    assert not any(target.iterdir())
+    assert sum(written) <= 1001

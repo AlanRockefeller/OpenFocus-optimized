@@ -101,6 +101,10 @@ touches the network. A remote manifest is cached too and used offline.
 Archives are unpacked member by member. Absolute names, `..`, drive letters,
 backslashes, links and device entries reject the whole archive; only the
 frames the manifest lists are written, and only inside the target folder.
+A member whose archive header gives a size other than the manifest's frame
+size is rejected before anything is written, and copying stops (removing the
+partial file) if a member delivers more or fewer bytes than that size, so a
+damaged or oversized archive cannot fill the cache disk.
 Uncompressed and compressed tar files and zip files are accepted.
 
 Remove a stack by deleting its folder under `stacks/`, or the whole cache.
