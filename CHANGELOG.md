@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Add developer tooling for sample focus stacks published outside OpenFocus:
+  a versioned manifest, a verified download cache, a packer with a metadata
+  check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Offer optional account sign-in with a skippable first-launch and update prompt.
 - Show the signed-in account in Help and provide browser account management and sign-out.
 - Restore an existing browser account at startup and open the account center using a short-lived handoff.
