@@ -35,6 +35,7 @@ dependencies = [
     "Pillow",
     "psdtags==2024.5.24",
     "tifffile==2024.8.30",
+    "imagecodecs>=2024.9.22",
     "onnxruntime-directml==1.23.0; sys_platform == 'win32' and platform_machine == 'AMD64'",
     "onnxruntime>=1.23,<1.24; sys_platform != 'win32' or platform_machine != 'AMD64'",
     # Optional in practice, harmless to require: a few KB each, and they turn
@@ -45,6 +46,7 @@ dependencies = [
     "rawpy>=0.25.1",
     "threadpoolctl>=3.5",
     "numba>=0.61.2",
+    "pyopencl>=2025.2.7; sys_platform == 'win32' or sys_platform == 'darwin' or sys_platform == 'linux'",
 ]
 dynamic = ["version"]
 
@@ -66,10 +68,10 @@ Changelog = "https://github.com/Xinzhe99/OpenFocus/blob/main/CHANGELOG.md"
 packages = ["core", "core.control", "core.models", "core.models.stackmff_v3",
             "core.models.stackmff_v1", "core.models.stackmff_v2",
             "fusion_methods", "utils", "weights", "locales"]
-# The locale packs are submodules of the `locales` package (locales/de.py, …)
-# discovered at runtime by TranslationManager; the whole package is listed
-# above so every language ships in the wheel.
-py-modules = ["constants"]
+# Release languages are registered in TranslationManager.PACK_ORDER. The
+# package ships their importable modules even when no .py files are unpacked;
+# source installations may additionally discover extra language modules.
+py-modules = ["constants", "build_identity"]
 
 [tool.setuptools.dynamic]
 version = { attr = "constants.APP_VERSION" }

@@ -344,6 +344,103 @@ def test_delete_failure_keeps_session_and_logout_failure_clears_it():
     assert store.value is None
 
 
+class FailingClearStore(MemoryStore):
+    def __init__(self, value):
+        super().__init__(value)
+        self.fail = True
+
+    def clear(self):
+        if self.fail:
+            raise account.AccountError('storage')
+        super().clear()
+
+
+@pytest.mark.parametrize('remote_failure', [None, 'network'])
+def test_logout_storage_failure_revokes_and_allows_cleanup_retry(remote_failure):
+    store = FailingClearStore(session())
+    calls = []
+    def request(method, url, body=None, token=None, timeout=None):
+        calls.append((url.rsplit('/', 1)[-1], token))
+        if remote_failure:
+            raise account.AccountError(remote_failure)
+        return {'ok': True}
+    client = account.AccountClient(store=store, request=request)
+    with pytest.raises(account.AccountError) as exc:
+        client.logout()
+    assert exc.value.category == 'storage' and 'private-token' not in str(exc.value)
+    assert calls == [('logout', 'private-token')]
+    assert client.logout_cleanup_pending and store.value == session()
+    assert not client.is_signed_in() and client.current_user() is None
+    assert client.token() is None and client.refresh() is False and client.me() is None
+    with pytest.raises(account.AccountError, match='storage'):
+        client.login_with_browser()
+    assert account.AccountClient(store=store).is_signed_in()
+    store.fail = False
+    if remote_failure:
+        with pytest.raises(account.AccountError, match='network'):
+            client.logout()
+        assert len(calls) == 2
+    else:
+        client.logout()
+        assert len(calls) == 1
+    assert not client.logout_cleanup_pending and store.value is None
+    assert not account.AccountClient(store=store).is_signed_in()
+
+
+@pytest.mark.parametrize('failure,status', [('network', None), ('http', 401)])
+def test_logout_remote_failure_still_removes_local_credentials(failure, status):
+    store = MemoryStore(session())
+    def request(*args, **kwargs):
+        raise account.AccountError(failure, status)
+    client = account.AccountClient(store=store, request=request)
+    with pytest.raises(account.AccountError):
+        client.logout()
+    assert client.token() is None and not client.logout_cleanup_pending
+    assert store.value is None and not account.AccountClient(store=store).is_signed_in()
+
+
+@pytest.mark.parametrize('operation,status', [('me', 401), ('me', 403), ('refresh', 401), ('delete_account', None)])
+def test_invalidated_session_stays_inaccessible_when_storage_fails(operation, status):
+    store = FailingClearStore(session())
+    def request(*args, **kwargs):
+        if status:
+            raise account.AccountError('http', status)
+        return {'ok': True}
+    client = account.AccountClient(store=store, request=request)
+    with pytest.raises(account.AccountError, match='storage'):
+        getattr(client, operation)()
+    assert client.logout_cleanup_pending and client.token() is None
+    assert client.refresh() is False and client.me() is None
+    store.fail = False
+    client.logout()
+    assert not client.logout_cleanup_pending and store.value is None
+
+
+def test_refresh_storage_failure_notifies_waiters():
+    entered, release, waiting = threading.Event(), threading.Event(), threading.Event()
+    store = FailingClearStore(session())
+    def request(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        raise account.AccountError('http', 401)
+    client = account.AccountClient(store=store, request=request)
+    class ObservedCondition(threading.Condition):
+        def wait(self, timeout=None):
+            waiting.set()
+            return super().wait(timeout)
+    client._condition = ObservedCondition(threading.RLock())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.refresh)
+        assert entered.wait(5)
+        second = pool.submit(client.refresh)
+        assert waiting.wait(5)
+        release.set()
+        for future in (first, second):
+            with pytest.raises(account.AccountError, match='storage'):
+                future.result(timeout=5)
+    assert client.token() is None and client.logout_cleanup_pending
+
+
 def test_malformed_refresh_does_not_replace_token():
     store = MemoryStore(session())
     client = account.AccountClient(store=store, request=lambda *a, **kw: {"token": "replacement", "expires_at": True})
@@ -1012,3 +1109,133 @@ def test_browser_login_cancellation_discards_exchange_result(monkeypatch):
     with pytest.raises(account.AccountError, match="cancelled"):
         client.login_with_browser(cancel=cancel)
     assert store.value == session()
+
+
+def test_device_identity_is_stable_and_private(tmp_path):
+    store = account.TokenStore(tmp_path / "private" / "session")
+    first = account.AccountClient(store=store)
+    assert account._valid_device_id(first.device_id)
+    assert first.device_name
+    second = account.AccountClient(store=store)
+    assert second.device_id == first.device_id
+    assert second.device_name == first.device_name
+    device_path = tmp_path / "private" / "account-device"
+    assert device_path.is_file()
+    if os.name != "nt":
+        assert device_path.stat().st_mode & 0o077 == 0
+
+
+def test_device_identity_can_be_injected_for_tests():
+    client = account.AccountClient(store=MemoryStore(), device_id="test-device-123", device_name="Test PC")
+    assert client._device_fields() == {"device_id": "test-device-123", "device_name": "Test PC"}
+    with pytest.raises(ValueError):
+        account.AccountClient(store=MemoryStore(), device_id="bad id")
+
+
+def test_exchange_sends_device_identity(monkeypatch):
+    monkeypatch.setattr(account, "_CallbackServer", DummyListener)
+    bodies = []
+    def request(method, url, body=None, **kwargs):
+        if url.endswith("/capabilities"):
+            return {"cross_device": "poll-v1"}
+        if url.endswith("/start"):
+            return {"ok": True, "flow_id": "flow", "poll_token": "token"}
+        if url.endswith("/poll"):
+            return {"status": "approved", "code": "code"}
+        if url.endswith("/exchange"):
+            bodies.append(body)
+            return session()
+        pytest.fail("unexpected request")
+    client = account.AccountClient(
+        store=MemoryStore(), request=request,
+        device_id="test-device-123", device_name="Test PC",
+    )
+    client.login("email", "user@example.test")
+    assert bodies[0]["device_id"] == "test-device-123"
+    assert bodies[0]["device_name"] == "Test PC"
+
+
+def test_http_sends_run_and_platform_headers(monkeypatch):
+    captured = {}
+    class Reply:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self, limit):
+            return b'{"ok": true}'
+    class Opener:
+        def open(self, request, timeout):
+            captured.update({key.lower(): value for key, value in request.header_items()})
+            return Reply()
+    monkeypatch.setattr(account.urllib.request, "build_opener", lambda *args: Opener())
+    assert account._http("GET", "https://account.example/v1/me", token="private-token") == {"ok": True}
+    assert 8 <= len(captured["x-openfocus-run"]) <= 64
+    assert all(char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+               for char in captured["x-openfocus-run"])
+    assert captured["x-openfocus-run-started"].isdigit()
+    assert captured["x-openfocus-platform"] in ("windows", "macos", "linux")
+    assert captured["user-agent"].startswith("OpenFocus/")
+    assert captured["authorization"] == "Bearer private-token"
+    assert all("private-token" not in value for key, value in captured.items() if key != "authorization")
+
+
+def _identity_in_process(path, barrier):
+    # Simulate a filesystem where hard links are unavailable in every process.
+    original_link = account.os.link
+    def no_link(*args, **kwargs):
+        raise OSError("hard links unsupported")
+    account.os.link = no_link
+    try:
+        barrier.wait(timeout=30)
+        return account.AccountClient(store=account.TokenStore(path)).device_id
+    finally:
+        account.os.link = original_link
+
+
+def test_device_identity_concurrent_processes_share_one_id(tmp_path):
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    path = str(tmp_path / "profile" / "session")
+    context = multiprocessing.get_context("spawn")
+    with context.Manager() as manager:
+        barrier = manager.Barrier(4)
+        with ProcessPoolExecutor(max_workers=4, mp_context=context) as pool:
+            ids = list(pool.map(_identity_in_process, [path] * 4, [barrier] * 4))
+    assert len(set(ids)) == 1
+    assert account._valid_device_id(ids[0])
+    assert account.AccountClient(store=account.TokenStore(path)).device_id == ids[0]
+
+
+def test_device_storage_failure_blocks_exchange_and_can_retry(monkeypatch, tmp_path):
+    store = account.TokenStore(tmp_path / "profile" / "session")
+    original_replace = account.os.replace
+    def fail_replace(*args):
+        raise OSError("private path")
+    monkeypatch.setattr(account.os, "replace", fail_replace)
+    client = account.AccountClient(store=store)
+    with pytest.raises(account.AccountError, match="storage"):
+        client._device_fields()
+    assert not (tmp_path / "profile" / "account-device").exists()
+    monkeypatch.setattr(account.os, "replace", original_replace)
+    first = client._device_fields()
+    assert account.AccountClient(store=store)._device_fields() == first
+
+
+def test_device_identity_persists_without_hard_links(monkeypatch, tmp_path):
+    def no_link(*args, **kwargs):
+        raise OSError("hard links unsupported")
+    monkeypatch.setattr(account.os, "link", no_link)
+    store = account.TokenStore(tmp_path / "session")
+    first = account.AccountClient(store=store)._device_fields()
+    assert account.AccountClient(store=store)._device_fields() == first
+
+
+def test_corrupt_device_identity_does_not_generate_new_seat(tmp_path):
+    path = tmp_path / "account-device"
+    path.write_text("corrupt", encoding="utf-8")
+    client = account.AccountClient(store=account.TokenStore(tmp_path / "session"))
+    with pytest.raises(account.AccountError, match="storage"):
+        client._device_fields()
+    assert path.read_text(encoding="utf-8") == "corrupt"

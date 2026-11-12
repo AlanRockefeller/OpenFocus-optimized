@@ -265,7 +265,6 @@ def refresh_experimental_selectors(window):
     apply_method_availability(window.combo_align, registration_algorithms(), window,
                               alignment=True, recommended=ALIGN_DEFAULT)
 
-
 def label_recommended(combo: QComboBox, method: str) -> None:
     """Decorate a selector entry without changing its stable identifier."""
     index = combo.findData(method)
@@ -435,7 +434,7 @@ def create_right_panel() -> RightPanelComponents:
 
     chk_quick_preview = _option('chk_quick_preview', False)
     chk_reverse_order = _option('chk_reverse_order', False)
-    chk_exposure_match = _option('chk_exposure_match', False)
+    chk_exposure_match = _option('chk_exposure_match', True)
     chk_base_correct = _option('chk_base_correct', False)
     chk_sharpen_output = _option('chk_sharpen_output', False)
 
@@ -696,10 +695,10 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
         window.source_manager.apply_list_order)
     components.output_list.customContextMenuRequested.connect(window.output_manager.show_output_context_menu)
     components.output_list.currentRowChanged.connect(window.output_manager.sync_output_slider_from_list)
-    # Keyboard navigation must show the row too, not only a mouse click.
+    # Selection changes cover mouse, keyboard and programmatic navigation;
+    # clicking the current row does not reload it.
     components.output_list.currentRowChanged.connect(
         window.output_manager.display_current_output_row)
-    components.output_list.itemClicked.connect(window.output_manager.display_output_image_in_result_view)
 
     delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), components.file_list)
     delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
