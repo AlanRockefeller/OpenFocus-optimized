@@ -5,8 +5,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
-
+### Changed
+- Reduce the tile overlap of neural tiled fusion in proportion when the tile is
+  made smaller to fit memory, instead of keeping the overlap requested for the
+  larger tile, but never below 128 pixels. A default 1024-pixel tile halved to
+  512 computes about half as many tiles; its blend bands are narrower, so
+  pixels can differ slightly from earlier versions.
+- Decode Bayer camera RAW at half size when the loading scale is 50% or less,
+  as camera-linear import already does. Loading and rendering such stacks is
+  faster; pixels can differ slightly from a full-size decode followed by
+  downsampling, and frame dimensions are unchanged.
 
 ## [1.77.0] - 2026-11-11
 
@@ -161,11 +172,6 @@ At the time of the [v1.77.0-beta.3 prerelease](https://github.com/Xinzhe99/OpenF
   Advanced Settings can turn them off.
 - Allow email sign-in to be confirmed on a phone while the desktop completes
   sign-in automatically, when the account service supports cross-device login.
-- Reduce the tile overlap of neural tiled fusion in proportion when the tile is
-  made smaller to fit memory, instead of keeping the overlap requested for the
-  larger tile, but never below 128 pixels. A default 1024-pixel tile halved to
-  512 computes about half as many tiles; its blend bands are narrower, so
-  pixels can differ slightly from earlier versions.
 - Stop writing one-use tile regions of neural tiled fusion to the temporary
   frame cache. Renders use less temporary disk space; output pixels are unchanged.
 - Recommend OpenFocus B as the default desktop fusion method. ECC remains the
@@ -201,10 +207,6 @@ At the time of the [v1.77.0-beta.3 prerelease](https://github.com/Xinzhe99/OpenF
   stack can still use camera-linear import and Linear DNG export.
 - Prepare source frames with bounded parallel decoding and publish thumbnails
   incrementally, while respecting the configured thread and memory budgets.
-- Decode Bayer camera RAW at half size when the loading scale is 50% or less,
-  as camera-linear import already does. Loading and rendering such stacks is
-  faster; pixels can differ slightly from a full-size decode followed by
-  downsampling, and frame dimensions are unchanged.
 - Reorder decoded camera RAW samples into the working channel order with a
   faster native copy. Decoded pixels are unchanged.
 - Move frame-review messages to the bottom status bar, leaving more room for
