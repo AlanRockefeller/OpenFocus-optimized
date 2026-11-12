@@ -53,6 +53,24 @@ PREFERENCE_MAXIMUM = "maximum"
 PREFERENCES = (PREFERENCE_BALANCED, PREFERENCE_RESPONSIVE, PREFERENCE_MAXIMUM)
 
 
+def raw_sensor_shape(sizes):
+    """Return the validated, aspect-expanded sensor height and width."""
+    aspect = float(sizes.pixel_aspect)
+    if not math.isfinite(aspect) or aspect <= 0:
+        raise ValueError('Invalid RAW pixel aspect ratio')
+    width = math.ceil(max(sizes.raw_width, sizes.width) * max(1, aspect, 1 / aspect))
+    height = max(sizes.raw_height, sizes.height)
+    if width <= 0 or height <= 0:
+        raise ValueError('Invalid RAW dimensions')
+    return int(height), int(width)
+
+
+def raw_decode_bytes(sensor_width, sensor_height, output_nbytes=0, encoded_bytes=0):
+    """Conservative full-sensor native workspace plus output and encoded input."""
+    return (int(sensor_width) * int(sensor_height) * 64
+            + int(output_nbytes) + int(encoded_bytes) * 2)
+
+
 @dataclass(frozen=True)
 class ResourceSnapshot:
     """What the machine can give right now."""
@@ -310,9 +328,10 @@ def _gpu_memory(kind: str) -> tuple:
 
 def probe_memory() -> ResourceSnapshot:
     """Read current RAM for admission without CPU topology or GPU queries."""
+    available, total = memory.system_memory_bytes()
     return ResourceSnapshot(
-        available_ram=int(memory.available_memory_bytes() or 0),
-        total_ram=int(memory.total_memory_bytes() or 0),
+        available_ram=int(available or 0),
+        total_ram=int(total or 0),
         process_rss=int(memory.process_rss_bytes() or 0),
     )
 
@@ -381,12 +400,10 @@ def cpu_capacity(snapshot: ResourceSnapshot, preference: str) -> int:
     return max(1, min(cores - 1, math.floor(cores * 0.8)))
 
 
-def native_thread_ceiling(preference: str = PREFERENCE_BALANCED,
-                          user_threads: Optional[int] = None) -> int:
-    """Threads one serial native call may use: the planner's CPU ceiling."""
+def native_thread_ceiling(preference=PREFERENCE_BALANCED, user_threads=0):
+    """CPU allowance for a serial owner independent of outer task count."""
     capacity = cpu_capacity(probe_resources(), preference)
-    return (min(capacity, int(user_threads))
-            if user_threads is not None and user_threads > 0 else capacity)
+    return min(capacity, int(user_threads)) if user_threads and int(user_threads) > 0 else capacity
 
 
 def cpu_facts(preference: str = PREFERENCE_BALANCED) -> dict:

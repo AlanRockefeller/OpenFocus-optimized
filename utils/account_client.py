@@ -12,8 +12,10 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import secrets
 import socketserver
+import string
 import subprocess
 import sys
 import tempfile
@@ -24,16 +26,20 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
-from constants import APP_VERSION
+from constants import app_display_version
 from utils.app_paths import user_data_dir
+from utils.report_client import ReportError, _file_lock
 
 BASE_URL = "https://account.openfocus.top"
+_RUN_ID = secrets.token_urlsafe(16)
+_RUN_STARTED = int(time.time())
 _MAX_RESPONSE = 1024 * 1024
 _MAX_ERROR_RESPONSE = 16 * 1024
 _ERROR_CODES = frozenset({
     "verified_email_required", "email_required", "invalid_code", "invalid_verifier",
     "terms_required", "invalid_terms_version", "account_disabled", "invalid_email",
     "rate_limited", "provider_error", "email_not_configured", "email_delivery_failed",
+    "device_limit_reached",
 })
 
 
@@ -64,6 +70,72 @@ def _valid_session(value):
             and 0 < expiry < 10**20 and math.isfinite(expiry)
             and isinstance(user, dict) and isinstance(user.get('id'), str)
             and bool(user['id']) and len(user['id']) <= 512)
+
+
+def _valid_device_id(value):
+    return (isinstance(value, str) and 8 <= len(value) <= 128
+            and all(char in string.ascii_letters + string.digits + "-_" for char in value))
+
+
+def _default_device_name():
+    name = ''.join(char for char in platform.node() if char.isprintable() and char != '"')
+    return name.strip()[:80] or "OpenFocus desktop"
+
+
+def _device_path(store):
+    path = getattr(store, "path", None)
+    return Path(path).parent / "account-device" if path is not None else None
+
+
+def _load_device_identity(store):
+    path = _device_path(store)
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, UnicodeError):
+        raise AccountError("storage") from None
+    if not isinstance(value, dict) or not _valid_device_id(value.get("device_id")):
+        raise AccountError("storage")
+    device_name = value.get("device_name")
+    if not isinstance(device_name, str) or not device_name.strip():
+        device_name = _default_device_name()
+    return value["device_id"], device_name.strip()[:80]
+
+
+def _create_device_identity(store, device_name):
+    path = _device_path(store)
+    identity = (secrets.token_urlsafe(32), device_name)
+    if path is None:
+        return identity
+    temporary = None
+    try:
+        # The stable lock serializes both threads and processes, including on
+        # filesystems without hard-link support. Never replace an existing ID.
+        with _file_lock(path.parent, ".account-device.lock", deadline=time.monotonic() + 15):
+            loaded = _load_device_identity(store)
+            if loaded is not None:
+                return loaded
+            fd, temporary = tempfile.mkstemp(prefix=".account-device-", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump({"device_id": identity[0], "device_name": identity[1]}, output,
+                          separators=(",", ":"), ensure_ascii=False)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+            temporary = None
+            return identity
+    except (OSError, ReportError):
+        raise AccountError("storage") from None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
 
 
 def _dpapi(data, decrypt=False):
@@ -167,7 +239,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _http(method, url, body=None, token=None, timeout=15):
-    headers = {"Accept": "application/json", "User-Agent": f"OpenFocus/{APP_VERSION}"}
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": f"OpenFocus/{app_display_version()}",
+        "X-OpenFocus-Platform": {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux"),
+        "X-OpenFocus-Run": _RUN_ID,
+        "X-OpenFocus-Run-Started": str(_RUN_STARTED),
+    }
     if body is not None:
         body = json.dumps(body, separators=(",", ":")).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -341,7 +419,8 @@ class AccountClient:
     sign-in. Email defaults to 15 minutes, social sign-in to 5 minutes.
     on_started takes no arguments; cancel is a threading.Event.
     """
-    def __init__(self, store=None, *, base_url=BASE_URL, request=None, clock=time.time):
+    def __init__(self, store=None, *, base_url=BASE_URL, request=None, clock=time.time,
+                 device_id=None, device_name=None):
         parsed = urllib.parse.urlsplit(base_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
             raise ValueError("Account base URL must be an HTTPS origin")
@@ -349,6 +428,20 @@ class AccountClient:
         self.store = store if store is not None else TokenStore()
         self._request = request or _http
         self._clock = clock
+        if device_id is not None:
+            if not _valid_device_id(device_id):
+                raise ValueError("Invalid device id")
+            self.device_id = device_id
+            self.device_name = (device_name or _default_device_name()).strip()[:80] or _default_device_name()
+        else:
+            self.device_name = (device_name or _default_device_name()).strip()[:80] or _default_device_name()
+            self.device_id = None
+            try:
+                identity = _load_device_identity(self.store) or _create_device_identity(self.store, self.device_name)
+                self.device_id, self.device_name = identity
+            except AccountError:
+                # Loading the app remains possible; exchange must retry persistence.
+                pass
         self._condition = threading.Condition(threading.RLock())
         self._session = copy.deepcopy(self.store.load())
         if not _valid_session(self._session):
@@ -357,7 +450,16 @@ class AccountClient:
         self._login_epoch = 0
         self._refreshing = False
         self._last_refresh_error = None
+        self._logout_cleanup_pending = False
+        self._logout_in_progress = False
+        self._pending_logout_token = None
         self.email_handoff_mode = None
+
+    def _device_fields(self):
+        if self.device_id is None:
+            self.device_id, self.device_name = (_load_device_identity(self.store)
+                                                or _create_device_identity(self.store, self.device_name))
+        return {"device_id": self.device_id, "device_name": self.device_name}
 
     def _call(self, method, path, body=None, token=None, timeout=15):
         result = self._request(method, self.base_url + path, body=body, token=token, timeout=timeout)
@@ -372,15 +474,28 @@ class AccountClient:
         self._session = copy.deepcopy(session)
         self._generation += 1
 
-    def _clear(self):
+    def _invalidate_session(self):
         self._session = None
         self._generation += 1
+        self._logout_cleanup_pending = True
+        self._condition.notify_all()
+
+    def _clear_storage(self):
         self.store.clear()
+        self._logout_cleanup_pending = False
+        self._pending_logout_token = None
+
+    @property
+    def logout_cleanup_pending(self):
+        with self._condition:
+            return self._logout_cleanup_pending
 
     def _check_login(self, generation, cancel):
         with self._condition:
             if generation != (self._generation, self._login_epoch) or (cancel is not None and cancel.is_set()):
                 raise AccountError("cancelled")
+            if self._logout_cleanup_pending or self._logout_in_progress:
+                raise AccountError("storage")
 
     def _login_call(self, generation, method, path, body=None, *, cancel=None, timeout=15, check_after=True):
         self._check_login(generation, cancel)
@@ -391,7 +506,8 @@ class AccountClient:
                 if generation != (self._generation, self._login_epoch) or (cancel is not None and cancel.is_set()):
                     raise AccountError("cancelled") from None
                 if exc.category == "account_disabled":
-                    self._clear()
+                    self._invalidate_session()
+                    self._clear_storage()
             raise
         if check_after:
             self._check_login(generation, cancel)
@@ -519,10 +635,13 @@ class AccountClient:
                         if server.error == "account_disabled":
                             with self._condition:
                                 if generation == (self._generation, self._login_epoch):
-                                    self._clear()
+                                    self._invalidate_session()
+                                    self._clear_storage()
                         raise AccountError(server.error)
                     code = server.code
-                session = self._login_call(generation, "POST", "/v1/auth/exchange", {"code": code, "code_verifier": verifier}, cancel=cancel)
+                session = self._login_call(generation, "POST", "/v1/auth/exchange",
+                                           {"code": code, "code_verifier": verifier,
+                                            **self._device_fields()}, cancel=cancel)
                 with self._condition:
                     if generation != (self._generation, self._login_epoch) or (cancel is not None and cancel.is_set()):
                         raise AccountError("cancelled")
@@ -583,10 +702,12 @@ class AccountClient:
                 if server.error == "account_disabled":
                     with self._condition:
                         if generation == (self._generation, self._login_epoch):
-                            self._clear()
+                            self._invalidate_session()
+                            self._clear_storage()
                 raise AccountError(server.error)
             session = self._login_call(generation, "POST", "/v1/auth/exchange",
-                                       {"code": server.code, "code_verifier": verifier}, cancel=cancel)
+                                       {"code": server.code, "code_verifier": verifier,
+                                        **self._device_fields()}, cancel=cancel)
             with self._condition:
                 if generation != (self._generation, self._login_epoch) or (cancel is not None and cancel.is_set()):
                     raise AccountError("cancelled")
@@ -640,7 +761,8 @@ class AccountClient:
                 if exc.status in (401, 403):
                     with self._condition:
                         if generation == (self._generation, self._login_epoch):
-                            self._clear()
+                            self._invalidate_session()
+                            self._clear_storage()
                 raise
             self._check_login(generation, cancel)
             url = result.get("url")
@@ -707,7 +829,7 @@ class AccountClient:
     def token(self, *, expected_owner=None):
         """Return a bearer for the expected account, refreshing before expiry."""
         with self._condition:
-            session = self._session
+            session = None if self._logout_in_progress else self._session
             if not session or (expected_owner is not None and
                                session['user'].get('id') != expected_owner):
                 return None
@@ -715,7 +837,7 @@ class AccountClient:
         if needs_refresh:
             self.refresh(_expected_token=session['token'])
         with self._condition:
-            session = self._session
+            session = None if self._logout_in_progress else self._session
             if not session or (expected_owner is not None and
                                session['user'].get('id') != expected_owner):
                 return None
@@ -724,12 +846,14 @@ class AccountClient:
     def refresh(self, *, _expected_token=None):
         """Rotate once; concurrent callers share the same result or error."""
         with self._condition:
+            if self._logout_in_progress:
+                return False
             if self._refreshing:
                 while self._refreshing:
                     self._condition.wait()
                 if self._last_refresh_error:
                     raise self._last_refresh_error
-                return bool(self._session)
+                return not self._logout_in_progress and bool(self._session)
             if not self._session:
                 return False
             if _expected_token is not None and self._session["token"] != _expected_token:
@@ -747,8 +871,13 @@ class AccountClient:
                 return True
         except AccountError as exc:
             with self._condition:
-                if exc.status in (401, 403) and generation == self._generation:
-                    self._clear()
+                try:
+                    if exc.status in (401, 403) and generation == self._generation:
+                        self._invalidate_session()
+                        self._clear_storage()
+                except AccountError as storage_error:
+                    self._last_refresh_error = storage_error
+                    raise
                 self._last_refresh_error = exc
             raise
         finally:
@@ -770,7 +899,8 @@ class AccountClient:
             if exc.status in (401, 403):
                 with self._condition:
                     if generation == self._generation:
-                        self._clear()
+                        self._invalidate_session()
+                        self._clear_storage()
             raise
 
     def terms(self):
@@ -809,18 +939,50 @@ class AccountClient:
     def logout(self):
         with self._condition:
             self._login_epoch += 1
-            self._condition.notify_all()
-            owner = self._session['user'].get('id') if self._session else None
-            while self._refreshing:
+            while self._logout_in_progress:
                 self._condition.wait()
-            if not self._session or self._session['user'].get('id') != owner:
-                return
-            token = self._session['token']
-            self._clear()
-        if token:
-            result = self._call("POST", "/v1/auth/logout", token=token)
-            if result.get("ok") is not True:
-                raise AccountError("invalid_response")
+            self._logout_in_progress = True
+            self._condition.notify_all()
+            try:
+                owner = self._session['user'].get('id') if self._session else None
+                while self._refreshing:
+                    self._condition.wait()
+                token = self._pending_logout_token
+                if self._session and self._session['user'].get('id') == owner:
+                    token = self._session['token']
+                    self._invalidate_session()
+                if not self._logout_cleanup_pending:
+                    self._logout_in_progress = False
+                    self._condition.notify_all()
+                    return
+                storage_error = None
+                try:
+                    self._clear_storage()
+                except AccountError as exc:
+                    storage_error = exc
+                    self._pending_logout_token = token
+            except BaseException:
+                self._logout_in_progress = False
+                self._condition.notify_all()
+                raise
+        remote_error = None
+        try:
+            if token:
+                result = self._call("POST", "/v1/auth/logout", token=token)
+                if result.get("ok") is not True:
+                    raise AccountError("invalid_response")
+        except AccountError as exc:
+            remote_error = exc
+        finally:
+            with self._condition:
+                if remote_error is None:
+                    self._pending_logout_token = None
+                self._logout_in_progress = False
+                self._condition.notify_all()
+        if storage_error:
+            raise storage_error
+        if remote_error:
+            raise remote_error
 
     def delete_account(self):
         token = self.token()
@@ -836,11 +998,13 @@ class AccountClient:
             if exc.status in (401, 403):
                 with self._condition:
                     if generation == self._generation:
-                        self._clear()
+                        self._invalidate_session()
+                        self._clear_storage()
             raise
         if result.get("ok") is not True:
             raise AccountError("invalid_response")
         with self._condition:
             if generation == self._generation:
-                self._clear()
+                self._invalidate_session()
+                self._clear_storage()
         return True

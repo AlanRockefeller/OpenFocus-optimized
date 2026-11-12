@@ -694,6 +694,45 @@ def test_render_scope_hashes_each_registration_input_once(tmp_path, monkeypatch,
     assert render() > stages * len(sources)
 
 
+@pytest.mark.parametrize('dtype', [np.uint8, np.uint16])
+def test_lent_warp_keeps_pixels_and_restores_thread_state(monkeypatch, dtype):
+    class Source:
+        def validate_pixels(self, image, should_cancel):
+            pass
+
+    image = _pixels(dtype, 3)[0]
+    matrix = np.array([[1, .01, .25], [.005, 1, -.4], [.0001, -.0002, 1]], np.float32)
+    warp = registration.PerspectiveWarp(Source(), tuple(matrix.flat), matrix.dtype.str,
+                                        (image.shape[1], image.shape[0]))
+    expected = warp(image)
+    settings = []
+    monkeypatch.setattr(cv2, 'currentParallelFramework', lambda: 'TBB', raising=False)
+    monkeypatch.setattr(cv2, 'getNumThreads', lambda: 1)
+    monkeypatch.setattr(cv2, 'setNumThreads', settings.append)
+    with registration.deferred_warp_threads(2):
+        actual = warp(image)
+    np.testing.assert_array_equal(actual, expected)
+    assert settings == [2, 0]
+
+
+def test_lent_warp_restores_thread_state_after_error(monkeypatch):
+    class Source:
+        def validate_pixels(self, image, should_cancel):
+            pass
+
+    settings = []
+    monkeypatch.setattr(cv2, 'currentParallelFramework', lambda: 'TBB', raising=False)
+    monkeypatch.setattr(cv2, 'getNumThreads', lambda: 1)
+    monkeypatch.setattr(cv2, 'setNumThreads', settings.append)
+    def fail(*args, **kwargs):
+        raise RuntimeError('warp failed')
+    monkeypatch.setattr(cv2, 'warpPerspective', fail)
+    warp = registration.PerspectiveWarp(Source(), tuple(np.eye(3).flat), '<f8', (4, 4))
+    with registration.deferred_warp_threads(2), pytest.raises(RuntimeError, match='warp failed'):
+        warp(np.zeros((4, 4), np.uint8))
+    assert settings == [2, 0]
+
+
 def _budget_warp(dtype=np.uint16):
     rng = np.random.default_rng(71)
     image = rng.integers(0, np.iinfo(dtype).max, (240, 320, 3), dtype)
@@ -703,40 +742,14 @@ def _budget_warp(dtype=np.uint16):
         source, tuple(float(v) for v in matrix.flat), matrix.dtype.str, (312, 236))
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def bounded_opencv_backend(monkeypatch):
-    """Lending tests describe a backend that honours setNumThreads (the
-    pthreads, TBB and OpenMP builds); GCD has its own test."""
-    monkeypatch.setattr(registration, '_bounded_backend', True, raising=False)
+    """A backend that honours setNumThreads (TBB, OpenMP or pthreads); GCD
+    keeps deferred warps serial and is covered in test_registration_resources."""
+    monkeypatch.setattr(cv2, 'currentParallelFramework', lambda: 'TBB', raising=False)
 
 
-def test_deferred_warp_thread_budget_keeps_pixels_and_restores_opencv(monkeypatch):
-    image, warp = _budget_warp()
-    serial = warp(image)
-    before = cv2.getNumThreads()
-    calls = []
-    original = cv2.setNumThreads
-    monkeypatch.setattr(cv2, 'setNumThreads', lambda n: (calls.append(n), original(n))[1])
-    assert np.array_equal(warp(image), serial)
-    assert calls == []
-    with registration.deferred_warp_threads(4):
-        lent = warp(image)
-    assert np.array_equal(lent, serial)
-    assert calls == [4, 0 if before == 1 else before]
-    assert cv2.getNumThreads() == before
-
-
-def test_deferred_warp_thread_budget_restores_opencv_after_failure(monkeypatch):
-    image, warp = _budget_warp(np.uint8)
-    before = cv2.getNumThreads()
-    monkeypatch.setattr(cv2, 'warpPerspective',
-                        lambda *args, **kwargs: (_ for _ in ()).throw(cv2.error('warp')))
-    with registration.deferred_warp_threads(3), pytest.raises(cv2.error):
-        warp(image)
-    assert cv2.getNumThreads() == before
-    assert not registration._warp_threads_lock.locked()
-
-
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_deferred_warp_thread_budget_is_scoped_to_its_owner_thread():
     from concurrent.futures import ThreadPoolExecutor
     assert registration._warp_thread_budget() == 1
@@ -752,6 +765,7 @@ def test_deferred_warp_thread_budget_is_scoped_to_its_owner_thread():
     assert registration._warp_thread_budget() == 1
 
 
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_serial_materialization_lends_threads_and_decode_workers_stay_serial(tmp_path, monkeypatch):
     from core import resource_policy as policy
     seen = []
@@ -775,6 +789,7 @@ def test_serial_materialization_lends_threads_and_decode_workers_stay_serial(tmp
     assert seen == [1]
 
 
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_openfocus_row_mode_lends_its_idle_workers_to_deferred_warps():
     from fusion_methods import _openfocus_execution as execution
 
@@ -789,6 +804,7 @@ def test_openfocus_row_mode_lends_its_idle_workers_to_deferred_warps():
     assert registration._warp_thread_budget() == 1
 
 
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_exposure_gain_pass_lends_the_planned_threads(monkeypatch):
     from core import resource_policy as policy
     from core.multi_focus_fusion import MultiFocusFusion
@@ -812,6 +828,7 @@ def test_exposure_gain_pass_lends_the_planned_threads(monkeypatch):
     assert registration._warp_thread_budget() == 1
 
 
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_thread_count_exchange_never_saves_a_count_raised_for_a_warp(monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     image, warp = _budget_warp(np.uint8)
@@ -848,24 +865,10 @@ def test_thread_count_exchange_never_saves_a_count_raised_for_a_warp(monkeypatch
     assert cv2.getNumThreads() == before
 
 
-def test_gcd_backend_keeps_deferred_warps_serial(monkeypatch):
-    """GCD runs any count above one on the host's whole dispatch pool, so a
-    lent budget could not be enforced: warps stay serial there."""
-    monkeypatch.setattr(registration, '_bounded_backend', None, raising=False)
-    monkeypatch.setattr(registration.cv2, 'getBuildInformation',
-                        lambda: '  Parallel framework:            GCD\n')
-    with registration.deferred_warp_threads(4):
-        assert registration._warp_thread_budget() == 1
-    monkeypatch.setattr(registration, '_bounded_backend', None, raising=False)
-    monkeypatch.setattr(registration.cv2, 'getBuildInformation',
-                        lambda: '  Parallel framework:            pthreads\n')
-    with registration.deferred_warp_threads(4):
-        assert registration._warp_thread_budget() == 4
-
-
+@pytest.mark.usefixtures('bounded_opencv_backend')
 def test_materialization_without_a_thread_plan_keeps_warps_serial(monkeypatch):
-    """Callers that plan no threads (CLI, export, retouch, depth maps before
-    they forwarded theirs) must not receive the automatic budget."""
+    """Callers that plan no threads (CLI, export, retouch) must not receive
+    the automatic budget."""
     from core import resource_policy as policy
     seen = []
 
@@ -890,7 +893,8 @@ def test_depth_map_preparation_keeps_the_jobs_thread_limit(monkeypatch):
 
     monkeypatch.setattr(source_frames, 'materialize_frames', materialize)
     frames = [np.zeros((16, 16, 3), np.uint8)] * 2
+    # OpenFocus B resolves its own deferred frames; C is prepared up front.
     with pytest.raises(RuntimeError, match='stop after preparation'):
-        depth_map.compute_focus_index(frames, 'openfocus_b', thread_count=1,
+        depth_map.compute_focus_index(frames, 'openfocus_c', thread_count=1,
                                       resource_preference='responsive')
     assert calls == [{'thread_count': 1, 'resource_preference': 'responsive'}]

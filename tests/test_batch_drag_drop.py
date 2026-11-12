@@ -540,6 +540,34 @@ def test_batch_fusion_only_options_follow_the_selected_method(qapp):
         qapp.processEvents()
 
 
+def test_batch_exposure_uses_method_choices_and_keeps_drafts(qapp):
+    from types import SimpleNamespace
+    from dialogs.batch import BatchProcessingDialog
+
+    dialog = BatchProcessingDialog(None)
+    dialog.parent_window = SimpleNamespace(
+        brightness_option_for=lambda option, method: method != 'openfocus_a')
+    try:
+        _select_fusion(dialog, 'openfocus_a')
+        assert not dialog.chk_exposure_match.isChecked()
+        assert not dialog.get_processing_settings()['runtime_settings']['exposure_match']
+        _select_fusion(dialog, 'openfocus_b')
+        assert dialog.chk_exposure_match.isChecked()
+        dialog.chk_exposure_match.setChecked(False)
+        _select_fusion(dialog, 'none')
+        _select_fusion(dialog, 'openfocus_a')
+        assert not dialog.chk_exposure_match.isChecked()
+        dialog.chk_exposure_match.setChecked(True)
+        _select_fusion(dialog, 'openfocus_b')
+        assert not dialog.chk_exposure_match.isChecked()
+        _select_fusion(dialog, 'openfocus_a')
+        assert dialog.chk_exposure_match.isChecked()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
 @pytest.mark.parametrize('method,expected', [
     ('openfocus_a', 'first'), ('openfocus_b', 'first'),
     ('openfocus_c', 'first'), ('guided_filter', 'last'),
@@ -671,3 +699,110 @@ def test_batch_depth_warning_only_appears_for_eight_bit_formats(qapp):
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_split_preview_tracks_current_reference_paths(qapp, tmp_path):
+    from dialogs.batch import BatchProcessingDialog
+
+    dialog = BatchProcessingDialog(None)
+    try:
+        paths = [str(tmp_path / name) for name in ('a.png', 'b.png', 'c.png', 'flat.png')]
+        dialog.single_folder_images_with_times = [(path, None, float(i), os.path.basename(path))
+                                                  for i, path in enumerate(paths)]
+        dialog.split_method_combo.setCurrentIndex(0)
+        dialog.param_spinbox.setValue(2)
+        dialog.flat_field_path.setText(paths[3])
+        assert [[entry[0] for entry in stack] for stack in dialog.single_folder_stacks] == [paths[:2], paths[2:3]]
+        assert [[entry[0] for entry in stack] for stack in dialog.get_processing_settings()['frozen_stacks']] == [paths[:2], paths[2:3]]
+        dialog.flat_field_path.setText(paths[0])
+        assert [[entry[0] for entry in stack] for stack in dialog.single_folder_stacks] == [paths[1:3], paths[3:]]
+        dialog.flat_field_path.clear()
+        assert [[entry[0] for entry in stack] for stack in dialog.single_folder_stacks] == [paths[:2], paths[2:]]
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_cancelled_import_signals_cannot_replace_new_request(qapp, monkeypatch):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from core import workers
+    from dialogs.batch import BatchProcessingDialog
+
+    class ImportWorker(QObject):
+        stack_loaded = pyqtSignal(object, object, object)
+        folders_loaded = pyqtSignal(object)
+        finished = pyqtSignal()
+
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+        def start(self):
+            pass
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(workers, 'BatchImportWorker', ImportWorker)
+    dialog = BatchProcessingDialog(None)
+    received = []
+    try:
+        assert dialog._start_import('stack', folder_path='old', on_stack=lambda *args: received.append(args))
+        old = dialog._import_worker
+        old.stack_loaded.disconnect(dialog._on_import_stack_ready)
+        old.stack_loaded.connect(dialog._on_import_stack_ready, Qt.ConnectionType.QueuedConnection)
+        old.finished.disconnect(dialog._on_import_finished)
+        old.finished.connect(dialog._on_import_finished, Qt.ConnectionType.QueuedConnection)
+        old.stack_loaded.emit('old', [], 'error')
+        old.finished.emit()
+        dialog.cancel_imports()
+        assert dialog._start_import('stack', folder_path='new', on_stack=lambda *args: received.append(args))
+        new = dialog._import_worker
+        qapp.processEvents()
+        assert dialog._import_worker is new and dialog._import_busy
+        assert received == []
+        new.stack_loaded.emit('new', ['frame'], '')
+        assert received == [('new', ['frame'], '')]
+        new.finished.emit()
+        assert not dialog._import_busy
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_folder_thumbnail_queue_survives_active_import(qapp, monkeypatch):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from core import workers
+    from dialogs.batch import BatchProcessingDialog
+
+    requests = []
+    class ImportWorker(QObject):
+        stack_loaded = pyqtSignal(object, object, object)
+        folders_loaded = pyqtSignal(object)
+        finished = pyqtSignal()
+        def __init__(self, mode, **kwargs):
+            super().__init__()
+            requests.append(kwargs['folder_paths'])
+        def start(self):
+            pass
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(workers, 'BatchImportWorker', ImportWorker)
+    dialog = BatchProcessingDialog(None)
+    try:
+        dialog.add_folders_to_list(['first'])
+        first = dialog._import_worker
+        dialog.add_folders_to_list(['second', 'third'])
+        assert requests == [['first']]
+        first.folders_loaded.emit([('first', None)])
+        first.finished.emit()
+        assert requests == [['first'], ['second', 'third']]
+        second = dialog._import_worker
+        second.folders_loaded.emit([('second', None), ('third', None)])
+        second.finished.emit()
+        assert not dialog._import_busy
+        assert dialog.folder_list.item(1).toolTip()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        qapp.processEvents()

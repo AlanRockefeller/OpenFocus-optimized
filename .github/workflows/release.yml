@@ -17,9 +17,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # One identity for both platforms. A tag must match constants.APP_VERSION
-  # exactly; a branch dispatch produces a clearly labelled preview that is
-  # never uploaded to a GitHub release (the release job below is tag-only).
+  # Tagged releases match APP_VERSION, optionally with a beta suffix. Branch
+  # dispatches only produce preview artifacts and are never published.
   prepare:
     name: Resolve build identity
     runs-on: ubuntu-latest
@@ -28,6 +27,7 @@ jobs:
       label: ${{ steps.identity.outputs.label }}
       channel: ${{ steps.identity.outputs.channel }}
       tag: ${{ steps.identity.outputs.tag }}
+      sha: ${{ steps.identity.outputs.sha }}
     steps:
       - uses: actions/checkout@v5
 
@@ -38,7 +38,15 @@ jobs:
       - name: Resolve version and build label
         id: identity
         shell: bash
-        run: python tools/release_metadata.py --github-output "$GITHUB_OUTPUT"
+        run: python tools/release_metadata.py --checkout-sha "$(git rev-parse HEAD)" --github-output "$GITHUB_OUTPUT"
+
+  release-tests:
+    needs: prepare
+    if: needs.prepare.outputs.channel == 'release' || needs.prepare.outputs.channel == 'beta'
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      run_suite: true
 
   build-windows:
     name: Build Windows (x64)
@@ -48,6 +56,8 @@ jobs:
       signed: ${{ steps.signpath.outputs.enabled }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: actions/setup-python@v6
         with:
@@ -57,7 +67,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install --only-binary=pyopencl -r requirements.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install pyinstaller
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -79,22 +89,20 @@ jobs:
             Write-Output ("AI model {0}: {1:N0} bytes" -f $w, $len)
           }
 
+      - name: Write packaged build identity
+        run: python tools/release_metadata.py --write-build-identity build_identity.py
+
       - name: Build with PyInstaller
         shell: pwsh
         run: |
           pyinstaller --clean --noconfirm --onedir --noconsole --noupx `
             --name OpenFocus `
+            --contents-directory "_openfocus_runtime_${{ needs.prepare.outputs.label }}" `
             --version-file build/version_info.txt `
             --additional-hooks-dir hooks `
             --icon "assets/OpenFocus.ico" `
-            --add-data "assets;assets" `
-            --add-data "weights/stackmff_final.onnx;weights" `
-            --add-data "weights/stackmff_v2_final.onnx;weights" `
-            --add-data "weights/stackmff_v3_final.onnx;weights" `
-            --add-data "ui;ui" `
-            --add-data "docs;docs" `
-            --collect-submodules PyQt6 `
             --collect-submodules fusion_methods `
+            --hidden-import pyopencl `
             --collect-submodules locales `
             --hidden-import core.algorithm_adapters `
             --hidden-import core.depth_map `
@@ -104,11 +112,9 @@ jobs:
             --hidden-import PyQt6.QtGui `
             --hidden-import PyQt6.QtWidgets `
             --hidden-import PyQt6.QtNetwork `
-            --collect-all scipy `
+            --hidden-import PyQt6.QtSvg `
             --copy-metadata imageio `
             --collect-data dtcwt `
-            --collect-all rawpy `
-            --collect-all onnxruntime `
             --exclude-module torch `
             --exclude-module matplotlib `
             --exclude-module tkinter `
@@ -121,37 +127,28 @@ jobs:
             --exclude-module PyQt6.QtDesigner `
             --exclude-module PyQt6.QtQuick `
             main.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 
-      - name: Prune build-only files from the bundle
+      - name: Remove incompatible ICU shadow library
         shell: pwsh
         run: |
-          # torch ships headers, .lib import libraries and CMake files that are
-          # only used when compiling against it. They are ~80 MB of the bundle
-          # and nothing reads them at runtime. Qt's WebEngine/3D/Multimedia
-          # plugins are likewise unused by this app.
-          $root = "dist/OpenFocus"
-          $patterns = @("*.lib", "*.pdb", "*.exp")
-          foreach ($pat in $patterns) {
-            Get-ChildItem -Path $root -Recurse -Filter $pat -ErrorAction SilentlyContinue |
-              Remove-Item -Force -ErrorAction SilentlyContinue
-          }
-          foreach ($dir in @("torch/include", "torch/share", "torch/test")) {
-            $p = Join-Path $root "_internal/$dir"
-            if (Test-Path $p) { Remove-Item -Path $p -Recurse -Force }
-          }
-          # Qt expects the unversioned Windows ICU API. A Conda icuuc.dll can
-          # shadow it while exporting only version-suffixed symbols, causing
-          # QtWidgets to fail at startup with STATUS_ENTRYPOINT_NOT_FOUND.
-          $icu = Join-Path $root "_internal/icuuc.dll"
+          # Qt requires the unversioned Windows ICU API.
+          $resources = "dist/OpenFocus/_openfocus_runtime_${{ needs.prepare.outputs.label }}"
+          $icu = Join-Path $resources "icuuc.dll"
           if (Test-Path $icu) { Remove-Item -Path $icu -Force }
-          $before = (Get-ChildItem $root -Recurse -File | Measure-Object Length -Sum).Sum
-          Write-Output ("bundle after prune: {0:N0} MB" -f ($before/1MB))
+          python tools/verify_frozen_resources.py $resources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c "from pathlib import Path; import sys; assert any(p.parent.name == 'pyopencl' for p in Path(sys.argv[1]).rglob('_cl*.pyd')), 'PyOpenCL extension missing from bundle'" $resources
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Older updaters require this directory to exist in the new payload.
+          New-Item -ItemType Directory -Path "dist/OpenFocus/_internal" -Force | Out-Null
+          Set-Content -Path "dist/OpenFocus/_internal/legacy-layout.marker" -Value "Compatibility marker for older updaters." -Encoding utf8
 
       - name: Detect SignPath signing configuration
         id: signpath
         # Never sign a branch acceptance build with the official version.
-        if: needs.prepare.outputs.channel == 'release'
+        if: needs.prepare.outputs.channel == 'release' || needs.prepare.outputs.channel == 'beta'
         shell: pwsh
         env:
           API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -227,7 +224,22 @@ jobs:
       - name: Verify packaged CLI and desktop control
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python tools/frozen_cli_smoke.py --executable dist/OpenFocus/OpenFocus.exe
+        run: python tools/frozen_cli_smoke.py --executable dist/OpenFocus/OpenFocus.exe --resources "dist/OpenFocus/_openfocus_runtime_${{ needs.prepare.outputs.label }}"
+
+      - name: Verify upgrade from v1.76.0
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previous = Join-Path $env:RUNNER_TEMP "OpenFocus-v1.76.0-windows-x64.zip"
+          gh release download v1.76.0 --repo $env:GITHUB_REPOSITORY --pattern "OpenFocus-v1.76.0-windows-x64.zip" --output $previous
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash -Path $previous -Algorithm SHA256).Hash
+          if ($hash -ne "b125290a52da1ddd90e590f876e583d21d14d74cf563329bb0f00975b834c47a") {
+            throw "Unexpected SHA-256 for v1.76.0 Windows ZIP: $hash"
+          }
+          python tools/frozen_upgrade_smoke.py --executable dist/OpenFocus/OpenFocus.exe --previous-zip $previous --runtime-name "_openfocus_runtime_${{ needs.prepare.outputs.label }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package zip (portable)
         shell: pwsh
@@ -249,6 +261,7 @@ jobs:
             /DAPP_VERSION=${{ needs.prepare.outputs.label }} `
             /DAPP_VERSION_NUM=${{ needs.prepare.outputs.version }} `
             OpenFocus.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item installer/OpenFocus-*-setup.exe .
 
       - name: Upload unsigned installer
@@ -299,13 +312,45 @@ jobs:
           QT_QPA_PLATFORM: windows
         run: |
           $setup = (Resolve-Path "OpenFocus-${{ needs.prepare.outputs.label }}-setup.exe").Path
-          $target = Join-Path $env:RUNNER_TEMP "OpenFocus-installed"
+          $previous = Join-Path $env:RUNNER_TEMP "OpenFocus-v1.76.0-windows-x64.zip"
+          $previousRoot = Join-Path $env:RUNNER_TEMP "OpenFocus-installer-previous"
+          python -m zipfile -e $previous $previousRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $target = Join-Path $previousRoot "OpenFocus"
+          Remove-Item -Path "$target/OpenFocus.portable" -Force
+          $oldFile = Get-ChildItem "$target/_internal" -File -Recurse | Select-Object -First 1
+          if (-not $oldFile) { throw "Previous installation has no runtime files." }
+          New-Item -ItemType Directory -Path "$target/_openfocus_runtime_obsolete", "$target/OpenFocusData" -Force | Out-Null
+          Set-Content -Path "$target/_openfocus_runtime_obsolete/old.txt" -Value "old runtime"
+          Set-Content -Path "$target/OpenFocusData/keep.txt" -Value "user data"
           $install = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=`"$target`""
           )
           if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+          if ((Test-Path $oldFile.FullName) -or (Test-Path "$target/_openfocus_runtime_obsolete")) {
+            throw "Installer retained an obsolete application runtime."
+          }
+          if ((Get-Content "$target/OpenFocusData/keep.txt" -Raw).Trim() -ne "user data") {
+            throw "Installer changed existing user data."
+          }
           python tools/frozen_cli_smoke.py --executable "$target/OpenFocus.exe" --installed-startup
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report Windows package contents
+        shell: pwsh
+        run: |
+          python tools/packaging_report.py `
+            --toc build/OpenFocus/Analysis-00.toc --toc build/OpenFocus/COLLECT-00.toc `
+            --package dist/OpenFocus `
+            --package "OpenFocus-${{ needs.prepare.outputs.label }}-windows-x64.zip" `
+            --package "OpenFocus-${{ needs.prepare.outputs.label }}-setup.exe" `
+            --output "$env:RUNNER_TEMP/windows-packaging-report.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v5
+        with:
+          name: packaging-report-windows
+          path: ${{ runner.temp }}/windows-packaging-report.json
+          if-no-files-found: error
 
       - name: Stage Windows assets around GitHub's 2 GiB limit
         shell: pwsh
@@ -339,6 +384,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: actions/setup-python@v6
         with:
@@ -348,7 +395,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --only-binary=pyopencl -r requirements.txt
           pip install pyinstaller
 
       - name: Generate .icns icon
@@ -375,19 +422,17 @@ jobs:
             echo "AI model $w: $size bytes"
           done
 
+      - name: Write packaged build identity
+        run: python tools/release_metadata.py --write-build-identity build_identity.py
+
       - name: Build with PyInstaller
         run: |
           pyinstaller --clean --noconfirm --windowed \
             --name OpenFocus \
             --additional-hooks-dir hooks \
             --icon OpenFocus.icns \
-            --add-data "assets:assets" \
-            --add-data "weights/stackmff_final.onnx:weights" \
-            --add-data "weights/stackmff_v2_final.onnx:weights" \
-            --add-data "weights/stackmff_v3_final.onnx:weights" \
-            --add-data "ui:ui" \
-            --add-data "docs:docs" \
             --collect-submodules fusion_methods \
+            --hidden-import pyopencl \
             --collect-submodules locales \
             --hidden-import core.algorithm_adapters \
             --hidden-import core.depth_map \
@@ -397,11 +442,9 @@ jobs:
             --hidden-import PyQt6.QtGui \
             --hidden-import PyQt6.QtWidgets \
             --hidden-import PyQt6.QtNetwork \
-            --collect-all scipy \
+            --hidden-import PyQt6.QtSvg \
             --copy-metadata imageio \
             --collect-data dtcwt \
-            --collect-all rawpy \
-            --collect-all onnxruntime \
             --exclude-module torch \
             --exclude-module matplotlib \
             --exclude-module tkinter \
@@ -415,16 +458,11 @@ jobs:
             --exclude-module PyQt6.QtQuick \
             main.py
 
-      - name: Prune build-only files from the bundle
-        run: |
-          # Headers, import libraries and CMake files are compile-time only;
-          # they are a large share of the bundle and nothing reads them.
-          APP=dist/OpenFocus.app
-          find "$APP" -name '*.lib' -delete 2>/dev/null || true
-          find "$APP" -name '*.pdb' -delete 2>/dev/null || true
-          rm -rf "$APP"/Contents/Frameworks/torch/include 2>/dev/null || true
-          rm -rf "$APP"/Contents/Resources/torch/include 2>/dev/null || true
-          du -sh dist/OpenFocus.app || true
+      - name: Verify bundled runtime resources
+        run: python tools/verify_frozen_resources.py dist/OpenFocus.app/Contents/Resources
+
+      - name: Verify bundled PyOpenCL extension
+        run: python -c "from pathlib import Path; assert any(p.parent.name == 'pyopencl' for p in Path('dist/OpenFocus.app/Contents').rglob('_cl*.so')), 'PyOpenCL extension missing from bundle'"
 
       - name: Verify packaged CLI and desktop control
         env:
@@ -462,6 +500,20 @@ jobs:
           done
           ls -lh "$DMG"
 
+      - name: Report macOS package contents
+        run: |
+          python tools/packaging_report.py \
+            --toc build/OpenFocus/Analysis-00.toc --toc build/OpenFocus/COLLECT-00.toc \
+            --package dist/OpenFocus.app \
+            --package "OpenFocus-${{ needs.prepare.outputs.label }}-macos-arm64.zip" \
+            --package "OpenFocus-${{ needs.prepare.outputs.label }}-macos.dmg" \
+            --output "$RUNNER_TEMP/macos-packaging-report.json"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: packaging-report-macos
+          path: ${{ runner.temp }}/macos-packaging-report.json
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v5
         with:
           name: OpenFocus-macos
@@ -472,24 +524,29 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [prepare, build-windows, build-macos]
+    needs: [prepare, release-tests, build-windows, build-macos]
     runs-on: ubuntu-latest
     # Tags only: a workflow_dispatch run on a branch uploads downloadable
     # artifacts for acceptance testing and must never create or overwrite a
     # release (or its four stable assets).
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ needs.prepare.outputs.channel == 'release' || needs.prepare.outputs.channel == 'beta' }}
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5  # CHANGELOG.md for the release notes
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/download-artifact@v5
         with:
+          pattern: OpenFocus-*
           merge-multiple: true
           path: release
 
       - name: Create release notes
         env:
           WINDOWS_SIGNED: ${{ needs.build-windows.outputs.signed }}
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           cat > release_notes.md <<'EOF'
           ## Downloads
@@ -549,16 +606,24 @@ jobs:
           EOF
           # Keep a translated summary before the common download instructions.
           # Language blocks survive mirroring for in-app selection after fetch.
-          python3 - "${{ github.ref_name }}" <<'PY'
+          python3 - "${{ needs.prepare.outputs.tag }}" <<'PY'
           import os, re, sys
           from utils.release_notes import release_notes_markdown
           tag = sys.argv[1]
-          version = tag[1:] if tag.startswith('v') else tag
+          version = os.environ["RELEASE_VERSION"]
           text = open("CHANGELOG.md", encoding="utf-8").read()
           m = re.search(r"^## \[v?" + re.escape(version) + r"\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
           if not m:
               raise SystemExit(f"No changelog section found for {tag}")
           notes = open("release_notes.md", encoding="utf-8").read()
+          if os.environ["RELEASE_CHANNEL"] == "beta":
+              notes = notes.replace(
+                  "Windows downloads are available from **https://openfocus.top**.",
+                  "This is a beta prerelease. Download its assets from this page.",
+              ).replace("site download, or `OpenFocus-", "`OpenFocus-").replace(
+                  "rebuild the complete file, or download from the site.",
+                  "rebuild the complete file.",
+              )
           if os.environ.get("WINDOWS_SIGNED") == "true":
               notes = notes.replace(
                   "The app is unsigned, so SmartScreen/Gatekeeper may warn on first launch:",
@@ -567,7 +632,7 @@ jobs:
                   "notarized:",
               )
           # Publishing requires actual notes in every selectable UI language.
-          notes = release_notes_markdown(tag) + "\n\n" + notes
+          notes = release_notes_markdown(version) + "\n\n" + notes
           open("release_notes.md", "w", encoding="utf-8").write(notes)
           PY
 
@@ -592,46 +657,10 @@ jobs:
           find release -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
           ls -lh release/
 
-      - name: Remove stale release assets
+      - name: Verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${{ github.ref_name }}"
-          if ! gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            exit 0
-          fi
-          mapfile -t wanted < <(find release -maxdepth 1 -type f -printf '%f\n')
-          while IFS= read -r name; do
-            [ -n "$name" ] || continue
-            case "$name" in
-              "OpenFocus-${tag}-"*)
-                if ! printf '%s\n' "${wanted[@]}" | grep -Fxq "$name"; then
-                  echo "Deleting stale asset: $name"
-                  gh release delete-asset "$tag" "$name" \
-                    --repo "${{ github.repository }}" -y
-                fi
-                ;;
-            esac
-          done < <(gh release view "$tag" --repo "${{ github.repository }}" \
-            --json assets --jq '.assets[].name')
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "Files downloaded:"
-          ls -la release/
-          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release upload "${{ github.ref_name }}" release/* \
-              --repo "${{ github.repository }}" --clobber
-            gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" \
-              --title "OpenFocus ${{ github.ref_name }}" --notes-file release_notes.md \
-              --draft=false --prerelease=false
-          else
-            gh release create "${{ github.ref_name }}" \
-              --repo "${{ github.repository }}" \
-              --title "OpenFocus ${{ github.ref_name }}" \
-              --notes-file release_notes.md release/*
-          fi
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: python tools/publish_release.py --directory release --notes release_notes.md

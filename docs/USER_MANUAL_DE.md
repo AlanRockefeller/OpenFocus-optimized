@@ -76,6 +76,7 @@ Unter **Speichern unter** speichert gewöhnliches TIFF das Ergebnis als einzelne
 ### Installation
 
 Laden Sie den aktuellen Windows- oder macOS-Build von der [OpenFocus-Website](https://openfocus.top/#download). Dieselben Dateien und ältere Versionen stehen auch unter [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases) bereit.
+Website und Installationsskripte bieten auch neuere Betaversionen an, derzeit [Vorabversion v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Der Desktop-Updater bietet ebenfalls neuere Betas an; die Linux-CLI von PyPI bleibt stabil.
 
 | Plattform | Datei | Typ |
 |-----------|-------|-----|
@@ -229,6 +230,8 @@ Eine kleine Kurve über dem Navigationsregler der Quelle zeigt die Schärfe pro 
 Mikroskopiesoftware (ZEN, NIS-Elements, ImageJ/Fiji) exportiert einen ganzen Z-Stapel häufig als EINE mehrseitige TIFF-Datei. OpenFocus liest jede Seite einer solchen Datei als eigenes Einzelbild des Stapels – die Datei ablegen oder öffnen, und der Stapel erscheint vollständig (die Einzelbilder heißen `<file>_page_001` und so weiter). Einseitige TIFFs verhalten sich genau wie bisher. Auch der umgekehrte Weg funktioniert: **Datei → Stack speichern → Registrierter Stack / Eingabe-Stack → Als mehrseitige TIFF speichern** schreibt den gesamten Stapel zurück in eine einzige `.tif` und behält dabei die 16-Bit-Tiefe bei.
 
 ### Maßstabsbalken (Publikationsabbildungen)
+
+Beschriftungen des Maßstabsbalkens verwenden echte fette Glyphen, wenn die gewählte Schriftfamilie sie bietet; andernfalls wird eine lesbare Schrift derselben Familie verwendet.
 
 Fehlen für das gewählte Ziel nutzbare Metadaten, wird die manuelle Kalibrierung vorausgewählt und eine gültige Pixelgröße benötigt.
 
@@ -455,7 +458,7 @@ OpenFocus bietet zehn Fusionsalgorithmen plus einen reinen Ausrichtungsmodus. Ei
 
 - **Algorithmus**: Implementierung nach Fu et al. (*Laser & Optoelectronics Progress*, 2024): Eine Unschärfedifferenz-Fokuskarte |I − mean(I)| wird mit dem gaußartigen Vier-Nachbarschafts-Gradienten (GFG) angereichert, durch einen schnellen Guided Filter verfeinert, pro Pixel entschieden (Gleichstand über ein 3×3-Sobel-Kleinbereichsmaß aufgelöst) und die binären Entscheidungskarten werden vor der gewichteten Mischung erneut mit dem schnellen Guided Filter geglättet.
 - **Am besten für**: Mikroskopie und Bilder mit klaren Fokusbereichen
-- **Vorteile**: schnell, scharfe Grenzen der Fokusbereiche; der Speicherbedarf wächst nicht mit der Bildanzahl
+- **Vorteile**: schnell, scharfe Fokusgrenzen; Fokus- und Gewichtskarten werden in begrenzten Fenstern verarbeitet. Quellen und ihre Beschreibungen, Ergebnis, Dekodierung und Arbeitsbereiche benötigen weiterhin RAM und temporären Speicherplatz.
 - **Parameter**: Kernel = Größe des Mittelwertfilters der groben Fokuskarte
 
 ### StackMFF (V1, Deep Learning)
@@ -656,6 +659,8 @@ Diagnosedaten exakt wieder her, ohne den Hintergrund neu zu berechnen.
 
 ### Beschriftungen verwalten
 
+Historische ausgerichtete Stapel verwenden beim Export ihre eigenen Bildidentitäten; fehlen sie für eine bildgebundene Beschriftung, wird ein Fehler gemeldet. Nur tatsächlich zutreffende Beschriftungen blockieren den Export transparenter PNGs. **Einpassen** verwendet ein begrenztes Vorschaubild; **100 %** zeigt den Originalausschnitt mit einem Quellpixel pro Gerätepixel und kann Laden oder Fehler anzeigen. Große gespeicherte Koordinaten und Schriftgrößen bleiben beim Bearbeiten erhalten.
+
 **Werkzeuge → Beschriftungen** nach dem Laden von Bildern oder dem Erzeugen eines Ergebnisses öffnen. Jede Beschriftung hat ihr eigenes Ziel: den Quellstapel, den registrierten Stapel oder Ausgabeergebnisse. Ausgabebeschriftungen können für alle Ergebnisse oder für das ausgewählte Ergebnis nach seinem Namen gelten; Umbenennen oder Umsortieren dieses Ergebnisses ändert die Zuordnung nicht.
 
 Mit **Hinzufügen** eine weitere Beschriftung anlegen, einen Eintrag zum Bearbeiten auswählen und über sein Kästchen aktivieren oder deaktivieren. Festen Text eingeben oder `{value}` für eine Bildnummer einfügen. Die Nummer ist der Startwert plus dem nullbasierten Bildindex mal dem Intervall; eine einzelne Ausgabe verwendet immer den Startwert.
@@ -673,6 +678,8 @@ Die Vorschau verwendet das tatsächliche Ziel. Mit **Zurück/Weiter** navigieren
 **Einstellungen → Erweiterte Einstellungen…** öffnet Leistungs-, Registrierungs-, Sensorbereinigungs-, Ausgabebenennungs-, KI- und Starteinstellungen. Änderungen bleiben Entwürfe, bis Sie **OK** drücken; Abbrechen, Esc und Schließen verwerfen sie. Eine Verringerung der Kachelgröße aktualisiert sofort das sichtbare Überlappungslimit auf eine halbe Kachel. Die gespeicherte KI-Batch-Obergrenze bleibt erhalten; die Inferenz verwendet derzeit eine Kachel pro Aufruf. Die Registrierungsbreite kann die Genauigkeit der Ausrichtung verändern. Die Erfassung der Ausrichtungsdiagnose ist ein Kästchen im Abschnitt Registrierung.
 
 Automatische Update-Downloads laufen im Leerlauf und installieren nie von selbst. Ein abgeschlossener Download bleibt bereit, bis Sie ausdrücklich **Aktualisieren und neu starten** wählen. Der Neustart schützt aktive Bearbeitungen und ungespeicherte Arbeit und schreibt anschließend Wiederherstellungsdaten, bevor die Ersatzversion startet. Das Abbrechen eines Downloads oder einer Vorbereitung wartet auf die aktuelle sichere Grenze. Ein vorhandener vollständiger, neuerer bereitgestellter Build kann offline installiert werden.
+
+Unter Windows erstellt das Update eine separate Kandidatenversion und verschiebt beim Wechsel die portable Markierung und `OpenFocusData`. Scheitert der Wechsel, wird die alte Installation wiederhergestellt; scheitert die Rücksetzung, bleibt die Sicherung erhalten und die App startet nicht automatisch neu. Eine Berechtigungsabfrage kann einmal erscheinen. Abbrechen der Entpackung verwirft unvollständige Dateien und wird zwischen 256-KiB-Lese- und Schreibvorgängen geprüft; blockierte Datenträger- oder Netzwerkzugriffe können es verzögern.
 
 Die Flat-Field-Korrektur ändert die Arbeitssitzungspixel, ohne Quelldateien zu überschreiben. Über **Werkzeuge → Staubkarte (Flat-Field)** das Weißbild und ein Vorschaubild wählen und die Vorschau nach einer Änderung von Quelle oder Skalierung erneut erzeugen. Referenz- und Arbeits-/Basisbilder müssen denselben Koordinatenbereich und dieselbe Größe haben. Das Anwenden bereitet beide Stapel vor dem Übernehmen vor; das optionale Entfernen des Referenzbilds gehört zum selben Rückgängig-Schritt. Korrigierte Quellbilder exportieren, wenn diese Pixel außerhalb der Sitzung erhalten bleiben sollen.
 
@@ -748,8 +755,10 @@ Der Planer berücksichtigt physische Kerne, CPU-Affinität und Kontingente und f
 
 StackMFF V1/V2/V3 nutzen ONNX Runtime. DirectML unter Windows und CoreML unter macOS können die Inferenz beschleunigen; andernfalls wird die CPU verwendet. Die Verfügbarkeit eines Providers belegt keine GPU-Ausführung. Weitere GPU-Unterstützung muss validiert werden.
 
+OpenFocus B kann Tiefenverarbeitung und Quellenzusammenführung mit einer kompatiblen OpenCL-GPU beschleunigen; je nach Speicherbudget sind begrenzte GPU-Schritte oder CPU-Rückfall möglich. OpenFocus A/C und Ausrichtung laufen auf der CPU. Siehe [GPU-Unterstützung](GPU_SUPPORT.md).
+
 - Umschalten über **Einstellungen → GPU-Beschleunigung**
-- Deaktivieren zwingt die neuronalen Methoden auf die CPU – nützlich, wenn GPU-Treiber Probleme bereiten
+- Deaktivieren zwingt unterstützte Fusionsmethoden auf die CPU – nützlich bei Problemen mit GPU-Treibern
 - Das Statusfeld zeigt `N/A`, wenn kein Beschleuniger verwendet wird oder verfügbar ist, und `CPU*`, wenn ein Beschleuniger vorhanden ist, die gewählte Methode aber nur auf der CPU läuft
 - Die Wahl greift beim nächsten Rendern und wird gespeichert
 
@@ -962,7 +971,7 @@ Für ein einzelnes Rendering lässt sich beispielsweise `--align openfocus --ali
 | `--save-stacked [path]` | Mit `--auto-background` zusätzlich das Ergebnis vor dem Ersetzen speichern (Standard `<output>_stacked<ext>`). Im Stapelmodus nur der Standardpfad |
 | `--missing-data-map [path]` | Mit `--auto-background` zusätzlich die Fehlende-Daten-Karte und je Klasse eine 8-Bit-Maske speichern (Standard `<output>_missing.png`). Im Stapelmodus nur der Standardpfad |
 | `--dry-run` | Eingaben prüfen und den Plan ausgeben, ohne zu fusionieren |
-| `--resume` | Stapelmodus: Ordner überspringen, deren Ausgabedatei bereits existiert |
+| `--resume` | Stapelmodus: nur überspringen, wenn alle aktuell angeforderten Ergebnisse nichtleere reguläre Dateien sind; keine Inhalts- oder Parameterprüfung |
 | `--json FILE` | Eine maschinenlesbare Ergebniszusammenfassung in FILE schreiben |
 | `--json-progress` | Ein JSON-Fortschrittsobjekt pro Schritt auf stdout ausgeben (NDJSON); Prosa geht nach stderr |
 | `--config FILE` | Stapelmodus: JSON-Datei mit Überschreibungen pro Ordner, z. B. `{"stackA": {"method": "dct", "kernel": 9}}` |
@@ -1087,6 +1096,7 @@ Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler, `2` Nutzungsfehler. Der Aufruf 
 
 #### KI nicht verfügbar
 
+- Aktivieren und bestätigen Sie experimentelle Funktionen in den erweiterten Einstellungen; KI-Methoden sind sonst in der Desktop-App gesperrt. Laufzeit und Modell sind separate Voraussetzungen.
 - Prüfen Sie ONNX Runtime und das mitgelieferte Modell.
 - Über **Hilfe → Umgebungsinformationen** prüfen
 

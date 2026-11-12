@@ -383,8 +383,6 @@ def _restore_storage_directory(window):
 class OpenFocus(QMainWindow):
     storage_fallback_notice = pyqtSignal(str, str, str)
     account_session_loaded = pyqtSignal(object, object)
-    account_browser_started = pyqtSignal(object)
-    account_browser_finished = pyqtSignal(object, object)
 
     def __init__(self):
         super().__init__()
@@ -398,6 +396,7 @@ class OpenFocus(QMainWindow):
         log_session_start()
 
         self.setWindowTitle("OpenFocus")
+        self._close_confirmation_active = False
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
         
         # 设置窗口图标
@@ -469,6 +468,8 @@ class OpenFocus(QMainWindow):
         if saved_lang:
             trans.set_language(saved_lang)
         storage_warning = _restore_storage_directory(self)
+        from core import scratch_registry
+        scratch_registry.sweep_in_background([self.storage_directory] if self.storage_directory else [])
         if self.debug_logging:
             from utils.logging_setup import set_debug_logging
             set_debug_logging(True)
@@ -890,11 +891,13 @@ class OpenFocus(QMainWindow):
             self.lbl_status_memory.setText(trans.t('status_ram').format('N/A'))
 
         from core.multi_focus_fusion import (neural_device_kind,
-                                             is_ai_fusion_available)
+                                             is_ai_fusion_available,
+                                             openfocus_gpu_available)
         from fusion_methods import neural_runtime
         try:
             capability = neural_device_kind()
-            if capability is None and is_ai_fusion_available():
+            opencl = openfocus_gpu_available()
+            if opencl is None or (capability is None and is_ai_fusion_available()):
                 self._probe_device_kind_async()
             neural = self._ai_method_selected()
             checkpoint = (get_fusion(self.combo_fusion.currentData()).weights or ''
@@ -908,17 +911,22 @@ class OpenFocus(QMainWindow):
             kind = ('…' if state == 'pending'
                     else trans.t('neural_provider_ready').format(neural_runtime.display_name(device))
                     if state == 'ready' else neural_runtime.display_name(device))
+            if self.combo_fusion.currentData() == 'openfocus_b':
+                kind = ('CPU' if not getattr(self, 'use_gpu', True) or opencl is False
+                        else '…' if opencl is None
+                        else trans.t('neural_provider_ready').format('OpenCL'))
             self.lbl_status_gpu.setText(trans.t('status_gpu').format(kind))
             diagnostics = neural_runtime.device_diagnostics()
             hardware = '\n'.join(f'{name} (DXGI {index})' for index, name, *_ in diagnostics['hardware'])
             self.lbl_status_gpu.setToolTip('\n'.join(filter(None, (
                 hardware,
                 'ONNX Runtime: ' + ', '.join(diagnostics['providers']),
+                'OpenFocus B: ' + ('OpenCL' if opencl else 'CPU' if opencl is False else '…'),
                 trans.t('env_gpu_accel') + ': ' + neural_runtime.display_name(capability)
                 if neural_runtime.is_accelerator(capability)
                 else trans.t('env_gpu_memory_unknown').format(
                     device=neural_runtime.display_name(unadmitted)) if unadmitted
-                else trans.t('env_no_gpu'),
+                else 'ONNX Runtime: CPU',
                 trans.t('status_gpu').format(kind),
                 trans.t('msg_gpu_accel_hint'),
                 '\n'.join(diagnostics['probe_errors'])))))
@@ -1025,13 +1033,18 @@ class OpenFocus(QMainWindow):
         except Exception:
             return None
 
-    def push_scalebar_undo(self, previous: dict) -> None:
-        """Record a scale-bar configuration change as one undoable step."""
-        if getattr(self, "_undo_guard", False):
-            return
+    def prepare_scalebar_undo(self, previous: dict) -> dict:
+        """Capture annotation history before publishing a scale-bar change."""
         state = self._capture_stack_state()
         state["scalebar"] = dict(previous or {})
         state["annotations_only"] = True
+        return state
+
+    def push_scalebar_undo(self, previous: dict, *, prepared=None) -> None:
+        """Record a scale-bar configuration change as one undoable step."""
+        if getattr(self, "_undo_guard", False):
+            return
+        state = prepared if prepared is not None else self.prepare_scalebar_undo(previous)
         self._mark_project_dirty()
         self._undo_stack.append(state)
         if len(self._undo_stack) > self.UNDO_LIMIT:
@@ -1169,6 +1182,7 @@ class OpenFocus(QMainWindow):
         self.source_transforms = list(state.get("source_transforms", []))
         self.unrecoverable_source_changes = list(state.get(
             "unrecoverable_source_changes", []) or [])
+        self._mark_project_dirty()
         _restore_label_state(self, state.get("labels"))
         _restore_scalebar_state(self, state.get("scalebar"))
         _restore_watermark_state(self, state.get("watermark"))
@@ -1266,7 +1280,6 @@ class OpenFocus(QMainWindow):
 
             self.reset_parameter_memories()
             self.base_frame_correct = False
-            self.exposure_match = True
             self.refresh_algorithm_parameters()
             self.refresh_registration_parameters()
         # Reset is an explicit user edit. Mark directly: restore_default_settings
@@ -1301,9 +1314,9 @@ class OpenFocus(QMainWindow):
                 or getattr(self, "_device_probe_started", False)):
             return
         import threading
-        from core.multi_focus_fusion import neural_device_kind
+        from core.multi_focus_fusion import neural_device_kind, openfocus_gpu_available
         cached = neural_device_kind()
-        if cached is not None:
+        if cached is not None and openfocus_gpu_available() is not None:
             # A previous window/probe already resolved the backend.
             self._device_probe_started = True
             self._apply_device_probe_kind(cached)
@@ -1311,8 +1324,10 @@ class OpenFocus(QMainWindow):
         self._device_probe_started = True
 
         def worker():
-            from core.multi_focus_fusion import ensure_neural_device_kind
+            from core.multi_focus_fusion import (ensure_neural_device_kind,
+                                                 ensure_openfocus_gpu_available)
             try:
+                ensure_openfocus_gpu_available()
                 ensure_neural_device_kind()
             except Exception:
                 pass
@@ -1336,9 +1351,9 @@ class OpenFocus(QMainWindow):
         """UI-thread poll for the worker's cached backend decision."""
         if getattr(self, "_shutting_down", False):
             return
-        from core.multi_focus_fusion import neural_device_kind
+        from core.multi_focus_fusion import neural_device_kind, openfocus_gpu_available
         kind = neural_device_kind()
-        if kind is None:
+        if kind is None or openfocus_gpu_available() is None:
             return
         timer = getattr(self, "_device_probe_timer", None)
         if timer is not None:
@@ -1411,7 +1426,7 @@ class OpenFocus(QMainWindow):
         """Resolve the accelerator only when the selected method uses it."""
         try:
             code = self.combo_fusion.currentData()
-            if code != "none" and get_fusion(code).neural:
+            if code == 'openfocus_b' or (code != 'none' and get_fusion(code).neural):
                 self._probe_device_kind_async()
         except Exception:
             pass
@@ -1427,8 +1442,10 @@ class OpenFocus(QMainWindow):
     def _apply_device_probe_kind(self, _kind: str = "N/A") -> None:
         """Apply the background backend result to status and the GPU action."""
         from fusion_methods import neural_runtime
+        from core.multi_focus_fusion import openfocus_gpu_available
         if (getattr(self, '_gpu_pending_enable', False)
-                and not neural_runtime.is_accelerator(_kind)):
+                and not neural_runtime.is_accelerator(_kind)
+                and not openfocus_gpu_available()):
             # The user enabled the switch while the answer was unknown and
             # the probe found nothing. Revert only that speculative request;
             # an explicit off is never touched here.
@@ -1448,11 +1465,12 @@ class OpenFocus(QMainWindow):
             return
         from fusion_methods import neural_runtime
         from core.multi_focus_fusion import (is_ai_fusion_available,
-                                             neural_device_kind)
+                                             neural_device_kind, openfocus_gpu_available)
         kind = neural_device_kind()
-        enabled, checked = neural_runtime.gpu_toggle_state(
-            kind, getattr(self, 'use_gpu', True),
-            is_ai_fusion_available() if kind is None else False)
+        opencl = openfocus_gpu_available()
+        enabled = (neural_runtime.is_accelerator(kind) or opencl is True
+                   or opencl is None or (kind is None and is_ai_fusion_available()))
+        checked = bool(enabled and getattr(self, 'use_gpu', True))
         action.setEnabled(enabled)
         action.setChecked(checked)
         tooltip = (trans.t('msg_gpu_accel_hint') if enabled
@@ -1564,8 +1582,8 @@ class OpenFocus(QMainWindow):
         # the banner back up.
         if tag == self._banner_dismissed_tag():
             return
-        from constants import APP_VERSION
-        banner.show_for(tag, APP_VERSION, ready=ready)
+        from constants import app_display_version
+        banner.show_for(tag, app_display_version(), ready=ready)
 
     def _on_banner_update_clicked(self) -> None:
         """Primary action: install when staged, otherwise start the update."""
@@ -1851,25 +1869,61 @@ class OpenFocus(QMainWindow):
 
     def _cancel_running_work(self) -> None:
         """Cooperative stop of every long-running job (no terminate())."""
-        render_manager = getattr(self, "render_manager", None)
-        worker = getattr(render_manager, "worker", None) if render_manager else None
-        if worker is not None and worker.isRunning():
+        from utils.logging_setup import get_logger
+        logger = get_logger(__name__)
+
+        def cancel(action):
             try:
-                worker.is_cancelled = True
+                action()
             except Exception:
-                pass
-        batch_manager = getattr(self, "batch_manager", None)
-        if batch_manager is not None:
-            try:
-                batch_manager._cancel_running_batch()
-            except Exception:
-                pass
-        roi_worker = getattr(self, "roi_alignment_worker", None)
-        if roi_worker is not None:
-            try:
-                roi_worker.cancel()
-            except Exception:
-                pass
+                logger.exception('Unable to cancel running work')
+        loader = getattr(self, '_standalone_retouch_load_dialog', None)
+        if loader is not None:
+            cancel(loader.reject)
+
+        render = getattr(self, 'render_manager', None)
+        if render is not None:
+            cancel(render.cancel_pending_start)
+            context_worker = getattr(render, 'context_worker', None)
+            if context_worker is not None:
+                cancel(context_worker.cancel)
+            worker = getattr(render, 'worker', None)
+            if worker is not None and worker.isRunning():
+                cancel(lambda: setattr(worker, 'is_cancelled', True))
+        source = getattr(self, 'source_manager', None)
+        if source is not None:
+            if getattr(source, '_load_worker', None) is not None:
+                cancel(source.cancel_load)
+            for worker in (getattr(source, '_review_worker', None),
+                           *tuple(getattr(source, '_retiring_review_workers', ()))):
+                if worker is not None and worker.isRunning():
+                    cancel(worker.cancel)
+        exports = getattr(self, 'export_manager', None)
+        if exports is not None:
+            if getattr(exports, 'gif_worker', None) is not None:
+                cancel(exports._cancel_gif)
+            if getattr(exports, 'layered_worker', None) is not None:
+                cancel(exports._cancel_layered_tiff)
+        output = getattr(self, 'output_manager', None)
+        dng = getattr(output, 'linear_dng_worker', None)
+        if dng is not None and dng.isRunning():
+            cancel(dng.cancel)
+            progress = getattr(output, 'linear_dng_progress', None)
+            if progress is not None:
+                progress.setLabelText(trans.t('depth_cancelling'))
+        batch = getattr(self, 'batch_manager', None)
+        if batch is not None:
+            cancel(batch._cancel_running_batch)
+        roi = getattr(self, 'roi_alignment_worker', None)
+        if roi is not None and roi.isRunning():
+            cancel(roi.cancel)
+        try:
+            from dialogs.depthmap import _ORPHAN_WORKERS
+            for worker in tuple(_ORPHAN_WORKERS):
+                if worker.isRunning():
+                    cancel(worker.cancel)
+        except Exception:
+            logger.exception('Unable to cancel depth workers')
 
     def _open_releases_page(self) -> None:
         from utils.updater import RELEASES_PAGE_URL
@@ -2042,12 +2096,12 @@ class OpenFocus(QMainWindow):
         elif not self._update_manager().manual_check:
             return
         elif state == "latest":
-            from constants import APP_VERSION
+            from constants import app_display_version
             show_message_box(
                 self,
                 trans.t('update_up_to_date_title'),
                 trans.t('update_up_to_date_text') + "\n" +
-                trans.t('update_banner_hint').format(current=APP_VERSION),
+                trans.t('update_banner_hint').format(current=app_display_version()),
                 icon=QMessageBox.Icon.Information,
             )
         else:
@@ -2478,11 +2532,13 @@ class OpenFocus(QMainWindow):
 
     def show_standalone_retouch(self) -> None:
         """Retouch a file with frames explicitly selected by the user."""
+        if (getattr(self, '_shutting_down', False)
+                or getattr(self, '_standalone_retouch_load_dialog', None) is not None):
+            return
         from utils.file_dialogs import FileDialog
         from controllers.output_manager import OutputRecord
-        from dialogs.retouch import RetouchDialog
+        from dialogs.retouch import RetouchDialog, StandaloneRetouchLoadDialog
         from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
-        from utils.standalone_retouch import load_standalone_retouch
 
         show_message_box(self, trans.t('standalone_retouch_action'),
                          trans.t('standalone_retouch_intro'), '',
@@ -2498,20 +2554,18 @@ class OpenFocus(QMainWindow):
             return
         set_last_dialog_dir(os.path.dirname(result_path))
         try:
-            progress = QProgressDialog(trans.t('standalone_retouch_sources'),
-                                       trans.t('btn_cancel'), 0, len(source_paths) + 1, self)
-            progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setMinimumDuration(0)
-
-            def advance(done, total):
-                progress.setValue(done)
-                QApplication.processEvents()
-                return not progress.wasCanceled()
-
+            loader = StandaloneRetouchLoadDialog(result_path, source_paths, self)
+            self._standalone_retouch_load_dialog = loader
             try:
-                loaded = load_standalone_retouch(result_path, source_paths, progress=advance)
+                loader.start()
+                if loader.worker.error is not None:
+                    raise loader.worker.error
+                loaded = loader.worker.result
             finally:
-                progress.close()
+                self._standalone_retouch_load_dialog = None
+                loader.deleteLater()
+            if getattr(self, '_shutting_down', False) or loader.worker.cancelled:
+                return
             if loaded is None:
                 return
             image, context = loaded
@@ -2688,6 +2742,7 @@ class OpenFocus(QMainWindow):
             return False
         import time as _time
         from utils.dust_map import apply_flat_field_stack
+        from core.resource_policy import ResourceLimitError
         t0 = _time.time()
         # Apply to COPIES first: the previous order wrote raw_images and only
         # then tried base_images, so a failure on the second call left the
@@ -2713,6 +2768,9 @@ class OpenFocus(QMainWindow):
             if corrected_base is not None:
                 corrected_base = [image for i, image in enumerate(corrected_base)
                                   if i != remove_index]
+        except ResourceLimitError as exc:
+            show_warning_box(self, trans.t("msg_error"), str(exc))
+            return False
         except (ValueError, MemoryError) as exc:
             # A frame whose size disagrees with the white field must not die
             # silently in a Qt slot (the excepthook only writes a crash file).
@@ -3508,77 +3566,15 @@ class OpenFocus(QMainWindow):
         if not getattr(self, '_shutting_down', False):
             self.account_session_loaded.emit(getattr(self, '_account_client', None), error)
             self._refresh_account_action()
-            if error is None and getattr(self, '_browser_sso_pending', False):
-                self._start_browser_sso()
-
-    def enable_browser_sso(self) -> None:
-        """Try the system browser's account once when no local session exists."""
-        from utils.settings_store import get_settings
-        self._browser_sso_pending = get_settings().value(
-            'account/browser_sso_enabled', True, type=bool)
-        if self._browser_sso_pending and getattr(self, '_account_load_job', None) is None:
-            self._start_browser_sso()
-
-    def _start_browser_sso(self) -> None:
-        self._browser_sso_pending = False
-        client = getattr(self, '_account_client', None)
-        if (client is None or client.is_signed_in() or getattr(self, '_shutting_down', False)
-                or getattr(self, '_account_browser_job', None) is not None):
-            return
-        import threading
-        from dialogs.account import _AccountJob
-        self._account_browser_cancel = threading.Event()
-        language = 'zh' if trans.current_lang == 'zh' else 'en'
-        job = _AccountJob(lambda started: client.login_with_browser(
-            cancel=self._account_browser_cancel, on_started=started, timeout=30, language=language), self)
-        self._account_browser_job = job
-        job.finished.connect(self._browser_sso_finished)
-        job.finished.connect(job._release)
-        self.account_browser_started.emit(job)
-        job.start()
-
-    def _cancel_browser_sso(self) -> None:
-        self._browser_sso_pending = False
-        cancel = getattr(self, '_account_browser_cancel', None)
-        if cancel is not None:
-            cancel.set()
-
-    def _browser_sso_finished(self, user, error) -> None:
-        cancelled = (getattr(self, '_account_browser_cancel', None) is not None
-                     and self._account_browser_cancel.is_set())
-        self._account_browser_cancel = None
-        if cancelled and error is None and user:
-            # Skip can arrive after the worker persisted the session but before
-            # its queued completion reaches the GUI. Revoke that session first.
-            from dialogs.account import _AccountJob
-            job = _AccountJob(lambda _started: self._account_client.logout(), self)
-            self._account_browser_job = job
-            job.finished.connect(self._cancelled_browser_session_cleared)
-            job.finished.connect(job._release)
-            job.start()
-            return
-        self._account_browser_job = None
-        if getattr(self, '_shutting_down', False):
-            return
-        if error is None and user:
-            from dialogs.account import enable_disclosed_reports
-            enable_disclosed_reports(self, self._account_client.accepted_terms_version())
-        self.account_browser_finished.emit(user, error)
-        self._refresh_account_action()
-
-    def _cancelled_browser_session_cleared(self, _result, _error) -> None:
-        self._account_browser_job = None
-        if not getattr(self, '_shutting_down', False):
-            from utils.account_client import AccountError
-            self.account_browser_finished.emit(None, AccountError('cancelled'))
-            self._refresh_account_action()
 
     def _refresh_account_action(self) -> None:
         action = getattr(self, 'ui_objs', {}).get('action_account')
         if action is None:
             return
         client = getattr(self, '_account_client', None)
-        if client is not None and client.is_signed_in():
+        if client is not None and getattr(client, 'logout_cleanup_pending', False):
+            text = trans.t('account_cleanup_pending')
+        elif client is not None and client.is_signed_in():
             user = client.current_user() or {}
             email = user.get('email') or user.get('name') or trans.t('account_title')
             text = trans.t('account_signed_in').format(email=email)
@@ -4141,9 +4137,17 @@ class OpenFocus(QMainWindow):
         """True while a render, batch job, ROI alignment, GIF export or
         stack load runs."""
         running = []
+        running.append(getattr(self, '_standalone_retouch_load_dialog', None) is not None)
         render_manager = getattr(self, 'render_manager', None)
         if render_manager is not None and getattr(render_manager, '_pending_storage', None) is not None:
             running.append(True)
+        if render_manager is not None:
+            running.append(bool(getattr(render_manager, '_render_pending', False)
+                                or getattr(render_manager, '_render_after_load', None)
+                                or getattr(render_manager, '_compare_queue', None)
+                                or getattr(render_manager, '_compare_chain_timer', None)
+                                or getattr(render_manager, 'context_worker', None)
+                                or getattr(render_manager, '_retiring_context_workers', None)))
         if render_manager is not None and getattr(render_manager, 'worker', None):
             running.append(render_manager.worker.isRunning())
         batch_manager = getattr(self, 'batch_manager', None)
@@ -4184,52 +4188,54 @@ class OpenFocus(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up background threads before closing the window."""
-        # Nothing new may start once we are on the way out (update downloads
-        # check this flag before they begin).
-        self._shutting_down = True
-        force_quit = bool(getattr(self, "_force_quit", False)
-                          or getattr(self, "_retouch_quit_authorized", False))
-        # A retouched output lives in memory until exported; exiting must not
-        # silently throw those pixels away.
-        if (not force_quit
-                and not getattr(self, '_restart_for_update', False)
-                and hasattr(self, "output_manager")
-                and not self.output_manager.confirm_unexported_on_exit()):
-            self._shutting_down = False
+        if getattr(self, '_close_confirmation_active', False):
             event.ignore()
             return
-        # Shutting down discards in-flight results without a word; ask first
-        # (the self-update restart has already stopped the workers itself).
-        # Unsaved project state: every editor asks before discarding it.
-        # Skip during the update restart (the session is restored anyway).
-        if (not force_quit
-                and not getattr(self, '_restart_for_update', False)
-                and getattr(self, "_project_dirty", False)):
-            if not self._confirm_discard_project_changes(
-                    "msg_discard_unsaved_project_quit"):
-                self._shutting_down = False
-                event.ignore()
-                return
+        force_quit = bool(getattr(self, '_force_quit', False)
+                          or getattr(self, '_retouch_quit_authorized', False)
+                          or getattr(self, '_restart_for_update', False))
+        if not force_quit:
+            self._close_confirmation_active = True
+            try:
+                def protection_state():
+                    manager = getattr(self, 'output_manager', None)
+                    records = getattr(manager, 'protected_records', None)
+                    return (getattr(self, 'source_revision', 0),
+                            getattr(self, '_project_dirty', False),
+                            frozenset(id(record) for record in records()) if callable(records) else frozenset())
 
-        if (not force_quit
-                and not getattr(self, '_restart_for_update', False)
-                and self._has_work_in_flight()):
-            box = QMessageBox(self)
-            style_message_box(box)
-            box.setIcon(QMessageBox.Icon.Question)
-            box.setWindowTitle(trans.t('msg_warning'))
-            box.setText(trans.t('msg_quit_during_render'))
-            quit_btn = box.addButton(trans.t('btn_quit_anyway'),
-                                     QMessageBox.ButtonRole.AcceptRole)
-            box.addButton(trans.t('btn_continue'), QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(quit_btn)
-            box.exec()
-            if box.clickedButton() is not quit_btn:
-                # The user chose to keep working: un-arm the shutdown so
-                # background update checks keep working afterwards.
-                self._shutting_down = False
-                event.ignore()
-                return
+                while True:
+                    initial = protection_state()
+                    manager = getattr(self, 'output_manager', None)
+                    if manager is not None and not manager.confirm_unexported_on_exit():
+                        event.ignore()
+                        return
+                    if protection_state() != initial:
+                        continue
+                    if getattr(self, '_project_dirty', False):
+                        if not self._confirm_discard_project_changes('msg_discard_unsaved_project_quit'):
+                            event.ignore()
+                            return
+                    if protection_state() != initial:
+                        continue
+                    if self._has_work_in_flight():
+                        box = QMessageBox(self)
+                        style_message_box(box)
+                        box.setIcon(QMessageBox.Icon.Question)
+                        box.setWindowTitle(trans.t('msg_warning'))
+                        box.setText(trans.t('msg_quit_during_render'))
+                        quit_btn = box.addButton(trans.t('btn_quit_anyway'), QMessageBox.ButtonRole.AcceptRole)
+                        box.addButton(trans.t('btn_continue'), QMessageBox.ButtonRole.RejectRole)
+                        box.setDefaultButton(quit_btn)
+                        box.exec()
+                        if box.clickedButton() is not quit_btn:
+                            event.ignore()
+                            return
+                    if protection_state() == initial:
+                        break
+            finally:
+                self._close_confirmation_active = False
+        self._shutting_down = True
         self.render_manager.cancel_storage_preflight()
 
         # Keep modal owners and their documents alive while native work stops.
@@ -4239,6 +4245,26 @@ class OpenFocus(QMainWindow):
         from dialogs.account import AccountDialog, cancel_account_jobs
         from dialogs.retouch import RetouchDialog, _SHARPNESS_WORKERS
         shutdown_running = cancel_account_jobs(self)
+        from ui.sensor_cleanup import cancel_sensor_inspections
+        shutdown_running = cancel_sensor_inspections(self) or shutdown_running
+        from dialogs.scalebar import ScaleBarDialog
+        for dialog in self.findChildren(ScaleBarDialog):
+            stop = getattr(dialog, 'shutdown_running', None)
+            if callable(stop):
+                shutdown_running = stop() or shutdown_running
+        loader = getattr(self, '_standalone_retouch_load_dialog', None)
+        if loader is not None:
+            loader.reject()
+            shutdown_running = True
+        self.render_manager._closing = True
+        context_worker = getattr(self.render_manager, 'context_worker', None)
+        if context_worker is not None:
+            context_worker.cancel()
+            shutdown_running = True
+        for worker in tuple(getattr(self.render_manager, '_retiring_context_workers', ())):
+            if worker.isRunning():
+                worker.cancel()
+            shutdown_running = True
         for dialog in self.findChildren(RetouchDialog):
             dialog.setEnabled(False)
             dialog_busy = False
@@ -4435,15 +4461,13 @@ class OpenFocus(QMainWindow):
         if enabled:
             from fusion_methods import neural_runtime
             from core.multi_focus_fusion import (is_ai_fusion_available,
-                                                 neural_device_kind)
+                                                 neural_device_kind, openfocus_gpu_available)
             kind = neural_device_kind()
-            if kind is None and is_ai_fusion_available():
-                # The authoritative answer is not in yet. Keep the request,
-                # resolve it in the background, and let the fusion path fall
-                # back to CPU if the probe finds no accelerator.
+            opencl = openfocus_gpu_available()
+            if opencl is None or (kind is None and is_ai_fusion_available()):
                 pending = True
                 self._probe_device_kind_async()
-            elif not neural_runtime.is_accelerator(kind):
+            elif not opencl and not neural_runtime.is_accelerator(kind):
                 enabled = False
         self._gpu_pending_enable = pending
         self.use_gpu = enabled
@@ -4771,10 +4795,14 @@ if __name__ == "__main__":
     import time as _time
     _server_name = os.environ.get("OPENFOCUS_INSTANCE_NAME") or "OpenFocus-single-instance"
     _lock_name = _hashlib.sha256(_server_name.encode("utf-8")).hexdigest()[:24]
-    # Unix local sockets have a short pathname limit; isolated session names
-    # can exceed it under the long temporary directories used by macOS.
+    # Unix local sockets have a short pathname limit. A shortened name is
+    # insufficient when TMPDIR itself is long, as on isolated macOS sessions.
     if os.name != 'nt' and len(os.fsencode(os.path.join(_tempfile.gettempdir(), _server_name))) >= 100:
         _server_name = 'of-' + _lock_name
+        if len(os.fsencode(os.path.join(_tempfile.gettempdir(), _server_name))) >= 100:
+            _socket_key = _hashlib.sha256(os.fsencode(os.path.join(
+                _tempfile.gettempdir(), _server_name))).hexdigest()[:24]
+            _server_name = os.path.join('/tmp', 'of-' + _socket_key)
     _instance_lock = QLockFile(os.path.join(_tempfile.gettempdir(), "openfocus-" + _lock_name + ".lock"))
     _instance_lock.setStaleLockTime(0)
     _deadline = _time.monotonic() + 60
@@ -4905,10 +4933,12 @@ if __name__ == "__main__":
         # unsaved changes and must never stand in for a failed snapshot.
         state = recovery.load_snapshot_state()
         if state is not None:
-            # Preserve the document association without changing snapshot data.
-            window.project_path = restore_hint or None
+            document = state.get('recovery_document')
 
             def _restored_ok():
+                window.project_path = (document.get('project_path') or None) if document else (restore_hint or None)
+                window._project_dirty = document['dirty'] if document else True
+                window._update_project_title()
                 recovery.clear_pending_restore()
                 window._show_status_message(
                     trans.t('update_restored_session'), 8000)
@@ -4930,8 +4960,8 @@ if __name__ == "__main__":
             # Nothing to restore: do not consume the user's launch arguments
             # and do not claim a restore that did not happen.
             _log.warning("update restore requested but no valid snapshot exists")
-            if not restore_hint:
-                recovery.clear_pending_restore()
+            # Preserve the marker so an unsuccessful restore remains retryable.
+            pass
 
     # Report how the previous in-place update ended (a failed swap used to
     # look exactly like the user simply closing the app).
@@ -4947,14 +4977,12 @@ if __name__ == "__main__":
             show_warning_box(window, trans.t('update_check_failed_title'),
                              trans.t('update_failed_after_restart'))
 
-    # Restore an existing browser session while keeping sign-in optional.
-    window.enable_browser_sso()
     # The account prompt precedes the main window on first launch and updates.
-    from constants import APP_VERSION
+    from constants import app_display_version
     from utils.settings_store import get_settings
     _account_settings = get_settings()
     _shown_version = str(_account_settings.value('account/intro_version', '') or '')
-    if _shown_version != APP_VERSION or any(ok for _, ok, _ in _update_results):
+    if _shown_version != app_display_version() or any(ok for _, ok, _ in _update_results):
         _quit_on_last_window = app.quitOnLastWindowClosed()
         app.setQuitOnLastWindowClosed(False)
         try:
@@ -4968,7 +4996,7 @@ if __name__ == "__main__":
             window.deleteLater()
             QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             sys.exit(0)
-        _account_settings.setValue('account/intro_version', APP_VERSION)
+        _account_settings.setValue('account/intro_version', app_display_version())
 
     # Crash auto-recovery: a leftover lock means the last session died
     # without a clean close. Offer the saved snapshot before anything else.
@@ -4988,8 +5016,16 @@ if __name__ == "__main__":
         recovered = False
         if box.clickedButton() is restore_btn:
             from utils.project_file import apply_project
-            window.project_path = recovery.session_path()
-            apply_project(window, pending)
+            document = pending.get('recovery_document')
+            def _crash_restored():
+                window.project_path = (document.get('project_path') or None) if document else None
+                window._project_dirty = document['dirty'] if document else True
+                window._update_project_title()
+            def _crash_restore_failed(reason):
+                _log.warning("crash recovery failed: %s", reason)
+                show_warning_box(window, trans.t('recovery_title'), str(reason))
+            apply_project(window, pending, on_loaded=_crash_restored,
+                          on_error=_crash_restore_failed)
             recovered = True
             _log.info("recovered previous session from %s", recovery.session_path())
     recovery.init_lock()

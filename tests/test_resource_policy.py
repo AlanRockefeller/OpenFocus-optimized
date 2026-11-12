@@ -44,15 +44,23 @@ def test_affinity_and_fractional_quota_limit_all_preferences():
 
 def test_ram_only_admission_tracks_lost_and_unknown_memory(monkeypatch):
     available = iter((8 * GiB, 0, policy.RESERVE_BYTES // 2))
-    monkeypatch.setattr(memory, 'available_memory_bytes',
-                        lambda: next(available))
-    monkeypatch.setattr(memory, 'total_memory_bytes', lambda: 16 * GiB)
+    monkeypatch.setattr(memory, 'system_memory_bytes',
+                        lambda: (next(available), 16 * GiB))
     monkeypatch.setattr(memory, 'process_rss_bytes', lambda: GiB)
     required = 64 * 1024 ** 2
     assert policy.require_memory(required, policy.probe_memory()) >= required
     for _ in range(2):
         with pytest.raises(policy.ResourceLimitError):
             policy.require_memory(required, policy.probe_memory())
+
+
+def test_ram_only_admission_does_not_query_cpu_topology(monkeypatch):
+    from core.multi_focus_fusion import memory_budget_bytes
+
+    monkeypatch.setattr(policy, 'cpu_limits',
+                        lambda: pytest.fail('CPU topology queried for RAM admission'))
+    _probe(monkeypatch, 8 * GiB)
+    assert memory_budget_bytes() == policy.ram_ceiling(_snapshot())
 
 
 def test_fixed_allocations_reduce_concurrency_before_workers():
@@ -486,6 +494,70 @@ def test_missing_memory_availability_is_never_invented(monkeypatch):
     assert memory.total_memory_bytes() == 8 * GiB
 
 
+def test_memory_probe_reads_the_os_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    monkeypatch.setattr(memory, "_posix_memory",
+                        lambda: calls.append(1) or (GiB, 4 * GiB))
+    monkeypatch.setattr(memory, "process_rss_bytes", lambda: 0)
+    snapshot = policy.probe_memory()
+    assert (snapshot.available_ram, snapshot.total_ram, len(calls)) == (GiB, 4 * GiB, 1)
+
+
+def test_cgroup_path_cache_observes_migration_mounts_and_read_failure(monkeypatch):
+    files = {
+        "/proc/self/cgroup": "0::/job\n",
+        "/proc/self/mountinfo": "30 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+    }
+    _files(monkeypatch, files)
+    paths = platform_utils._linux_cgroup_paths
+    parser = platform_utils._parse_linux_cgroup_paths
+    parser.cache_clear()
+    assert list(paths("memory")) == [
+        ("/sys/fs/cgroup/job", "cgroup2"), ("/sys/fs/cgroup", "cgroup2")]
+    assert list(paths("memory")) == list(paths("memory"))
+    assert parser.cache_info().hits == 2
+    files["/proc/self/cgroup"] = "0::/other\n"
+    assert list(paths("memory"))[0] == ("/sys/fs/cgroup/other", "cgroup2")
+    files["/proc/self/mountinfo"] = (
+        "30 20 0:27 / /new/mount rw - cgroup2 cgroup rw\n")
+    assert list(paths("memory"))[0] == ("/new/mount/other", "cgroup2")
+    del files["/proc/self/cgroup"]
+    assert list(paths("memory")) == []
+
+
+def test_cgroup_names_keep_non_newline_line_boundary_characters(monkeypatch):
+    _files(monkeypatch, {
+        "/proc/self/cgroup": "0::/job\x0cone/part\u2028two\n",
+        "/proc/self/mountinfo": "30 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+    })
+    assert list(platform_utils._linux_cgroup_paths("memory")) == [
+        ("/sys/fs/cgroup/job\x0cone/part\u2028two", "cgroup2"),
+        ("/sys/fs/cgroup/job\x0cone", "cgroup2"),
+        ("/sys/fs/cgroup", "cgroup2")]
+
+
+def test_cached_cgroup_paths_keep_limits_and_occupancy_live(monkeypatch):
+    files = {
+        "/proc/self/cgroup": "0::/\n",
+        "/proc/self/mountinfo": "30 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+        "/sys/fs/cgroup/memory.max": str(4 * GiB),
+        "/sys/fs/cgroup/memory.current": str(GiB),
+        "/sys/fs/cgroup/cpu.max": "200000 100000",
+    }
+    _files(monkeypatch, files)
+    assert memory._linux_memory_limit(8 * GiB, 16 * GiB) == (3 * GiB, 4 * GiB)
+    assert platform_utils._linux_cpu_quota() == 2
+    files["/sys/fs/cgroup/memory.current"] = str(3 * GiB)
+    assert memory._linux_memory_limit(8 * GiB, 16 * GiB) == (GiB, 4 * GiB)
+    files["/sys/fs/cgroup/memory.max"] = str(2 * GiB)
+    files["/sys/fs/cgroup/cpu.max"] = "100000 100000"
+    assert memory._linux_memory_limit(8 * GiB, 16 * GiB) == (0, 2 * GiB)
+    assert platform_utils._linux_cpu_quota() == 1
+    del files["/sys/fs/cgroup/memory.current"]
+    assert memory._linux_memory_limit(8 * GiB, 16 * GiB) == (0, 2 * GiB)
+
+
 @pytest.mark.parametrize("kind", ["ROCM", "XPU"])
 def test_rocm_and_xpu_require_known_vram_like_cuda(kind):
     workload = _workload(algorithm='stackmffv3', parallel_layer='native',
@@ -580,3 +652,20 @@ def test_explicit_source_resolution_replaces_legacy_directory_estimate():
             *args, snapshot=snapshot, directory=True,
             source_resolution_bytes=mib + 64 * 1024,
             source_cache_bytes=224 * 1024)
+
+
+@pytest.mark.parametrize('aspect,expected', [(1, (4100, 6200)), (2, (4100, 12400)),
+                                              (0.5, (4100, 12400))])
+def test_raw_sensor_geometry_and_workspace(aspect, expected):
+    sizes = SimpleNamespace(width=6000, height=4000, raw_width=6200,
+                            raw_height=4100, pixel_aspect=aspect)
+    height, width = policy.raw_sensor_shape(sizes)
+    assert (height, width) == expected
+    assert policy.raw_decode_bytes(width, height, 144_000_000, 100) == width * height * 64 + 144_000_200
+
+
+@pytest.mark.parametrize('aspect', [0, -1, float('nan'), float('inf')])
+def test_raw_sensor_rejects_invalid_aspect(aspect):
+    sizes = SimpleNamespace(width=2, height=2, raw_width=2, raw_height=2, pixel_aspect=aspect)
+    with pytest.raises(ValueError):
+        policy.raw_sensor_shape(sizes)
