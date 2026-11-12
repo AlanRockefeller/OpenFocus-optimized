@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from PyQt6.QtWidgets import QDialog, QWidget
+from PyQt6.QtWidgets import QDialog, QPushButton, QWidget
 
 
 @pytest.fixture
@@ -121,6 +121,23 @@ def test_storage_directory_browse_cancel_and_save(settings_window, tmp_path, mon
     assert store.value('rendering/storage_directory') == ''
 
 
+def test_unavailable_saved_storage_does_not_block_other_settings(settings_window, tmp_path, monkeypatch):
+    from core import frame_storage
+    from dialogs import advanced_settings
+
+    monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    missing = str(tmp_path / 'missing')
+    settings_window.storage_directory = missing
+    frame_storage.restore_storage_directory(missing)
+    dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
+    dialog.spin_block.setValue(512)
+    dialog._apply()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert settings_window.tile_block_size == 512
+    assert settings_window.storage_directory == frame_storage._storage_directory == missing
+    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+
+
 def test_invalid_storage_directory_keeps_previous_settings(settings_window, tmp_path, monkeypatch):
     from core import frame_storage
     from dialogs import advanced_settings
@@ -159,7 +176,9 @@ def test_storage_directory_rolls_back_when_save_fails(settings_window, tmp_path,
     dialog = advanced_settings.AdvancedSettingsDialog(settings_window)
     dialog.storage_directory.setText(str(requested))
     dialog._apply()
-    assert frame_storage.storage_directory() == settings_window.storage_directory == str(previous)
+    assert frame_storage._storage_directory == settings_window.storage_directory == str(previous)
+    effective = str(previous) if previous_exists else frame_storage.tempfile.gettempdir()
+    assert frame_storage.storage_directory() == effective
     assert dialog.result() != QDialog.DialogCode.Accepted
 
 
@@ -175,8 +194,25 @@ def test_saved_storage_directory_restores_or_reports_unavailable(tmp_path, monke
     window.storage_directory = missing
     warning = main._restore_storage_directory(window)
     assert window.storage_directory == missing
-    assert frame_storage.storage_directory() == missing
-    assert missing in warning
+    assert frame_storage.storage_directory() == frame_storage.tempfile.gettempdir()
+    assert frame_storage._storage_directory == missing
+    assert missing in warning and frame_storage.tempfile.gettempdir() in warning
+
+
+def test_full_saved_storage_does_not_claim_fallback(tmp_path, monkeypatch):
+    import errno
+    import main
+    from core import frame_storage
+
+    monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    def full(path):
+        raise OSError(errno.ENOSPC, 'disk full')
+    monkeypatch.setattr(main, 'configure_storage_directory', full)
+    window = SimpleNamespace(storage_directory=str(tmp_path))
+    warning = main._restore_storage_directory(window)
+    assert 'disk full' in warning
+    assert frame_storage._storage_directory == str(tmp_path)
+    assert frame_storage.tempfile.gettempdir() not in warning
 
 
 def test_settings_preserve_supported_tile_and_registration_ranges(settings_window):
@@ -370,6 +406,79 @@ def test_registration_failure_policy_is_shared_and_persisted(settings_window, tm
             method, restored._registration_parameters_by_method.get(method))
         assert parameters["failure_policy"] == "fail"
     assert restored._registration_parameters_by_method["openfocus"]["reference_frame"] == 4
+
+
+def test_openfocus_advanced_draft_accept_and_persistence(settings_window, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QSettings
+    from core.algorithms import resolve_registration_parameters
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+    from utils import settings_store
+
+    store = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(settings_store, 'get_settings', lambda: store)
+    window = settings_window
+    window._registration_parameters_by_method = {
+        'openfocus': {'max_shift_ratio': .12, 'reference_frame': 4},
+        'ecc': {'failure_policy': 'continue'},
+    }
+    window.current_alignment_method = lambda: 'ecc'
+    window.registration_parameters_for = lambda method: resolve_registration_parameters(
+        method, window._registration_parameters_by_method.get(method))
+    window.persist_settings = lambda: settings_store.save_parameter_memories(window)
+
+    dialog = AdvancedSettingsDialog(window)
+    editors = dialog.openfocus_registration_panel.editors
+    assert set(editors) == {'max_shift_ratio', 'rotation', 'magnification', 'reference_frame'}
+    assert editors['max_shift_ratio'].value() == .12
+    assert editors['reference_frame'].value() == 4
+    editors['rotation'].setValue(8)
+    dialog.reject()
+    assert window.registration_parameters_for('openfocus')['rotation'] == 0
+    assert not store.allKeys()
+
+    dialog = AdvancedSettingsDialog(window)
+    editors = dialog.openfocus_registration_panel.editors
+    for key, value in {'max_shift_ratio': .2, 'rotation': 8,
+                       'magnification': 5, 'reference_frame': 2}.items():
+        editors[key].setValue(value)
+    dialog.combo_align_failure.setCurrentIndex(dialog.combo_align_failure.findData('fail'))
+    dialog._apply()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    restored = SimpleNamespace()
+    settings_store.load_parameter_memories(restored)
+    assert restored._registration_parameters_by_method['openfocus'] == {
+        'max_shift_ratio': .2, 'rotation': 8., 'magnification': 5.,
+        'reference_frame': 2, 'failure_policy': 'fail'}
+    assert restored._registration_parameters_by_method['ecc']['failure_policy'] == 'fail'
+
+
+def test_openfocus_advanced_invalid_and_save_failure_roll_back(settings_window):
+    from core.algorithms import resolve_registration_parameters
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+
+    window = settings_window
+    original = {'openfocus': {'reference_frame': 3}, 'ecc': {'failure_policy': 'continue'}}
+    window._registration_parameters_by_method = original
+    window.current_alignment_method = lambda: 'ecc'
+    window.registration_parameters_for = lambda method: resolve_registration_parameters(
+        method, window._registration_parameters_by_method.get(method))
+    dialog = AdvancedSettingsDialog(window)
+    editor = dialog.openfocus_registration_panel.editors['rotation']
+    editor.lineEdit().setText('')
+    dialog._apply()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert window._registration_parameters_by_method == original
+    assert not window.saved
+
+    editor.setValue(4)
+    dialog.combo_align_failure.setCurrentIndex(dialog.combo_align_failure.findData('fail'))
+    def fail():
+        raise OSError('disk full')
+    window.persist_settings = fail
+    dialog._apply()
+    assert dialog.result() != QDialog.DialogCode.Accepted
+    assert window._registration_parameters_by_method == original
+    assert 'disk full' in dialog.status.text()
 
 
 def test_advanced_settings_preserve_high_saved_thread_limit(settings_window):
@@ -600,14 +709,13 @@ def test_feedback_failed_replace_preserves_previous_archive(monkeypatch, tmp_pat
     assert list(tmp_path.iterdir()) == [dest]
 
 
-def test_environment_missing_runtime_keeps_classic_methods_available(monkeypatch):
+def test_environment_reports_missing_onnx_runtime(monkeypatch):
     import sys
     from dialogs.about import EnvironmentInfoDialog
     from locales import trans
 
     monkeypatch.setitem(sys.modules, "onnxruntime", None)
     text = EnvironmentInfoDialog.environment_report()
-    assert "Guided Filter / GFG-FGF / OpenFocus A/B/C: CPU" in text
     assert f"StackMFF V1/V2/V3: {trans.t('env_not_installed')}" in text
     assert trans.t('env_stackmff_unavailable') in text
 
@@ -633,16 +741,75 @@ def test_environment_reports_neural_provider(monkeypatch, kind, device):
         assert trans.t('env_no_gpu') not in text
 
 
-def test_environment_probe_does_not_block_dialog_and_copy_uses_report(qapp, monkeypatch):
+def test_environment_explains_an_unadmitted_provider(monkeypatch):
+    """A verified provider whose memory cannot be read is reported as such,
+    not as a failed verification."""
+    import sys
+    from dialogs.about import EnvironmentInfoDialog
+    from fusion_methods import neural_runtime
+    from locales import trans
+    import core.multi_focus_fusion as mff
+
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(__version__="1.0"))
+    monkeypatch.setattr(mff, "ensure_neural_device_kind", lambda: "CUDA")
+    monkeypatch.setattr(neural_runtime, "_UNADMITTED", "CUDA")
+    text = EnvironmentInfoDialog.environment_report()
+    assert "StackMFF V1/V2/V3: CPU" in text
+    assert trans.t('env_gpu_memory_unknown').format(device="CUDA") in text
+    assert trans.t('env_no_gpu') not in text
+    assert trans.t('env_cpu_mode') in text
+
+
+def test_environment_probe_populates_selectable_report(qapp, monkeypatch):
     from dialogs import about
     monkeypatch.setattr(about._EnvironmentProbe, "start", lambda self: None)
     dialog = about.EnvironmentInfoDialog()
-    assert not dialog.copy_button.isEnabled()
     dialog._probe.text = "CPU methods available; optional AI missing"
     dialog._probe_finished()
-    dialog._copy()
-    assert qapp.clipboard().text() == dialog._probe.text
+    assert dialog.text_edit.toPlainText() == dialog._probe.text
+    assert not dialog.findChildren(QPushButton)
     dialog.deleteLater()
+
+
+def test_feedback_uses_environment_probe_and_offers_signed_in_account(qapp, monkeypatch):
+    from dialogs import about, feedback
+
+    monkeypatch.setattr(about._EnvironmentProbe, "start", lambda self: None)
+    window = QWidget()
+    window._account_client = SimpleNamespace(is_signed_in=lambda: True)
+    dialog = feedback.FeedbackDialog(window)
+    dialog._show_facts(True)
+    dialog._facts_probe.text = "shared environment report"
+    dialog._facts_probe.finished.set()
+    dialog._poll_facts()
+    assert dialog.facts_view.toPlainText() == dialog._facts_probe.text
+    dialog.deleteLater()
+    window.deleteLater()
+
+
+def test_feedback_account_handoff_uses_account_client(qapp, monkeypatch):
+    from dialogs import account, feedback
+
+    calls = []
+    class Job:
+        def __init__(self, call, owner):
+            self.call = call
+            self.finished = SimpleNamespace(connect=lambda callback: None)
+        def start(self):
+            self.call(None)
+        def _release(self, *_args):
+            pass
+
+    monkeypatch.setattr(account, '_AccountJob', Job)
+    window = QWidget()
+    window._account_client = SimpleNamespace(
+        is_signed_in=lambda: True,
+        open_web_handoff=lambda **kwargs: calls.append(kwargs))
+    dialog = feedback.FeedbackDialog(window)
+    dialog.account_button.click()
+    assert calls == [{'timeout': 8}]
+    dialog.deleteLater()
+    window.deleteLater()
 
 
 def test_environment_dialog_closes_while_probe_is_running(qapp, monkeypatch):
@@ -788,6 +955,72 @@ def test_image_save_dialogs_start_where_the_last_image_was_saved(tmp_path, monke
     assert store.image_save_dir() == str(home)
 
 
+def test_image_save_dialogs_remember_the_chosen_format(tmp_path, monkeypatch):
+    from PyQt6.QtCore import QSettings
+    import utils.settings_store as store
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, "get_settings", lambda: settings)
+    saved = tmp_path / "exports"
+    saved.mkdir()
+    output = ("PNG 8/16-bit (*.png);;TIFF 8/16-bit (*.tif *.tiff);;JPG 8-bit (*.jpg);;"
+              "Linear DNG (*.dng);;Layered TIFF (*.tif *.tiff)")
+    # Nothing chosen yet: callers keep their own defaults.
+    assert store.image_save_filter(output) == ""
+    assert Path(store.image_save_default("next.png", output)).name == "next.png"
+
+    store.remember_image_save(str(saved / "stack.tif"), "TIFF 8/16-bit (*.tif *.tiff)")
+    assert store.image_save_default("next.png", output) == str(saved / "next.tif")
+    assert store.image_save_filter(output) == "TIFF 8/16-bit (*.tif *.tiff)"
+
+    # Layered and plain TIFF share an extension; the exact choice comes back.
+    store.remember_image_save(str(saved / "layers.tif"), "Layered TIFF (*.tif *.tiff)")
+    assert store.image_save_filter(output) == "Layered TIFF (*.tif *.tiff)"
+
+    # A typed name without a suffix records the chosen filter's type.
+    store.remember_image_save(str(saved / "noext"), "JPG 8-bit (*.jpg)")
+    assert store.image_save_default("next.png", output) == str(saved / "next.jpg")
+
+    # Fixed-format exports (GIF, multi-page TIFF, depth maps) keep the folder
+    # but never change the default format.
+    store.remember_image_save(str(saved / "anim.gif"))
+    store.remember_image_save(str(saved / "depth.tif"))
+    assert store.image_save_type(output) == ".jpg"
+
+    # A dialog that cannot write the remembered type is left alone.
+    mosaic = "TIFF image (*.tif *.tiff);;PNG image (*.png)"
+    assert store.image_save_filter(mosaic) == ""
+    assert store.image_save_default("mask.png", "PNG (*.png)") == str(saved / "mask.png")
+    assert store.image_save_default("animation.gif") == str(saved / "animation.gif")
+
+    # A stale label (for example after a language change) falls back to the type.
+    settings.setValue(store.LAST_IMAGE_SAVE_FILTER_KEY, "JPEG-Bild (*.jpg)")
+    assert store.image_save_filter(output) == "JPG 8-bit (*.jpg)"
+
+    # A typed suffix the selected filter does not offer is what was written,
+    # so it is the format remembered, not the filter's.
+    store.remember_image_save(str(saved / "typed.png"), "TIFF image (*.tif *.tiff)")
+    assert store.image_save_type(output) == ".png"
+    assert store.image_save_filter(output) == "PNG 8/16-bit (*.png)"
+    assert store.image_save_filter(mosaic) == "PNG image (*.png)"
+
+@pytest.mark.parametrize("suffix", [".jpeg", ".jpe", ".jfif", ".JPEG"])
+@pytest.mark.parametrize("selected", ["JPG 8-bit (*.jpg)", "PNG 8/16-bit (*.png)"])
+def test_image_save_remembers_jpeg_alias_as_offered_format(tmp_path, monkeypatch, suffix, selected):
+    from PyQt6.QtCore import QSettings
+    import utils.settings_store as store
+
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, "get_settings", lambda: settings)
+    filters = "PNG 8/16-bit (*.png);;JPG 8-bit (*.jpg)"
+    store.remember_image_save(str(tmp_path / "previous.png"), "PNG 8/16-bit (*.png)")
+    store.remember_image_save(str(tmp_path / ("image" + suffix)), selected)
+    assert store.image_save_type(filters) == ".jpg"
+    assert store.image_save_filter(filters) == "JPG 8-bit (*.jpg)"
+    assert store.image_save_default("next.png", filters) == str(tmp_path / "next.jpg")
+    assert store.image_save_filter("JPEG (*.jpeg);;PNG (*.png)") == "JPEG (*.jpeg)"
+
+
+
 def test_restore_preferences_keeps_workspace_and_user_data(qapp, tmp_path, monkeypatch):
     from PyQt6.QtCore import QSettings
     from utils import settings_store as store
@@ -810,6 +1043,8 @@ def test_restore_preferences_keeps_workspace_and_user_data(qapp, tmp_path, monke
     previous_language = settings.value(store.LANGUAGE_KEY)
     store.restore_default_settings(window)
     assert window.thread_count == 0 and window.tile_enabled
+    assert window.exposure_match and not window.base_frame_correct
+    assert not window.stack_reverse_order and not window.sharpen_output
     assert window.storage_directory == ''
     assert window._fusion_parameters_by_method == {}
     assert window._registration_parameters_by_method == {}
@@ -829,6 +1064,91 @@ def test_restore_preferences_keeps_workspace_and_user_data(qapp, tmp_path, monke
     assert restored.thread_count == 0 and restored.tile_enabled
     assert restored.recent_files == ['source.tif']
     assert restored.recent_projects == ['session.ofproj']
+
+
+def test_account_report_default_survives_incidental_saves(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QSettings
+    from utils import settings_store as store
+
+    settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, 'get_settings', lambda: settings)
+    window = SimpleNamespace()
+    store.load_window_settings(window)
+    assert not window.auto_error_reports
+    store.save_window_settings(window)
+    restored = SimpleNamespace()
+    store.load_window_settings(restored)
+    assert not restored.auto_error_reports
+    store.enable_account_default_reports(restored)
+    assert restored.auto_error_reports
+    assert settings.value(store.REPORTS_AUTO_SEND_KEY, type=bool)
+    store.save_window_settings(restored)
+    again = SimpleNamespace()
+    store.load_window_settings(again)
+    assert again.auto_error_reports
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_account_report_default_preserves_ambiguous_legacy_value(qapp, tmp_path, monkeypatch, enabled):
+    from PyQt6.QtCore import QSettings
+    from utils import settings_store as store
+
+    settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, 'get_settings', lambda: settings)
+    settings.setValue(store.REPORTS_AUTO_SEND_KEY, enabled)
+    window = SimpleNamespace()
+    store.load_window_settings(window)
+    store.save_window_settings(window)
+    store.enable_account_default_reports(window)
+    assert window.auto_error_reports is enabled
+    assert settings.value(store.REPORTS_AUTO_SEND_KEY, type=bool) is enabled
+
+
+def test_advanced_reporting_choice_and_reset_remain_off_on_sign_in(
+        settings_window, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QSettings
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+    from utils import settings_store as store
+    from ui import report_retry
+
+    settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, 'get_settings', lambda: settings)
+    discarded = []
+    monkeypatch.setattr(report_retry, 'discard_automatic_reports', lambda: discarded.append(True))
+    settings_window.persist_settings = lambda: store.save_window_settings(settings_window)
+    store.enable_account_default_reports(settings_window)
+    dialog = AdvancedSettingsDialog(settings_window)
+    dialog.chk_auto_error_reports.click()
+    dialog._apply()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    assert discarded == [True]
+    store.enable_account_default_reports(settings_window)
+    assert not settings_window.auto_error_reports
+    restored = SimpleNamespace()
+    store.load_window_settings(restored)
+    store.enable_account_default_reports(restored)
+    assert not restored.auto_error_reports
+
+    settings_window.auto_error_reports = True
+    store.restore_default_settings(settings_window)
+    assert discarded == [True, True]
+    store.enable_account_default_reports(settings_window)
+    assert not settings_window.auto_error_reports
+
+
+def test_unchanged_advanced_reporting_is_not_a_choice(settings_window, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QSettings
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+    from utils import settings_store as store
+
+    settings = QSettings(str(tmp_path / 'settings.ini'), QSettings.Format.IniFormat)
+    monkeypatch.setattr(store, 'get_settings', lambda: settings)
+    settings_window.persist_settings = lambda: store.save_window_settings(settings_window)
+    dialog = AdvancedSettingsDialog(settings_window)
+    dialog._apply()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+    store.enable_account_default_reports(settings_window)
+    assert settings_window.auto_error_reports
 
 
 @pytest.mark.parametrize('decision', ['cancel', 'escape', 'busy', 'busy_after_confirmation'])
@@ -878,7 +1198,7 @@ def test_restore_confirmation_rejection_never_writes(qapp, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('method', ['openfocus_a', 'openfocus_b', 'openfocus_c'])
-def test_default_full_frame_policy_and_explicit_threshold_are_visible(settings_window, method):
+def test_openfocus_desktop_tiling_status_stays_whole_frame(settings_window, method):
     from core.algorithms import get_fusion
     from core.multi_focus_fusion import _DEFAULT_TILE_THRESHOLD
     from dialogs.advanced_settings import AdvancedSettingsDialog
@@ -895,9 +1215,9 @@ def test_default_full_frame_policy_and_explicit_threshold_are_visible(settings_w
             method=get_fusion(method).display_name)
         full_frame_status = dialog.tile_status.text()
         dialog.spin_threshold.setValue(_DEFAULT_TILE_THRESHOLD + 256)
-        assert not dialog.spin_block.isHidden() and not dialog.spin_overlap.isHidden()
-        assert not dialog.tile_note.isHidden()
-        assert dialog.tile_status.text() != full_frame_status
+        assert dialog.spin_block.isHidden() and dialog.spin_overlap.isHidden()
+        assert dialog.tile_note.isHidden()
+        assert dialog.tile_status.text() == full_frame_status
         dialog.chk_tile.setChecked(False)
         assert dialog.spin_threshold.isHidden() and dialog.spin_block.isHidden()
         assert dialog.tile_note.isHidden()
@@ -937,3 +1257,63 @@ def test_enabling_sharpening_reveals_risk_in_small_render_dialog(qapp):
     finally:
         dialog.close()
         window.deleteLater()
+
+
+def test_performance_profiling_is_a_persisted_diagnostic_draft(settings_window):
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+    from utils.project_file import TEMPLATE_SETTINGS
+
+    dialog = AdvancedSettingsDialog(settings_window)
+    assert not dialog.chk_profile_performance.isChecked()
+    assert dialog.chk_profile_performance.property('controlId') == 'chk_profile_performance'
+    dialog.chk_profile_performance.setChecked(True)
+    dialog.reject()
+    assert not getattr(settings_window, 'profile_performance', False)
+    dialog.deleteLater()
+
+    dialog = AdvancedSettingsDialog(settings_window)
+    dialog.chk_profile_performance.setChecked(True)
+    dialog._apply()
+    assert settings_window.profile_performance is True
+    assert settings_window.saved
+    dialog.deleteLater()
+    # A machine diagnostic, never a processing setting carried by templates.
+    assert 'profile_performance' not in TEMPLATE_SETTINGS
+
+
+def test_performance_report_viewer_and_json_export(settings_window, qapp, tmp_path):
+    import json
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication, QPlainTextEdit
+    from controllers.render_manager import RenderManager
+    from dialogs.advanced_settings import AdvancedSettingsDialog
+
+    manager = settings_window.render_manager = RenderManager(settings_window)
+    manager.worker = type('Finished', (), {'performance_report': {
+        'schema_version': 1, 'outcome': 'completed', 'wall_ms': 12.0,
+        'stages': {'render': {'count': 1, 'total_ms': 12.0, 'self_ms': 12.0,
+                              'mean_ms': 12.0, 'min_ms': 12.0, 'max_ms': 12.0,
+                              'parent': None, 'pct_of_parent': None}},
+        'threads': {'requested': 2}}})()
+    manager._capture_performance_report()
+    assert manager.performance_report['threads']['requested'] == 2
+
+    settings = AdvancedSettingsDialog(settings_window)
+    settings.show()
+    shown = []
+
+    def close_report():
+        report = QApplication.activeModalWidget()
+        text = report.findChild(QPlainTextEdit) if report is not None else None
+        shown.append(text.toPlainText() if text else None)
+        if report is not None:
+            report.reject()
+
+    try:
+        QTimer.singleShot(0, close_report)
+        settings.btn_performance_report.click()
+        assert shown and 'Outcome: completed' in shown[0]
+    finally:
+        settings.reject()
+    path = manager.save_performance_report(str(tmp_path / 'report.json'))
+    assert json.loads(open(path, encoding='utf-8').read())['threads']['requested'] == 2

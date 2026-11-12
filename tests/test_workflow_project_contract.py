@@ -191,7 +191,7 @@ def test_project_roundtrips_per_method_parameters(tmp_path):
     window = _window(paths, str(tmp_path))
     window._brightness_by_method = {("base_correct", "openfocus_b"): True,
                                     ("exposure_match", "openfocus_b"): False}
-    window.set_fusion_parameters("openfocus_c", {"blend_smoothing": 3.5})
+    window.set_fusion_parameters("openfocus_c", {"smoothing": 3.5})
     window.set_fusion_parameters("dct", {"kernel_size": 11})
     window.set_registration_parameters("openfocus", {"max_shift_ratio": .12, "failure_policy": "fail", "reference_frame": 2})
     state = project_file._collect_state(window)
@@ -199,9 +199,9 @@ def test_project_roundtrips_per_method_parameters(tmp_path):
     project_file._apply_after_load(restored, state)
     assert restored._brightness_by_method[("base_correct", "openfocus_b")] is True
     assert restored._brightness_by_method[("exposure_match", "openfocus_b")] is False
-    assert restored.fusion_parameters_for("openfocus_c") == {"blend_smoothing": 3.5}
+    assert restored.fusion_parameters_for("openfocus_c") == {"smoothing": 3.5}
     assert restored.fusion_parameters_for("dct") == {"kernel_size": 11}
-    assert restored.registration_parameters_for("openfocus") == {"max_shift_ratio": .12, "rotation": 0., "magnification": 3., "failure_policy": "fail", "reference_frame": 2}
+    assert restored.registration_parameters_for("openfocus") == {"max_shift_ratio": .12, "rotation": 0., "magnification": 5., "failure_policy": "fail", "reference_frame": 2}
 
 
 def test_project_does_not_rebind_missing_absolute_source_to_same_basename(tmp_path):
@@ -368,12 +368,20 @@ def test_resize_scales_metadata_and_labels_using_actual_pixels(qapp, monkeypatch
     from tests.test_gui_units import _resize_window, _StubResizeDialog
     window = _resize_window((10, 14, 3), 1.0, 0.5)
     window.source_px_um = 2.0
-    ratios = []
-    window.label_manager = SimpleNamespace(scale_stack_labels=lambda x, y: ratios.append((x, y)))
+    input_config = SimpleNamespace(x_location=3, y_location=2, font_size=9)
+    output_config = SimpleNamespace(x_location=4, y_location=3, font_size=10)
+    revisions = []
+    window.label_manager = SimpleNamespace(
+        _labels=[SimpleNamespace(target='input', config=input_config),
+                 SimpleNamespace(target='output', config=output_config)],
+        _bump_revision=lambda: revisions.append(True))
     monkeypatch.setattr(module, "DownsampleDialog", _StubResizeDialog(1.0))
     monkeypatch.setattr(module, "show_success_box", lambda *args, **kwargs: None)
     window.transform_manager.resize_all_images()
-    assert ratios == [(2.0, 2.0)]
+    assert (input_config.x_location, input_config.y_location, input_config.font_size) == (6, 4, 18)
+    assert (output_config.x_location, output_config.y_location, output_config.font_size) == (4, 3, 10)
+    assert revisions == [True]
+    assert window.raw_images[0].shape[:2] == (10, 14)
     assert window.source_px_um == 1.0
 
 
@@ -453,7 +461,87 @@ def test_sensor_controls_inspect_mask_and_reject_source_frame(qapp, tmp_path):
     controls.close()
 
 
-def test_roi_startup_rejects_replacement_dispatched_before_worker_completion(qapp, monkeypatch):
+def test_sensor_controls_retains_finished_result_and_coalesces_requests(qapp, monkeypatch):
+    import weakref
+    import ui.sensor_cleanup as sensor
+    monkeypatch.setattr(sensor._Inspection, 'start', lambda self: None)
+    controls = sensor.SensorCleanupControls('A')
+    first = controls._worker
+    mask = SimpleNamespace(width=8, height=8, coverage=1 / 64)
+    controls.path.setText('B')
+    controls._inspection_finished(first.serial, mask, '')
+    assert controls.mask is None
+    sensor._retire(weakref.ref(controls), first)
+    controls.path.setText('A')
+    assert controls.validate() == ''
+    assert controls.mask is mask and '8' in controls.extent.text()
+    controls.path.setText('B')
+    controls._inspect()
+    active = controls._worker
+    for path in ('C', 'D'):
+        controls.path.setText(path)
+        controls._inspect()
+    assert controls._worker is active and controls._queued[1] == 'D'
+    sensor._retire(weakref.ref(controls), active)
+    last = controls._worker
+    assert last.path == 'D'
+    controls._inspection_finished(last.serial, None, 'bad mask')
+    assert 'bad mask' in controls.validate()
+    controls.path.clear()
+    assert controls.validate() == '' and controls.mask is None
+    controls._inspection_finished(last.serial, mask, '')
+    assert controls.mask is None
+    controls.stop_inspection()
+    sensor._retire(weakref.ref(controls), last)
+    assert not sensor._INSPECTIONS
+    controls.close()
+
+
+@pytest.mark.parametrize('queued', [False, True])
+def test_sensor_controls_destroyed_during_real_worker(qapp, monkeypatch, queued):
+    import gc
+    import threading
+    from PyQt6 import sip
+    from PyQt6.QtWidgets import QWidget
+    import ui.sensor_cleanup as sensor
+    import utils.sensor_cleanup as cleanup
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def decode(path, cancel_callback=None):
+        calls.append(path)
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError('test worker was not released')
+        return SimpleNamespace(width=8, height=8, coverage=1 / 64)
+
+    monkeypatch.setattr(cleanup, 'load_sensor_defect_mask', decode)
+    parent = QWidget()
+    controls = sensor.SensorCleanupControls('A', parent=parent)
+    worker = controls._worker
+    try:
+        assert entered.wait(5)
+        if queued:
+            controls.path.setText('B')
+            controls._inspect()
+        sip.delete(parent)
+        assert sip.isdeleted(controls)
+        assert worker.isInterruptionRequested()
+        del controls, parent
+        gc.collect()
+    finally:
+        release.set()
+        assert worker.wait(5000)
+        qapp.processEvents()
+    assert calls == ['A']
+    assert worker not in sensor._INSPECTIONS
+    assert worker not in sensor._RETIREMENTS
+    gc.collect()
+    qapp.processEvents()
+
+
+@pytest.mark.parametrize('changed', ['source', 'method', 'parameters', 'brightness'])
+def test_roi_startup_rejects_stale_results(qapp, monkeypatch, changed):
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QPushButton, QSlider, QWidget
     import main
@@ -472,6 +560,7 @@ def test_roi_startup_rejects_replacement_dispatched_before_worker_completion(qap
     monkeypatch.setattr(main, 'show_message_box', lambda *args: None)
     original = [np.full((12, 16, 3), 1000, np.uint16) for _ in range(2)]
     replacement = [np.full((12, 16, 3), 60000, np.uint16) for _ in range(2)]
+    settings = {'method': 'ecc', 'failure_policy': 'continue', 'brightness': False}
     window = SimpleNamespace(
         raw_images=original, image_filenames=['first.tif', 'second.tif'],
         source_revision=0, roi_aligned_images=[], roi_mode_active=False,
@@ -479,6 +568,12 @@ def test_roi_startup_rejects_replacement_dispatched_before_worker_completion(qap
         result_slider=QSlider(), result_control_bar=QWidget(),
         btn_preview_roi=QPushButton(), label_manager=SimpleNamespace(
             frame_ids=lambda target: ['first', 'second']))
+    from controllers.render_manager import RenderManager
+    window.current_alignment_method = lambda: settings['method']
+    window.current_fusion_method = lambda: 'guided_filter'
+    window.registration_parameters_for = lambda method: {'failure_policy': settings['failure_policy']}
+    window.brightness_option_for = lambda option, method=None: settings['brightness']
+    window.render_manager = RenderManager(window)
     window.effective_stack = lambda: (list(window.raw_images), list(window.image_filenames), [0, 1])
     displayed = []
     window._display_roi_aligned_image = displayed.append
@@ -488,15 +583,23 @@ def test_roi_startup_rejects_replacement_dispatched_before_worker_completion(qap
     window._release_roi_worker = main.OpenFocus._release_roi_worker.__get__(window)
 
     def replace():
-        window.raw_images = replacement
-        window.source_revision += 1
+        if changed == 'source':
+            window.raw_images = replacement
+            window.source_revision += 1
+        elif changed == 'method':
+            settings['method'] = 'homography'
+        elif changed == 'parameters':
+            settings['failure_policy'] = 'fail'
+        else:
+            settings['brightness'] = True
 
     QTimer.singleShot(0, replace)
     main.OpenFocus.toggle_roi_mode(window, True)
     qapp.processEvents()
     window._on_roi_alignment_finished(window.roi_alignment_worker.frames, 0.1)
 
-    assert window.raw_images is replacement
+    if changed == 'source':
+        assert window.raw_images is replacement
     assert not window.roi_mode_active
     assert window.roi_aligned_images == []
     assert displayed == []

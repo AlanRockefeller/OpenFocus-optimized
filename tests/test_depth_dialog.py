@@ -52,6 +52,7 @@ def _busy_actions(dialog, cancelling=False):
 def _click_and_finish(qapp, dialog):
     dialog.compute_btn.click()
     _wait(qapp, lambda: dialog._worker is None)
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
     assert dialog._index01 is not None
     assert dialog._has_current_map()
     _idle_actions(dialog)
@@ -59,6 +60,8 @@ def _click_and_finish(qapp, dialog):
 
 @pytest.fixture
 def depth_dialog(qapp, monkeypatch, tmp_path):
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent
     from PyQt6.QtCore import QSettings
     from PyQt6.QtWidgets import QWidget
     import dialogs.depthmap as dm
@@ -70,6 +73,7 @@ def depth_dialog(qapp, monkeypatch, tmp_path):
         from PyQt6.QtWidgets import QListWidget, QListWidgetItem
         from controllers.output_manager import OutputManager, OutputRecord, OUTPUT_RECORD_ROLE
         window = QWidget()
+        window.experimental_features = True
         window.raw_images = frames if frames is not None else _synthetic_thirds(48, 64)
         window.image_filenames = [f"capture-{i}.tif" for i in range(len(window.raw_images))]
         window.current_fusion_method = lambda: method
@@ -109,9 +113,15 @@ def depth_dialog(qapp, monkeypatch, tmp_path):
         thread.join(10)
         assert not thread.is_alive()
     for dialog in dialogs:
-        if not dialog._closing:
+        if not sip.isdeleted(dialog) and not dialog._closing:
             dialog.reject()
     _wait(qapp, lambda: not dm._ORPHAN_WORKERS)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    for window in windows:
+        if not sip.isdeleted(window):
+            window.close()
+            window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.processEvents()
 
 
@@ -149,7 +159,12 @@ def test_depth_open_and_switch_require_explicit_compute(depth_dialog, qapp, monk
             from core.algorithms import get_fusion
             assert set(dialog.fusion_parameter_panel.editors) == {
                 spec.key for spec in get_fusion(selected).depth.parameters}
-            _idle_actions(dialog)
+            item = dialog.method_combo.model().item(dialog.method_combo.currentIndex())
+            if item.isEnabled():
+                _idle_actions(dialog)
+            else:
+                assert not dialog.compute_btn.isEnabled()
+                assert dialog.cancel_btn.isHidden()
     dialog.gamma_spin.setValue(1.7)
     dialog.smooth_spin.setValue(2)
     dialog.invert_chk.setChecked(True)
@@ -245,8 +260,8 @@ def _openfocus_transition_frames():
 
 
 @pytest.mark.parametrize("method,control", [
-    ("openfocus_b", "depth_smoothing"),
-    ("openfocus_c", "blend_smoothing"),
+    ("openfocus_b", "smoothing"),
+    ("openfocus_c", "smoothing"),
 ])
 def test_openfocus_depth_smoothing_edit_changes_measurement(
         depth_dialog, qapp, method, control):
@@ -271,8 +286,8 @@ def test_depth_parameter_drafts_are_local_and_not_overridden(depth_dialog, monke
     from copy import deepcopy
     from core.algorithms import resolve_fusion_parameters
     drafts = {'dct': {'kernel_size': 9},
-              'openfocus_b': {'kernel_size': 15, 'depth_smoothing': 2.0},
-              'openfocus_c': {'blend_smoothing': 4.0}, 'dtcwt': {'N': 5}}
+              'openfocus_b': {'radius': 7, 'smoothing': 2.0 / .24},
+              'openfocus_c': {'smoothing': 4.0 / .6}, 'dtcwt': {'N': 5}}
     before = deepcopy(drafts)
     def parameters_for(method, depth=False):
         return resolve_fusion_parameters(method, drafts.get(method), depth=depth)
@@ -286,20 +301,20 @@ def test_depth_parameter_drafts_are_local_and_not_overridden(depth_dialog, monke
     editors['kernel_size'].setValue(23)
     _select(dialog.method_combo, "openfocus_b")
     editors = dialog.fusion_parameter_panel.editors
-    assert editors['kernel_size'].value() == 15
-    assert editors['depth_smoothing'].value() == pytest.approx(2.0)
-    editors['kernel_size'].setValue(3)
-    editors['depth_smoothing'].setValue(6.0)
+    assert editors['radius'].value() == 7
+    assert editors['smoothing'].value() == pytest.approx(2.0 / .24)
+    editors['radius'].setValue(1)
+    editors['smoothing'].setValue(6.0)
     _select(dialog.method_combo, "openfocus_c")
     editors = dialog.fusion_parameter_panel.editors
     # C exposes only its fusion smoothing to the depth map.
-    assert set(editors) == {'blend_smoothing'}
-    assert editors['blend_smoothing'].value() == pytest.approx(4.0)
-    editors['blend_smoothing'].setValue(5.0)
+    assert set(editors) == {'smoothing'}
+    assert editors['smoothing'].value() == pytest.approx(4.0 / .6)
+    editors['smoothing'].setValue(5.0)
     _select(dialog.method_combo, "openfocus_b")
     editors = dialog.fusion_parameter_panel.editors
-    assert editors['kernel_size'].value() == 3
-    assert editors['depth_smoothing'].value() == pytest.approx(6.0)
+    assert editors['radius'].value() == 1
+    assert editors['smoothing'].value() == pytest.approx(6.0)
     _select(dialog.method_combo, "dtcwt")
     assert 'mode' not in dialog.fusion_parameter_panel.editors
     _select(dialog.method_combo, "dct")
@@ -389,12 +404,15 @@ def test_depth_change_cancels_without_restart(depth_dialog, monkeypatch, qapp):
         return _ramp(images, method)
 
     monkeypatch.setattr(depth_map, "compute_focus_index", compute)
+    # The measurement backend is mocked; exercise DTCWT selection even when
+    # its optional package is unavailable on this Python installation.
+    monkeypatch.setattr('ui.algorithm_combo._package_available', lambda _name: True)
     dialog, _ = depth_dialog()
     dialog.compute_btn.click()
     _wait(qapp, entered.is_set)
     first = dialog._worker
     _select(dialog.method_combo, "openfocus_b")
-    dialog.fusion_parameter_panel.editors['kernel_size'].setValue(3)
+    dialog.fusion_parameter_panel.editors['radius'].setValue(1)
     _select(dialog.method_combo, "dtcwt")
     _select(dialog.method_combo, "stackmffv3")
     assert dialog._worker is first
@@ -514,6 +532,8 @@ def test_depth_stale_map_blocks_every_export(depth_dialog, monkeypatch, qapp, ch
     from core import depth_map
     from utils.file_dialogs import FileDialog
     monkeypatch.setattr(depth_map, "compute_focus_index", _ramp)
+    if change == 'levels':
+        monkeypatch.setattr('ui.algorithm_combo._package_available', lambda _name: True)
     frames = _synthetic_thirds(48, 64)
     image = frames[0].copy()
     dialog, _ = depth_dialog("dtcwt" if change == "levels" else "dct", frames, image,
@@ -668,6 +688,7 @@ def test_depth_automatic_texture_uses_completed_source_frame(depth_dialog, monke
     chosen = next(choice for choice in frame_choices if choice[2] == 1)
     _select(dialog.texture_combo, chosen)
     dialog._refresh_preview()
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
     assert dialog.texture_combo.currentData() == chosen
     np.testing.assert_array_equal(dialog._mesh_texture, aligned[1])
     assert not np.array_equal(dialog._mesh_texture, frames[1])
@@ -706,9 +727,11 @@ def test_depth_texture_and_2d_colormap_are_independent(depth_dialog, monkeypatch
     np.testing.assert_array_equal(dialog._mesh_texture, texture)
     dialog.overlay_chk.setChecked(False)
     _select(dialog.texture_combo, "color")
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
     pseudocolor = dialog._mesh_texture.copy()
     _select(dialog.map_combo, "gray")
     dialog.gamma_spin.setValue(0.5)
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
     assert np.mean(np.abs(dialog._mesh_texture.astype(float) - pseudocolor)) > 10
     dialog.overlay_chk.setChecked(False)
     np.testing.assert_array_equal(dialog._mesh_texture, dialog._colorized_full())
@@ -790,6 +813,7 @@ def test_depth_obj_uses_the_resolved_preview_texture(depth_dialog, monkeypatch, 
                       and dialog.texture_combo.itemData(i)[2] == 1)
         _select(dialog.texture_combo, choice)
     dialog.mesh_size.setValue(12)
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
     assert max(dialog._mesh_height.shape) == 12
     assert max(dialog._mesh_texture.shape[:2]) > 12
     expected = dialog._mesh_texture.copy()
@@ -820,7 +844,7 @@ def test_depth_obj_uses_the_resolved_preview_texture(depth_dialog, monkeypatch, 
     assert metadata["source_indices"] == dialog._map_indices
     assert metadata["request"] == dialog._map_request
     _idle_actions(dialog)
-    assert dialog.btn_save_3d.isEnabled()
+    _wait(qapp, lambda: dialog.btn_save_3d.isEnabled())
 
 
 def test_depth_export_cancel_restores_actions(depth_dialog, monkeypatch, qapp, tmp_path):
@@ -877,7 +901,8 @@ def test_depth_export_cancel_restores_actions(depth_dialog, monkeypatch, qapp, t
 @pytest.mark.parametrize("close", ["escape", "window"])
 def test_depth_close_detaches_without_publishing(depth_dialog, monkeypatch, qapp, tmp_path, operation, close):
     """DM-A15: close keeps actual threads alive through native/lease boundaries."""
-    from PyQt6.QtCore import Qt
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent, Qt
     from PyQt6.QtTest import QTest
     from utils.file_dialogs import FileDialog
     from core import depth_map, resource_policy
@@ -944,7 +969,9 @@ def test_depth_close_detaches_without_publishing(depth_dialog, monkeypatch, qapp
         dialog.compute_btn.click()
         _wait(qapp, entered.is_set)
         worker = dialog._worker
-    before = None if dialog._index01 is None else dialog._index01.copy()
+    late = []
+    monkeypatch.setattr(dialog, '_computed', lambda *args: late.append('computed'))
+    monkeypatch.setattr(dialog, '_set_export_outcome', lambda *args: late.append('export'))
     if close == "escape":
         QTest.keyClick(dialog, Qt.Key.Key_Escape)
     else:
@@ -957,15 +984,18 @@ def test_depth_close_detaches_without_publishing(depth_dialog, monkeypatch, qapp
         assert worker.isRunning()
         if holder is not None:
             assert holder.is_alive()
-        closing_status = dialog.status_lbl.text()
+        assert not worker._dialog_bindings
+        assert dialog._index01 is None and not dialog._map_frames
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert sip.isdeleted(dialog)
         release.set()
         _wait(qapp, lambda: worker not in dm._ORPHAN_WORKERS)
-        if before is None:
-            assert dialog._index01 is None
-        else:
-            np.testing.assert_array_equal(dialog._index01, before)
-        assert dialog.status_lbl.text() == closing_status
+        qapp.processEvents()
+        assert not late
+        assert dialog._index01 is None and not dialog._map_frames
         assert dialog._worker is None and dialog._export_worker is None
+        if operation == 'export':
+            assert not (tmp_path / '关闭.obj').exists()
     finally:
         release.set()
         owner_release.set()
@@ -1075,6 +1105,7 @@ def test_depth_dtcwt_levels_seed_from_main_and_preserve_local_draft(depth_dialog
         return _ramp(images, "dtcwt")
 
     monkeypatch.setattr(depth_map, "_measure_dtcwt", measure)
+    monkeypatch.setattr('ui.algorithm_combo._package_available', lambda _name: True)
     from core.algorithms import resolve_fusion_parameters
     def parameters_for(method, depth=False):
         values = {'N': 3} if method == 'dtcwt' else None
@@ -1101,7 +1132,9 @@ def test_depth_image_exports_protect_standalone_sources(depth_dialog, monkeypatc
     source.write_bytes(b"original standalone source")
     dialog, _ = depth_dialog(_standalone_retouch_paths={str(source)})
     _click_and_finish(qapp, dialog)
-    monkeypatch.setattr(dialog, "_physical_values", lambda index: (index, [0.0, 1.0]))
+    if kind == 'physical':
+        dialog.z_mapping.setChecked(True)
+        dialog.z_step.setValue(1.0)
     target = [source]
     monkeypatch.setattr(FileDialog, "getSaveFileName", lambda *a, **k: (str(target[0]), ""))
 
@@ -1116,6 +1149,7 @@ def test_depth_image_exports_protect_standalone_sources(depth_dialog, monkeypatc
     assert str(source) in dialog.status_lbl.text()
     target[0] = tmp_path / ("safe.png" if kind == "color" else "safe.tif")
     save()
+    _wait(qapp, lambda: dialog._export_worker is None)
     assert target[0].is_file()
     assert source.read_bytes() == b"original standalone source"
 
@@ -1448,17 +1482,105 @@ def test_unavailable_depth_methods_are_disabled_with_a_reason(
         index = dialog.method_combo.findData(method)
         assert index >= 0
         assert not dialog.method_combo.model().item(index).isEnabled()
-        assert (dialog.method_combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-                == trans.t("msg_stackmff_unavailable_text"))
+        assert trans.t('msg_stackmff_unavailable_text') in dialog.method_combo.itemData(
+            index, Qt.ItemDataRole.ToolTipRole)
     dtcwt = dialog.method_combo.findData('dtcwt')
     assert not dialog.method_combo.model().item(dtcwt).isEnabled()
-    assert dialog.method_combo.itemData(
-        dtcwt, Qt.ItemDataRole.ToolTipRole) == trans.t('env_dtcwt_unavailable')
+    assert trans.t('env_dtcwt_unavailable') in dialog.method_combo.itemData(
+        dtcwt, Qt.ItemDataRole.ToolTipRole)
     assert dialog.method_combo.currentData() == "openfocus_b"
 
     selected, _ = depth_dialog(method="dtcwt")
     assert selected.method_combo.currentData() == "dtcwt"
     assert not selected.compute_btn.isEnabled()
-    assert selected.status_lbl.text() == trans.t("env_dtcwt_unavailable")
+    assert trans.t('env_dtcwt_unavailable') in selected.status_lbl.text()
     _select(selected.method_combo, "dct")
     assert selected.compute_btn.isEnabled()
+
+
+@pytest.mark.parametrize('companion', range(1, 4))
+def test_depth_mesh_rejects_companion_directory_before_confirmation(depth_dialog, monkeypatch, qapp, tmp_path, companion):
+    from core import depth_map
+    from PyQt6.QtWidgets import QMessageBox
+    from utils.file_dialogs import FileDialog
+    from utils.mesh_export import obj_paths
+    monkeypatch.setattr(depth_map, 'compute_focus_index', _ramp)
+    dialog, _ = depth_dialog()
+    _click_and_finish(qapp, dialog)
+    target = tmp_path / 'model.obj'
+    conflict = Path(obj_paths(target)[companion])
+    conflict.mkdir()
+    (conflict / 'sentinel').write_bytes(b'keep')
+    monkeypatch.setattr(FileDialog, 'getSaveFileName', lambda *a, **k: (str(target), ''))
+    prompts = []
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a, **k: prompts.append(1))
+    dialog._export_3d()
+    assert not prompts and dialog._export_worker is None
+    assert (conflict / 'sentinel').read_bytes() == b'keep'
+    assert str(conflict) in dialog.status_lbl.text()
+
+
+def test_depth_map_retains_captured_source_paths(depth_dialog, monkeypatch, qapp, tmp_path):
+    from core import depth_map
+    monkeypatch.setattr(depth_map, 'compute_focus_index', _ramp)
+    source = tmp_path / 'old.tif'
+    source.write_bytes(b'keep')
+    dialog, window = depth_dialog(image_source_paths=[str(source)])
+    _click_and_finish(qapp, dialog)
+    window.image_source_paths = [str(tmp_path / 'new.tif')]
+    with pytest.raises(ValueError):
+        dialog._safe_export_paths([source])
+    assert source.read_bytes() == b'keep'
+
+
+@pytest.mark.parametrize('dtype', [np.uint8, np.uint16])
+@pytest.mark.parametrize('gray', [False, True])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_depth_retains_resolved_registration_frames(depth_dialog, monkeypatch, qapp, dtype, gray, reverse):
+    from core import compare_worker, depth_map
+    from core.source_frames import process_frame
+    shape = (24, 32) if gray else (24, 32, 3)
+    frames = [np.full(shape, i + 20, dtype) for i in range(3)]
+    calls = []
+    def processor(number):
+        def apply(image):
+            calls.append(number)
+            return image + 5
+        return apply
+    deferred = [process_frame(frame, processor(i)) for i, frame in enumerate(frames)]
+    monkeypatch.setattr(compare_worker, 'align_frames', lambda *a, **k: deferred)
+    monkeypatch.setattr(depth_map, 'compute_focus_index', _ramp)
+    dialog, _ = depth_dialog('openfocus_b' if reverse else 'dct', frames, stack_reverse_order=reverse)
+    _select(dialog.align_combo, 'ecc')
+    _click_and_finish(qapp, dialog)
+    expected = list(reversed(frames)) if reverse else frames
+    for actual, original in zip(dialog._map_frames, expected):
+        assert isinstance(actual, np.ndarray) and actual.dtype == dtype
+        np.testing.assert_array_equal(actual, original + 5)
+    before = list(calls)
+    dialog._refresh_preview()
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
+    assert calls == before and len(calls) == len(frames)
+
+
+def test_depth_visual_discards_obsolete_parameter_request(depth_dialog, monkeypatch, qapp):
+    from core import depth_map
+    monkeypatch.setattr(depth_map, 'compute_focus_index', _ramp)
+    dialog, _ = depth_dialog()
+    _click_and_finish(qapp, dialog)
+    entered, release = Event(), Event()
+    original = depth_map.smooth_index_map
+    def blocked(index, amount):
+        if amount == 1:
+            entered.set()
+            assert release.wait(5)
+        return original(index, amount)
+    monkeypatch.setattr(depth_map, 'smooth_index_map', blocked)
+    dialog.smooth_spin.setValue(1)
+    _wait(qapp, entered.is_set)
+    old_revision = dialog._visual_revision
+    dialog.smooth_spin.setValue(2)
+    assert dialog._visual_revision > old_revision
+    release.set()
+    _wait(qapp, lambda: dialog._visual_ready_revision == dialog._visual_revision)
+    assert dialog._visual_cache['smooth_key'][-1] == 2

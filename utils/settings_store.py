@@ -7,12 +7,14 @@ recently opened stacks) survives restarts through this module.
 import json
 import math
 import os
+import re
 from typing import Any, Optional
 
 from PyQt6.QtCore import QSettings
 
 from core.algorithms import (fusion_algorithms, get_fusion, get_registration,
-                             resolve_fusion_parameters, resolve_registration_parameters)
+                             migrate_openfocus_parameters, resolve_fusion_parameters,
+                             resolve_registration_parameters)
 from locales import trans
 from utils import app_paths
 from utils.validators import normalize_kernel_size
@@ -21,6 +23,7 @@ ORGANIZATION = "OpenFocus"
 APPLICATION = "OpenFocus"
 MAX_RECENT_FILES = 8
 MAX_RECENT_PROJECTS = 8
+MAX_RECENT_DIALOG_DIRS = 8
 
 # First-run theme. Light reads better on a fresh install for most users; a
 # saved preference always wins, so an existing dark-theme user stays dark.
@@ -43,7 +46,13 @@ UPDATE_BANNER_DISMISSED_KEY = "updates/banner_dismissed_tag"
 LAST_STACK_FOLDER_KEY = "ui/last_stack_folder"
 LAST_STACK_MODE_KEY = "ui/last_stack_mode"
 LAST_DIALOG_DIR_KEY = "ui/last_dialog_dir"
+RECENT_DIALOG_DIRS_KEY = "ui/recent_dialog_dirs"
 LAST_IMAGE_SAVE_DIR_KEY = "ui/last_image_save_dir"
+LAST_IMAGE_SAVE_TYPE_KEY = "ui/last_image_save_type"
+LAST_IMAGE_SAVE_FILTER_KEY = "ui/last_image_save_filter"
+IMAGE_SAVE_TYPES = frozenset({
+    ".png", ".tif", ".tiff", ".jpg", ".jpeg", ".jpe", ".jfif", ".bmp", ".webp", ".dng",
+})
 # The "AI runs on the CPU" warning is informational and repeat-per-launch
 # annoying; once the user says "don't show again" it must stay gone.
 AI_CPU_WARNING_DISMISSED_KEY = "rendering/ai_cpu_warning_dismissed"
@@ -53,11 +62,17 @@ AI_CPU_WARNING_DISMISSED_KEY = "rendering/ai_cpu_warning_dismissed"
 # a restart no longer reverts the user's per-algorithm choices.
 BRIGHTNESS_BY_METHOD_KEY = "fusion/brightness_by_method"
 METHOD_PARAMETERS_KEY = "fusion/method_parameters"
+METHOD_PARAMETERS_VERSION_KEY = "fusion/method_parameters_version"
 REGISTRATION_PARAMETERS_KEY = "registration/parameters"
+FUSION_METHOD_KEY = "fusion/method"
+ALIGNMENT_METHOD_KEY = "registration/method"
 # Historical keys are read only at this boundary.
 SMOOTHING_BY_METHOD_KEY = "fusion/smoothing_by_method"
 KERNEL_BY_MODE_KEY = "fusion/kernel_by_mode"
 BRIGHTNESS_OPTIONS = ("exposure_match", "base_correct")
+REPORTS_AUTO_SEND_KEY = "reports/auto_send"
+REPORTS_CHOICE_KEY = "reports/auto_send_choice"
+
 
 
 # window attribute -> (settings key, default, cast)
@@ -74,8 +89,12 @@ _PERSISTED_FIELDS = {
     "use_gpu": ("rendering/use_gpu", True, "bool"),
     "align_cache_enabled": ("rendering/align_cache_enabled", True, "bool"),
     "collect_alignment_report": ("rendering/collect_alignment_report", False, "bool"),
+    "profile_performance": ("diagnostics/profile_performance", False, "bool"),
+    "debug_logging": ("diagnostics/debug_logging", False, "bool"),
     "output_name_prefix": ("export/name_prefix", "", "str"),
     "restore_last_stack": ("ui/restore_last_stack", False, "bool"),
+    "experimental_features": ("ui/experimental_features", False, "bool"),
+    "auto_error_reports": (REPORTS_AUTO_SEND_KEY, False, "bool"),
     "ui_theme": ("ui/theme", DEFAULT_THEME, "str"),
     "scale_bar_enabled": ("export/scale_bar_enabled", False, "bool"),
     "scale_um_per_px_manual": ("export/scale_um_per_px_manual", 0.0, "float"),
@@ -97,6 +116,8 @@ _PERSISTED_FIELDS = {
     "watermark_color": ("export/watermark_color", "white", "str"),
     "watermark_angle": ("export/watermark_angle", -25.0, "float"),
     "watermark_density": ("export/watermark_density", "standard", "str"),
+    "watermark_copyright_enabled": ("export/watermark_copyright_enabled", False, "bool"),
+    "watermark_copyright_position": ("export/watermark_copyright_position", "prefix", "str"),
     "watermark_source_enabled": ("export/watermark_source", True, "bool"),
     "watermark_registered_enabled": ("export/watermark_registered", False, "bool"),
     "watermark_output_enabled": ("export/watermark_output", True, "bool"),
@@ -176,8 +197,9 @@ def _cast(raw: Any, kind: Any, default: Any) -> Any:
         # 标定等所有字符串/浮点设置曾因此从未恢复过
         if isinstance(kind, str):
             kind = _STR_KINDS[kind]
-        return kind(raw)
-    except (TypeError, ValueError, KeyError):
+        value = kind(raw)
+        return default if kind is float and not math.isfinite(value) else value
+    except (TypeError, ValueError, OverflowError, KeyError):
         return default
 
 
@@ -205,7 +227,10 @@ def _finite_number(value: Any) -> Optional[float]:
     """A finite, non-boolean number, else None (bools are ints in Python)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -285,9 +310,10 @@ def _legacy_kernel_memory(raw):
     for mode, value in _loads_object(raw).items():
         if mode in _LEGACY_KERNEL_METHODS and isinstance(value, int) \
                 and not isinstance(value, bool) and value > 0:
-            method = _LEGACY_KERNEL_METHODS[mode][0]
-            spec = next(p for p in get_fusion(method).parameters if p.key == "kernel_size")
-            memory[mode] = normalize_kernel_size(min(value, spec.maximum))
+            maximum = 21 if mode == 'ofab' else next(
+                p.maximum for p in get_fusion(_LEGACY_KERNEL_METHODS[mode][0]).parameters
+                if p.key == 'kernel_size')
+            memory[mode] = normalize_kernel_size(min(value, maximum))
     return memory
 
 
@@ -312,14 +338,14 @@ def _legacy_parameters(settings):
                         ("openfocus_c", "blend_smoothing")):
         value = _finite_number(smoothing.get(method))
         if value is not None:
-            spec = next(p for p in get_fusion(method).parameters if p.key == key)
-            memory.setdefault(method, {})[key] = min(max(value, spec.minimum), spec.maximum)
+            memory.setdefault(method, {})[key] = min(max(value, 0), 8)
     if settings.contains("fusion/ai_mode"):
         memory.setdefault("stackmffv3", {})["mode"] = settings.value("fusion/ai_mode")
     raw_levels = settings.value("fusion/dtcwt_levels")
     if settings.contains("fusion/dtcwt_levels") and not isinstance(raw_levels, bool):
         memory.setdefault("dtcwt", {})["N"] = _cast(raw_levels, int, None)
-    return parameter_memory_from_json(memory)
+    return parameter_memory_from_json({method: migrate_openfocus_parameters(method, values)
+                                       for method, values in memory.items()})
 
 
 def load_parameter_memories(window) -> None:
@@ -328,9 +354,25 @@ def load_parameter_memories(window) -> None:
     if settings.contains(BRIGHTNESS_BY_METHOD_KEY):
         window._brightness_by_method = brightness_memory_from_json(
             settings.value(BRIGHTNESS_BY_METHOD_KEY))
-    window._fusion_parameters_by_method = (
-        parameter_memory_from_json(settings.value(METHOD_PARAMETERS_KEY))
-        if settings.contains(METHOD_PARAMETERS_KEY) else _legacy_parameters(settings))
+    if settings.contains(METHOD_PARAMETERS_KEY):
+        memory = _loads_object(settings.value(METHOD_PARAMETERS_KEY))
+        if _cast(settings.value(METHOD_PARAMETERS_VERSION_KEY), int, 0) < 1:
+            migrated = {}
+            for method, values in memory.items():
+                if isinstance(values, dict):
+                    converted = {}
+                    for key, value in values.items():
+                        try:
+                            converted.update(migrate_openfocus_parameters(method, {key: value}))
+                        except (TypeError, ValueError):
+                            continue
+                    if method == 'openfocus_b':
+                        converted.setdefault('feather', 0)
+                    migrated[method] = converted
+            memory = migrated
+        window._fusion_parameters_by_method = parameter_memory_from_json(memory)
+    else:
+        window._fusion_parameters_by_method = _legacy_parameters(settings)
     window._registration_parameters_by_method = parameter_memory_from_json(
         settings.value(REGISTRATION_PARAMETERS_KEY), registration=True)
 
@@ -342,6 +384,7 @@ def save_parameter_memories(window) -> None:
         getattr(window, "_brightness_by_method", {})))
     settings.setValue(METHOD_PARAMETERS_KEY, parameter_memory_to_json(
         getattr(window, "_fusion_parameters_by_method", {})))
+    settings.setValue(METHOD_PARAMETERS_VERSION_KEY, 1)
     settings.setValue(REGISTRATION_PARAMETERS_KEY, parameter_memory_to_json(
         getattr(window, "_registration_parameters_by_method", {}), registration=True))
     for key in (SMOOTHING_BY_METHOD_KEY, KERNEL_BY_MODE_KEY, "fusion/ai_mode",
@@ -366,6 +409,18 @@ def load_window_settings(window) -> None:
         else:
             setattr(window, attr, getattr(window, attr, default))
 
+    # The selectors are built later; apply only valid explicitly saved IDs.
+    for key, attr, lookup in ((FUSION_METHOD_KEY, "_preferred_fusion_method", get_fusion),
+                              (ALIGNMENT_METHOD_KEY, "_preferred_alignment_method", get_registration)):
+        if settings.contains(key):
+            value = settings.value(key)
+            try:
+                if value != "none":
+                    lookup(value)
+            except (TypeError, ValueError):
+                continue
+            setattr(window, attr, value)
+
     # Must run after the scalar fields: the smoothing migration reads the
     # legacy ofb_depth_smoothing value restored just above.
     load_parameter_memories(window)
@@ -376,14 +431,12 @@ def load_window_settings(window) -> None:
     from utils import watermark
     mapping = {key: getattr(window, attr, default)
                for key, (attr, default) in watermark.ATTRS.items()}
-    # Never source the text from a previous in-memory window; only a project
-    # or recovery snapshot may restore it.
-    mapping["text"] = ""
+    # Validate style with a temporary nonempty value; never persist user text.
+    mapping["text"] = "x"
     cfg = watermark.safe_config(mapping)
-    if cfg is None:
-        window.watermark_text = ""
-    else:
-        for key, value in cfg.to_dict().items():
+    window.watermark_text = ""
+    for key, value in cfg.to_dict().items():
+        if key != "text":
             setattr(window, watermark.ATTRS[key][0], value)
 
     raw_recent = settings.value(RECENT_FILES_KEY, []) or []
@@ -397,9 +450,43 @@ def load_window_settings(window) -> None:
     window.recent_projects = [str(p) for p in raw_projects][:MAX_RECENT_PROJECTS]
 
 
+def enable_account_default_reports(window) -> None:
+    """Enable reports at sign-in only when no reporting choice is known.
+
+    Legacy stores with a reporting value but no provenance are ambiguous, so
+    preserve them. New ordinary saves mark their default as unselected.
+    """
+    settings = get_settings()
+    choice = settings.value(REPORTS_CHOICE_KEY)
+    if choice == "unselected" or (choice is None and not settings.contains(REPORTS_AUTO_SEND_KEY)):
+        from utils.app_paths import user_data_dir
+        from utils.report_client import ReportClient, revoke_automatic
+        directory = user_data_dir() / "reports"
+        old_values = {key: settings.value(key) if settings.contains(key) else None
+                      for key in (REPORTS_AUTO_SEND_KEY, REPORTS_CHOICE_KEY)}
+        ReportClient(directory).enable_automatic()
+        try:
+            settings.setValue(REPORTS_AUTO_SEND_KEY, True)
+            settings.setValue(REPORTS_CHOICE_KEY, "account_default")
+            settings.sync()
+            if settings.status() != QSettings.Status.NoError:
+                raise OSError("Could not write OpenFocus settings")
+        except BaseException:
+            revoke_automatic(directory)
+            for key, value in old_values.items():
+                if value is None:
+                    settings.remove(key)
+                else:
+                    settings.setValue(key, value)
+            raise
+        window.auto_error_reports = True
+
+
 def save_window_settings(window) -> None:
     """Write current window preferences (including language) to QSettings."""
     settings = get_settings()
+    if not settings.contains(REPORTS_CHOICE_KEY) and not settings.contains(REPORTS_AUTO_SEND_KEY):
+        settings.setValue(REPORTS_CHOICE_KEY, "unselected")
     for attr, (key, default, _kind) in _PERSISTED_FIELDS.items():
         settings.setValue(key, getattr(window, attr, default))
     # Privacy: older builds wrote the watermark text here.  Remove the stale
@@ -409,6 +496,11 @@ def save_window_settings(window) -> None:
     settings.setValue(LANGUAGE_KEY, trans.current_lang)
     settings.setValue(RECENT_FILES_KEY, list(getattr(window, "recent_files", [])))
     settings.setValue(RECENT_PROJECTS_KEY, list(getattr(window, "recent_projects", [])))
+    for key, attr in ((FUSION_METHOD_KEY, "_preferred_fusion_method"),
+                      (ALIGNMENT_METHOD_KEY, "_preferred_alignment_method")):
+        value = getattr(window, attr, None)
+        if value is not None:
+            settings.setValue(key, value)
     save_parameter_memories(window)
     settings.sync()
     if settings.status() != QSettings.Status.NoError:
@@ -423,9 +515,10 @@ def restore_default_settings(window) -> None:
     """
     settings = get_settings()
     keys = {key for key, _default, _kind in _PERSISTED_FIELDS.values()}
-    keys.update((BRIGHTNESS_BY_METHOD_KEY, METHOD_PARAMETERS_KEY,
+    keys.update((REPORTS_CHOICE_KEY, BRIGHTNESS_BY_METHOD_KEY, METHOD_PARAMETERS_KEY,
                  REGISTRATION_PARAMETERS_KEY, SMOOTHING_BY_METHOD_KEY,
-                 KERNEL_BY_MODE_KEY, DRAG_FORMAT_KEY, CONVERTER_FORMAT_KEY,
+                 KERNEL_BY_MODE_KEY, FUSION_METHOD_KEY, ALIGNMENT_METHOD_KEY,
+                 DRAG_FORMAT_KEY, CONVERTER_FORMAT_KEY,
                  AI_CPU_WARNING_DISMISSED_KEY,
                  'fusion/ai_mode', 'fusion/dtcwt_levels',
                  'fusion/ofb_depth_smoothing', 'fusion/of_blend_smoothing',
@@ -446,7 +539,15 @@ def restore_default_settings(window) -> None:
             setattr(window, attr, default)
         for name in memories:
             setattr(window, name, {})
+        # Restoring the anonymous default is an explicit choice to turn off reports.
+        settings.setValue(REPORTS_CHOICE_KEY, "chosen")
         save_window_settings(window)
+        # The caller resets the visible selectors after this transaction.
+        settings.remove(FUSION_METHOD_KEY)
+        settings.remove(ALIGNMENT_METHOD_KEY)
+        settings.sync()
+        if settings.status() != QSettings.Status.NoError:
+            raise OSError("Could not write OpenFocus settings")
     except Exception:
         for attr, value in attributes.items():
             setattr(window, attr, value)
@@ -458,6 +559,9 @@ def restore_default_settings(window) -> None:
             settings.setValue(key, value)
         settings.sync()
         raise
+    if attributes["auto_error_reports"]:
+        from ui.report_retry import discard_automatic_reports
+        discard_automatic_reports()
 
 
 
@@ -579,6 +683,37 @@ def set_converter_output_format(fmt: str) -> None:
         get_settings().setValue(CONVERTER_FORMAT_KEY, fmt)
 
 
+def get_recent_dialog_dirs() -> list[str]:
+    """Return existing folders visited in the shared file picker, newest first."""
+    raw = get_settings().value(RECENT_DIALOG_DIRS_KEY, []) or []
+    if not isinstance(raw, list):
+        raw = [raw]
+    result = []
+    seen = set()
+    for value in raw:
+        if not isinstance(value, str) or not value or not os.path.isdir(value):
+            continue
+        path = os.path.abspath(value)
+        key = os.path.normcase(os.path.normpath(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+            if len(result) == MAX_RECENT_DIALOG_DIRS:
+                break
+    return result
+
+
+def add_recent_dialog_dir(path: str) -> None:
+    """Remember a real folder visited in the shared file picker."""
+    if not path or not os.path.isdir(path):
+        return
+    path = os.path.abspath(path)
+    key = os.path.normcase(os.path.normpath(path))
+    recent = [p for p in get_recent_dialog_dirs()
+              if os.path.normcase(os.path.normpath(p)) != key]
+    get_settings().setValue(RECENT_DIALOG_DIRS_KEY, [path, *recent][:MAX_RECENT_DIALOG_DIRS])
+
+
 def get_last_dialog_dir() -> str:
     value = str(get_settings().value(LAST_DIALOG_DIR_KEY, "") or "")
     return value if value and os.path.isdir(value) else ""
@@ -601,19 +736,82 @@ def image_save_dir() -> str:
     return get_last_dialog_dir() or os.path.expanduser("~")
 
 
-def image_save_default(filename: str) -> str:
-    """`filename` placed in `image_save_dir()`, for a save dialog's default."""
-    return os.path.join(image_save_dir(), os.path.basename(filename or ""))
+def _image_extensions(filters: str) -> tuple:
+    """Extensions advertised by a Qt file-dialog filter string, in order."""
+    extensions = []
+    for token in re.findall(r"\*(\.[A-Za-z0-9]+)", filters or ""):
+        extension = token.lower()
+        if extension not in extensions:
+            extensions.append(extension)
+    return tuple(extensions)
 
 
-def remember_image_save(path: str) -> None:
-    """Remember the folder an image was just saved to."""
+def image_save_type(filters: str) -> str:
+    """The last format chosen in a multi-format image dialog, if *filters* offers it."""
+    extension = str(get_settings().value(LAST_IMAGE_SAVE_TYPE_KEY, "") or "").lower()
+    if extension in (".jpeg", ".jpe", ".jfif"):
+        extension = ".jpg"
+    offered = _image_extensions(filters)
+    if extension == ".jpg" and extension not in offered:
+        extension = next((ext for ext in offered if ext in (".jpeg", ".jpe", ".jfif")), extension)
+    if extension not in IMAGE_SAVE_TYPES or extension not in offered:
+        return ""
+    return extension
+
+
+def image_save_filter(filters: str) -> str:
+    """The filter entry to preselect: the one chosen last time, else its type's."""
+    extension = image_save_type(filters)
+    if not extension:
+        return ""
+    entries = (filters or "").split(";;")
+    label = str(get_settings().value(LAST_IMAGE_SAVE_FILTER_KEY, "") or "")
+    # Exact label first: e.g. Layered TIFF and plain TIFF share ".tif".
+    if label in entries and extension in _image_extensions(label):
+        return label
+    return next((entry for entry in entries if extension in _image_extensions(entry)), "")
+
+
+def image_save_default(filename: str, filters: str = "") -> str:
+    """`filename` in `image_save_dir()`, with the last chosen type when *filters* offers it.
+
+    Single-format dialogs omit *filters* and keep their own suffix.
+    """
+    basename = os.path.basename(filename or "")
+    extension = image_save_type(filters) if filters else ""
+    if extension:
+        basename = os.path.splitext(basename)[0] + extension
+    return os.path.join(image_save_dir(), basename)
+
+
+def remember_image_save(path: str, selected_filter: str = "") -> None:
+    """Remember the folder an image was saved to, and the format if one was chosen.
+
+    Only multi-format dialogs pass *selected_filter*, so a fixed-format export
+    (multi-page TIFF, GIF, depth map) never changes the default format.
+    """
     if not path:
         return
     folder = os.path.dirname(os.path.abspath(path))
     if os.path.isdir(folder):
-        get_settings().setValue(LAST_IMAGE_SAVE_DIR_KEY, folder)
+        settings = get_settings()
+        settings.setValue(LAST_IMAGE_SAVE_DIR_KEY, folder)
         set_last_dialog_dir(folder)
+        if selected_filter:
+            # The format is the file actually written: a typed suffix wins
+            # over the filter, which only decides for a bare name.
+            offered = _image_extensions(selected_filter)
+            extension = os.path.splitext(path)[1].lower() or (offered[0] if offered else "")
+            if extension in (".jpeg", ".jpe", ".jfif"):
+                extension = ".jpg"
+            if extension in IMAGE_SAVE_TYPES:
+                settings.setValue(LAST_IMAGE_SAVE_TYPE_KEY, extension)
+                # Keep the label only when it offers that format; otherwise
+                # the next dialog picks the first filter that does.
+                settings.setValue(LAST_IMAGE_SAVE_FILTER_KEY,
+                                  selected_filter if extension in offered or (
+                                      extension == ".jpg" and any(
+                                          ext in offered for ext in (".jpeg", ".jpe", ".jfif"))) else "")
 
 
 def load_drag_export_format(window) -> None:

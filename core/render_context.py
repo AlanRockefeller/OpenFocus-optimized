@@ -22,6 +22,7 @@ import uuid
 from dataclasses import dataclass, field, fields
 from typing import Iterable, Optional, Sequence, Tuple
 
+
 import cv2
 import numpy as np
 from core.algorithms import alignment_steps
@@ -36,9 +37,15 @@ class _SourceRegion(LazySourceFrame):
     source: object = None
     region: tuple = ()
 
-    def full_resolution(self):
+    def full_resolution(self, *, should_cancel=None):
+        from core.registration import RegistrationCancelled
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
         x, y, width, height = self.region
-        return resolve_frame(self.source)[y:y + height, x:x + width]
+        image = resolve_frame(self.source, should_cancel=should_cancel)
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+        return image[y:y + height, x:x + width]
 
 
 def display_image(image):
@@ -118,15 +125,21 @@ class SourceFrame:
     def local_point(self, x: float, y: float) -> Tuple[float, float]:
         return x - self.offset_x, y - self.offset_y
 
-    def valid_mask(self) -> Optional[np.ndarray]:
+    def valid_mask(self, *, should_cancel=None) -> Optional[np.ndarray]:
         """Boolean mask in frame coordinates, or None when every pixel is
         sampleable.  Border-connected pure black is registration fill."""
         if not self.aligned:
             return None
-        return _alignment_valid_mask(self.image)
+        return _alignment_valid_mask(self.image, should_cancel=should_cancel)
 
 
-def _alignment_valid_mask(image: np.ndarray) -> Optional[np.ndarray]:
+def _check_cancel(should_cancel):
+    if should_cancel is not None and should_cancel():
+        from core.registration import RegistrationCancelled
+        raise RegistrationCancelled()
+
+
+def _alignment_valid_mask(image: np.ndarray, *, should_cancel=None) -> Optional[np.ndarray]:
     """Mark border-connected all-zero regions as invalid.
 
     A homography warp fills the uncovered border with zeros.  Connected
@@ -135,6 +148,9 @@ def _alignment_valid_mask(image: np.ndarray) -> Optional[np.ndarray]:
     None when no border fill exists, which is the common case and avoids
     allocating a full-size mask.
     """
+    _check_cancel(should_cancel)
+    image = resolve_frame(image, should_cancel=should_cancel)
+    _check_cancel(should_cancel)
     if image.size == 0:
         return None
     if image.ndim == 3:
@@ -147,6 +163,7 @@ def _alignment_valid_mask(image: np.ndarray) -> Optional[np.ndarray]:
 
     count, labels = cv2.connectedComponents(zero.astype(np.uint8),
                                             connectivity=8)
+    _check_cancel(should_cancel)
     if count <= 1:
         return None
     border_labels = np.unique(np.concatenate((
@@ -182,6 +199,11 @@ class RenderContext:
     source_revision: int = 0
     parameters: dict = field(default_factory=dict)
     icc_profile: bytes = b""
+    #: Raw EXIF of the first participating source, snapshotted at publish time.
+    source_exif: bytes = b""
+    #: Raw EXIF per context frame, same order as ``frames``.
+    frame_exif: Tuple[bytes, ...] = ()
+    frame_icc_profiles: Tuple[bytes, ...] = ()
     linear_dng_metadata: object = None
     source_paths: Tuple[str, ...] = ()
 
@@ -244,8 +266,12 @@ def build_render_context(
     parameters: Optional[dict] = None,
     frame_ids: Optional[Sequence[str]] = None,
     icc_profile: bytes = b"",
+    source_exif: bytes = b"",
+    frame_exif: Optional[Sequence[bytes]] = None,
+    frame_icc_profiles: Optional[Sequence[bytes]] = None,
     linear_dng_metadata=None,
     source_paths: Optional[Sequence[str]] = None,
+    should_cancel=None,
 ) -> Optional[RenderContext]:
     """Build the provenance context for one completed fusion.
 
@@ -268,6 +294,7 @@ def build_render_context(
 
     frames = []
     for index, image in enumerate(frames_in):
+        _check_cancel(should_cancel)
         if image is None or not isinstance(image, (np.ndarray, LazySourceFrame, ProcessedFrame)):
             return None
         ox = oy = 0
@@ -317,6 +344,22 @@ def build_render_context(
             offset_y=oy,
             aligned=bool(aligned),
         ))
+        _check_cancel(should_cancel)
+
+    paths = tuple(str(path) if path else "" for path in (source_paths or ()))
+    # EXIF is snapshotted by the background load/render worker and passed in.
+    # Never reopen source files to construct provenance.
+    frame_exif = tuple(frame_exif or ())
+    # Align the snapshot with the frames actually used; a missing path or an
+    # older caller yields empty metadata rather than borrowing the current
+    # global stack.
+    if len(frame_exif) < len(frames):
+        frame_exif = frame_exif + (b"",) * (len(frames) - len(frame_exif))
+    elif len(frame_exif) > len(frames):
+        frame_exif = frame_exif[:len(frames)]
+    source_exif = bytes(source_exif or (frame_exif[0] if frame_exif else b""))
+    frame_icc_profiles = tuple(frame_icc_profiles or ())
+    frame_icc_profiles = (frame_icc_profiles + (b'',) * len(frames))[:len(frames)]
 
     return RenderContext(
         context_id=new_context_id(),
@@ -336,6 +379,9 @@ def build_render_context(
         source_revision=source_revision,
         parameters=dict(parameters or {}),
         icc_profile=icc_profile,
+        source_exif=source_exif,
+        frame_exif=frame_exif,
+        frame_icc_profiles=frame_icc_profiles,
         linear_dng_metadata=linear_dng_metadata,
-        source_paths=tuple(source_paths or ()),
+        source_paths=paths,
     )

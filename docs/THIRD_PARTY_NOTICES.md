@@ -3,6 +3,14 @@
 OpenFocus ships code and model weights from other projects. This file records
 the origin, the license, and the changes made here.
 
+## PyOpenCL — OpenCL GPU access
+
+- **Upstream**: https://github.com/inducer/pyopencl
+- **Version**: 2025.2.7 or later
+- **License**: MIT. Used without modification for OpenCL device access. Frozen
+  builds retain the distribution metadata, including the original license and
+  any bundled OpenCL loader notices.
+
 ## Numba and llvmlite — CPU depth-filter compilation
 
 - **Upstream**: https://github.com/numba/numba and
@@ -47,6 +55,14 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## imagecodecs — TIFF LZW decoding
+
+- **Upstream**: https://github.com/cgohlke/imagecodecs
+- **Version**: 2024.9.22 or later
+- **License**: BSD 3-Clause, Copyright (c) Christoph Gohlke. Used without
+  modification for lossless TIFF LZW decoding. Frozen builds retain the
+  distribution metadata and its original license and third-party notices.
 
 ## psdtags and tifffile — layered TIFF export
 

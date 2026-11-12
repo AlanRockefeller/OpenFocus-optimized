@@ -6,20 +6,33 @@ cannot produce a per-source depth map or provenance. The callback is
 responsible for admitting its own algorithm-specific working memory.
 """
 
+from contextlib import contextmanager
 import math
 import os
-import shutil
 import tempfile
 
 import numpy as np
 from PIL import Image
 
 from core import resource_policy
-from core.frame_storage import storage_directory
-from core.image_loader import RAW_FORMATS, _downscale_page, decode_image
+from core.frame_storage import require_disk_space, storage_directory
+from core.image_loader import RAW_FORMATS, _downscale_page, decode_image, is_raw_source, tiff_source_pages
 from core.registration import RegistrationCancelled
 from utils.image_utils import get_imwrite_params, imwrite_auto, read_image_exif
 
+
+
+@contextmanager
+def _grouped_scratch():
+    from core import scratch_registry
+    paths = []
+    try:
+        with tempfile.TemporaryDirectory(prefix='openfocus-grouped-', dir=storage_directory()) as directory:
+            paths.append(directory)
+            scratch_registry.register(directory)
+            yield directory, paths
+    finally:
+        scratch_registry.forget([path for path in paths if not os.path.lexists(path)])
 
 def _check_cancel(should_cancel):
     if should_cancel is not None and should_cancel():
@@ -28,9 +41,26 @@ def _check_cancel(should_cancel):
 
 def _header(path):
     """Read dimensions and reject containers that contribute multiple frames."""
-    if os.path.splitext(os.fspath(path))[1].lower() in RAW_FORMATS:
+    extension = os.path.splitext(os.fspath(path))[1].lower()
+    if extension in RAW_FORMATS or is_raw_source(path):
         raise ValueError(f"Grouped fusion cannot safely size RAW input: {path}")
     try:
+        if extension in ('.tif', '.tiff'):
+            import tifffile
+            with tifffile.TiffFile(path) as tif:
+                pages = list(tiff_source_pages(tif))
+                if len(pages) != 1:
+                    raise ValueError(f"Grouped fusion does not support multipage files: {path}")
+                _, page = pages[0]
+                if page.extrasamples:
+                    raise ValueError(f"Grouped fusion does not support alpha-channel inputs: {path}. Remove alpha or disable grouping")
+                width, height = page.imagewidth, page.imagelength
+                tag = page.tags.get('Orientation')
+                if tag is not None and int(tag.value) in (5, 6, 7, 8):
+                    width, height = height, width
+            if width <= 0 or height <= 0:
+                raise ValueError(f"Invalid image dimensions: {path}")
+            return width, height, os.path.getsize(path)
         with Image.open(path) as image:
             if getattr(image, "n_frames", 1) != 1:
                 raise ValueError(f"Grouped fusion does not support multipage files: {path}")
@@ -110,9 +140,7 @@ def grouped_fuse(paths, group_size, overlap, fuse_group, *, scale_factor=1.0,
     if width < 1 or height < 1:
         raise ValueError('Grouped fusion scale produces an empty image')
 
-    with tempfile.TemporaryDirectory(prefix="openfocus-grouped-", dir=storage_directory()) as scratch:
-        from core.scratch_registry import register
-        register(scratch)
+    with _grouped_scratch() as (scratch, scratch_paths):
         current = [(path, False, (0, 0, width, height)) for path in paths]
         stage = 1
         while True:
@@ -195,12 +223,11 @@ def grouped_fuse(paths, group_size, overlap, fuse_group, *, scale_factor=1.0,
                         return result
                     # Uncompressed TIFF has a small directory in addition to pixels.
                     required = result.nbytes + 65536
-                    available = shutil.disk_usage(scratch).free
-                    if available < required:
-                        raise resource_policy.ResourceLimitError(
-                            f"Insufficient scratch disk space in {scratch}: need {required} bytes, "
-                            f"with 0 bytes reserved (free: {available} bytes)")
-                    output = os.path.join(scratch, f'{stage}-{completed}.tif')
+                    require_disk_space(required, scratch)
+                    output = os.path.join(scratch, f'openfocus-grouped-{stage}-{completed}.tif')
+                    scratch_paths.append(output)
+                    from core import scratch_registry
+                    scratch_registry.register(output)
                     if not imwrite_auto(output, result, get_imwrite_params('.tif'), exif=b''):
                         raise OSError("Could not write grouped fusion scratch TIFF")
                     _check_cancel(should_cancel)

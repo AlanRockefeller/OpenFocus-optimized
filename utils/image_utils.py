@@ -176,7 +176,7 @@ def imwrite_multi_tiff(path: str, images, *, icc_profile: bytes = b"", page_spec
                         page_specs=page_specs)
 
 
-def imwrite_float_tiff(path: str, image: np.ndarray, metadata: dict) -> bool:
+def imwrite_float_tiff(path: str, image: np.ndarray, metadata: dict, *, should_cancel=None) -> bool:
     """Write physical depth as float32 TIFF, preserving NaN and unit metadata."""
     import json
     from PIL import Image
@@ -188,7 +188,8 @@ def imwrite_float_tiff(path: str, image: np.ndarray, metadata: dict) -> bool:
         description = Image.Exif()
         description[270] = json.dumps(metadata, ensure_ascii=True, allow_nan=False)
         return imwrite_auto(path, values, get_imwrite_params('.tif'),
-                            exif=description.tobytes(), stream_tiff=True)
+                            exif=description.tobytes(), stream_tiff=True,
+                            should_cancel=should_cancel)
     except (OSError, ValueError, TypeError):
         return False
 
@@ -197,6 +198,61 @@ def imwrite_float_tiff(path: str, image: np.ndarray, metadata: dict) -> bool:
 # lossless exports automatically. Empty bytes = no metadata to embed.
 SOURCE_EXIF = b""
 _PNG_EXIF_LIMIT = 16 * 1024 * 1024
+
+
+class SourceExifTooLarge(OSError):
+    """A source image's EXIF exceeds the loader's metadata budget.
+
+    Pure data error (no Qt imports), so headless callers can surface the
+    English message and GUI callers can localize ``filename``.
+    """
+
+    def __init__(self, filename, size: int, limit: int):
+        self.filename = os.fspath(filename) if filename else ""
+        self.path = self.filename
+        self.size = int(size)
+        self.limit = int(limit)
+        self.message = (
+            f"EXIF metadata is too large to load: {self.size} bytes "
+            f"(limit {self.limit}); remove or reduce the EXIF metadata in "
+            f"{self.filename} before loading it.")
+        super().__init__(self.message)
+
+    def __str__(self):
+        # OSError's default __str__ treats ``filename`` as a system-error
+        # attribute and would print "[Errno None] None: ...".
+        return self.message
+
+
+class ImageWriteError(OSError):
+    """An image write failed for a metadata/layout reason with a stable code.
+
+    It inherits OSError so best-effort writers that already catch OSError keep
+    their contract, while callers that surface exceptions can show the actual
+    remediation instead of a generic "write failed".
+    """
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(detail or code)
+        self.code = str(code)
+        self.detail = str(detail)
+
+
+def _validate_jpeg_metadata(meta, profile: bytes) -> None:
+    """Reject JPEG metadata that cannot fit before encoding any pixels."""
+    exif_bytes = meta.tobytes() if meta is not None else b""
+    if len(exif_bytes) + 2 > 65535:
+        raise ImageWriteError(
+            'exif_too_large',
+            f'EXIF is too large for JPEG ({len(exif_bytes)} bytes; max 65533). '
+            'Use PNG/TIFF or remove the metadata.')
+    segment_size = 65519
+    count = (len(profile) + segment_size - 1) // segment_size if profile else 0
+    if count > 255:
+        raise ImageWriteError(
+            'icc_too_large',
+            f'ICC profile is too large for JPEG ({len(profile)} bytes; {count} segments; '
+            'max 255). Use PNG/TIFF or remove the profile.')
 
 
 def set_source_exif(exif: bytes) -> None:
@@ -233,7 +289,8 @@ def read_image_exif(image):
                     return exif
                 if kind == b"eXIf":
                     if length > _PNG_EXIF_LIMIT:
-                        raise OSError("PNG EXIF exceeds the read limit")
+                        raise SourceExifTooLarge(
+                            getattr(image, "filename", ""), length, _PNG_EXIF_LIMIT)
                     data = stream.read(length)
                     crc = stream.read(4)
                     if (len(data) != length or len(crc) != 4
@@ -245,7 +302,8 @@ def read_image_exif(image):
         finally:
             stream.seek(position)
     if len(data) > _PNG_EXIF_LIMIT:
-        raise OSError("PNG EXIF metadata exceeds the read limit")
+        raise SourceExifTooLarge(
+            getattr(image, "filename", ""), len(data), _PNG_EXIF_LIMIT)
     exif.load(data)
     return exif
 
@@ -379,11 +437,13 @@ def _write_encoded_jpeg(handle, encoded, exif, profile, should_cancel):
         raise ValueError('Invalid encoded JPEG')
     exif_bytes = exif.tobytes() if exif is not None else b''
     if len(exif_bytes) + 2 > 65535:
-        raise ValueError('EXIF is too large for JPEG')
+        raise ImageWriteError('exif_too_large',
+                              f'EXIF is too large for JPEG ({len(exif_bytes)} bytes; max 65533).')
     segment_size = 65519
     count = (len(profile) + segment_size - 1) // segment_size
     if count > 255:
-        raise ValueError('ICC profile is too large for JPEG')
+        raise ImageWriteError('icc_too_large',
+                              f'ICC profile is too large for JPEG ({len(profile)} bytes).')
     _check_write_cancelled(should_cancel)
     handle.write(pixels[:2])
     if exif_bytes:
@@ -639,7 +699,8 @@ def _write_tiff_page(handle, image, exif, profile, params, should_cancel, bigtif
             offsets.append(handle.tell())
             counts.append(len(pixels))
             if not bigtiff and handle.tell() + len(pixels) >= _CLASSIC_TIFF_LIMIT:
-                raise ValueError('Classic TIFF limit exceeded')
+                raise ImageWriteError('tiff_too_large',
+                                      'Classic TIFF exceeds the 4 GiB limit; use BigTIFF.')
             handle.write(pixels)
     end = handle.tell()
     header, _ = _tiff_header(image.shape, image.dtype, exif, profile, rows, bigtiff=bigtiff, offset=offset,
@@ -938,6 +999,8 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
             return False
     profile = icc_profile if (icc_profile and image.ndim == 3
                               and image.shape[2] in (3, 4)) else b''
+    if ext in jpeg_exts:
+        _validate_jpeg_metadata(meta, profile)
     bounded = image.nbytes >= _BOUNDED_WRITE_THRESHOLD or should_cancel is not None
     if ext in ('.tif', '.tiff') and (bounded or stream_tiff or meta is not None or profile):
         options = params
@@ -966,7 +1029,8 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
                     require_memory(image.nbytes * 4)
                 if image.dtype == np.uint16 and ext not in ('.png', '.tif', '.tiff'):
                     image = to_display_uint8(image)
-                ok, encoded = cv2.imencode(ext, image, params or [])
+                encode_ext = '.jpg' if ext in jpeg_exts else ext
+                ok, encoded = cv2.imencode(encode_ext, image, params or [])
                 if not ok:
                     return False
                 if meta is not None and ext == '.png':
@@ -990,6 +1054,8 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
         _check_write_cancelled(should_cancel)
         os.replace(part, path)
         return True
+    except ImageWriteError:
+        raise
     except (OSError, ValueError, cv2.error):
         return False
     finally:
@@ -1127,10 +1193,8 @@ def _exposure_mean(frame, should_cancel=None, *, normalize_uint16=False):
 def exposure_gains(frames):
     """Per-frame gains that put every frame at the last frame's mean level.
 
-    The reference A/B/C pipeline matches each frame's exposure to the last
-    frame (the base reference) before the focus measure. Doing it once here,
-    on the whole stack and before tiling, keeps the decision independent of
-    tile boundaries; a per-tile implementation would show brightness seams.
+    Non-OpenFocus methods match each frame to the last frame before focus
+    measurement. Whole-stack gains keep tiled output free of exposure seams.
     """
     n = len(frames)
     if n == 0:

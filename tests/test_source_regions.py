@@ -9,6 +9,79 @@ from core.source_previews import DISPLAY_REGION_MAX_SIDE, SourceRegionWorker, re
 from utils.image_utils import to_display_uint8
 
 
+def test_source_region_requests_wait_for_retiring_decode_and_keep_latest(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from PyQt6.QtCore import QObject, pyqtSignal
+    import core.source_previews
+    from main import OpenFocus
+    from utils import scalebar, watermark
+
+    created = []
+
+    class Worker(QObject):
+        ready = pyqtSignal(object, object, object, object)
+        failed = pyqtSignal(object, str)
+        finished = pyqtSignal()
+
+        def __init__(self, frame, key, **kwargs):
+            super().__init__()
+            self.key, self.cancelled, self.requests = key, False, []
+            created.append(self)
+
+        def start(self):
+            pass
+
+        def submit(self, request):
+            self.requests.append(request)
+
+        def request_cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr(core.source_previews, 'SourceRegionWorker', Worker)
+    monkeypatch.setattr(scalebar, 'export_cfg', lambda *args, **kwargs: None)
+    monkeypatch.setattr(watermark, 'export_cfg', lambda *args, **kwargs: None)
+    frames = [np.zeros((10, 10, 3), np.uint8) for _ in range(3)]
+    window = SimpleNamespace(raw_images=frames, linear_dng_metadata=None,
+                             label_manager=SimpleNamespace(snapshot=lambda: None))
+    window._request_source_region = lambda key, request: OpenFocus._request_source_region(window, key, request)
+    request = ('view', 1, (0, 0, 10, 10), (10, 10))
+    keys = [(0, id(frame), index, index) for index, frame in enumerate(frames)]
+    window._source_display_key = keys[0]
+    window._request_source_region(keys[0], request)
+    for key in keys[1:]:
+        window._source_display_key = key
+        window._request_source_region(key, request)
+    assert len(created) == 1 and created[0].cancelled
+    created[0].finished.emit()
+    assert len(created) == 2 and created[1].key == keys[2]
+    assert created[1].requests == [request]
+    window._shutting_down = True
+    created[1].finished.emit()
+
+
+def test_native_region_replaces_thumbnail_on_actual_widget_surface(qapp):
+    from widgets.magnifier_label import MagnifierLabel
+    from utils.image_utils import cv2_to_pixmap
+
+    image = np.full((600, 800, 3), (20, 100, 220), np.uint8)
+    thumbnail = np.zeros((60, 80, 3), np.uint8)
+    label = MagnifierLabel()
+    label.resize(400, 300)
+    requests = []
+    label.sourceRegionRequested.connect(lambda key, request: requests.append((key, request)))
+    label.show()
+    try:
+        label.set_display_pixmap(cv2_to_pixmap(thumbnail), source_size=(800, 600), source_key='frame')
+        assert label.grab().toImage().pixelColor(200, 150).red() == 0
+        key, request = requests[-1]
+        tile, rect = render_source_region(image, request[2], request[3])
+        assert label.set_source_region(cv2_to_pixmap(tile), rect, source_key=key, request=request)
+        color = label.grab().toImage().pixelColor(200, 150)
+        assert (color.red(), color.green(), color.blue()) == (220, 100, 20)
+    finally:
+        label.close()
+
+
 @pytest.mark.parametrize('dtype', [np.uint8, np.uint16])
 @pytest.mark.parametrize('channels', [None, 3])
 def test_native_region_owns_only_visible_pixels(dtype, channels):
@@ -55,7 +128,8 @@ def test_selected_source_decode_coalesces_requests_and_never_runs_on_gui(qapp, m
     decoded_threads = []
     image = np.full((128, 192, 3), 83, np.uint16)
 
-    def resolve(frame):
+    def resolve(frame, *, should_cancel=None):
+        assert callable(should_cancel) and not should_cancel()
         decoded_threads.append(threading.get_ident())
         entered.set()
         assert release.wait(2)
@@ -92,8 +166,10 @@ def test_selected_source_decode_coalesces_requests_and_never_runs_on_gui(qapp, m
 def test_cancelled_original_cannot_publish_a_late_tile(qapp, monkeypatch):
     from core import source_frames
     entered, release = threading.Event(), threading.Event()
+    cancellation_checks = []
 
-    def resolve(frame):
+    def resolve(frame, *, should_cancel=None):
+        cancellation_checks.append(should_cancel)
         entered.set()
         assert release.wait(2)
         return np.full((80, 100, 3), 128, np.uint8)
@@ -106,6 +182,7 @@ def test_cancelled_original_cannot_publish_a_late_tile(qapp, monkeypatch):
     try:
         assert entered.wait(2)
         worker.request_cancel()
+        assert callable(cancellation_checks[0]) and cancellation_checks[0]()
         release.set()
         assert worker.wait(2000)
         qapp.processEvents()
@@ -154,9 +231,9 @@ def test_uncacheable_selected_original_is_resolved_once_across_requests(qapp, tm
     monkeypatch.setattr(source_frames, 'SOURCE_CACHE', source_frames.FrameCache(max_bytes=0))
     original_resolve = source_frames.resolve_frame
     calls = []
-    def resolve(item):
+    def resolve(item, *, should_cancel=None):
         calls.append(item)
-        return original_resolve(item)
+        return original_resolve(item, should_cancel=should_cancel)
     monkeypatch.setattr(source_frames, 'resolve_frame', resolve)
     ready = threading.Event()
     results = []
@@ -475,6 +552,86 @@ def test_preview_waits_for_active_render_and_can_be_cancelled(qapp, monkeypatch)
         assert worker.wait(2000)
 
 
+def test_selected_preview_is_available_during_heavy_work(qapp, tmp_path):
+    import cv2
+    from core import resource_policy, source_previews, source_frames
+
+    image = np.full((64, 96, 3), (20, 80, 140), np.uint8)
+    path = tmp_path / 'selected.png'
+    assert cv2.imwrite(str(path), image)
+    frame = source_frames.scan_source(str(path), header_only=True)[0]
+    started, release = threading.Event(), threading.Event()
+
+    def active_job():
+        with resource_policy.heavy_job():
+            started.set()
+            assert release.wait(5)
+
+    owner = threading.Thread(target=active_job)
+    owner.start()
+    worker = source_previews.SourcePreviewWorker([frame], 'selected', [0], selected_display=True)
+    received = QSignalSpy(worker.ready)
+    try:
+        assert started.wait(2)
+        worker.start()
+        if not received:
+            assert received.wait(2000)
+        assert not release.is_set()
+        np.testing.assert_array_equal(received[0][3][0, 0], image[0, 0])
+    finally:
+        release.set()
+        owner.join(2)
+        worker.request_cancel()
+        assert worker.wait(2000)
+
+
+def test_selected_preview_bypasses_bulk_preview_waiting_for_render(qapp, tmp_path, monkeypatch):
+    import cv2
+    from contextlib import contextmanager
+    from core import resource_policy, source_previews, source_frames
+
+    image = np.full((64, 96, 3), (20, 80, 140), np.uint8)
+    path = tmp_path / 'selected-during-bulk.png'
+    assert cv2.imwrite(str(path), image)
+    frame = source_frames.scan_source(str(path), header_only=True)[0]
+    started, release, bulk_waiting = threading.Event(), threading.Event(), threading.Event()
+    original_heavy_job = resource_policy.heavy_job
+
+    @contextmanager
+    def observed_heavy_job(*args, **kwargs):
+        bulk_waiting.set()
+        with original_heavy_job(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(resource_policy, 'heavy_job', observed_heavy_job)
+
+    def active_job():
+        with original_heavy_job():
+            started.set()
+            release.wait(5)
+
+    owner = threading.Thread(target=active_job)
+    bulk = source_previews.SourcePreviewWorker([frame, frame], 'bulk')
+    selected = source_previews.SourcePreviewWorker([frame], 'selected', [0], selected_display=True)
+    received = QSignalSpy(selected.ready)
+    owner.start()
+    try:
+        assert started.wait(2)
+        bulk.start()
+        assert bulk_waiting.wait(2)
+        selected.start()
+        if not received:
+            assert received.wait(1000)
+        assert not release.is_set()
+        np.testing.assert_array_equal(received[0][3][0, 0], image[0, 0])
+    finally:
+        release.set()
+        owner.join(2)
+        bulk.request_cancel()
+        selected.request_cancel()
+        assert bulk.wait(2000) and selected.wait(2000)
+
+
 @pytest.mark.parametrize('dtype,channels', [(np.uint16, 3), (np.float32, 3), (np.uint8, 4)])
 def test_preview_thumbnail_preserves_original_pixels(qapp, dtype, channels):
     import cv2
@@ -494,3 +651,228 @@ def test_preview_thumbnail_preserves_original_pixels(qapp, dtype, channels):
     finally:
         worker.request_cancel()
         assert worker.wait(2000)
+
+
+def test_idle_region_workers_take_turns_and_deliver_latest(qapp):
+    from PyQt6.QtCore import Qt
+    images = [np.full((32, 40, 3), value, np.uint8) for value in (37, 91)]
+    workers = [SourceRegionWorker(image, key) for image, key in zip(images, ('left', 'right'))]
+    events = [threading.Event(), threading.Event()]
+    results = [[], []]
+    for index, worker in enumerate(workers):
+        def receive(*args, index=index):
+            results[index].append(args)
+            events[index].set()
+        worker.ready.connect(receive, Qt.ConnectionType.DirectConnection)
+        worker.start()
+    try:
+        for serial, index, kind in ((1, 0, 'view'), (1, 1, 'view'),
+                                    (2, 0, 'loupe'), (2, 1, 'loupe'),
+                                    (3, 0, 'view'), (3, 1, 'view')):
+            request = (kind, serial, (3, 4, 12, 10), (12, 10))
+            events[index].clear()
+            workers[index].submit(request)
+            assert events[index].wait(2)
+            key, actual, tile, rect = results[index][-1]
+            assert key == ('left', 'right')[index] and actual == request
+            expected, expected_rect = render_source_region(images[index], request[2], request[3])
+            assert rect == expected_rect
+            np.testing.assert_array_equal(tile, expected)
+    finally:
+        for worker in workers:
+            worker.request_cancel()
+        for worker in workers:
+            assert worker.wait(2000)
+
+
+@pytest.mark.parametrize('failure', ['resolve', 'preflight', 'store', 'sample'])
+def test_region_failure_releases_turn_and_snapshot(qapp, monkeypatch, failure):
+    from PyQt6.QtCore import Qt
+    from core import frame_storage, source_frames, source_previews
+    source = object()
+    image = np.full((24, 28, 3), 42, np.uint8)
+    original_resolve = source_frames.resolve_frame
+    original_select = frame_storage.select_scratch
+    original_store = frame_storage.store_frame
+    original_render = source_previews.render_source_region
+    paths = []
+    def resolve(frame, **kwargs):
+        if frame is source:
+            if failure == 'resolve':
+                raise RuntimeError('resolve failed')
+            return image
+        return original_resolve(frame, **kwargs)
+    def select(*args, **kwargs):
+        if failure == 'preflight':
+            raise RuntimeError('preflight failed')
+        return original_select(*args, **kwargs)
+    def store(*args, **kwargs):
+        if failure == 'store':
+            raise RuntimeError('store failed')
+        return original_store(*args, **kwargs)
+    def render(*args, **kwargs):
+        if failure == 'sample':
+            raise RuntimeError('sample failed')
+        return original_render(*args, **kwargs)
+    monkeypatch.setattr(source_frames, 'resolve_frame', resolve)
+    monkeypatch.setattr(frame_storage, 'select_scratch', select)
+    monkeypatch.setattr(frame_storage, 'store_frame', store)
+    monkeypatch.setattr(source_previews, 'render_source_region', render)
+    failed = threading.Event()
+    failures = []
+    worker = SourceRegionWorker(source, 'failure')
+    worker.failed.connect(lambda *args: (failures.append(args), failed.set()), Qt.ConnectionType.DirectConnection)
+    worker.submit(('view', 1, (0, 0, 10, 10), (10, 10)))
+    with frame_storage.observe_temp_files(paths.append):
+        worker.start()
+        assert failed.wait(2)
+        assert worker.wait(2000)
+    assert len(failures) == 1 and failure in failures[0][1]
+    assert all(not frame_storage.owns_temp_file(path) for path in paths)
+    monkeypatch.setattr(source_previews, 'render_source_region', original_render)
+    other = SourceRegionWorker(image, 'other')
+    ready = threading.Event()
+    other.ready.connect(lambda *_: ready.set(), Qt.ConnectionType.DirectConnection)
+    other.submit(('view', 1, (0, 0, 10, 10), (10, 10)))
+    other.start()
+    try:
+        assert ready.wait(2)
+    finally:
+        other.request_cancel()
+        assert other.wait(2000)
+
+
+def test_region_source_change_after_snapshot_is_rejected(qapp, tmp_path):
+    import cv2
+    from PyQt6.QtCore import Qt
+    from core.source_frames import scan_source
+    path = tmp_path / 'source.png'
+    assert cv2.imwrite(str(path), np.full((24, 28, 3), 42, np.uint8))
+    frame = scan_source(str(path), header_only=True)[0]
+    worker = SourceRegionWorker(frame, 'source')
+    ready, failed = threading.Event(), threading.Event()
+    results, errors = [], []
+    worker.ready.connect(lambda *args: (results.append(args), ready.set()), Qt.ConnectionType.DirectConnection)
+    worker.failed.connect(lambda *args: (errors.append(args), failed.set()), Qt.ConnectionType.DirectConnection)
+    worker.submit(('view', 1, (0, 0, 10, 10), (10, 10)))
+    worker.start()
+    try:
+        assert ready.wait(2)
+        replacement = tmp_path / 'replacement.png'
+        assert cv2.imwrite(str(replacement), np.full((30, 32, 3), 71, np.uint8))
+        replacement.replace(path)
+        worker.submit(('view', 2, (0, 0, 10, 10), (10, 10)))
+        assert failed.wait(2)
+        assert len(results) == 1 and len(errors) == 1
+    finally:
+        worker.request_cancel()
+        assert worker.wait(2000)
+
+
+@pytest.mark.parametrize('phase', ['waiting', 'preparing', 'idle', 'sampling'])
+def test_cancelled_region_never_blocks_another_worker(qapp, monkeypatch, phase):
+    from PyQt6.QtCore import Qt
+    from core import source_frames, source_previews
+    image = np.full((24, 28, 3), 67, np.uint8)
+    source = object()
+    entered, release, ready, other_ready = (threading.Event() for _ in range(4))
+    original_resolve = source_frames.resolve_frame
+    original_render = source_previews.render_source_region
+    def resolve(frame, **kwargs):
+        if frame is source:
+            if phase == 'preparing':
+                entered.set()
+                assert release.wait(2)
+            return image
+        return original_resolve(frame, **kwargs)
+    def render(*args, **kwargs):
+        if phase == 'sampling' and not entered.is_set():
+            entered.set()
+            assert release.wait(2)
+        return original_render(*args, **kwargs)
+    monkeypatch.setattr(source_frames, 'resolve_frame', resolve)
+    monkeypatch.setattr(source_previews, 'render_source_region', render)
+    worker = SourceRegionWorker(source, 'old')
+    other = SourceRegionWorker(image, 'new')
+    received = []
+    worker.ready.connect(lambda *args: (received.append(args), ready.set()), Qt.ConnectionType.DirectConnection)
+    other.ready.connect(lambda *_: other_ready.set(), Qt.ConnectionType.DirectConnection)
+    held = False
+    try:
+        if phase == 'waiting':
+            assert source_previews._SOURCE_DISPLAY.acquire(timeout=2)
+            held = True
+        worker.submit(('view', 1, (0, 0, 10, 10), (10, 10)))
+        worker.start()
+        if phase in ('preparing', 'sampling'):
+            assert entered.wait(2)
+        elif phase == 'idle':
+            assert ready.wait(2)
+        worker.request_cancel()
+        release.set()
+        if held:
+            source_previews._SOURCE_DISPLAY.release()
+            held = False
+        assert worker.wait(2000)
+        assert len(received) == (1 if phase == 'idle' else 0)
+        other.submit(('view', 1, (0, 0, 10, 10), (10, 10)))
+        other.start()
+        assert other_ready.wait(2)
+    finally:
+        release.set()
+        if held:
+            source_previews._SOURCE_DISPLAY.release()
+        worker.request_cancel()
+        other.request_cancel()
+        assert worker.wait(2000)
+        assert other.wait(2000)
+
+
+def test_lazy_region_decodes_are_serial_and_snapshots_reused(qapp, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from core import source_frames
+    sources = [object(), object()]
+    images = [np.full((20, 24), value, np.uint16) for value in (500, 900)]
+    calls = []
+    entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+    def resolve(frame, **kwargs):
+        index = sources.index(frame)
+        calls.append(index)
+        if index == 0:
+            entered.set()
+            assert release.wait(2)
+        else:
+            second_entered.set()
+        return images[index]
+    monkeypatch.setattr(source_frames, 'resolve_frame', resolve)
+    workers = [SourceRegionWorker(source, index) for index, source in enumerate(sources)]
+    events = [threading.Event(), threading.Event()]
+    results = [[], []]
+    for index, worker in enumerate(workers):
+        def receive(*args, index=index):
+            results[index].append(args)
+            events[index].set()
+        worker.ready.connect(receive, Qt.ConnectionType.DirectConnection)
+        worker.submit(('view', 1, (2, 3, 10, 8), (10, 8)))
+    try:
+        workers[0].start()
+        assert entered.wait(2)
+        workers[1].start()
+        assert not second_entered.wait(.1)
+        release.set()
+        assert events[0].wait(2) and events[1].wait(2)
+        for index, worker in enumerate(workers):
+            events[index].clear()
+            request = ('loupe', 2, (4, 5, 10, 8), (10, 8))
+            worker.submit(request)
+            assert events[index].wait(2)
+            expected, rect = render_source_region(images[index], request[2], request[3])
+            assert results[index][-1][1] == request and results[index][-1][3] == rect
+            np.testing.assert_array_equal(results[index][-1][2], expected)
+        assert calls == [0, 1]
+    finally:
+        release.set()
+        for worker in workers:
+            worker.request_cancel()
+        for worker in workers:
+            assert worker.wait(2000)

@@ -23,7 +23,7 @@ import atexit
 import errno
 import logging
 import os
-import shutil
+import re
 import sys
 import tempfile
 import threading
@@ -81,18 +81,44 @@ def _try_lock(handle) -> bool:
             pass
 
 
+def _still_published(handle, path) -> bool:
+    """True while *path* names the very file *handle* has open."""
+    try:
+        opened, named = os.fstat(handle.fileno()), os.stat(path)
+    except OSError:
+        return False
+    return (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+
+
+_OPEN_ATTEMPTS = 5
+
+
 def _open_registry():
-    """Create and lock this process's registry, or disable recording."""
-    global _handle, _handle_path, _disabled
+    """Create and lock this process's registry, or disable recording.
+
+    A new registry is visible to other processes' sweeps before it is
+    locked. A sweep that wins that race sees an unlocked, empty registry and
+    removes it (or, on Windows, merely holds its lock for a moment), so the
+    lock is retried under a fresh name until this process holds the lock on
+    a file that is still published.
+    """
+    global _handle, _handle_path
     directory = registry_directory()
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{os.getpid()}-{uuid.uuid4().hex[:12]}{_SUFFIX}"
-    handle = open(path, "a+", **_ENCODING)
-    if not _try_lock(handle):
+    for attempt in range(_OPEN_ATTEMPTS):
+        path = directory / f"{os.getpid()}-{uuid.uuid4().hex[:12]}{_SUFFIX}"
+        handle = open(path, "a+", **_ENCODING)
+        if _try_lock(handle) and _still_published(handle, path):
+            _handle, _handle_path = handle, path
+            return
         handle.close()
-        path.unlink(missing_ok=True)
-        raise OSError(errno.EAGAIN, "could not lock new scratch registry", str(path))
-    _handle, _handle_path = handle, path
+        if os.path.exists(path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        time.sleep(0.01 * (attempt + 1))
+    raise OSError(errno.EAGAIN, "could not lock a new scratch registry", str(directory))
 
 
 def register(path) -> None:
@@ -104,7 +130,10 @@ def register(path) -> None:
     global _disabled
     if _disabled:
         return
-    line = os.path.abspath(os.fsdecode(path))
+    line = os.fsdecode(path)
+    if not os.path.isabs(line):
+        return
+    line = os.path.abspath(line)
     if "\n" in line or "\r" in line:
         return
     with _lock:
@@ -148,13 +177,19 @@ def forget(paths) -> None:
             log.warning("scratch registry: could not forget handed-over scratch: %s", exc)
 
 
-def _safe_target(path: str):
+def _safe_target(path: str, registered_directories=frozenset()):
     """Return a Path that may be removed, or None for anything unexpected."""
     if not path or not os.path.isabs(path):
         return None
     target = Path(path)
     if not target.name.startswith(_PREFIXES):
-        return None
+        parent = target.parent
+        if (not re.fullmatch(r"video_[0-9]{5,}\.png", target.name)
+                or not parent.name.startswith("openfocus_video_")
+                or _norm(str(parent)) not in registered_directories
+                or _safe_target(str(parent)) is None
+                or not parent.is_dir()):
+            return None
     try:
         info = target.lstat()
     except OSError:
@@ -171,9 +206,8 @@ def _remove(target: Path) -> int:
     """Remove a file or folder, returning bytes freed (best effort)."""
     try:
         if target.is_dir():
-            size = sum(p.stat().st_size for p in target.rglob("*") if p.is_file()
-                       and not p.is_symlink())
-            shutil.rmtree(target)
+            target.rmdir()
+            size = 0
         else:
             size = target.stat().st_size
             target.unlink()
@@ -189,21 +223,46 @@ def _live_registry_paths(directory: Path) -> set:
         if entry != _handle_path:
             try:
                 probe = open(entry, "r+", **_ENCODING)
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError:
+                return None
             try:
                 if _try_lock(probe):
                     continue  # stale, not live
             finally:
                 probe.close()
         try:
-            live.update(line.strip() for line in entry.read_text(**_ENCODING).splitlines())
+            live.update(line for line in entry.read_text(**_ENCODING).splitlines() if line)
         except (OSError, ValueError):
-            pass
+            return None
     return live
 
 
-def _sweep_stale_registries(directory: Path):
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _owned_by_live(target: Path, live) -> bool:
+    """True when a live registry lists target, a folder holding it, or a path inside it."""
+    path = _norm(str(target))
+    for owned in live:
+        if path == owned:
+            return True
+        inner, outer = (path, owned) if len(path) > len(owned) else (owned, path)
+        if inner.startswith(outer.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _sweep_stale_registries(directory: Path, live=frozenset()):
+    """Remove what exited processes recorded, except what a live one owns.
+
+    A path in both a stale and a live registry was handed over (a render
+    worker's results adopted by the window) without the stale registry
+    forgetting it; the live owner records and removes it itself.
+    """
+    live = {_norm(path) for path in live if path}
     removed, freed = 0, 0
     for entry in directory.glob(f"*{_SUFFIX}"):
         if _handle_path is not None and entry == _handle_path:
@@ -217,27 +276,39 @@ def _sweep_stale_registries(directory: Path):
             if not _try_lock(probe):
                 continue  # owner is alive
             lines = probe.read().splitlines()
+            directories = {_norm(line) for line in lines
+                           if os.path.isabs(line) and
+                           Path(line).name.startswith("openfocus_video_")}
             # Most recent first: folders are recorded before files inside them.
             for line in reversed(lines):
-                target = _safe_target(line.strip())
-                if target is not None:
+                target = _safe_target(line, directories)
+                if target is not None and not _owned_by_live(target, live):
                     size = _remove(target)
                     if target.exists():
                         leftover = True  # e.g. locked by antivirus; retry next time
                     else:
                         removed += 1
                         freed += size
+            if not leftover and os.name != "nt":
+                # Unlink before unlocking: once the lock is released, a new
+                # owner could lock this file just before it disappears.
+                # (Windows cannot delete an open file; there the owner keeps
+                # it open, so the unlink below fails for a live registry.)
+                _unlink_quietly(entry)
         except (OSError, ValueError):
             leftover = True
         finally:
             probe.close()
-        if leftover:
-            continue
-        try:
-            entry.unlink()
-        except OSError:
-            pass
+        if not leftover and os.name == "nt":
+            _unlink_quietly(entry)
     return removed, freed
+
+
+def _unlink_quietly(entry: Path) -> None:
+    try:
+        entry.unlink()
+    except OSError:
+        pass
 
 
 def _boot_time():
@@ -250,8 +321,7 @@ def _boot_time():
                         return float(line.split()[1])
         elif os.name == "nt":
             import ctypes
-            ticks = ctypes.windll.kernel32.GetTickCount64()
-            return time.time() - ticks / 1000.0
+            return _windows_boot_time(ctypes.windll.kernel32)
         elif sys.platform == "darwin":
             import ctypes
             import ctypes.util
@@ -268,6 +338,20 @@ def _boot_time():
     except (OSError, ValueError, AttributeError):
         pass
     return None
+
+
+def _windows_boot_time(kernel32):
+    """Boot time from GetTickCount64.
+
+    ctypes assumes a signed 32-bit int unless told otherwise, which turns the
+    uptime negative after about 25 days (and wraps every 49.7), putting
+    "boot" in the future so every preview spill looks pre-boot.
+    """
+    import ctypes
+    function = kernel32.GetTickCount64
+    function.restype = ctypes.c_ulonglong
+    function.argtypes = ()
+    return time.time() - function() / 1000.0
 
 
 def _open_by_any_process():
@@ -288,15 +372,19 @@ def _open_by_any_process():
             for fd in os.listdir(f"{base}/fd"):
                 try:
                     busy.add(os.stat(f"{base}/fd/{fd}").st_ino)
+                except FileNotFoundError:
+                    continue
                 except OSError:
-                    pass
+                    return None
             with open(f"{base}/maps", encoding="utf-8", errors="replace") as maps:
                 for line in maps:
                     parts = line.split(None, 5)
                     if len(parts) >= 5 and parts[4] != "0":
                         busy.add(int(parts[4]))
+        except FileNotFoundError:
+            continue  # process exited during the scan
         except (OSError, ValueError):
-            continue  # exited, or another user's process
+            return None  # incomplete visibility cannot prove abandonment
     return busy
 
 
@@ -310,7 +398,7 @@ def _sweep_legacy(directories, live):
             continue
         for entry in entries:
             if (entry.name.startswith(_LEGACY_PREFIXES) and entry.is_file(follow_symlinks=False)
-                    and os.path.abspath(entry.path) not in live):
+                    and not _owned_by_live(Path(os.path.abspath(entry.path)), live)):
                 candidates.append(entry.path)
     if not candidates:
         return 0, 0
@@ -349,10 +437,14 @@ def sweep_abandoned(extra_directories=()):
         directory.mkdir(parents=True, exist_ok=True)
     except OSError:
         return 0, 0
-    removed, freed = _sweep_stale_registries(directory)
+    live = _live_registry_paths(directory)
+    if live is None:
+        return 0, 0
+    live = {_norm(path) for path in live if path}
+    removed, freed = _sweep_stale_registries(directory, live)
     folders = {os.path.abspath(tempfile.gettempdir())}
     folders.update(os.path.abspath(os.fsdecode(d)) for d in extra_directories if d)
-    legacy = _sweep_legacy(sorted(folders), _live_registry_paths(directory))
+    legacy = _sweep_legacy(sorted(folders), live)
     removed, freed = removed + legacy[0], freed + legacy[1]
     if removed:
         log.info("removed %d abandoned scratch item(s), %.1f MiB, left by an "

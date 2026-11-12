@@ -53,17 +53,26 @@ def test_scaled_raw_preserves_full_decode_colors_and_size(monkeypatch, tmp_path)
     rgb = np.random.default_rng(7).integers(0, 65536, (73, 95, 3), dtype=np.uint16)
 
     class Raw:
+        sizes = SimpleNamespace(width=rgb.shape[1], height=rgb.shape[0],
+                                raw_width=rgb.shape[1], raw_height=rgb.shape[0],
+                                pixel_aspect=1.0, flip=0)
         def __enter__(self):
             return self
 
         def __exit__(self, *_args):
             pass
+        def open_file(self, path):
+            assert path == str(tmp_path / 'frame.raf')
+
+        def unpack(self):
+            pass
+
 
         def postprocess(self, **_kwargs):
             return rgb.copy()
 
     monkeypatch.setattr(il, 'RAWPY_AVAILABLE', True)
-    monkeypatch.setattr(il, 'rawpy', SimpleNamespace(imread=lambda _path: Raw()), raising=False)
+    monkeypatch.setattr(il, 'rawpy', SimpleNamespace(RawPy=Raw), raising=False)
     path = tmp_path / 'frame.raf'
     path.touch()
     original = np.ascontiguousarray(rgb[:, :, ::-1])
@@ -78,8 +87,76 @@ def test_scaled_raw_preserves_full_decode_colors_and_size(monkeypatch, tmp_path)
         frame = source_frames.SourceFrame(
             str(path), 0, expected.shape, expected.dtype, None,
             source_frames._fingerprint(str(path)), scale=scale,
-            native_shape=rgb.shape)
+            native_shape=rgb.shape, raw_sensor_shape=rgb.shape[:2])
         source_frames.SOURCE_CACHE.clear()
         np.testing.assert_array_equal(frame.full_resolution(), expected)
 
 
+def _reversed_copy(rgb):
+    return np.ascontiguousarray(rgb[:, :, ::-1])
+
+
+def test_rgb_to_bgr_returns_the_reversed_copy_for_decoded_samples():
+    rng = np.random.default_rng(11)
+    for dtype in (np.uint8, np.uint16):
+        rgb = rng.integers(0, np.iinfo(dtype).max + 1, (37, 53, 3), dtype=dtype)
+        for source in (rgb, rgb[::2, 3:], rgb[:, ::-1], np.asfortranarray(rgb)):
+            before = source.copy()
+            bgr = il.rgb_to_bgr(source)
+            assert bgr.dtype == dtype and bgr.shape == source.shape
+            assert bgr.flags.c_contiguous and bgr.flags.writeable
+            assert not np.shares_memory(bgr, source)
+            np.testing.assert_array_equal(bgr, _reversed_copy(source))
+            np.testing.assert_array_equal(source, before)
+    extremes = np.array([[[0, 1, 65535], [65534, 32768, 255]]], np.uint16)
+    np.testing.assert_array_equal(il.rgb_to_bgr(extremes), _reversed_copy(extremes))
+
+
+def test_rgb_to_bgr_uses_the_native_swap_only_for_three_integer_channels(monkeypatch):
+    calls = []
+    real = cv2.cvtColor
+
+    def counted(image, code, *args, **kwargs):
+        calls.append(code)
+        return real(image, code, *args, **kwargs)
+
+    monkeypatch.setattr(il.cv2, 'cvtColor', counted)
+    rng = np.random.default_rng(12)
+    il.rgb_to_bgr(rng.integers(0, 65536, (5, 7, 3), dtype=np.uint16))
+    il.rgb_to_bgr(rng.integers(0, 256, (5, 7, 3), dtype=np.uint8))
+    assert calls == [cv2.COLOR_RGB2BGR] * 2
+    # Layouts LibRaw is not expected to return keep the plain reversed copy.
+    for other in (rng.integers(0, 65536, (5, 7, 1), dtype=np.uint16),
+                  rng.integers(0, 65536, (5, 7, 4), dtype=np.uint16),
+                  rng.integers(-99, 99, (5, 7, 3)).astype(np.int16),
+                  rng.random((5, 7, 3)), rng.random((5, 7, 3), dtype=np.float32)):
+        result = il.rgb_to_bgr(other)
+        assert result.flags.c_contiguous and result.dtype == other.dtype
+        np.testing.assert_array_equal(result, _reversed_copy(other))
+    assert len(calls) == 2
+
+
+def test_raw_budget_rejection_precedes_native_unpack(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import pytest
+    from core import resource_policy
+    path = tmp_path / 'sensor.raf'
+    path.write_bytes(b'raw')
+    calls = []
+    class Raw:
+        sizes = SimpleNamespace(width=6000, height=4000, raw_width=6200,
+                                raw_height=4100, pixel_aspect=1, flip=0)
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+        def open_file(self, _path): pass
+        def unpack(self): calls.append('unpack')
+        def postprocess(self, **kwargs): calls.append('postprocess')
+    monkeypatch.setattr(il, 'RAWPY_AVAILABLE', True)
+    monkeypatch.setattr(il, 'rawpy', SimpleNamespace(RawPy=Raw), raising=False)
+    def reject(required, **kwargs):
+        assert required == 6200 * 4100 * 64 + 6000 * 4000 * 6 + 6
+        raise resource_policy.ResourceLimitError('budget')
+    monkeypatch.setattr(resource_policy, 'require_memory', reject)
+    with pytest.raises(resource_policy.ResourceLimitError):
+        il._read_raw(str(path))
+    assert calls == []

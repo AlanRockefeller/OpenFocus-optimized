@@ -1,5 +1,12 @@
 APP_VERSION = "1.77.0"
 
+
+def app_display_version():
+    """Return the build identity while preserving the numeric package version."""
+    from build_identity import BETA_SUFFIX
+    return APP_VERSION + BETA_SUFFIX
+
+
 WINDOW_WIDTH = 1600
 WINDOW_HEIGHT = 950
 
@@ -22,7 +29,7 @@ BYTES_TO_GB = 1024 ** 3
 
 # Shared snapshots and numerical scratch leave room for source/preview caches.
 FRAME_RAM_BUDGET_BYTES = 384 * 1024 ** 2
-HF9_MAX_IN_FLIGHT_FRAMES = 2
+OPENFOCUS_MAX_IN_FLIGHT_FRAMES = 2
 
 FEATURE_MAX_KEYPOINTS = 200
 FEATURE_MATCH_THRESHOLD = 0.01

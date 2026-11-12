@@ -12,12 +12,77 @@ MAIN = os.path.join(PROJECT_ROOT, "main.py")
 
 QUrl = pytest.importorskip("PyQt6.QtCore").QUrl
 
+pytestmark = pytest.mark.usefixtures("isolated_process_env")
+
 
 def run_cli(*argv):
     return subprocess.run(
         [sys.executable, MAIN, *argv],
         capture_output=True, text=True, cwd=PROJECT_ROOT, timeout=300,
     )
+
+
+def test_cli_ignores_inherited_data_and_log_overrides(tmp_path, monkeypatch):
+    from tests.process_isolation import sandbox_env
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "settings.ini"
+    sentinel.write_bytes(b"unchanged user data\n")
+    log = outside / "existing.log"
+    log.write_bytes(b"unchanged diagnostic log\n")
+    monkeypatch.setenv("OPENFOCUS_DATA_DIR", str(outside))
+    monkeypatch.setenv("OPENFOCUS_LOG_DIR", str(outside))
+    env = sandbox_env(tmp_path / "child", {
+        "OPENFOCUS_DATA_DIR": str(outside), "OPENFOCUS_LOG_DIR": str(outside),
+    })
+    result = subprocess.run([sys.executable, MAIN, "--help"], cwd=PROJECT_ROOT,
+                            env=env, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert sentinel.read_bytes() == b"unchanged user data\n"
+    assert log.read_bytes() == b"unchanged diagnostic log\n"
+    assert {path.name for path in outside.iterdir()} == {"settings.ini", "existing.log"}
+    assert list((tmp_path / "child" / "logs").glob("openfocus-*.log"))
+
+@pytest.mark.parametrize('method', ['openfocus_a', 'openfocus_b', 'openfocus_c'])
+def test_desc_orders_sources_before_openfocus_registration(monkeypatch, method):
+    from core import cli, registration, multi_focus_fusion
+    from utils import image_utils
+
+    frames = [np.full((4, 4), value, np.uint8) for value in (10, 20, 30)]
+    observed = {}
+
+    class Registration:
+        def __init__(self, **kwargs):
+            pass
+
+        def process(self, images, **kwargs):
+            observed['registration'] = list(images)
+            return images
+
+    class Fusion:
+        def __init__(self, **kwargs):
+            observed['sort'] = kwargs['sort_mode']
+
+        def fuse(self, input_source, **kwargs):
+            observed['fusion'] = list(input_source)
+            return input_source[0]
+
+        def get_info(self):
+            return {'device': 'test'}
+
+    monkeypatch.setattr(registration, 'ImageRegistration', Registration)
+    monkeypatch.setattr(multi_focus_fusion, 'MultiFocusFusion', Fusion)
+    monkeypatch.setattr(cli, '_transparent_region', lambda images, args: (images, None))
+    monkeypatch.setattr(image_utils, 'prepare_fusion_input', lambda images, cancel: (images, False))
+    args = cli.build_parser().parse_args(['-i', 'in', '-o', 'out.png', '-m', method,
+                                           '--align', 'openfocus', '--sort', 'desc'])
+    cli._fuse_stack_admitted_body(frames, args)
+    assert [int(frame[0, 0]) for frame in observed['registration']] == [30, 20, 10]
+    assert [int(frame[0, 0]) for frame in observed['fusion']] == [30, 20, 10]
+    assert [int(frame[0, 0]) for frame in args._depth_frames] == [30, 20, 10]
+    assert observed['sort'] == 'asc'
+    assert [int(frame[0, 0]) for frame in frames] == [10, 20, 30]
 
 
 def test_help_exits_zero(tmp_path):

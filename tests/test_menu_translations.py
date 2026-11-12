@@ -35,9 +35,13 @@ def _menu_window(qapp):
         "save_stack_as_multipage_tiff": staticmethod(stub),
         "save_processed_input_stack": staticmethod(stub),
     })()
+    window.output_manager = type("O", (), {
+        "export_all_results": staticmethod(stub),
+    })()
     window.source_manager = type("S", (), {
         "clear_image_stack": staticmethod(stub),
         "reset_current_stack": staticmethod(stub),
+        "prompt_and_load_frames": staticmethod(stub),
     })()
     window.label_manager = type("L", (), {
         "show_add_label_dialog": staticmethod(stub),
@@ -62,7 +66,7 @@ def _menu_window(qapp):
             'restore_default_settings', 'set_use_gpu', 'apply_theme', 'set_language',
             "check_for_updates", "install_update_now", "open_logs_folder",
             "show_quick_start", "show_environment_info", "show_feedback_dialog",
-            "show_contact_info"):
+            "show_contact_info", "show_account_dialog"):
         setattr(window, name, stub)
     return window
 
@@ -84,6 +88,29 @@ def test_file_menu_uses_one_folder_entry(qapp):
         window.close()
         window.deleteLater()
         qapp.processEvents()
+
+
+def test_file_menu_exports_all_results(qapp):
+    from ui.menus import setup_menus
+
+    window = _menu_window(qapp)
+    calls = []
+    window.output_manager.export_all_results = lambda: calls.append(True)
+    setup_menus(window)
+    try:
+        action = window.ui_objs['menu_export_all']
+        assert action in window.ui_objs['menu_file'].actions()
+        action.trigger()
+        assert calls == [True]
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_export_all_menu_translation_exists_in_every_language():
+    for code in trans.PACK_ORDER:
+        assert trans.translations[code].get('menu_export_all'), code
 
 
 
@@ -109,24 +136,33 @@ def test_usage_disclosure_and_switch_exist_in_every_language():
         assert 'usage_opt_in' not in table, code
 
 
-def test_reset_stack_menu_action_calls_source_manager(qapp):
+def test_reset_stack_menu_action_calls_source_manager(qapp, tmp_path, monkeypatch):
     from ui.menus import setup_menus
+    from tests.test_control_channel import _new_main_window, _destroy_main_window
 
-    window = _menu_window(qapp)
+    host = _menu_window(qapp)
     calls = []
-    window.source_manager.reset_current_stack = lambda: calls.append(True)
-    setup_menus(window)
+    host.source_manager.reset_current_stack = lambda: calls.append(True)
+    setup_menus(host)
     try:
-        action = window.ui_objs["action_reset_stack"]
-        actions = window.ui_objs["menu_edit"].actions()
-        assert actions.index(action) == actions.index(window.ui_objs["action_redo"]) + 1
-        assert action.property("trans_key") == "menu_reset_stack"
-        action.trigger()
+        host.ui_objs["action_reset_stack"].trigger()
         assert calls == [True]
     finally:
-        window.close()
-        window.deleteLater()
-        qapp.processEvents()
+        host.close()
+        host.deleteLater()
+
+    previous = trans.current_lang
+    window = _new_main_window(qapp, tmp_path, monkeypatch)
+    try:
+        action = window.ui_objs["action_reset_stack"]
+        for language in ("en", "zh"):
+            trans.set_language(language)
+            qapp.processEvents()
+            assert action.isVisible()
+            assert action.text() == trans.t("menu_reset_stack")
+    finally:
+        trans.set_language(previous)
+        _destroy_main_window(qapp, window)
 
 
 def test_reset_stack_translations_exist_in_every_language():
@@ -169,6 +205,40 @@ def test_rotation_menu_rotates_frames_in_the_named_direction(qapp, action_index,
         for images in (window.raw_images, window.base_images):
             np.testing.assert_array_equal(images[0], expected)
             np.testing.assert_array_equal(images[1], expected + 1000)
+        assert reloaded == [1]
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize("action_index, expected", [
+    (0, [[3, 2, 1], [6, 5, 4]]),
+    (1, [[4, 5, 6], [1, 2, 3]]),
+])
+def test_flip_menu_preserves_viewed_frame(qapp, action_index, expected):
+    import numpy as np
+    from controllers.transform_manager import TransformManager
+    from ui.menus import setup_menus
+
+    window = _menu_window(qapp)
+    original = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.uint16)
+    window.raw_images = [original.copy(), original + 1000]
+    window.base_images = [image.copy() for image in window.raw_images]
+    window.source_transforms = []
+    window.current_img_index, window.current_display_index = 0, 1
+    window.push_undo = lambda: None
+    manager = TransformManager(window)
+    manager._invalidate_processing_results = lambda **kwargs: None
+    reloaded = []
+    manager.reload_image_stack = lambda **kwargs: reloaded.append(kwargs["initial_index"])
+    window.flip_stack = manager.flip_stack
+    setup_menus(window)
+    try:
+        window.ui_objs["menu_flip"].actions()[action_index].trigger()
+        for images in (window.raw_images, window.base_images):
+            np.testing.assert_array_equal(images[0], np.array(expected, dtype=np.uint16))
+            np.testing.assert_array_equal(images[1], np.array(expected, dtype=np.uint16) + 1000)
         assert reloaded == [1]
     finally:
         window.close()

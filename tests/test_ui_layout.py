@@ -122,6 +122,7 @@ def test_button_caption_recovers_after_temporary_width_constraint(qapp):
         button.setMaximumWidth(18)
         qapp.processEvents()
         assert button.text() != caption
+        assert button.toolTip() == caption
 
         button.setMaximumWidth(host.width())
         button.setText(caption)
@@ -129,6 +130,9 @@ def test_button_caption_recovers_after_temporary_width_constraint(qapp):
         layout.activate()
         qapp.processEvents()
         assert button.text() == caption
+        assert not button.toolTip()
+        button.setToolTip('Opens stack review')
+        assert button.toolTip() == 'Opens stack review'
     finally:
         host.close()
         host.deleteLater()
@@ -144,12 +148,13 @@ def test_main_selector_explains_missing_dtcwt(qapp, monkeypatch):
 
     combo = QComboBox()
     algorithm_combo.fill_fusion_combo(combo)
-    host = SimpleNamespace(combo_fusion=combo, _stackmff_available=True)
+    host = SimpleNamespace(combo_fusion=combo, combo_align=QComboBox(),
+                           _stackmff_available=True, experimental_features=True)
     monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: False)
     main.OpenFocus.refresh_method_availability(host)
     index = combo.findData('dtcwt')
     assert not combo.model().item(index).isEnabled()
-    assert combo.itemData(index, Qt.ItemDataRole.ToolTipRole) == trans.t('env_dtcwt_unavailable')
+    assert trans.t('env_dtcwt_unavailable') in combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
     monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: True)
     main.OpenFocus.refresh_method_availability(host)
     assert combo.model().item(index).isEnabled()
@@ -206,13 +211,13 @@ def test_alignment_only_disables_fusion_only_options(qapp):
     assert not host.chk_base_correct.isEnabled()
     assert not host.chk_sharpen_output.isEnabled()
     assert not host.chk_reverse_order.isEnabled()
-    assert host.chk_exposure_match.isEnabled(), (
-        "exposure matching still feeds the registration brightness reference")
+    assert not host.chk_exposure_match.isEnabled()
     assert _t.t("radio_no_fusion_hint") in host.chk_base_correct.toolTip()
     assert _t.t("radio_no_fusion_hint") in host.chk_reverse_order.toolTip()
 
     host.method = "guided_filter"
     refresh()
+    assert host.chk_exposure_match.isEnabled()
     assert host.chk_base_correct.isEnabled()
     assert host.chk_sharpen_output.isEnabled()
     assert host.chk_reverse_order.isEnabled()
@@ -405,37 +410,34 @@ def test_downsample_controls_stay_in_sync(qapp, max_scale, theme, show_dont_ask)
 
 
 
-def test_status_block_is_two_rows(qapp):
-    """The status block is a 2x2 grid, not four stacked rows.
-
-    v1.66.0 stacked the four statistics because tools/lang_ui_audit.py reported
-    the RAM string as needing 260 px against a 212 px column. That figure is an
-    artefact of the offscreen platform failing to resolve the UI font (it
-    measures 260 px where the real 96 dpi desktop measures 126 px), so the
-    block was made taller for nothing: 107 px instead of 61, taken from the
-    source list above it. The widest real statistic is French at 132 px and a
-    half of the 400 px panel is 177 px.
-    """
+def test_status_block_is_readable_and_compact(qapp):
     from PyQt6.QtWidgets import QFrame, QLabel
-
     from ui.right_panel import create_right_panel
 
     parts = create_right_panel()
+    parts.widget.resize(500, 1100)
+    parts.widget.show()
+    qapp.processEvents()
     try:
         panel = parts.widget.findChild(QFrame, "statusPanel")
-        assert panel is not None
-        layout = panel.layout()
-        cells = [(layout.getItemPosition(layout.indexOf(w))[:2], w)
-                 for w in panel.findChildren(QLabel)]
-        rows = {row for (row, _col), _w in cells}
-        assert len(rows) == 2, f"status block must be two rows, got {len(rows)}"
-        cols = {col for (_row, col), _w in cells}
-        assert cols == {0, 1}, f"expected two columns, got {sorted(cols)}"
-        # No cell may be empty: four labels fill all four positions.
-        assert len(cells) == 4
-        assert {(r, c) for (r, c), _w in cells} == {(0, 0), (0, 1),
-                                                    (1, 0), (1, 1)}
+        labels = panel.findChildren(QLabel)
+        assert len(labels) == 4
+        for label in labels:
+            assert label.isVisible() and label.text()
+            assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
+            assert label.height() >= label.fontMetrics().height()
+        for index, label in enumerate(labels):
+            for other in labels[index + 1:]:
+                assert not label.geometry().intersects(other.geometry())
+        rows = sorted({label.y() for label in labels})
+        assert len(rows) == 2
+        assert all(sum(label.y() == row for label in labels) == 2 for row in rows)
+        assert parts.file_list.isVisible()
+        parts.file_list.addItem("frame.tif")
+        parts.file_list.setCurrentRow(0)
+        assert parts.file_list.currentItem().text() == "frame.tif"
     finally:
+        parts.widget.close()
         parts.widget.deleteLater()
 
 
@@ -461,19 +463,22 @@ def test_quick_preview_is_a_fraction_not_an_absolute_cap():
 
 
 
-def test_add_label_dialog_style_exists():
-    """The style constant the action imports must exist.
+def test_label_menu_opens_dialog(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QDialog
+    from tests.test_control_channel import _new_main_window, _destroy_main_window
 
-    v1.62's visual-layer rewrite deleted ADD_LABEL_DIALOG_STYLE while
-    controllers/label_manager.py kept importing it. The ImportError fired
-    inside the menu handler, so "Add Label" silently did nothing for three
-    releases.
-    """
-    from ui.styles import (ADD_LABEL_DIALOG_STYLE,
-                           get_add_label_dialog_style)
-
-    assert "QDialog" in ADD_LABEL_DIALOG_STYLE
-    assert get_add_label_dialog_style("light") != ADD_LABEL_DIALOG_STYLE
+    window = _new_main_window(qapp, tmp_path, monkeypatch)
+    opened = []
+    def capture(dialog):
+        opened.append(dialog.windowTitle())
+        return QDialog.DialogCode.Rejected
+    monkeypatch.setattr(QDialog, "exec", capture)
+    try:
+        window.add_label_action.setEnabled(True)
+        window.add_label_action.trigger()
+        assert len(opened) == 1 and opened[0]
+    finally:
+        _destroy_main_window(qapp, window)
 
 
 def test_first_run_theme_is_light():
@@ -526,6 +531,7 @@ def test_batch_downscale_is_a_ratio_of_the_stack():
 def test_retouch_paints_a_locked_frame(qapp):
     """Retouching copies from the frame the user locked, and auto-pick is off."""
     import numpy as np
+    from PyQt6.QtTest import QTest
 
     from controllers.output_manager import OutputRecord
     from core.render_context import build_render_context
@@ -544,8 +550,10 @@ def test_retouch_paints_a_locked_frame(qapp):
         assert not hasattr(dlg, "chk_auto"), "auto-pick is gone"
         assert dlg.frame_list.count() == 3
         dlg._select_frame(2)
-        qapp.processEvents()
-        qapp.processEvents()
+        for _ in range(500):
+            if dlg._source_ready and not dlg._source_loading:
+                break
+            QTest.qWait(10)
         assert dlg.doc.frame_index == 2
         assert dlg._source_ready
         before = dlg.doc.working.copy()
@@ -589,22 +597,41 @@ def test_theme_bound_styles_are_strings_and_follow_the_theme():
         st.set_current_theme("dark")
 
 
-def test_stepper_uses_native_spinbox_and_theme(qapp):
-    from PyQt6.QtWidgets import QDoubleSpinBox
-    import ui.styles as st
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_stepper_is_readable_in_each_theme(qapp, theme):
+    from PyQt6.QtGui import QPalette
+    from ui.styles import get_theme_style
     from widgets.stepper import StepperSpinBox
 
-    spin = StepperSpinBox(minimum=0, maximum=8, decimals=1, step=0.2)
-    assert isinstance(spin, QDoubleSpinBox)
-    dark = st.get_theme_style("dark")
-    light = st.get_theme_style("light")
-    assert dark != light
-    for sheet in (dark, light):
-        spin.setStyleSheet(sheet)
-        spin.reapply_theme()
-        assert spin.styleSheet() == sheet
-        assert "QDoubleSpinBox::up-button" in sheet
-        assert "QDoubleSpinBox::down-button" in sheet
+    spin = StepperSpinBox(minimum=0, maximum=8, decimals=1, step=0.2, value=1.2)
+    spin.setSuffix(" %")
+    spin.setStyleSheet(get_theme_style(theme))
+    spin.show()
+    qapp.processEvents()
+    try:
+        editor = spin.lineEdit()
+        palette = editor.palette()
+        assert palette.color(QPalette.ColorRole.Text) != palette.color(QPalette.ColorRole.Base)
+        assert editor.width() >= editor.fontMetrics().horizontalAdvance(editor.text())
+        assert editor.text().endswith(" %")
+    finally:
+        spin.close()
+        spin.deleteLater()
+
+
+def test_stepper_trims_zeros_without_rounding(qapp):
+    from PyQt6.QtCore import QLocale
+    from widgets.stepper import StepperSpinBox
+
+    spin = StepperSpinBox(minimum=0, maximum=100, decimals=9, value=4)
+    assert spin.text() == '4.0'
+    spin.setValue(0.000000125)
+    assert spin.text() == '0.000000125'
+    spin.setLocale(QLocale(QLocale.Language.German, QLocale.Country.Germany))
+    spin.setValue(1.25)
+    assert spin.text() == '1,25'
+    spin.interpretText()
+    assert spin.value() == 1.25
     spin.deleteLater()
 
 
@@ -762,6 +789,9 @@ def test_batch_parameter_editors_fit_their_content(qapp):
 def test_batch_ai_mode_survives_a_method_switch(qapp):
     from dialogs.batch import BatchProcessingDialog
     dlg = BatchProcessingDialog(None)
+    from types import SimpleNamespace
+    dlg.parent_window = SimpleNamespace(experimental_features=True)
+    dlg._apply_fusion_availability()
     try:
         dlg.show()
         dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv3"))
@@ -832,12 +862,14 @@ def test_batch_import_mode_group_stays_compact(qapp):
         dlg.deleteLater()
 
 
-def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
+def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path, monkeypatch):
     """The picker must not get a second, empty list widget.
 
     Inserting a QListWidget into Qt's splitter put an empty column beside the
     real place list - the blank box reported in the screenshot.
     """
+    from utils import file_dialogs
+    monkeypatch.setattr(file_dialogs, "_use_native_folder_dialog", lambda: False)
     from PyQt6.QtWidgets import QApplication, QSplitter, QListView
 
     from dialogs.batch import BatchProcessingDialog
@@ -877,13 +909,15 @@ def test_folder_picker_has_no_empty_extra_column(qapp, tmp_path):
 
 
 
-def test_folder_picker_keeps_only_qt_places(qapp, tmp_path):
+def test_folder_picker_keeps_only_qt_places(qapp, tmp_path, monkeypatch):
     """No custom entries in the place sidebar.
 
     "Last used" and "Queued: <name>" were appended to Qt's place model; they
     duplicated what the picker already offers and pushed the useful entries
     down. The sidebar must keep exactly the standard locations.
     """
+    from utils import file_dialogs
+    monkeypatch.setattr(file_dialogs, "_use_native_folder_dialog", lambda: False)
     from PyQt6.QtWidgets import QApplication, QFileDialog, QSplitter
 
     from dialogs.batch import BatchProcessingDialog

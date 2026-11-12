@@ -7,18 +7,6 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6")
-QSettings = pytest.importorskip("PyQt6.QtCore").QSettings
-
-from PyQt6.QtWidgets import QApplication  # noqa: E402
-
-TEMP_SETTINGS = os.path.join(tempfile.gettempdir(), "openfocus_pytest_qsettings")
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, TEMP_SETTINGS)
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 @pytest.fixture()
@@ -198,6 +186,10 @@ class _StubStatusBar:
 class _StubOutputManager:
     def show_fusion_result(self):
         pass
+    def display_specific_fusion_result(self, image):
+        self.displayed_image = image
+        return True
+
 
     def update_output_list_for_fusion(self):
         pass
@@ -232,6 +224,8 @@ class _StubLabelManager:
 
 
 def _source_window(filenames):
+    from core.image_loader import ImageStackLoader
+
     class FakeWindow:
         def push_undo(self):
             pass
@@ -246,6 +240,7 @@ def _source_window(filenames):
         pass
 
     w = FakeWindow()
+    w.image_loader = ImageStackLoader()
     w.file_list = QListWidget()
     for name in filenames:
         w.file_list.addItem(name)
@@ -276,6 +271,7 @@ def _render_window(frames):
         pass
 
     w = FakeWindow()
+    w.experimental_features = True
     w.raw_images = list(frames)
     w.base_images = list(frames)
     w.image_filenames = [f"f{i}.png" for i in range(len(frames))]
@@ -402,6 +398,11 @@ def _patched_render_manager(monkeypatch, window, ai_available=False):
     the recorded save_aligned calls, the recorded worker stack)."""
     from controllers import render_manager as render_module
     from utils import align_cache
+    from core import frame_storage
+
+    # These unit tests exercise the render pipeline with a non-QObject window.
+    # The asynchronous storage probe is covered by the preflight tests.
+    monkeypatch.setattr(frame_storage, "automatic_preflight_may_block", lambda: False)
 
     monkeypatch.setattr(render_module, "RenderProcessWorker", _fake_worker_class())
     monkeypatch.setattr(render_module, "is_ai_fusion_available", lambda: ai_available)
@@ -490,6 +491,7 @@ def test_deleting_a_middle_frame_keeps_names_aligned_with_images(qapp):
     frames = [np.full((8, 8, 3), i, dtype=np.uint8) for i in range(4)]
 
     w = _source_window(names)
+    w.image_loader.source_exifs = (b"exif0", b"exif1", b"exif2", b"exif3")
     sm = SourceManager(w)
     sm._load_source = (folder, None, None)
     sm._apply_load_options(sm._build_load_options(frames, names, 0.5))
@@ -498,6 +500,7 @@ def test_deleting_a_middle_frame_keeps_names_aligned_with_images(qapp):
     assert w.raw_images is not w.base_images
     assert [id(x) for x in w.raw_images] == [id(x) for x in w.base_images]
     assert w.image_source_paths == [os.path.join(folder, n) for n in names]
+    assert w.image_source_exifs == [b"exif0", b"exif1", b"exif2", b"exif3"]
 
     sm.delete_source_image(w.file_list.item(1))  # delete a middle frame
 
@@ -506,6 +509,7 @@ def test_deleting_a_middle_frame_keeps_names_aligned_with_images(qapp):
     assert [int(img[0, 0, 0]) for img in w.base_images] == [0, 2, 3]
     assert w.image_source_paths == [os.path.join(folder, n)
                                     for n in ("f0.png", "f2.png", "f3.png")]
+    assert w.image_source_exifs == [b"exif0", b"exif2", b"exif3"]
     assert len(w.image_filenames) == len(w.raw_images) == len(w.base_images)
 
 
@@ -523,6 +527,75 @@ def test_quick_preview_render_does_not_publish_its_draft(qapp, monkeypatch):
     assert saved == []
     assert rm._preview_mode is False
 
+
+def test_reused_alignment_preview_displays_and_owns_draft(qapp, monkeypatch):
+    frames = [np.full((60, 140, 3), i, np.uint8) for i in range(2)]
+    window = _render_window(frames)
+    window.set_fusion_method("none")
+    window.set_alignment_method("ecc")
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    assert manager.start_render() == "started"
+    aligned = _finish_alignment(manager, window, manager.worker.args[0])
+    window.output_list.addItem("old output")
+    window.output_list.setCurrentRow(0)
+    window.chk_quick_preview.setChecked(True)
+    assert manager.start_render() == "started"
+    assert manager._render_context["aligned"]
+    assert manager.worker.kwargs["alignment"] == "none"
+    draft = [image[::2, ::2].copy() for image in aligned]
+    manager.on_render_finished(draft, None, False, 0.0, 0.0, "CPU")
+    assert manager.last_state == "done"
+    assert manager.last_result["preview"] and manager.last_result["registration_performed"]
+    assert window.preview_result["kind"] == "registration"
+    assert window.preview_result["image"] is draft[0]
+    assert window.output_list.currentItem() is None
+    assert window.aligned_images is aligned
+
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_context_copy_delays_publication_and_honors_cancel(qapp, monkeypatch, stale):
+    from core import workers
+    frames = [np.zeros((30, 40, 3), np.uint8) for _ in range(2)]
+    window = _render_window(frames)
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    assert manager.start_render() == "started"
+    manager._render_context.update(roi=True, roi_rect=(1, 2, 10, 10), roi_mode="crop")
+    class ContextWorker:
+        def __init__(self, *args, **kwargs):
+            self.ready, self.failed, self.finished = _StubSignal(), _StubSignal(), _StubSignal()
+            self.is_cancelled = False
+        def start(self):
+            pass
+        def cancel(self):
+            self.is_cancelled = True
+        def deleteLater(self):
+            pass
+    monkeypatch.setattr(workers, "RenderContextWorker", ContextWorker)
+    manager.on_render_finished(frames, np.zeros((10, 10, 3), np.uint8), False, 0, 1, "CPU")
+    context_worker = manager.context_worker
+    assert context_worker is not None and window.output_list.count() == 0
+    if stale:
+        window.source_revision = getattr(window, "source_revision", 0) + 1
+    else:
+        context_worker.cancel()
+    context_worker.ready.slot(object())
+    assert manager.last_state == ("discarded" if stale else "cancelled")
+    assert window.output_list.count() == 0
+    context_worker.finished.slot()
+
+
+def test_cancel_pending_start_prevents_worker_dispatch(qapp, monkeypatch):
+    frames = [np.zeros((30, 40, 3), np.uint8) for _ in range(2)]
+    window = _render_window(frames)
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    monkeypatch.setattr(manager, "_ai_confirmation_needed", lambda *args: True)
+    def confirm(*args):
+        manager.cancel_pending_start()
+        return True
+    monkeypatch.setattr(manager, "_confirm_cpu_ai_render", confirm)
+    assert manager.start_render() == "cancelled"
+    assert manager.last_state == "cancelled" and manager.worker is None
 
 def test_alignment_published_when_the_stack_is_untouched(qapp, monkeypatch):
     """Align-only publishes one in-memory stack without a duplicate disk cache."""
@@ -840,7 +913,7 @@ class _StubResizeDialog:
         self.chosen = chosen
         self.offered = []
 
-    def __call__(self, parent=None, initial_scale=1.0, max_scale=1.0):
+    def __call__(self, parent=None, initial_scale=1.0, max_scale=1.0, **kwargs):
         self.offered.append((initial_scale, max_scale))
         dialog = self
 
@@ -879,8 +952,11 @@ def _resize_window(base_shape, base_scale, current_scale):
     from controllers.transform_manager import TransformManager
     w.transform_manager = TransformManager(w)
     w.transform_manager._invalidate_processing_results = lambda **kw: None
-    w.transform_manager.reload_image_stack = lambda *a, **kw: setattr(
-        w, "reload_calls", w.reload_calls + 1)
+    def reload_stack(*args, **kwargs):
+        w.reload_calls += 1
+        w.reloaded_index = kwargs.get("initial_index")
+        return True
+    w.transform_manager.reload_image_stack = reload_stack
     return w
 
 
@@ -912,6 +988,71 @@ def test_resizing_starts_from_the_loaded_base_and_cannot_exceed_it(qapp, monkeyp
     assert [int(img[0, 0, 0]) for img in w2.raw_images] == [0, 1, 2]
 
 
+def test_resize_applies_preset_near_base_scale(qapp, monkeypatch):
+    from controllers import transform_manager as tm
+
+    window = _resize_window((16, 2049, 3), 1.0, 1.0)
+    window.raw_images = list(window.base_images)
+    monkeypatch.setattr(tm, 'DownsampleDialog', _StubResizeDialog(2048 / 2049))
+    messages = []
+    monkeypatch.setattr(tm, 'show_success_box', lambda *args, **kwargs: messages.append(args))
+    window.transform_manager.resize_all_images()
+    assert all(image.shape[1] == 2048 for image in window.raw_images)
+    assert window.current_scale_factor == 2048 / 2049
+    assert '99.951196' in messages[0][2]
+
+
+@pytest.mark.parametrize("operation", ["rotate", "flip"])
+@pytest.mark.parametrize("failure_call", [1, 3, 4, 6])
+def test_geometry_transform_staging_failure_is_atomic(monkeypatch, operation, failure_call):
+    from controllers import transform_manager as tm
+    window = _resize_window((8, 12, 3), 1.0, 1.0)
+    raw, base = window.raw_images, window.base_images
+    window.source_transforms = []
+    window.current_display_index = 2
+    window.dirty = False
+    window.redo = ["previous"]
+    window.push_undo = lambda: (setattr(window, "dirty", True), window.redo.clear())
+    calls = []
+    def transform(image, *args, **kwargs):
+        calls.append(image)
+        if len(calls) == failure_call:
+            raise OSError("scratch unavailable")
+        return image.copy()
+    errors = []
+    monkeypatch.setattr(tm, "transform_frame", transform)
+    monkeypatch.setattr(tm, "show_error_box", lambda *args: errors.append(args))
+    getattr(window.transform_manager, operation + "_stack")(0)
+    assert window.raw_images is raw and window.base_images is base
+    assert window.source_transforms == [] and not window.dirty
+    assert window.redo == ["previous"] and window.reload_calls == 0
+    assert errors and "scratch unavailable" in errors[0][-1]
+
+
+def test_resize_failure_preserves_undo_and_view(monkeypatch):
+    from controllers import transform_manager as tm
+    window = _resize_window((8, 12, 3), 1.0, 1.0)
+    raw = window.raw_images
+    window.current_display_index, window.current_img_index = 2, 0
+    window.dirty, window.redo = False, ["previous"]
+    window.push_undo = lambda: (setattr(window, "dirty", True), window.redo.clear())
+    monkeypatch.setattr(tm, "DownsampleDialog", _StubResizeDialog(0.5))
+    monkeypatch.setattr(tm, "transform_frame", lambda *a, **kw: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(tm, "show_error_box", lambda *a: None)
+    window.transform_manager.resize_all_images()
+    assert window.raw_images is raw and not window.dirty and window.redo == ["previous"]
+    assert window.reload_calls == 0
+
+
+def test_resize_preserves_displayed_index(monkeypatch):
+    from controllers import transform_manager as tm
+    window = _resize_window((8, 12, 3), 1.0, 1.0)
+    window.current_display_index, window.current_img_index = 2, 0
+    monkeypatch.setattr(tm, "DownsampleDialog", _StubResizeDialog(0.5))
+    monkeypatch.setattr(tm, "show_success_box", lambda *a: None)
+    window.transform_manager.resize_all_images()
+    assert window.reloaded_index == 2
+
 def test_downsample_dialog_respects_max_scale(qapp):
     from dialogs.settings import DownsampleDialog
 
@@ -933,6 +1074,7 @@ def test_algorithm_parameters_survive_method_switches(qapp):
     host = SimpleNamespace(method="guided_filter", _fusion_parameters_by_method={})
     host.current_fusion_method = lambda: host.method
     host.persist_settings = lambda: None
+    host._mark_project_setting_changed = lambda: None
     host._sync_brightness_checkboxes = lambda *_: None
     host.fusion_parameter_panel = AlgorithmParameterPanel()
     for name in ("fusion_parameters_for", "set_fusion_parameters",
@@ -1189,6 +1331,10 @@ def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
 
     class W:
         _capture_scalebar_state = main_module.OpenFocus._capture_scalebar_state
+        _mark_project_dirty = main_module.OpenFocus._mark_project_dirty
+
+        def _update_project_title(self):
+            pass
 
         def _capture_parameter_state(self):
             return {}
@@ -1204,6 +1350,7 @@ def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
     w.current_scale_factor = 0.5
     w.base_scale_factor = 1.0
     w.transform_manager = _FakeTransformManager()
+    w._project_dirty = False
 
     state = main_module.OpenFocus._capture_stack_state(w)
     assert state["raw"][0] is img, "snapshot must not duplicate pixels"
@@ -1215,6 +1362,7 @@ def test_undo_snapshot_keeps_references_and_restores_scale(qapp):
     assert w.current_scale_factor == 0.5
     assert w.base_scale_factor == 1.0
     assert w.excluded_frames == {1}
+    assert w._project_dirty
 
 
 def test_shutdown_worker_never_terminates(monkeypatch):
@@ -1270,6 +1418,7 @@ def _retouch_shutdown_window(monkeypatch, force):
             self._project_dirty = True
             self.output_manager = SimpleNamespace(
                 confirm_unexported_on_exit=lambda: record("output"))
+            self.render_manager = SimpleNamespace(cancel_storage_preflight=lambda: None, worker=None)
             self.usage_analytics = SimpleNamespace(shutdown=lambda: record("shutdown"))
 
         def _confirm_discard_project_changes(self, *_args):
@@ -1484,7 +1633,7 @@ def test_retouch_shutdown_discard_refusal_preserves_operation(
     try:
         assert not window.close()
         assert owner.isEnabled() and not operation._cancel_requested
-        assert not window._shutting_down and not calls["shutdown"]
+        assert not getattr(window, "_shutting_down", False) and not calls["shutdown"]
     finally:
         operation.reject()
         if not sip.isdeleted(owner):

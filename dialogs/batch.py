@@ -34,6 +34,9 @@ from core.algorithms import (alignment_steps, fusion_algorithms, get_fusion,
     registration_parameter_specs, registration_algorithms, resolve_fusion_parameters,
     resolve_registration_parameters)
 from ui.algorithm_parameters import AlgorithmParameterPanel
+from ui.algorithm_combo import apply_method_availability, selected_item_enabled
+from core.experimental import (alignment_is_experimental, experimental_enabled,
+                               fusion_is_experimental)
 from locales import trans
 from utils.ui_utils import size_dialog_to_content
 from widgets.stepper import StepperSpinBox
@@ -103,6 +106,9 @@ class BatchProcessingDialog(QDialog):
         self._import_worker = None
         self._import_generation = 0
         self._import_busy = False
+        self._import_callbacks = {}
+        self._pending_thumbnails = []
+        self._invalid_thumbnail_paths = set()
 
         
         # Dark palette only in dark mode: hard-coding it showed a dark slab in
@@ -402,6 +408,7 @@ class BatchProcessingDialog(QDialog):
         options_layout.addWidget(self.params_rule)
 
         self._fusion_drafts = {}
+        self._exposure_drafts = {}
         self._registration_drafts = {}
         self._editing_method = None
         self._editing_alignment = None
@@ -481,6 +488,7 @@ class BatchProcessingDialog(QDialog):
         options_layout.addWidget(self.chk_reverse_order)
 
         self.chk_exposure_match = QCheckBox(trans.t('chk_exposure_match'))
+        self.chk_exposure_match.setChecked(True)
         self.chk_exposure_match.setToolTip(trans.t('chk_exposure_match_hint'))
         options_layout.addWidget(self.chk_exposure_match)
 
@@ -497,6 +505,7 @@ class BatchProcessingDialog(QDialog):
         self.flat_field_path = QLineEdit()
         self.flat_field_path.setPlaceholderText(trans.t('dust_no_file'))
         self.flat_field_path.setToolTip(trans.t('batch_flat_field_hint'))
+        self.flat_field_path.textChanged.connect(self.update_single_folder_preview)
         flat_row.addWidget(self.flat_field_path, 1)
         flat_browse = QPushButton(trans.t('dust_browse'))
         flat_browse.clicked.connect(self._browse_flat_field)
@@ -509,6 +518,7 @@ class BatchProcessingDialog(QDialog):
             getattr(self.parent_window, 'sensor_denoise', False), show_scope=False)
         options_layout.addWidget(self.sensor_cleanup)
         self.sensor_cleanup.path.textChanged.connect(lambda: self.update_single_folder_preview())
+        self.finished.connect(lambda _result: self.sensor_cleanup.stop_inspection())
 
         last_dir = self._last_pick_dir()
         if last_dir:
@@ -719,7 +729,7 @@ class BatchProcessingDialog(QDialog):
             self.path_input.setToolTip(trans.t('batch_path_invalid'))
 
     def add_folders(self):
-        """Pick one or more stack folders with the shared address bar."""
+        """Pick one or more stack folders."""
         dialog = FileDialog.for_directories(
             self, trans.t('batch_pick_title'), self._last_pick_dir(), multiple=True)
         self._fit_picker_sidebar(dialog)
@@ -747,7 +757,7 @@ class BatchProcessingDialog(QDialog):
         """Give the place list just enough width for its longest label."""
         from PyQt6.QtWidgets import QSplitter, QListView
 
-        splitter = dialog.findChild(QSplitter)
+        splitter = dialog.findChild(QSplitter) if hasattr(dialog, "findChild") else None
         if splitter is None or splitter.count() < 2:
             return
         sidebar = splitter.widget(0)
@@ -798,11 +808,13 @@ class BatchProcessingDialog(QDialog):
             scale_factor=(self.load_scale_factor if scale_factor is None
                           else scale_factor),
             sort_by=sort_by,
-            exclude_paths=[self.sensor_cleanup.path.text().strip()] if self.sensor_cleanup.path.text().strip() else [],
+            exclude_paths=([self.sensor_cleanup.path.text().strip()]
+                           if mode == 'thumbnails' and self.sensor_cleanup.path.text().strip() else []),
             thread_count=self._runtime_settings.get('thread_count', 0),
             resource_preference=self._runtime_settings.get(
                 'resource_preference', 'balanced'),
         )
+        worker.import_generation = self._import_generation
         self._import_worker = worker
         self._import_busy = True
         self._import_callbacks = {'thumbnails': on_thumbnails,
@@ -821,28 +833,35 @@ class BatchProcessingDialog(QDialog):
         worker.start()
         return True
 
+    def _active_import_sender(self):
+        worker = self.sender()
+        return (worker is not None and worker is self._import_worker and
+                getattr(worker, 'import_generation', None) == self._import_generation)
+
     def _on_import_folders_ready(self, results) -> None:
-        callback = self._import_callbacks.get('thumbnails')
-        self._import_busy = False
-        self._set_import_busy(False)
+        if not self._active_import_sender():
+            return
+        callback = self._import_callbacks.pop('thumbnails', None)
         if callback is not None:
-            callback(results)
+            callback([(path, image) for path, image in results
+                      if path not in self._invalid_thumbnail_paths])
 
     def _on_import_stack_ready(self, folder, entries, message) -> None:
-        callback = self._import_callbacks.get('stack')
-        self._import_busy = False
-        self._set_import_busy(False)
+        if not self._active_import_sender():
+            return
+        callback = self._import_callbacks.pop('stack', None)
         if callback is not None:
             callback(folder, entries, message)
 
     def _on_import_finished(self) -> None:
-        worker = self.sender()
-        if worker is not self._import_worker:
+        if not self._active_import_sender():
             return
         self._import_worker = None
         self._import_callbacks = {}
         self._import_busy = False
-        self._set_import_busy(False)
+        self._invalid_thumbnail_paths.clear()
+        self._pump_folder_thumbnails()
+        self._set_import_busy(self._import_busy)
 
     def _set_import_busy(self, busy: bool) -> None:
         """Disable the actions that would need the data still decoding."""
@@ -861,6 +880,10 @@ class BatchProcessingDialog(QDialog):
         self._import_generation += 1
         self._import_busy = False
         self._import_worker = None
+        self._import_callbacks = {}
+        self._pending_thumbnails.clear()
+        self._invalid_thumbnail_paths.clear()
+        self._set_import_busy(False)
         if worker is not None:
             # The worker is tracked at module level, so it stays alive until
             # it really stops even if this dialog is being destroyed.
@@ -898,13 +921,19 @@ class BatchProcessingDialog(QDialog):
         dialog (validation, Start) sees the selection immediately; only the
         preview icon depends on the worker.
         """
-        pending = []
         for folder_path in folder_paths:
             if folder_path in self.folder_paths:
                 continue
             self.folder_paths.append(folder_path)
             self._append_folder_row(folder_path)
-            pending.append(folder_path)
+            self._pending_thumbnails.append(folder_path)
+        self._pump_folder_thumbnails()
+
+    def _pump_folder_thumbnails(self):
+        if self._import_busy:
+            return
+        pending = [path for path in self._pending_thumbnails if path in self.folder_paths]
+        self._pending_thumbnails.clear()
         if pending:
             self._start_import('thumbnails', folder_paths=pending,
                                on_thumbnails=self._apply_thumbnails)
@@ -914,7 +943,12 @@ class BatchProcessingDialog(QDialog):
         from core.image_loader import ImageStackLoader
         loader = ImageStackLoader()
         for folder_path, first in results:
-            if folder_path not in self.folder_paths or first is None:
+            if folder_path not in self.folder_paths:
+                continue
+            if first is None:
+                item = self.folder_list.item(self.folder_paths.index(folder_path))
+                if item is not None:
+                    item.setToolTip(trans.t('converter_no_preview'))
                 continue
             index = self.folder_paths.index(folder_path)
             thumbnail = loader.create_thumbnails([first], thumb_size=60)[0]
@@ -996,7 +1030,10 @@ class BatchProcessingDialog(QDialog):
                       reverse=True)
         for row in rows:
             self.folder_list.takeItem(row)
-            self.folder_paths.pop(row)
+            path = self.folder_paths.pop(row)
+            self._pending_thumbnails = [p for p in self._pending_thumbnails if p != path]
+            if self._import_busy:
+                self._invalid_thumbnail_paths.add(path)
             if row < len(self.folder_thumbnails):
                 self.folder_thumbnails.pop(row)
         self._update_folder_placeholder()
@@ -1047,9 +1084,16 @@ class BatchProcessingDialog(QDialog):
         self.quality_value_label.setVisible(is_jpg)
         self.depth_hint.setVisible(format_text.upper() in ("JPG", "BMP"))
     
+    def _effective_single_folder_entries(self):
+        from utils.path_identity import same_path
+        references = (self.flat_field_path.text().strip(), self.sensor_cleanup.path.text().strip())
+        return [entry for entry in self.single_folder_images_with_times
+                if not any(ref and same_path(entry[0], ref) for ref in references)]
+
     def update_single_folder_preview(self):
         """更新单文件夹预览"""
         if not self.single_folder_images_with_times:
+            self.single_folder_stacks = []
             self.preview_label.setText(trans.t('batch_preview_no_folder'))
             return
         
@@ -1060,10 +1104,7 @@ class BatchProcessingDialog(QDialog):
         from core.image_loader import ImageStackLoader
         loader = ImageStackLoader()
         from utils.sorting import natural_sort_key
-        from utils.path_identity import same_path
-        mask_path = self.sensor_cleanup.path.text().strip()
-        entries = [item for item in self.single_folder_images_with_times
-                   if not mask_path or not same_path(item[0], mask_path)]
+        entries = self._effective_single_folder_entries()
         entries.sort(key=lambda item:
             natural_sort_key(item[3] if len(item) > 3 else item[0]) if split_method == 0 else
             (item[2] is None, item[2] or 0, natural_sort_key(item[3] if len(item) > 3 else item[0])))
@@ -1182,27 +1223,17 @@ class BatchProcessingDialog(QDialog):
         getter = getattr(window, 'brightness_option_for', None)
         if callable(getter):
             method = self.fusion_combo.currentData()
-            self.chk_exposure_match.setChecked(bool(getter('exposure_match', method)))
+            if method != 'none':
+                self.chk_exposure_match.setChecked(bool(getter('exposure_match', method)))
             self.chk_base_correct.setChecked(bool(getter('base_correct', method)))
 
     def _apply_fusion_availability(self) -> None:
-        """Keep unavailable methods visible with a dependency explanation."""
         from core.multi_focus_fusion import is_ai_fusion_available
-        from ui.algorithm_combo import fusion_unavailable_reason
 
-        ai_available = bool(is_ai_fusion_available())
-        for spec in fusion_algorithms():
-            reason = fusion_unavailable_reason(spec, ai_available)
-            if not reason:
-                continue
-            index = self.fusion_combo.findData(spec.id)
-            if index < 0:
-                continue
-            item = self.fusion_combo.model().item(index)
-            if item is not None:
-                item.setEnabled(False)
-            self.fusion_combo.setItemData(
-                index, reason, Qt.ItemDataRole.ToolTipRole)
+        apply_method_availability(self.fusion_combo, fusion_algorithms(), self.parent_window,
+                                  ai_available=bool(is_ai_fusion_available()))
+        apply_method_availability(self.align_combo, registration_algorithms(), self.parent_window,
+                                  alignment=True)
 
     def _remember_fusion_parameters(self, values):
         self._fusion_drafts[self._editing_method] = dict(values)
@@ -1221,8 +1252,8 @@ class BatchProcessingDialog(QDialog):
         self._editing_alignment = method
         specs = registration_parameter_specs(method)
         self.registration_parameter_panel.set_parameters(specs, self._registration_drafts[method])
-        self.registration_parameter_panel.setVisible(bool(self.registration_parameter_panel.editors))
-        self._registration_has_specs = bool(self.registration_parameter_panel.editors)
+        self._registration_has_specs = method != 'openfocus' and bool(self.registration_parameter_panel.editors)
+        self.registration_parameter_panel.setVisible(self._registration_has_specs)
         self._sync_parameters_heading()
 
     def _sync_parameters_heading(self) -> None:
@@ -1268,9 +1299,7 @@ class BatchProcessingDialog(QDialog):
 
         Grouping needs multi-folder input plus a fusion step and cannot share
         the run with the aligned-stack copy; alignment-only output has no
-        fusion step, so base correction, sharpening and frame reversal have no
-        consumer. Exposure matching stays live because registration uses it as
-        its brightness reference even without fusion.
+        fusion step, so fusion options have no consumer.
         """
         method = self.fusion_combo.currentData()
         fusion_off = method in (None, 'none')
@@ -1322,6 +1351,7 @@ class BatchProcessingDialog(QDialog):
 
         fusion_only_hint = trans.t('radio_no_fusion_hint')
         for box, hint_key in (
+                (self.chk_exposure_match, 'chk_exposure_match_hint'),
                 (self.chk_base_correct, 'chk_base_correct_hint'),
                 (self.chk_sharpen_output, 'chk_sharpen_output_hint')):
             box.setEnabled(not fusion_off)
@@ -1340,6 +1370,15 @@ class BatchProcessingDialog(QDialog):
 
     def _sync_method_controls(self) -> None:
         method = self.fusion_combo.currentData()
+        previous = self._editing_method
+        if previous not in (None, 'none'):
+            self._exposure_drafts[previous] = self.chk_exposure_match.isChecked()
+        if method not in (None, 'none'):
+            if method not in self._exposure_drafts:
+                getter = getattr(self.parent_window, 'brightness_option_for', None)
+                self._exposure_drafts[method] = (bool(getter('exposure_match', method))
+                    if callable(getter) else get_fusion(method).default_exposure_match)
+            self.chk_exposure_match.setChecked(self._exposure_drafts[method])
         self._editing_method = method
         specs = () if method in (None, 'none') else get_fusion(method).parameters
         if method not in self._fusion_drafts:
@@ -1354,12 +1393,20 @@ class BatchProcessingDialog(QDialog):
 
     def get_processing_settings(self):
         """获取处理设置"""
+        for combo in (self.fusion_combo, self.align_combo):
+            if not selected_item_enabled(combo):
+                raise ValueError(combo.currentData(Qt.ItemDataRole.ToolTipRole) or '')
+        if (not experimental_enabled(self.parent_window)
+                and (fusion_is_experimental(self.fusion_combo.currentData())
+                     or alignment_is_experimental(self.align_combo.currentData()))):
+            raise ValueError(trans.t('experimental_locked_hint'))
         format_str = self.format_combo.currentText().lower()
         
         fusion_method = self.fusion_combo.currentData() or "none"
         fusion_params = self.fusion_parameter_panel.values()
         runtime = dict(self._runtime_settings)
-        runtime['base_frame'] = 'last' if self.chk_base_correct.isChecked() else 'none'
+        runtime['base_frame'] = ('first' if fusion_method in ('openfocus_a', 'openfocus_b', 'openfocus_c')
+                                 else 'last') if self.chk_base_correct.isChecked() else 'none'
         runtime['exposure_match'] = self.chk_exposure_match.isChecked()
         runtime['sharpen_output'] = self.chk_sharpen_output.isChecked()
         runtime['sort_mode'] = 'desc' if self.chk_reverse_order.isChecked() else 'asc'
@@ -1465,6 +1512,18 @@ class BatchProcessingDialog(QDialog):
     def start_batch_processing(self):
         """开始批处理"""
         from PyQt6.QtWidgets import QMessageBox
+        if (not selected_item_enabled(self.fusion_combo)
+                or not selected_item_enabled(self.align_combo)
+                or (not experimental_enabled(self.parent_window)
+                    and (fusion_is_experimental(self.fusion_combo.currentData())
+                         or alignment_is_experimental(self.align_combo.currentData())))):
+            for combo in (self.fusion_combo, self.align_combo):
+                if not selected_item_enabled(combo):
+                    QMessageBox.warning(self, trans.t('msg_error'),
+                                        combo.currentData(Qt.ItemDataRole.ToolTipRole))
+                    return
+            QMessageBox.warning(self, trans.t('msg_error'), trans.t('experimental_locked_hint'))
+            return
         sensor_error = self.sensor_cleanup.validate()
         if sensor_error:
             QMessageBox.warning(self, trans.t('msg_error'), sensor_error)
@@ -1499,17 +1558,20 @@ class BatchProcessingDialog(QDialog):
             QMessageBox.warning(self, trans.t("msg_error"), problem)
             return
 
-        processing_settings = self.get_processing_settings()
         if import_mode == 'single_folder':
             self.update_single_folder_preview()
+            entries = self._effective_single_folder_entries()
+            if not entries or not self.single_folder_stacks:
+                QMessageBox.warning(self, trans.t('msg_no_folder_title'), trans.t('msg_no_folder_text'))
+                return
             if split_method == 'time_threshold':
                 from core.image_loader import ImageStackLoader
-                missing = ImageStackLoader.missing_timestamps(self.single_folder_images_with_times)
+                missing = ImageStackLoader.missing_timestamps(entries)
                 if missing:
                     QMessageBox.warning(self, trans.t('msg_error'),
                                         trans.t('batch_missing_times').format(n=missing))
                     return
-            if processing_settings['fusion_method'] != 'none' and any(
+            if (self.fusion_combo.currentData() or 'none') != 'none' and any(
                     len(stack) < 2 for stack in self.single_folder_stacks):
                 QMessageBox.warning(self, trans.t('msg_error'),
                                     trans.t('depth_need_two_frames').format(n=1))

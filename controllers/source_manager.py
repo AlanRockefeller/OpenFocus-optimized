@@ -45,6 +45,8 @@ class LoadOptions:
     base_images: list[Any]
     working_images: list[Any]
     reset_scale_factor: float | None = None
+    source_exifs: list[bytes] | None = None
+    source_icc_profiles: list[bytes] | None = None
 
 
 class SourceManager(QObject):
@@ -60,6 +62,8 @@ class SourceManager(QObject):
         self._stack_baseline = None
         window.linear_dng_metadata = None
         self._review_error = ""
+
+        self._source_hover = None
 
     def _clear_history(self):
         window = self.window
@@ -117,6 +121,7 @@ class SourceManager(QObject):
         window.base_images = list(baseline["images"])
         window.image_filenames = list(baseline["filenames"])
         window.image_source_paths = list(baseline["paths"])
+        window.image_source_exifs = list(baseline.get("exifs", ()))
         window.image_icc_profiles = list(baseline["profiles"])
         window.current_folder_path = baseline["folder"]
         window.current_scale_factor = baseline["scale"]
@@ -363,6 +368,37 @@ class SourceManager(QObject):
             working_scale = float(getattr(window, "current_scale_factor", 1.0) or 1.0)
             baseline = self._stack_baseline
             scale = baseline["scale"] if baseline else working_scale
+        append_target = None
+        if append and getattr(window, "raw_images", None):
+            append_target = (getattr(window, "source_revision", 0), window.raw_images,
+                             tuple(window.raw_images), getattr(window, "current_scale_factor", 1.0),
+                             getattr(window, "base_scale_factor", 1.0),
+                             getattr(window, "base_images", None), self._stack_baseline,
+                             getattr(window, "linear_dng_metadata", None))
+
+        def append_target_is_current():
+            if append_target is None:
+                return True
+            revision, raw, frames, current_scale, base_scale, base, baseline, metadata = append_target
+            current = getattr(window, "raw_images", None)
+            return (getattr(window, "source_revision", 0) == revision and current is raw
+                    and len(current) == len(frames)
+                    and all(a is b for a, b in zip(current, frames))
+                    and getattr(window, "current_scale_factor", 1.0) == current_scale
+                    and getattr(window, "base_scale_factor", 1.0) == base_scale
+                    and getattr(window, "base_images", None) is base
+                    and self._stack_baseline is baseline
+                    and getattr(window, "linear_dng_metadata", None) is metadata)
+
+        def reject_changed_append():
+            if append_target_is_current():
+                return False
+            message = trans.t("msg_append_target_changed")
+            if on_error is not None:
+                on_error(message)
+            else:
+                show_warning_box(window, trans.t("msg_load_failed"), message)
+            return True
 
         self._load_worker = StackLoadWorker(
             window.image_loader, folder=folder, video=video,
@@ -388,6 +424,7 @@ class SourceManager(QObject):
         def load_is_current():
             from PyQt6 import sip
             return (not (isinstance(window, QObject) and sip.isdeleted(window))
+                    and not getattr(worker, "is_cancelled", False)
                     and not getattr(window, "_shutting_down", False)
                     and generation == getattr(self, "_load_generation", -1))
 
@@ -405,6 +442,8 @@ class SourceManager(QObject):
                         show_warning_box(window, trans.t("msg_load_failed"),
                                          trans.t("msg_load_stack_failed_text"), message)
                     return
+                if reject_changed_append():
+                    return
                 load_options = self._build_load_options(images, filenames, scale)
                 if append and window.raw_images and working_scale != scale:
                     from core.image_loader import UnsupportedTransparency, _has_transparency
@@ -419,12 +458,16 @@ class SourceManager(QObject):
                 mixed_ok = self._confirm_mixed_sizes(load_options.working_images)
                 if not load_is_current():
                     return
+                if reject_changed_append():
+                    return
                 if not mixed_ok:
                     if on_error is not None:
                         on_error("CANCELLED")
                     return
                 append_ok = not append or self._confirm_append_dimensions(load_options.working_images)
                 if not load_is_current():
+                    return
+                if reject_changed_append():
                     return
                 if not append_ok:
                     if on_error is not None:
@@ -434,14 +477,17 @@ class SourceManager(QObject):
                     load_options = prepare_options(load_options)
                 if not load_is_current():
                     return
+                if reject_changed_append():
+                    return
                 from utils import watermark
                 state_fields = ("current_folder_path", "source_px_um", "linear_dng_metadata",
                                 "base_images", "raw_images", "image_filenames", "image_source_paths",
-                                "image_icc_profiles", "current_scale_factor", "base_scale_factor",
+                                "image_source_exifs", "image_icc_profiles", "current_scale_factor", "base_scale_factor",
                                 "excluded_frames", "source_transforms", "unrecoverable_source_changes",
                                 "watermark_text", "watermark_font_family",
                                 "watermark_size_percent", "watermark_opacity",
                                 "watermark_color", "watermark_angle", "watermark_density",
+                                "watermark_copyright_enabled", "watermark_copyright_position",
                                 "watermark_source_enabled", "watermark_registered_enabled",
                                 "watermark_output_enabled", watermark.STACK_LINEAGE_ATTR)
                 # Rotating the lineage is what isolates the replaced stack's
@@ -467,7 +513,7 @@ class SourceManager(QObject):
                 if not append or not window.raw_images:
                     window.linear_dng_metadata = worker.linear_dng_metadata
                 self._apply_load_options(load_options, append=append,
-                                         profile_map=getattr(worker, "source_icc_profiles", {}))
+                                         profile_map=getattr(worker, "source_icc_profiles", ()))
                 if not append:
                     # A new source stack must not inherit the previous stack's
                     # watermark text/scope.  Project restore re-applies its own
@@ -687,7 +733,7 @@ class SourceManager(QObject):
                 linear_raw=linear_raw,
             )
 
-    def _ask_load_scale(self):
+    def _ask_load_scale(self, *, paths=(), folder=None, video=None, linear_raw=False):
         """Loading scale for a new import, or None if the user cancelled.
 
         The scale prompt used to appear before *every* load; users who always
@@ -698,7 +744,9 @@ class SourceManager(QObject):
             return float(getattr(window, "load_scale_default", 1.0) or 1.0)
         current_scale = getattr(window, "current_scale_factor", 1.0)
         dlg = DownsampleDialog(window, initial_scale=current_scale,
-                               show_dont_ask=True)
+                               show_dont_ask=True, source_paths=paths,
+                               source_folder=folder, source_video=video,
+                               linear_raw=linear_raw)
         if not dlg.exec():
             return None
         scale = dlg.get_scale_factor()
@@ -736,7 +784,7 @@ class SourceManager(QObject):
             return False
         return None
 
-    def _folder_import_paths(self, folder):
+    def _folder_import_paths(self, folder, *, strict=False):
         """Match the ordinary folder loader's supported and excluded sources."""
         from core.image_loader import ImageStackLoader
         from utils.path_identity import same_path
@@ -750,6 +798,8 @@ class SourceManager(QObject):
                          and not (excluded and same_path(entry.path, excluded))]
             return [path for _, path in loader._drop_derived_aligned_copies(files)]
         except OSError:
+            if strict:
+                raise
             return []  # Let the worker report inaccessible folders.
 
     def load_image_stack(self, folder_path: str, append: bool = False) -> None:
@@ -770,7 +820,7 @@ class SourceManager(QObject):
         if append and same_folder:
             append = False
 
-        scale_factor = self._ask_load_scale()
+        scale_factor = self._ask_load_scale(folder=folder_path, linear_raw=linear_raw)
         if scale_factor is None:
             return
 
@@ -785,7 +835,7 @@ class SourceManager(QObject):
         """Load image stack from a video file."""
         window = self.window
 
-        scale_factor = self._ask_load_scale()
+        scale_factor = self._ask_load_scale(video=video_path)
         if scale_factor is None:
             return
 
@@ -805,6 +855,30 @@ class SourceManager(QObject):
             if selected:
                 set_last_dialog_dir(selected[0])
                 self.load_image_stack(selected[0])
+
+    def prompt_and_load_frames(self) -> None:
+        """Select image files and load them together as a new stack."""
+        from core.image_loader import ImageStackLoader
+        from utils.settings_store import get_last_dialog_dir, set_last_dialog_dir
+        from utils.sorting import natural_sort_key
+
+        image_exts = " ".join(f"*{ext}" for ext in sorted(ImageStackLoader.SUPPORTED_FORMATS))
+        paths, _ = FileDialog.getOpenFileNames(
+            self.window, trans.t("action_open_frames"), get_last_dialog_dir(),
+            f"{trans.t('action_open_frames')} ({image_exts});;All Files (*)",
+            "", FileDialog.Option.HideNameFilterDetails,
+        )
+        if not paths:
+            return
+        set_last_dialog_dir(paths[0])
+        paths = sorted(paths, key=lambda path: natural_sort_key(os.path.basename(path)))
+        linear_raw = self._choose_raw_import_mode(paths, append=False)
+        if linear_raw is None:
+            return
+        scale = self._ask_load_scale(paths=paths, linear_raw=linear_raw)
+        if scale is None:
+            return
+        self._start_load_worker(filepaths=paths, scale=scale, append=False, linear_raw=linear_raw)
 
     def prompt_and_load_video(self) -> None:
         """Open a file dialog to select a video file and load it as image stack."""
@@ -854,7 +928,7 @@ class SourceManager(QObject):
                     event.acceptProposedAction()
                 else:
                     # 多组图像栈 - 先弹出下采样设置
-                    scale = self._ask_load_scale()
+                    scale = self._ask_load_scale(folder=paths[0])
                     if scale is None:
                         event.ignore()
                         return
@@ -868,7 +942,7 @@ class SourceManager(QObject):
 
         # If multiple directories were dropped, ask user how to import
         elif all(os.path.isdir(p) for p in paths):
-            scale = self._ask_load_scale()
+            scale = self._ask_load_scale(folder=paths[0])
             if scale is None:
                 event.ignore()
                 return
@@ -920,7 +994,7 @@ class SourceManager(QObject):
             if linear_raw is None:
                 event.ignore()
                 return
-            scale = self._ask_load_scale()
+            scale = self._ask_load_scale(paths=valid_paths, linear_raw=linear_raw)
             if scale is None:
                 # user cancelled
                 event.ignore()
@@ -949,11 +1023,19 @@ class SourceManager(QObject):
         # Sources retain paths and bounded previews rather than original pixel
         # arrays. Share those immutable frames across base/working stacks, while
         # keeping separate lists so delete/reorder cannot mutate both at once.
+        source_exifs = list(getattr(self.window.image_loader, "source_exifs", ()) or ())
+        if len(source_exifs) != len(full_res_images):
+            source_exifs = [b""] * len(full_res_images)
+        profiles = list(getattr(self.window.image_loader, "source_icc_profiles", ()) or ())
+        if len(profiles) != len(full_res_images):
+            profiles = [b""] * len(full_res_images)
         return LoadOptions(
             scale_factor=scale_factor,
             filenames=list(filenames),
             base_images=list(full_res_images),
             working_images=list(full_res_images),
+            source_exifs=source_exifs,
+            source_icc_profiles=profiles,
         )
 
     def _source_paths_for(self, filenames: list[str]) -> list[str]:
@@ -982,14 +1064,23 @@ class SourceManager(QObject):
         paths = self._source_paths_for(options.filenames)
         previous_paths = list(getattr(window, "image_source_paths", None) or [])
         previous_count = len(window.image_filenames or [])
-        if profile_map is None:
-            profile_map = getattr(getattr(window, "image_loader", None), "source_icc_profiles", {})
-        profiles = [profile_map.get(path, b"") for path in paths]
+        option_profiles = getattr(options, "source_icc_profiles", None)
+        if option_profiles is not None:
+            profile_map = option_profiles
+        elif profile_map is None:
+            profile_map = getattr(getattr(window, "image_loader", None), "source_icc_profiles", ())
+        profiles = list(profile_map or ())
         if len(profiles) != len(options.working_images):
             profiles = [b""] * len(options.working_images)
+        exifs = list(getattr(options, "source_exifs", ()) or ())
+        if len(exifs) != len(options.working_images):
+            exifs = [b""] * len(options.working_images)
         previous_profiles = list(getattr(window, "image_icc_profiles", ()) or ())
         if len(previous_profiles) != len(window.raw_images or []):
             previous_profiles = [b""] * len(window.raw_images or [])
+        previous_exifs = list(getattr(window, "image_source_exifs", ()) or ())
+        if len(previous_exifs) != len(window.raw_images or []):
+            previous_exifs = [b""] * len(window.raw_images or [])
         if (not append or not window.raw_images) and hasattr(options, "source_px_um"):
             window.source_px_um = options.source_px_um
         reset_scale = getattr(options, "reset_scale_factor", None) or options.scale_factor
@@ -1006,6 +1097,9 @@ class SourceManager(QObject):
             window.base_scale_factor = window.current_scale_factor
             window.raw_images = (window.raw_images or []) + options.working_images
             window.image_icc_profiles = previous_profiles + profiles
+            window.image_source_exifs = (previous_exifs + exifs
+                                         if len(exifs) == len(options.working_images)
+                                         else [])
             window.image_filenames = (window.image_filenames or []) + options.filenames
             # Keep the paths aligned with the names; anything else is better
             # dropped than left pointing at the wrong frame.
@@ -1022,6 +1116,7 @@ class SourceManager(QObject):
                     "images": baseline["images"] + list(getattr(options, "reset_images", options.base_images)),
                     "filenames": baseline["filenames"] + list(options.filenames),
                     "profiles": baseline["profiles"] + profiles,
+                    "exifs": baseline.get("exifs", []) + exifs,
                     "paths": (baseline["paths"] + paths
                               if len(baseline["paths"]) == len(baseline["images"])
                               and len(paths) == len(options.filenames) else []),
@@ -1035,6 +1130,7 @@ class SourceManager(QObject):
             window.raw_images = options.working_images
             window.image_filenames = options.filenames
             window.image_source_paths = paths
+            window.image_source_exifs = exifs
             window.image_icc_profiles = profiles
             window.excluded_frames = set()
             window.source_transforms = []
@@ -1045,6 +1141,7 @@ class SourceManager(QObject):
                 "filenames": list(options.filenames),
                 "paths": list(getattr(options, "reset_paths", paths)),
                 "profiles": list(profiles),
+                "exifs": list(exifs),
                 "folder": window.current_folder_path,
                 "scale": reset_scale,
                 "source_px_um": reset_px_um,
@@ -1118,6 +1215,7 @@ class SourceManager(QObject):
         window.stack_images = []
         window.image_filenames = []
         window.image_source_paths = []
+        window.image_source_exifs = []
         window.linear_dng_metadata = None
         window.image_icc_profiles = []
         window.excluded_frames = set()
@@ -1162,6 +1260,10 @@ class SourceManager(QObject):
             window.stack_slider.setRange(0, 0)
 
     def update_file_list(self, filenames, thumbnails) -> None:
+        if self._source_hover is None or self._source_hover.view is not self.window.file_list:
+            from controllers.source_hover import SourceHover
+            self._source_hover = SourceHover(self, self.window.file_list)
+        self._source_hover.invalidate()
         window = self.window
         window.file_list.blockSignals(True)
         window.file_list.clear()
@@ -1204,20 +1306,21 @@ class SourceManager(QObject):
     def delete_source_image(self, item: QListWidgetItem) -> None:
         window = self.window
         row = window.file_list.row(item)
-        if row < 0:
+        if row < 0 or row >= len(window.raw_images):
             return
+        window.push_undo()
 
         if len(window.raw_images) <= 1:
             self.clear_image_stack()
             return
 
-        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
         self._pop_sequence(window.image_filenames, row)
         self._pop_sequence(window.raw_images, row)
         self._pop_sequence(getattr(window, "base_images", None), row)
         self._pop_sequence(getattr(window, "image_source_paths", None), row)
+        self._pop_sequence(getattr(window, "image_source_exifs", None), row)
         self._pop_sequence(getattr(window, "image_icc_profiles", None), row)
         self._remap_exclusions_after_delete([row])
 
@@ -1233,8 +1336,11 @@ class SourceManager(QObject):
         if not selected_items:
             return
 
-        rows = [window.file_list.row(item) for item in selected_items]
-        rows = [row for row in rows if row >= 0]
+        raw = window.raw_images
+        revision = getattr(window, "source_revision", 0)
+        frames = tuple(raw)
+        rows = sorted({window.file_list.row(item) for item in selected_items
+                       if 0 <= window.file_list.row(item) < len(frames)})
         if not rows:
             return
 
@@ -1247,13 +1353,19 @@ class SourceManager(QObject):
         confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if confirm.exec() != QMessageBox.StandardButton.Yes:
             return
+        current = window.raw_images
+        if (getattr(window, "source_revision", 0) != revision or current is not raw
+                or len(current) != len(frames)
+                or any(a is not b for a, b in zip(current, frames))):
+            window.statusBar().showMessage(trans.t("msg_delete_source_changed"), 5000)
+            return
+        window.push_undo()
 
         remaining = len(window.raw_images) - len(rows)
         if remaining <= 0:
             self.clear_image_stack()
             return
 
-        window.push_undo()
         window.transform_manager.invalidate_processing_results(clear_output_view=False, preserve_outputs=True)
 
         rows.sort(reverse=True)
@@ -1263,6 +1375,7 @@ class SourceManager(QObject):
             self._pop_sequence(window.raw_images, row)
             self._pop_sequence(getattr(window, "base_images", None), row)
             self._pop_sequence(getattr(window, "image_source_paths", None), row)
+            self._pop_sequence(getattr(window, "image_source_exifs", None), row)
             self._pop_sequence(getattr(window, "image_icc_profiles", None), row)
         self._remap_exclusions_after_delete(rows)
 
@@ -1351,6 +1464,10 @@ class SourceManager(QObject):
     def processing_selection_changed(self) -> None:
         window = self.window
         window.source_revision = getattr(window, "source_revision", 0) + 1
+        clear_prepared = getattr(getattr(window, 'render_manager', None),
+                                 'clear_prepared_cache', None)
+        if callable(clear_prepared):
+            clear_prepared()
         window.aligned_images = []
         window.is_images_aligned = False
         window.last_alignment_options = None
@@ -1394,6 +1511,8 @@ class SourceManager(QObject):
             window.base_images = _reorder(window.base_images)
         if getattr(window, "image_source_paths", None):
             window.image_source_paths = _reorder(window.image_source_paths)
+        if len(getattr(window, "image_source_exifs", ()) or ()) == n:
+            window.image_source_exifs = _reorder(window.image_source_exifs)
         if len(getattr(window, "image_icc_profiles", ()) or ()) == n:
             window.image_icc_profiles = _reorder(window.image_icc_profiles)
         excluded = getattr(window, "excluded_frames", None)
@@ -1419,7 +1538,7 @@ class SourceManager(QObject):
 
     def load_multiple_folders_from_icon(self, folder_paths: list[str]) -> None:
         """Load multiple folders dropped on app icon."""
-        scale = self._ask_load_scale()
+        scale = self._ask_load_scale(folder=folder_paths[0] if folder_paths else None)
         if scale is not None:
             self.window.show_batch_processing_dialog(
                 preload_folder_paths=folder_paths,
@@ -1435,7 +1554,7 @@ class SourceManager(QObject):
         linear_raw = self._choose_raw_import_mode(file_paths, append=True)
         if linear_raw is None:
             return
-        scale = self._ask_load_scale()
+        scale = self._ask_load_scale(paths=file_paths, linear_raw=linear_raw)
         if scale is None:
             return
 

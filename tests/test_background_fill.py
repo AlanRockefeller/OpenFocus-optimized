@@ -301,6 +301,7 @@ def test_retouch_refuses_roi_frames(scene):
 
 def test_retouch_workspace_auto_background(qapp, scene, soft_result, monkeypatch, tmp_path):
     from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtTest import QTest
     from utils.file_dialogs import FileDialog
     from controllers.output_manager import OutputRecord
     from core.render_context import build_render_context
@@ -328,6 +329,13 @@ def test_retouch_workspace_auto_background(qapp, scene, soft_result, monkeypatch
     saved = tmp_path / "map.png"
     monkeypatch.setattr(FileDialog, "getSaveFileName", lambda *a: (str(saved), ""))
     try:
+        # Automatic background becomes available once the initially selected
+        # source has loaded; its worker then resolves any remaining sources.
+        for _ in range(500):
+            if dlg._source_ready:
+                break
+            QTest.qWait(10)
+        assert dlg._source_ready, "Selected retouch source did not finish loading"
         assert dlg.btn_auto_bg.isEnabled()
         assert dlg.chk_missing.isHidden()
         dlg.btn_auto_bg.click()
@@ -905,10 +913,11 @@ def test_batch_rejects_sidecars_that_would_overwrite_another_folder(
 
 
 def test_batch_plan_follows_a_per_folder_config_that_disables_the_background(
-        scene, tmp_path):
-    """Only the folder that still writes sidecars claims those paths."""
+        scene, tmp_path, monkeypatch):
+    """Planning uses each folder's merged background setting."""
     import json
-    from core.cli import run_cli
+    import os
+    from core import cli
 
     frames, _fused, _disc = scene
     _write_stack(tmp_path / "stack", frames)
@@ -916,9 +925,31 @@ def test_batch_plan_follows_a_per_folder_config_that_disables_the_background(
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"stack": {"auto_background": None}}), encoding="utf-8")
     out = tmp_path / "out"
-    assert run_cli(["-i", str(tmp_path / "stack"), str(tmp_path / "stack_stacked"),
-                    "-d", str(out), "--dry-run", "--auto-background", "--save-stacked",
-                    "--config", str(config)]) == 0
+    plans = {}
+    original = cli._result_outputs
+    def capture(args, output):
+        plans[os.path.basename(output)] = args.auto_background
+        return original(args, output)
+    monkeypatch.setattr(cli, '_result_outputs', capture)
+    assert cli.run_cli(["-i", str(tmp_path / "stack"), str(tmp_path / "stack_stacked"),
+                        "-d", str(out), "--dry-run", "--auto-background",
+                        "--config", str(config)]) == 0
+    assert plans == {"stack.png": None, "stack_stacked.png": "auto"}
+    assert not out.exists()
+
+
+def test_batch_rejects_disabled_background_with_inherited_sidecar(scene, tmp_path):
+    import json
+    from core.cli import EXIT_USAGE, run_cli
+
+    frames, _fused, _disc = scene
+    _write_stack(tmp_path / "stack", frames)
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"stack": {"auto_background": None}}), encoding="utf-8")
+    out = tmp_path / "out"
+    assert run_cli(["-i", str(tmp_path / "stack"), "-d", str(out), "--dry-run",
+                    "--auto-background", "--save-stacked", "--config", str(config)]) == EXIT_USAGE
+    assert not out.exists()
 
 
 def test_batch_rejects_a_summary_that_would_overwrite_an_input_frame(

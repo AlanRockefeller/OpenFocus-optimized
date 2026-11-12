@@ -1,13 +1,9 @@
-"""Bounded HF9 depth-guided fusion in the native integer code domain.
-
-C consumes the completed canvas depth in reverse source order. Its RGB
-output is the full-resolution merge; it has no reconstruction pyramid.
-"""
+"""Bounded OpenFocus B depth fusion and C weighted-pyramid fusion."""
 import numpy as np
 
-from fusion_methods.openfocus_depth import depth_map
+from fusion_methods.openfocus_depth import depth_map, _validate_feather
 from core.frame_storage import create_transient_frame as create_frame
-from fusion_methods._hf9_execution import (
+from fusion_methods._openfocus_execution import (
     execution_job, configure_rows, run_bands,
 )
 
@@ -26,11 +22,12 @@ def _inputs(input_source, img_resize, should_cancel):
 
 def _depth(frames, shape, img_resize, kernel_size, smoothing, should_cancel,
            depth_override, thread_count, progress_callback=None, *, return_codes=False,
-           half_resolution=False):
+           half_resolution=False, preserve_detail=False, feather=0, gpu=None):
     if depth_override is None:
         return depth_map(frames, img_resize, kernel_size, smoothing, should_cancel,
                          progress_callback=progress_callback, thread_count=thread_count,
-                         return_codes=return_codes, half_resolution=half_resolution)
+                         return_codes=return_codes, half_resolution=half_resolution,
+                         preserve_detail=preserve_detail, feather=feather, _gpu=gpu)
     depth = np.asarray(depth_override, dtype=np.float32)
     if depth.shape != shape[:2]:
         raise ValueError("depth_override must match the source height and width")
@@ -44,7 +41,7 @@ def _source_codes(source, img_resize, should_cancel):
     """Borrow native samples; allocate code planes only at the legacy boundary."""
     from core.source_frames import resolve_frame
     from fusion_methods.openfocus_ab import _check_cancel
-    from fusion_methods._hf9_pixels import frame_codes
+    from fusion_methods._openfocus_pixels import frame_codes
     _check_cancel(should_cancel)
     frame = resolve_frame(source)
     _check_cancel(should_cancel)
@@ -54,17 +51,40 @@ def _source_codes(source, img_resize, should_cancel):
 
 
 def _merge_codes(accumulator, current, depth, index, count, should_cancel,
-                 *, source_scale=1, reverse=False):
+                 *, source_scale=1, reverse=False, gpu=None):
     """Ordered MergeWeighted bands, skipping inactive samples before color reads."""
     from fusion_methods.openfocus_ab import _check_cancel
-    from fusion_methods._hf9_kernels import merge_rows
+    from fusion_methods._openfocus_kernels import merge_rows
     step = 65535 // max(1, count - 1)
     first = index == (count - 1 if reverse else 0)
+    if gpu is not None:
+        from fusion_methods._openfocus_gpu import GpuError, log_fallback
+        for start in range(0, current.shape[0], gpu.rows):
+            _check_cancel(should_cancel)
+            stop = min(start + gpu.rows, current.shape[0])
+            if gpu is not None:
+                gpu.acquire(should_cancel)
+                try:
+                    try:
+                        gpu.band(accumulator[start:stop], current[start:stop],
+                                 depth[start:stop], index, step, source_scale, first)
+                        gpu.used = True
+                        continue
+                    except GpuError as exc:
+                        gpu.failed = True
+                        log_fallback(exc)
+                finally:
+                    gpu.release()
+                gpu = None
+            merge_rows(accumulator, current, depth, index, step, start, stop,
+                       source_scale, first, reverse)
+        return gpu
     def merge(start, stop):
         _check_cancel(should_cancel)
         merge_rows(accumulator, current, depth, index, step, start, stop,
                    source_scale, first, reverse)
     run_bands(current.shape[0], 128, merge)
+    return None
 
 
 
@@ -99,17 +119,21 @@ def _active_sources(depth, count, should_cancel):
         _check_cancel(should_cancel)
         codes = depth[start:start + 128].astype(np.int64)
         lower = np.clip(codes // step, 0, count - 1)
-        active[np.unique(lower)] = True
+        active |= np.bincount(lower.ravel(), minlength=count).astype(bool)
         fraction = codes % step != 0
-        active[np.unique(np.minimum(lower[fraction] + 1, count - 1))] = True
+        upper = np.minimum(lower[fraction] + 1, count - 1)
+        active |= np.bincount(upper, minlength=count).astype(bool)
     return active
 
 
 @execution_job
 def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 17,
                      thread_count: int = None, depth_smoothing: float = 1.44,
-                     should_cancel=None, depth_override=None, progress_callback=None):
-    """Fuse integer source codes with the HF9 ordered MergeWeighted bands."""
+                     should_cancel=None, depth_override=None, progress_callback=None,
+                     *, feather: int = 0, use_gpu: bool = False,
+                     device_callback=None):
+    """Fuse source codes, optionally accelerating ordered merge on an OpenCL GPU."""
+    _validate_feather(feather)
     from core import source_frames
     from fusion_methods.openfocus_ab import _check_cancel
     frames, shape = _inputs(input_source, img_resize, should_cancel)
@@ -121,36 +145,83 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 17,
     if progress_callback is not None:
         progress_callback(0, total)
     _check_cancel(should_cancel)
+    gpu = None
+    if use_gpu:
+        from fusion_methods._openfocus_gpu import Merge, GpuError, log_fallback
+        try:
+            gpu = Merge(shape[1], 1 if len(shape) == 2 else shape[2])
+        except GpuError as exc:
+            log_fallback(exc)
+    gpu_state = gpu
     def depth_progress(index, _total):
         if progress_callback is not None:
             progress_callback(index + 1, total)
     depth = _depth(frames, shape, img_resize, kernel_size,
                    smoothing * (5.0 / 1.2), should_cancel, depth_override,
-                   thread_count, depth_progress, return_codes=True)
+                   thread_count, depth_progress, return_codes=True,
+                   half_resolution=True, preserve_detail=True, feather=feather,
+                   gpu=gpu)
     active = _active_sources(depth, count, should_cancel)
+    if gpu is not None and gpu.failed:
+        gpu = None
     result = create_frame(shape, np.uint16)
-    for index, source in enumerate(frames):
-        _check_cancel(should_cancel)
-        if img_resize is None and source.shape != shape:
-            raise ValueError('OpenFocus B requires frames with matching shapes')
-        if not active[index]:
-            if isinstance(source, source_frames.ProcessedFrame) or (
-                    source.ndim == 3 and source.shape[2] == 4):
-                # Lazy processors may enforce alpha/calibration invariants.
-                source_frames.resolve_frame(source)
-            elif isinstance(source, source_frames.SourceFrame):
-                source.validate_source()
-            if progress_callback is not None:
-                progress_callback(activity_steps + index + 1, total)
-            continue
-        frame, source_scale = _source_codes(source, img_resize, should_cancel)
-        if frame.shape != shape:
-            raise ValueError("OpenFocus B requires frames with matching shapes")
-        _merge_codes(result, frame, depth, index, count, should_cancel,
-                     source_scale=source_scale)
-        del frame
-        if progress_callback is not None:
-            progress_callback(activity_steps + index + 1, total)
+    merge_progress = activity_steps
+    def merge_sources(resident):
+        nonlocal gpu, merge_progress
+        for index, source in enumerate(frames):
+            _check_cancel(should_cancel)
+            if img_resize is None and source.shape != shape:
+                raise ValueError('OpenFocus B requires frames with matching shapes')
+            if not active[index]:
+                if isinstance(source, source_frames.ProcessedFrame) or (
+                        source.ndim == 3 and source.shape[2] == 4):
+                    source_frames.resolve_frame(source)
+                elif isinstance(source, source_frames.SourceFrame):
+                    source.validate_source()
+            else:
+                frame, source_scale = _source_codes(source, img_resize, should_cancel)
+                if frame.shape != shape:
+                    raise ValueError('OpenFocus B requires frames with matching shapes')
+                if resident:
+                    try:
+                        gpu.resident_frame(frame, index, count, source_scale)
+                    except GpuError as exc:
+                        return exc
+                else:
+                    gpu = _merge_codes(result, frame, depth, index, count, should_cancel,
+                                       source_scale=source_scale, gpu=gpu)
+                del frame
+            current = activity_steps + index + 1
+            if progress_callback is not None and current > merge_progress:
+                progress_callback(current, total)
+                merge_progress = current
+        return None
+
+    resident = False
+    if gpu is not None:
+        try:
+            resident = gpu.begin_merge(depth, shape, should_cancel)
+        except GpuError as exc:
+            gpu.failed = True
+            log_fallback(exc)
+            gpu = None
+    if resident:
+        try:
+            failure = merge_sources(True)
+            if failure is None:
+                try:
+                    gpu.finish_merge(result)
+                except GpuError as exc:
+                    failure = exc
+        finally:
+            gpu.end_merge()
+        if failure is not None:
+            gpu.failed = True
+            log_fallback(failure)
+            gpu = None
+            merge_sources(False)
+    else:
+        merge_sources(False)
     del depth
     source_frames.SOURCE_CACHE.clear()
     _check_cancel(should_cancel)
@@ -158,65 +229,25 @@ def openfocus_b_impl(input_source, img_resize=None, kernel_size: int = 17,
     if progress_callback is not None:
         progress_callback(total, total)
     _check_cancel(should_cancel)
+    if device_callback is not None:
+        from fusion_methods._openfocus_gpu import device_status
+        device_callback(device_status(gpu_state))
     return output
 
 
 @execution_job
-def openfocus_c_impl(input_source, img_resize=None, kernel_size: int = 17,
-                     thread_count: int = None, blend_smoothing: float = 3.6,
-                     should_cancel=None, depth_override=None, progress_callback=None):
-    """Complete native depth, then merge full-resolution sources in reverse."""
+def openfocus_c_impl(input_source, img_resize=None, thread_count: int = None,
+                     blend_smoothing: float = 2.4, should_cancel=None,
+                     progress_callback=None):
+    """Fuse source frames using a streaming weighted detail pyramid."""
     from core import source_frames
-    from fusion_methods.openfocus_ab import (
-        _check_cancel, _frame_pass_workers, _ordered_frame_results,
-    )
+    from fusion_methods._openfocus_pyramid import fuse_pyramid
 
     frames, shape = _inputs(input_source, img_resize, should_cancel)
-    count = len(frames)
     configure_rows(frames, img_resize, 'openfocus_c', thread_count, should_cancel)
-    activity_steps = count if depth_override is None else 0
-    total = activity_steps + count + 1
-    if progress_callback is not None:
-        progress_callback(0, total)
-
-    def cancel():
-        _check_cancel(should_cancel)
-
-    def depth_progress(index, _total):
-        if progress_callback is not None:
-            progress_callback(index + 1, total)
-
-    produced = None
+    smoothing = 2.4 if blend_smoothing is None else float(blend_smoothing)
     try:
-        smoothing = 3.6 if blend_smoothing is None else float(blend_smoothing)
-        depth = _depth(frames, shape, img_resize, kernel_size,
-                       smoothing * (5.0 / 3.0), should_cancel, depth_override,
-                       thread_count, depth_progress, return_codes=True,
-                       half_resolution=True)
-        result = create_frame(shape, np.uint16)
-
-        def prepare(position, cancelled):
-            return _source_codes(frames[count - 1 - position], img_resize, cancelled)
-
-        workers = _frame_pass_workers(frames, img_resize, 'openfocus_c', thread_count)
-        produced = _ordered_frame_results(count, prepare, workers, should_cancel)
-        for position, (current, source_scale) in produced:
-            cancel()
-            if current.shape != shape:
-                raise ValueError('OpenFocus C requires frames with matching shapes')
-            _merge_codes(result, current, depth, count - 1 - position, count,
-                         should_cancel, source_scale=source_scale, reverse=True)
-            del current
-            if progress_callback is not None:
-                progress_callback(activity_steps + position + 1, total)
+        return fuse_pyramid(frames, shape, img_resize, smoothing * (5.0 / 3.0),
+                            should_cancel, progress_callback)
     finally:
-        if produced is not None:
-            produced.close()
         source_frames.SOURCE_CACHE.clear()
-    del depth
-    cancel()
-    output = _output_codes(result, frames, should_cancel)
-    if progress_callback is not None:
-        progress_callback(total, total)
-    cancel()
-    return output

@@ -28,6 +28,7 @@ import numpy as np
 
 from constants import FRAME_RAM_BUDGET_BYTES
 from utils import memory
+from utils.logging_setup import debug_enabled, log_debug
 from utils.platform_utils import cpu_limits
 from core.algorithms import get_fusion
 from core import torch_backend
@@ -50,6 +51,24 @@ PREFERENCE_BALANCED = "balanced"
 PREFERENCE_RESPONSIVE = "responsive"
 PREFERENCE_MAXIMUM = "maximum"
 PREFERENCES = (PREFERENCE_BALANCED, PREFERENCE_RESPONSIVE, PREFERENCE_MAXIMUM)
+
+
+def raw_sensor_shape(sizes):
+    """Return the validated, aspect-expanded sensor height and width."""
+    aspect = float(sizes.pixel_aspect)
+    if not math.isfinite(aspect) or aspect <= 0:
+        raise ValueError('Invalid RAW pixel aspect ratio')
+    width = math.ceil(max(sizes.raw_width, sizes.width) * max(1, aspect, 1 / aspect))
+    height = max(sizes.raw_height, sizes.height)
+    if width <= 0 or height <= 0:
+        raise ValueError('Invalid RAW dimensions')
+    return int(height), int(width)
+
+
+def raw_decode_bytes(sensor_width, sensor_height, output_nbytes=0, encoded_bytes=0):
+    """Conservative full-sensor native workspace plus output and encoded input."""
+    return (int(sensor_width) * int(sensor_height) * 64
+            + int(output_nbytes) + int(encoded_bytes) * 2)
 
 
 @dataclass(frozen=True)
@@ -380,6 +399,39 @@ def cpu_capacity(snapshot: ResourceSnapshot, preference: str) -> int:
     return max(1, min(cores - 1, math.floor(cores * 0.8)))
 
 
+def native_thread_ceiling(preference=PREFERENCE_BALANCED, user_threads=0):
+    """CPU allowance for a serial owner independent of outer task count."""
+    capacity = cpu_capacity(probe_resources(), preference)
+    return min(capacity, int(user_threads)) if user_threads and int(user_threads) > 0 else capacity
+
+
+def cpu_facts(preference: str = PREFERENCE_BALANCED) -> dict:
+    """CPU topology and what automatic threads resolve to, for diagnostics."""
+    snapshot = probe_resources()
+    return {'physical_cores': snapshot.physical_cores, 'logical_cpus': snapshot.logical_cpus,
+            'cpu_limit': snapshot.cpu_limit,
+            'physical_cores_known': snapshot.physical_cores_known,
+            'automatic_threads': {name: cpu_capacity(snapshot, name) for name in PREFERENCES},
+            'resource_preference': preference}
+
+
+def log_render_resources(phase: str, preference: str = PREFERENCE_BALANCED) -> None:
+    """Record process memory around a render, and the CPU facts at its start.
+
+    Detailed logging only, and never a reason for a render to fail.
+    """
+    if not debug_enabled():
+        return
+    try:
+        log_debug('render_resources', phase=phase, rss_bytes=memory.process_rss_bytes(),
+                  peak_rss_bytes=memory.peak_rss_bytes(),
+                  available_ram_bytes=memory.available_memory_bytes(),
+                  total_ram_bytes=memory.total_memory_bytes(),
+                  **(cpu_facts(preference) if phase == 'start' else {}))
+    except Exception:
+        log_debug('render_resources', phase=phase, unavailable=True)
+
+
 class ResourceLimitError(MemoryError):
     """The minimum working set cannot safely be admitted."""
 
@@ -637,9 +689,18 @@ def plan_execution(workload: Workload, snapshot: Optional[ResourceSnapshot] = No
         # GPU inference has one owner and one stream; no parallel submissions.
         workers = 1
     native = ceiling if workers == 1 else 1
-    return ExecutionPlan(workers=workers, native_threads=native,
+    plan = ExecutionPlan(workers=workers, native_threads=native,
                          max_in_flight=workers, ram_budget=ram, vram_budget=vram,
                          device_kind=snapshot.device_kind, reasons=tuple(reasons))
+    log_debug('execution_plan', algorithm=workload.algorithm, frames=workload.frames,
+              shape=(workload.height, workload.width, workload.channels),
+              block_size=workload.block_size, layer=workload.parallel_layer, tasks=tasks,
+              fixed_bytes=fixed, per_worker_bytes=per_worker,
+              available_ram=snapshot.available_ram, ram_budget=ram, vram_budget=vram,
+              preference=preference, user_threads=user_threads, cpu_capacity=capacity,
+              workers=plan.workers, native_threads=plan.native_threads,
+              device=plan.device_kind, reasons=plan.reasons)
+    return plan
 
 
 def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
@@ -698,6 +759,15 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                 capacity = cpu_capacity(snapshot, preference)
                 threads = (min(capacity, int(user_threads))
                            if user_threads is not None and user_threads > 0 else capacity)
+                # Why a tile is smaller than requested: the first size whose
+                # working set fits the ceiling, halving from the image clamp.
+                log_debug('neural_tile_plan', frames=frames, shape=(height, width, channels),
+                          block_requested=int(block_size), block_after_image_clamp=maximum,
+                          block=block, device=kind, required_bytes=required,
+                          fixed_bytes=fixed, inference_bytes=inference, ram_ceiling=ceiling,
+                          available_ram=snapshot.available_ram, preference=preference,
+                          user_threads=user_threads, cpu_capacity=capacity,
+                          native_threads=max(1, threads))
                 return block, ExecutionPlan(
                     workers=1, native_threads=max(1, threads), max_in_flight=1,
                     ram_budget=ceiling,
@@ -738,10 +808,15 @@ def heavy_job(should_cancel=None):
             from core.registration import RegistrationCancelled
             raise RegistrationCancelled()
 
+    waited = 0
     while True:
         check_cancel()
         if _HEAVY_JOB_LOCK.acquire(timeout=0.05):
             break
+        waited += 1
+    if waited:
+        # Another heavy job held the lease; the wait is not processing time.
+        log_debug('heavy_job.waited', waited_ms=waited * 50)
     try:
         check_cancel()
         yield

@@ -1,7 +1,7 @@
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, QSizeF, Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtProperty, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap, QPen, QRegion
+from PyQt6.QtGui import QColor, QFont, QInputDevice, QPainter, QPixmap, QPen, QRegion
 from PyQt6.QtWidgets import QLabel
 
 from locales import trans
@@ -9,6 +9,44 @@ from locales import trans
 
 MAGNIFIER_MIN_SIZE = 64.0
 MAGNIFIER_MAX_SIZE = 1024.0
+
+
+# Pixels a touchpad pan moves per wheel-notch equivalent (120 angle units)
+# when the platform reports only angle deltas: three 20 px lines, the same
+# distance QAbstractScrollArea scrolls for one notch.
+ANGLE_UNITS_PER_PIXEL = 2.0
+
+
+def _is_touchpad_gesture(event):
+    """True for a two-finger touchpad scroll, False for a mouse wheel.
+
+    pixelDelta() is neither necessary nor sufficient: macOS and some
+    high-resolution wheels report pixel deltas for an ordinary mouse wheel,
+    while X11 reports touchpad scrolling with angle deltas only. Touchpad
+    gestures are identified by their device type or by a scroll phase
+    (begin/update/end, plus momentum on macOS); plain wheels have neither.
+    """
+    device = event.pointingDevice()
+    if device is not None and device.type() == QInputDevice.DeviceType.TouchPad:
+        return True
+    return event.phase() != Qt.ScrollPhase.NoScrollPhase
+
+
+def _platform_name():
+    from PyQt6.QtGui import QGuiApplication
+    return QGuiApplication.platformName()
+
+
+def _gesture_pan(event):
+    """How far a touchpad gesture moves the image, in pixels.
+
+    Pixel deltas are used where the platform provides reliable ones.  On X11
+    (xcb) Qt documents them as driver-specific and unreliable, so the angle
+    deltas are converted there even when pixel deltas are present."""
+    pixels = event.pixelDelta()
+    if not pixels.isNull() and _platform_name() != "xcb":
+        return QPointF(pixels)
+    return QPointF(event.angleDelta()) / ANGLE_UNITS_PER_PIXEL
 
 
 class MagnifierLabel(QLabel):
@@ -21,6 +59,7 @@ class MagnifierLabel(QLabel):
     roiModeExitRequested = pyqtSignal()  # 请求退出ROI模式（点击X按钮或右键）
     sourceRegionRequested = pyqtSignal(object, object)  # generation key, bounded region request
     sourceRegionsReleased = pyqtSignal(object)
+    viewStateChanged = pyqtSignal()
 
     def __init__(self, text: Optional[str] = "", parent=None):
         super().__init__(parent)
@@ -32,6 +71,7 @@ class MagnifierLabel(QLabel):
         self._magnifier_zoom = 2.0
         self._loupe_zoom_initialized = False
         self._is_panning = False
+        self._pan_button = Qt.MouseButton.NoButton
         self._pan_offset = QPointF(0, 0)
         self._last_mouse_pos = QPointF()
         self.setToolTip(trans.t("magnifier_hint"))
@@ -76,6 +116,7 @@ class MagnifierLabel(QLabel):
 
     @roi_mode.setter
     def roi_mode(self, enabled: bool):
+        self._reset_interaction()
         self._roi_mode = enabled
         if not enabled:
             # self._roi_rect = None # Keep the rect even if mode disabled? Maybe clear. 
@@ -85,6 +126,15 @@ class MagnifierLabel(QLabel):
             self._roi_rect = None
             self.roiDeleted.emit()
         self.update()
+
+    def _reset_interaction(self):
+        self._is_panning = False
+        self._pan_button = Qt.MouseButton.NoButton
+        self._last_mouse_pos = QPointF()
+        self._roi_state = "none"
+        self._hovering_handle = None
+        self._last_cursor_state = None
+        self.unsetCursor()
 
     def get_roi_rect(self) -> Optional[QRectF]:
         """Returns the current ROI in base image coordinates."""
@@ -174,6 +224,7 @@ class MagnifierLabel(QLabel):
         sourceRegionRequested lets the owner sample them away from the GUI thread.
         The key must identify the frame AND generation to reject stale completions.
         """
+        self._reset_interaction()
         changed_source = source_key != self._source_key
         if self._source_key is not None and (changed_source or pixmap is None or pixmap.isNull()):
             self.sourceRegionsReleased.emit(self._source_key)
@@ -187,6 +238,7 @@ class MagnifierLabel(QLabel):
             self._source_size = QSizeF()
             super().clear()
             self._magnifier_active = False
+            self.viewStateChanged.emit()
             self.update()
             return
         self._source_size = QSizeF(*source_size) if source_size is not None else QSizeF(pixmap.size())
@@ -195,6 +247,7 @@ class MagnifierLabel(QLabel):
         if changed_source and self._magnifier_active:
             self._ensure_native_loupe()
         self._update_scaled_pixmap()
+        self.viewStateChanged.emit()
         self._request_source_regions()
 
     def set_source_region(self, pixmap, rect, *, source_key, request) -> bool:
@@ -264,9 +317,36 @@ class MagnifierLabel(QLabel):
     def refresh_display(self):
         self._update_scaled_pixmap()
 
+    def view_zoom_state(self):
+        """Return the fit-relative zoom, its limits, and image availability."""
+        available = self._base_pixmap is not None and not self._base_pixmap.isNull()
+        return self._zoom_factor, self._min_zoom, self._view_max_zoom(), available
+
+    def zoom_view(self, zoom_in):
+        """Zoom around the view centre, keeping the image within pan bounds."""
+        old_zoom, minimum, maximum, available = self.view_zoom_state()
+        if not available or (zoom_in and old_zoom >= maximum) or (not zoom_in and old_zoom <= minimum):
+            return
+        new_zoom = (min(old_zoom * 1.1, maximum) if zoom_in
+                    else max(old_zoom / 1.1, minimum))
+        if new_zoom == old_zoom:
+            return
+        centre = QPointF(self.width() / 2.0, self.height() / 2.0)
+        base_point = self._map_to_base(centre)
+        self._zoom_factor = new_zoom
+        after = self._map_from_base(base_point)
+        self._pan_offset += centre - after
+        scaled_w, scaled_h = self._display_size()
+        if scaled_w <= self.width() and scaled_h <= self.height():
+            self._pan_offset = QPointF(0, 0)
+        self._update_scaled_pixmap()
+        self._show_zoom_indicator()
+        self.viewStateChanged.emit()
+
     def reset_view(self):
         self._zoom_factor = 1.0
         self._pan_offset = QPointF(0, 0)
+        self.viewStateChanged.emit()
         if self._base_pixmap is None or self._base_pixmap.isNull():
             super().clear()
             self._last_cursor_state = None
@@ -276,6 +356,7 @@ class MagnifierLabel(QLabel):
         self._update_scaled_pixmap()
 
     def clear(self):
+        self._reset_interaction()
         if self._source_key is not None:
             self.sourceRegionsReleased.emit(self._source_key)
         self._base_pixmap = None
@@ -291,6 +372,7 @@ class MagnifierLabel(QLabel):
         self._last_cursor_state = None
         self.unsetCursor()
         super().clear()
+        self.viewStateChanged.emit()
 
     def wheelEvent(self, event):
         if self._is_panning:
@@ -322,6 +404,17 @@ class MagnifierLabel(QLabel):
 
         if self._base_pixmap is None or self._base_pixmap.isNull():
             super().wheelEvent(event)
+            return
+
+        # A two-finger touchpad gesture moves the image like a drag; Ctrl keeps
+        # zooming. Space+drag is unusable on laptops where libinput disables
+        # the touchpad while a key is held.
+        if (_is_touchpad_gesture(event)
+                and not event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._pan_offset += _gesture_pan(event)
+            self._clamp_pan_offset()
+            self._update_scaled_pixmap()
+            event.accept()
             return
 
         delta = event.angleDelta().y()
@@ -388,6 +481,7 @@ class MagnifierLabel(QLabel):
             else:
                 self._update_scaled_pixmap(clamp=False)
             self._show_zoom_indicator()
+            self.viewStateChanged.emit()
 
         event.accept()
 
@@ -409,6 +503,7 @@ class MagnifierLabel(QLabel):
         super().resizeEvent(event)
         if self._base_pixmap is not None and not self._base_pixmap.isNull():
             self._update_scaled_pixmap()
+            self.viewStateChanged.emit()
 
     def keyPressEvent(self, event):
         if self._roi_mode and (event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace):
@@ -507,7 +602,7 @@ class MagnifierLabel(QLabel):
                 if not is_inside_roi:
                     # 右键点击非ROI区域，请求退出ROI模式
                     self._roi_rect = None
-                    self._roi_state = "none"
+                    self._reset_interaction()
                     self.roiModeExitRequested.emit()
                     self.update()
                     event.accept()
@@ -515,6 +610,7 @@ class MagnifierLabel(QLabel):
             
             if self._base_pixmap is not None and not self._base_pixmap.isNull():
                 self._is_panning = True
+                self._pan_button = Qt.MouseButton.RightButton
                 self._last_mouse_pos = event.position()
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 event.accept()
@@ -527,6 +623,7 @@ class MagnifierLabel(QLabel):
         ):
             if self._space_pressed:
                 self._is_panning = True
+                self._pan_button = Qt.MouseButton.LeftButton
                 self._last_mouse_pos = event.position()
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             else:
@@ -539,6 +636,25 @@ class MagnifierLabel(QLabel):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._is_panning:
+            if self._base_pixmap is not None and not self._base_pixmap.isNull():
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    if self._magnifier_active:
+                        self._magnifier_active = False
+                        self._update_cursor()
+                        self.update()
+
+                if self._last_mouse_pos.isNull():
+                    self._last_mouse_pos = event.position()
+                else:
+                    delta = event.position() - self._last_mouse_pos
+                    self._pan_offset.setX(self._pan_offset.x() + delta.x())
+                    self._pan_offset.setY(self._pan_offset.y() + delta.y())
+                    self._clamp_pan_offset()
+                    self._last_mouse_pos = event.position()
+                    self._update_scaled_pixmap()
+            event.accept()
+            return
         if self._roi_mode:
             pos = event.position()
             base_pos = self._map_to_base(pos)
@@ -618,25 +734,6 @@ class MagnifierLabel(QLabel):
                 
             return
 
-        if self._is_panning:
-            if self._base_pixmap is not None and not self._base_pixmap.isNull():
-                if event.buttons() & Qt.MouseButton.LeftButton:
-                    if self._magnifier_active:
-                        self._magnifier_active = False
-                        self._update_cursor()
-                        self.update()
-
-                if self._last_mouse_pos.isNull():
-                    self._last_mouse_pos = event.position()
-                else:
-                    delta = event.position() - self._last_mouse_pos
-                    self._pan_offset.setX(self._pan_offset.x() + delta.x())
-                    self._pan_offset.setY(self._pan_offset.y() + delta.y())
-                    self._clamp_pan_offset()
-                    self._last_mouse_pos = event.position()
-                    self._update_scaled_pixmap()
-            event.accept()
-            return
 
         if self._magnifier_active:
             self._magnifier_pos = event.position()
@@ -645,8 +742,13 @@ class MagnifierLabel(QLabel):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._is_panning and event.button() == self._pan_button:
+            self._reset_interaction()
+            self._update_cursor()
+            event.accept()
+            return
         if self._roi_mode:
-            if self._roi_state != "none":
+            if event.button() == Qt.MouseButton.LeftButton and self._roi_state != "none":
                 if self._roi_rect and (self._roi_rect.width() < 5 or self._roi_rect.height() < 5):
                      # Too small, discard
                      self._roi_rect = None
@@ -658,11 +760,6 @@ class MagnifierLabel(QLabel):
                 self.update()
             return
 
-        if event.button() == Qt.MouseButton.RightButton and self._is_panning:
-            self._is_panning = False
-            self._update_cursor()
-            event.accept()
-            return
 
         if event.button() == Qt.MouseButton.MiddleButton:
             if self._base_pixmap is not None and not self._base_pixmap.isNull():
@@ -671,11 +768,6 @@ class MagnifierLabel(QLabel):
                 return
 
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._is_panning:
-                self._is_panning = False
-                self._update_cursor()
-                event.accept()
-                return
             if self._magnifier_active:
                 self._magnifier_active = False
                 self._update_cursor()
@@ -706,6 +798,8 @@ class MagnifierLabel(QLabel):
         # If releasing space, stop panning immediately
         if not pressed and self._is_panning:
             self._is_panning = False
+            self._pan_button = Qt.MouseButton.NoButton
+            self._last_mouse_pos = QPointF()
             
         self._update_cursor()
 

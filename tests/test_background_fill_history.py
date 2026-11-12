@@ -216,6 +216,8 @@ def native_scene():
 
 def _in_qthread(call):
     from PyQt6.QtCore import QThread
+    from utils.platform_utils import configure_native_worker_stack
+
     class Worker(QThread):
         def run(self):
             try:
@@ -223,6 +225,7 @@ def _in_qthread(call):
             except BaseException as exc:
                 self.error = exc
     worker = Worker()
+    configure_native_worker_stack(worker)
     worker.start()
     assert worker.wait(120000), 'background operation did not finish'
     if hasattr(worker, 'error'):
@@ -346,6 +349,58 @@ def _legacy_record(doc, operations, cursor, undo_count, redo_count):
             'max_strokes': 100, 'max_bytes': 64 * 64 * 3}
 
 
+@pytest.mark.parametrize('stacked', ['missing', 'wrong_shape'])
+@pytest.mark.parametrize('analysis', [False, True])
+def test_legacy_stacked_replay_rejects_missing_source_transactionally(
+        tmp_path, controlled_background, stacked, analysis):
+    target = _document()
+    assert target.auto_background('soft') == 'committed'
+    assert target.auto_background('sharp') == 'committed'
+    assert target.undo()
+    pixels = target.working.copy()
+    history, fill = target.history, target.background_fill
+    operations, cursor = list(target._operations), target._cursor
+    analyses, fills = target._background_analyses, target._background_fills
+
+    background = {'type': 'auto_background', 'preset': 'auto' if analysis else 'soft',
+                  'clean': True, 'from_stacked': True}
+    # Replay a prior operation before reaching the invalid background source.
+    tones = {'type': 'tones', 'exposure': 0.2, 'contrast': 0}
+    record = _legacy_record(target, [tones] if analysis else [tones, background],
+                            1 if analysis else 2, 1 if analysis else 2, 0)
+    if analysis:
+        record['background_analyses'] = [{'cursor': 1, 'operation': background}]
+    path = tmp_path / 'stacked-replay.ofretouch'
+    path.write_text(json.dumps(record), encoding='utf-8')
+    target.stacked_image = (None if stacked == 'missing'
+                            else np.zeros((63, 64, 3), np.uint8))
+    original_stacked = target.stacked_image
+
+    with pytest.raises(ValueError, match='Stacked image required'):
+        target.load_checkpoint(path)
+    np.testing.assert_array_equal(target.working, pixels)
+    assert target.history is history and target.background_fill is fill
+    assert target._operations == operations and target._cursor == cursor
+    assert target._background_analyses is analyses and target._background_fills is fills
+    assert target.stacked_image is original_stacked
+    assert target.can_undo and target.can_redo
+
+
+@pytest.mark.parametrize('source', ['missing', 'wrong_shape'])
+def test_interactive_background_keeps_base_fallback(monkeypatch, source):
+    def replace(frames, fused, **kwargs):
+        image = np.clip(fused.astype(np.int16) + 20, 0, 255).astype(np.uint8)
+        layer = np.zeros(fused.shape[:2], np.uint8)
+        return BackgroundFillResult(image, True, 0, 1, 0.25,
+                                    MissingData(*(layer.copy() for _ in range(4))))
+
+    monkeypatch.setattr('core.background_fill.replace_background', replace)
+    target = _document()
+    target.stacked_image = None if source == 'missing' else np.zeros((1, 1, 3), np.uint8)
+    assert target.auto_background('soft') == 'committed'
+    np.testing.assert_array_equal(target.working, np.full_like(target.base, 100))
+
+
 @pytest.mark.parametrize('cursor', [1, 2])
 def test_legacy_tile_only_background_checkpoint_preserves_reachable_history(
         tmp_path, controlled_background, cursor):
@@ -409,8 +464,11 @@ def test_legacy_diagnostic_memory_rejection_is_transactional(
     path.write_text(json.dumps(record), encoding='utf-8')
     assert target.auto_background('sharp') == 'committed'
     pixels, fill = target.working.copy(), target.background_fill
-    def admission(required):
-        if required >= 80000:
+    from utils.retouch_checkpoint import _aligned_mask_bytes
+    pixels_count = target.height * target.width
+    admission_limit = pixels_count * 4 + _aligned_mask_bytes(target)
+    def admission(required, snapshot=None):
+        if required > admission_limit:
             raise ResourceLimitError('legacy diagnostic budget cannot be admitted')
     def forbidden(*args, **kwargs):
         pytest.fail('background replay started before migration memory admission')

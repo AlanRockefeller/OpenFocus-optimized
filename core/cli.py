@@ -7,6 +7,7 @@ Lets batch users and CI pipelines run registration + fusion without the GUI:
 
 Exit codes: 0 success, 1 processing error, 2 usage error.
 """
+from contextlib import contextmanager
 import argparse
 import json
 import math
@@ -25,6 +26,7 @@ os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 import numpy as np
 from typing import List, Optional, Tuple
 
+from utils import performance_profile
 from utils.sorting import natural_sort_key
 from utils.path_identity import file_identity, path_key
 from core.resource_policy import heavy_job, require_memory
@@ -33,7 +35,7 @@ from core.frame_storage import scratch_directory
 from core.algorithms import (fusion_algorithms, registration_algorithms, get_fusion,
                              get_registration, resolve_fusion_parameters,
                              resolve_registration_parameters, alignment_steps)
-from constants import APP_VERSION
+from constants import app_display_version
 from utils.logging_setup import (setup_logging, log_session_start, log_operation,
                                  log_action, get_logger, frame_details)
 
@@ -111,22 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--align", "-a", default="none",
                         choices=[spec.id for spec in registration_algorithms()],
                         help="Registration applied before fusion (default: none); openfocus = "
-                             "fast bounded similarity search with brightness equalization")
+                             "fast bounded similarity search with auto-crop")
     parser.add_argument("--param", action="append", default=[], metavar="KEY=JSON_VALUE",
                         help="Fusion parameter; repeat for multiple keys. Overrides legacy flags.")
     parser.add_argument("--align-param", action="append", default=[], metavar="KEY=JSON_VALUE",
                         help="Registration parameter; repeat for multiple keys.")
     parser.add_argument("--align-shift-limit", type=float, default=None, metavar="RATIO",
                         help="openfocus alignment only: translation search domain as a fraction "
-                             "of the frame size (default 0.05)")
+                             "of the frame size (default 0.03)")
     parser.add_argument("--base-frame", default="none", choices=["none", "last", "first"],
                         help="Optional post-fusion base correction: match the output's low "
                              "frequencies to the last/first frame (default: none).")
     parser.add_argument("--exposure-match", dest="exposure_match",
                         action=argparse.BooleanOptionalAction, default=True,
-                        help="Match every frame's exposure to the last frame before fusion "
-                             "(default: on; --no-exposure-match disables it). Computed on the "
-                             "whole stack before tiling, for every fusion method.")
+                        help="Match exposure before fusion: OpenFocus A/B/C use the first "
+                             "processed frame, other methods use the last (default: on; "
+                             "--no-exposure-match disables it). Applied before tiling.")
     parser.add_argument("--sharpen-output", action="store_true",
                         help="Apply mild unsharp masking to the fused output (off by default).")
     parser.add_argument("--sort", default="asc", choices=["asc", "desc", "off"],
@@ -141,13 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor-denoise", action="store_true",
                         help="Apply conservative sensor denoising before registration")
     parser.add_argument("--kernel", "-k", type=int, default=None,
-                        help="Odd kernel size; for OpenFocus A/B, controls focus-response scale")
-    parser.add_argument("--depth-smoothing", type=float, default=None, metavar="VALUE",
-                        help="openfocus_b only: depth-map transition smoothing "
-                             "(default 1.44; larger values smooth transitions more)")
-    parser.add_argument("--blend-smoothing", type=float, default=None, metavar="VALUE",
-                        help="openfocus_a / openfocus_c only: transition smoothing "
-                             "(defaults 2.0 for A and 3.6 for C)")
+                        help="Odd kernel size for methods with a kernel_size parameter; "
+                             "use --param radius=8 for OpenFocus A/B")
     parser.add_argument("--threads", "-t", type=int, default=0,
                         help="Worker thread upper limit (0 = automatic; default: 0)")
     parser.add_argument("--resource-preference", default="balanced",
@@ -161,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "their predicted probabilities (default); 'hard' "
                              "takes the most probable frame per pixel")
     parser.add_argument("--cpu", action="store_true",
-                        help="Force CPU even if CUDA/ROCm/XPU/MPS is available")
+                        help="Force CPU for OpenFocus B and AI fusion")
     parser.add_argument("--downscale", type=int, default=None,
                         help="Registration feature-detection downscale width")
     parser.add_argument("--tile-size", type=int, default=None,
@@ -208,13 +205,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate inputs and print the plan without fusing")
     parser.add_argument("--resume", action="store_true",
-                        help="Batch mode: skip folders whose output file already exists")
+                        help="Batch mode: skip folders only when every requested result is a nonempty file; content and settings are not checked")
     parser.add_argument("--json", default=None, metavar="FILE",
                         help="Write a machine-readable result summary to FILE when done")
     parser.add_argument("--alignment-report", default=None, metavar="FILE",
                         help="Write registration diagnostics as JSON (requires alignment; single stack only; no grouped fusion or dry run)")
     parser.add_argument("--json-progress", action="store_true",
                         help="Print one JSON progress object per step to stdout (NDJSON)")
+    parser.add_argument("--temp-dir", default=None, metavar="DIR",
+                        help="Directory for temporary data (must exist and be writable). "
+                             "Default: the system temporary directory or the local volume "
+                             "with the most space; the GUI's Temporary directory setting "
+                             "is not used by the CLI")
+    parser.add_argument("--profile-performance", nargs="?", const=True, default=None, metavar="FILE",
+                        help="Time supported render stages; print a summary to stderr, embed the "
+                             "report in --json, and optionally write it as JSON to FILE "
+                             "(single, non-grouped run only)")
+    parser.add_argument("--log-level", default=None, type=str.upper, metavar="LEVEL",
+                        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+                        help="Detail of this run's log file: debug, info (default), warning "
+                             "or error. Overrides OPENFOCUS_LOG_LEVEL; the log path is "
+                             "printed to stderr")
     parser.add_argument("--config", default=None, metavar="FILE",
                         help="Batch mode: JSON file with per-folder overrides, "
                              "e.g. {\"stackA\": {\"method\": \"dct\", \"kernel\": 9}}")
@@ -234,22 +245,86 @@ def _parameter_assignments(assignments):
     return values
 
 
+def _validate_execution_args(args):
+    """Validate execution options shared by CLI, batch overrides and recipes."""
+    import math
+
+    for name, minimum, optional in (
+            ('threads', 0, False), ('batch_size', 1, False),
+            ('downscale', 1, True), ('tile_size', 64, True),
+            ('kernel', None, True), ('tile_overlap', 0, True),
+            ('tile_threshold', 1, True), ('group_size', 0, False),
+            ('group_overlap', 0, False)):
+        value = getattr(args, name)
+        if value is None and optional:
+            continue
+        if type(value) is not int or (minimum is not None and value < minimum):
+            raise ValueError(f"invalid {name}: {value!r}")
+    for name in ('exposure_match', 'sharpen_output', 'cpu', 'keep_soft_parts'):
+        if type(getattr(args, name)) is not bool:
+            raise ValueError(f"{name} must be boolean")
+    actions = {action.dest: action for action in build_parser()._actions}
+    for name in ('method', 'align', 'base_frame', 'sort', 'ai_mode',
+                 'resource_preference', 'auto_background', 'background_mode'):
+        value = getattr(args, name)
+        if value is None and name in ('ai_mode', 'auto_background'):
+            continue
+        if not isinstance(value, str) or value not in actions[name].choices:
+            raise ValueError(f"invalid {name}: {value!r}")
+    for name in ('fusion_parameters', 'registration_parameters'):
+        if not isinstance(getattr(args, name, {}), dict):
+            raise ValueError(f"{name} must be an object")
+    value = args.align_shift_limit
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                              or not math.isfinite(value)):
+        raise ValueError('align_shift_limit must be a finite number')
+    if args.group_size == 1 or (args.group_size and args.group_overlap > args.group_size - 2):
+        raise ValueError('invalid group_size or group_overlap')
+    if args.group_size and args.depth_map:
+        raise ValueError('depth_map is unavailable with grouped fusion')
+    if args.tile_overlap is not None and args.tile_size is not None and args.tile_overlap >= args.tile_size:
+        raise ValueError('tile_overlap must be smaller than tile_size')
+    if args.native_batch_format and (not args.native_raw or not args.output_dir):
+        raise ValueError('native_batch_format requires native_raw and output_dir')
+    if args.native_raw and (args.suggest_duplicates or args.group_size or args.dust_map or
+                            args.defect_mask_path or args.sensor_denoise or args.depth_map):
+        raise ValueError('native_raw cannot be combined with grouped fusion, references or depth maps')
+    if args.native_raw and (args.scale_bar or args.scale_um is not None) and (
+            (args.output_dir and (args.native_batch_format or 'dng') == 'dng') or
+            (args.output and os.path.splitext(args.output)[1].lower() == '.dng')):
+        raise ValueError('scale bars are not supported in native DNG output')
+    extras = args.background_mode != 'clean' or args.keep_soft_parts or args.save_stacked or args.missing_data_map
+    if extras and not args.auto_background:
+        raise ValueError('background options require auto_background')
+    if args.auto_background and (args.group_size or args.native_raw):
+        raise ValueError('auto_background is unavailable with grouped fusion or native_raw')
+    if args.output_dir:
+        for name in ('depth_map', 'save_stacked', 'missing_data_map'):
+            if isinstance(getattr(args, name), str):
+                option = '--' + name.replace('_', '-')
+                raise ValueError(f'{option} with an explicit path cannot be used with --output-dir')
+    if isinstance(args.missing_data_map, str) and not args.missing_data_map.lower().endswith('.png'):
+        raise ValueError('missing_data_map must be a .png path')
+    if isinstance(args.save_stacked, str) and os.path.splitext(args.save_stacked)[1].lower() not in VALID_FORMATS:
+        raise ValueError('save_stacked has an unsupported extension')
+    return args
+
+
 def _resolve_algorithm_arguments(args):
     """Translate old flags once; generic dictionaries/assignments win per field."""
     spec = get_fusion(args.method)
     get_registration(args.align)
     declared = {parameter.key for parameter in spec.parameters}
     values = {}
-    if getattr(args, "kernel", None) is not None and "kernel_size" in declared:
+    if getattr(args, "kernel", None) is not None:
+        if "kernel_size" not in declared:
+            raise ValueError("--kernel is not available for this method; use --param radius=... for OpenFocus A/B")
         default = next(parameter.default for parameter in spec.parameters if parameter.key == "kernel_size")
         values["kernel_size"] = _normalize_kernel(args.kernel, default)
-    for old, key in (("depth_smoothing", "depth_smoothing"),
-                     ("blend_smoothing", "blend_smoothing"), ("ai_mode", "mode")):
-        value = getattr(args, old, None)
-        if value is not None and key in declared:
-            if key.endswith("smoothing") and not math.isfinite(value):
-                raise ValueError(f"{old} must be finite")
-            values[key] = max(0.0, value) if key.endswith("smoothing") else value
+    if getattr(args, "ai_mode", None) is not None:
+        if "mode" not in declared:
+            raise ValueError("--ai-mode is not available for this method")
+        values["mode"] = args.ai_mode
     provided = getattr(args, "fusion_parameters", {})
     registration = getattr(args, "registration_parameters", {})
     if not isinstance(provided, dict) or not isinstance(registration, dict):
@@ -322,6 +397,29 @@ def _validate_sensor_sources(paths, args):
         validate_sensor_source_orientation(paths, cancel_callback=getattr(args, "_should_cancel", None))
 
 
+@contextmanager
+def _video_directory(args, directory):
+    import tempfile
+    from core import scratch_registry
+
+    recorded = []
+    try:
+        with tempfile.TemporaryDirectory(prefix='openfocus_video_', dir=directory) as path:
+            args._video_scratch = recorded
+            recorded.append(path)
+            try:
+                scratch_registry.register(path)
+            except Exception as exc:
+                _log.warning('could not register video scratch directory: %s', exc)
+            yield path
+    finally:
+        args._video_scratch = None
+        try:
+            scratch_registry.forget([path for path in recorded if not os.path.exists(path)])
+        except Exception as exc:
+            _log.warning('could not forget video scratch: %s', exc)
+
+
 def _resolve_stack(args, video_temp_root: str) -> Tuple[str, List[str]]:
     """Return (source_label, image file paths) from folders, videos, or files.
 
@@ -348,11 +446,19 @@ def _resolve_stack(args, video_temp_root: str) -> Tuple[str, List[str]]:
             ok, message, frames, _names = loader.load_from_video(entry)
             if not ok:
                 raise RuntimeError(f"Failed to read video {entry}: {message}")
-            import cv2
             for i, frame in enumerate(frames):
-                frame_path = os.path.join(video_temp_root, f"video_{len(paths) + i:05d}.png")
+                frame_path = os.path.join(video_temp_root, f"video_{len(paths):05d}.png")
+                recorded = getattr(args, '_video_scratch', None)
+                if recorded is not None:
+                    recorded.append(frame_path)
+                    try:
+                        from core import scratch_registry
+                        scratch_registry.register(frame_path)
+                    except Exception as exc:
+                        _log.warning('could not register video scratch frame: %s', exc)
                 from utils.image_utils import imwrite_auto
-                imwrite_auto(frame_path, frame)
+                if not imwrite_auto(frame_path, frame):
+                    raise RuntimeError(f"Failed to write frame {i + 1} from video {entry}")
                 paths.append(frame_path)
         elif os.path.isfile(entry):
             paths.append(entry)
@@ -589,6 +695,30 @@ def _fuse_stack(images, args):
 
 
 def _fuse_stack_admitted(images, args):
+    from core.algorithms import alignment_steps, get_fusion
+    from core.frame_resolution_cache import (mandatory_staging_bytes,
+                                             render_scope)
+    frames = list(images) if isinstance(images, (list, tuple)) else []
+    mandatory = 0
+    if frames:
+        steps = (len(alignment_steps(args.align))
+                 if getattr(args, "align", "none") != "none" else 0)
+        mandatory = mandatory_staging_bytes(
+            frames, alignment_steps=steps,
+            exposure_match=bool(getattr(args, "exposure_match", True)),
+            deferred=bool(get_fusion(args.method).streaming_sources))
+    from core.resource_policy import log_render_resources
+    log_render_resources('start', getattr(args, "resource_preference", "balanced"))
+    try:
+        with render_scope(frames, mandatory_bytes=mandatory,
+                          should_cancel=getattr(args, '_should_cancel', None)), \
+                performance_profile.current().stage('render', resources=True):
+            return _fuse_stack_admitted_body(images, args)
+    finally:
+        log_render_resources('end')
+
+
+def _fuse_stack_admitted_body(images, args):
     """Register and fuse one stack; returns the fused image."""
     import cv2
     from core.registration import ImageRegistration
@@ -616,16 +746,23 @@ def _fuse_stack_admitted(images, args):
     # Flat-field correction also runs in the raw pixel domain before registration.
     dust_white = getattr(args, "dust_map", None)
     if dust_white:
-        from utils.dust_map import compute_flat_field, apply_flat_field
-        data = np.fromfile(dust_white, dtype=np.uint8)
-        white = cv2.imdecode(data, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-        if white is None:
-            raise RuntimeError(f"Failed to decode white-field image: {dust_white}")
+        from utils.dust_map import compute_flat_field, apply_flat_field, load_flat_field_reference
+        try:
+            white, _ = load_flat_field_reference(dust_white)
+        except ValueError as exc:
+            raise RuntimeError(f"Failed to decode white-field image: {dust_white}") from exc
         gain = compute_flat_field(white)
         images = ([process_frame(image, lambda pixels: apply_flat_field(pixels, gain),
                                  should_cancel=should_cancel) for image in images]
                   if streaming_sources else [store_frame(apply_flat_field(image, gain)) for image in images])
         _say(f"Flat-field (dust map) correction applied from {dust_white}")
+    preordered = (args.align == 'openfocus' and get_fusion(args.method).sort_frames
+                  and getattr(args, 'sort', 'asc') == 'desc')
+    if preordered:
+        images = list(reversed(images))
+    args._alignment_reversed = preordered
+    fusion_order = 'asc' if preordered else getattr(args, 'sort', 'asc')
+
 
     if args.align != "none":
         defer_warps = streaming_sources
@@ -638,9 +775,10 @@ def _fuse_stack_admitted(images, args):
             brightness_reference=("last" if getattr(args, "exposure_match", True)
                                   else "first"),
             use_gpu=False, defer_warps=defer_warps)
-        images = reg.process(images, output_path=None, thread_count=args.threads,
-                             resource_preference=getattr(args, "resource_preference", "balanced"),
-                             should_cancel=should_cancel)
+        with performance_profile.current().stage('registration', resources=True):
+            images = reg.process(images, output_path=None, thread_count=args.threads,
+                                 resource_preference=getattr(args, "resource_preference", "balanced"),
+                                 should_cancel=should_cancel)
         _say(f"Registration ({args.align}) done in {time.time() - t0:.1f}s")
 
     spec = get_fusion(args.method)
@@ -648,15 +786,9 @@ def _fuse_stack_admitted(images, args):
                          fusion_parameters=args._fusion_parameters,
                          resource_preference=getattr(args, "resource_preference", "balanced"),
                          base_frame=getattr(args, "base_frame", "none"),
-                         sort_mode=getattr(args, "sort", "asc"),
+                         sort_mode=fusion_order,
                          exposure_match=getattr(args, "exposure_match", True),
                          ai_batch_size=args.batch_size)
-    log_action("cli.fusion", method=args.method, alignment=args.align,
-               fusion_parameters=args._fusion_parameters,
-               registration_parameters=args._registration_parameters,
-               threads=args.threads, use_gpu=not args.cpu,
-               tile_size=args.tile_size, base_frame=fusion_kwargs['base_frame'],
-               exposure_match=fusion_kwargs['exposure_match'], **frame_details(images))
     if args.tile_size:
         fusion_kwargs["tile_block_size"] = args.tile_size
     if not getattr(args, "tile_enabled", True):
@@ -666,14 +798,35 @@ def _fuse_stack_admitted(images, args):
     if getattr(args, "tile_threshold", None) is not None:
         fusion_kwargs["tile_threshold"] = args.tile_threshold
     fusion = MultiFocusFusion(**fusion_kwargs)
-    images, is_16bit = prepare_fusion_input(images, getattr(args, "_should_cancel", None))
+    from core.fusion_diagnostics import log_effective_fusion
+    log_effective_fusion(fusion, images, origin='cli', thread_count=args.threads,
+        registration=alignment_steps(args.align), registration_parameters=args._registration_parameters,
+        registration_downscale_width=args.downscale,
+        registration_brightness_reference='last' if getattr(args, 'exposure_match', True) else 'first',
+        reverse_registration=preordered, sharpen_output=bool(getattr(args, 'sharpen_output', False)),
+        sensor_denoise=bool(getattr(args, 'sensor_denoise', False)),
+        defect_mask=bool(getattr(args, 'defect_mask_path', None)),
+        flat_field=bool(getattr(args, 'dust_map', None)), grouped=bool(getattr(args, '_grouped', False)))
+    profile = performance_profile.current()
+    with profile.stage('prepare_input'):
+        images, is_16bit = prepare_fusion_input(images, getattr(args, "_should_cancel", None))
     t0 = time.time()
     fuse_kwargs = dict(input_source=images, img_resize=None, thread_count=args.threads,
                        should_cancel=should_cancel)
     model_weights = _method_weights(spec)
     if model_weights:
         fuse_kwargs["model_path"] = model_weights
-    fused = fusion.fuse(**fuse_kwargs)
+    with profile.stage('fusion', resources=True):
+        fused = fusion.fuse(**fuse_kwargs)
+    if profile.enabled and fused is not None:
+        profile.set('render', algorithm=args.method,
+                    mode=args._fusion_parameters.get('mode'), frames=len(images),
+                    source_dtype=str(images[0].dtype) if len(images) else None,
+                    output_shape=list(fused.shape), device=fusion.get_info()['device'],
+                    resource_preference=getattr(args, "resource_preference", "balanced"),
+                    use_gpu_requested=not args.cpu, tile_block_size=fusion.tile_block_size,
+                    tile_overlap=fusion.tile_overlap, tile_enabled=fusion.tile_enabled)
+        profile.set('threads', requested=args.threads)
     info = fusion.get_info()
     if fused is None:
         raise RuntimeError("Fusion returned no result")
@@ -691,7 +844,7 @@ def _fuse_stack_admitted(images, args):
         if spec.sort_frames:
             from fusion_methods.openfocus_ab import sort_frames_for_openfocus
             depth_frames, _flipped = sort_frames_for_openfocus(
-                depth_frames, getattr(args, "sort", "asc"))
+                depth_frames, fusion_order)
         args._depth_frames = depth_frames
     _say(f"Fusion ({args.method}, device={info['device']}) done in {time.time() - t0:.1f}s")
     return fused
@@ -796,7 +949,8 @@ def _validate_alignment_report_path(args, paths=()):
         raise ValueError("--alignment-report must differ from input and output paths")
 
 
-def _write_alignment_report(path, payload):
+def _replace_text_file(path, text, prefix, before_replace=None):
+    """Create the folder, then replace ``path`` only once ``text`` is fully written."""
     import tempfile
 
     directory = os.path.dirname(os.path.abspath(path))
@@ -804,16 +958,22 @@ def _write_alignment_report(path, payload):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
-                                         prefix=".openfocus_alignment_", suffix=".tmp",
+                                         prefix=prefix, suffix=".tmp",
                                          delete=False) as stream:
             temporary = stream.name
-            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
-            stream.write("\n")
+            stream.write(text)
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
         temporary = None
     finally:
         if temporary is not None:
             os.unlink(temporary)
+
+
+def _write_alignment_report(path, payload):
+    _replace_text_file(path, json.dumps(payload, ensure_ascii=False, indent=2,
+                                        allow_nan=False) + "\n", ".openfocus_alignment_")
 
 
 def _save_depth(args, fused_out: str) -> None:
@@ -888,11 +1048,18 @@ def _result_outputs(args, fused_out: str):
     return outputs
 
 
+def _profile_destination(args):
+    """The --profile-performance FILE, or None when no file was requested."""
+    path = getattr(args, "profile_performance", None)
+    return path if isinstance(path, str) else None
+
+
 def _run_outputs(args, fused_out: str):
-    """`_result_outputs` plus the run-wide JSON summary and alignment report."""
+    """`_result_outputs` plus the run-wide JSON summary, alignment report and profile."""
     outputs = _result_outputs(args, fused_out)
     for flag, path in (("--json", getattr(args, "json", None)),
-                       ("--alignment-report", getattr(args, "alignment_report", None))):
+                       ("--alignment-report", getattr(args, "alignment_report", None)),
+                       ("--profile-performance", _profile_destination(args))):
         if path:
             outputs.append((flag, path))
     return outputs
@@ -946,6 +1113,34 @@ def _input_key_sets(candidates):
     return keys, identities
 
 
+def _admitted_input_keys(candidates):
+    """Collect identities only when every selected source can be stat'ed."""
+    keys, identities = set(), set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        info = os.stat(candidate)
+        keys.add(path_key(candidate))
+        if info.st_ino:
+            identities.add((info.st_dev, info.st_ino))
+    return keys, identities
+
+
+def _single_inputs(args, loader):
+    import stat
+
+    candidates = [getattr(args, "dust_map", None),
+                  getattr(args, "defect_mask_path", None),
+                  getattr(args, "config", None)]
+    for entry in args.input:
+        info = os.stat(entry)
+        if stat.S_ISDIR(info.st_mode):
+            candidates.extend(_list_folder_images(entry, loader))
+        else:
+            candidates.append(entry)
+    return candidates, _admitted_input_keys(candidates)
+
+
 def _first_input_overlap(outputs, keys, identities):
     """The first (flag, path) planned output that would overwrite an input."""
     for flag, path in outputs:
@@ -971,23 +1166,22 @@ def _output_over_inputs(args, fused_out: str, paths):
 
 
 def _batch_inputs(args, folders, loader):
-    """(path keys, file identities) for every file a batch run reads.
+    """Collect all batch sources without decoding or inspecting frame counts."""
+    import stat
 
-    Listing reads directory entries only -- no pixel decode -- and applies
-    each folder's own --config and dust/defect filters, exactly as the run
-    will, so the keys cover the frames that are actually loaded."""
     candidates = [getattr(args, "config", None)]
+    for entry in args.input:
+        info = os.stat(entry)
+        if not stat.S_ISDIR(info.st_mode):
+            candidates.append(entry)
     for folder in folders:
         name = os.path.basename(folder.rstrip("/\\")) or "stack"
         folder_args, _override = _folder_run_args(args, folder, name)
-        paths = _filter_stack_paths(_list_folder_images(folder, loader), folder_args.dust_map)
-        paths = _filter_stack_paths(paths, getattr(folder_args, "defect_mask_path", None))
-        candidates += paths
+        candidates.extend(_list_folder_images(folder, loader))
         candidates.append(getattr(folder_args, "dust_map", None))
         candidates.append(getattr(folder_args, "defect_mask_path", None))
-    candidates += [entry for entry in (getattr(args, "input", None) or ())
-                   if isinstance(entry, str) and os.path.isfile(entry)]
-    return _input_key_sets(candidates)
+        candidates.append(getattr(folder_args, "config", None))
+    return candidates, _admitted_input_keys(candidates)
 
 
 def _folder_run_args(args, folder: str, name: str):
@@ -996,7 +1190,10 @@ def _folder_run_args(args, folder: str, name: str):
     override = overrides.get(name) or overrides.get(folder)
     if not override:
         return args, None
-    return argparse.Namespace(**{**vars(args), **override}), override
+    merged = argparse.Namespace(**{**vars(args), **override})
+    _validate_execution_args(merged)
+    _resolve_algorithm_arguments(merged)
+    return merged, override
 
 
 def _auto_background(args, fused):
@@ -1117,12 +1314,15 @@ def _save(path: str, fused, scale_cfg=None, icc_profile=b"") -> None:
         raise RuntimeError(f"Failed to write output: {path}")
 
 
-def _run_batch(args, _emit_json=None) -> int:
+def _run_batch(args, _emit_json=None, _allow_summary=None) -> int:
     """Batch mode: fuse every input folder into --output-dir."""
     from core.image_loader import ImageStackLoader
 
     loader = ImageStackLoader()
     folders = [os.path.abspath(p) for p in args.input if os.path.isdir(p)]
+    machine = getattr(args, '_machine_state', None)
+    if machine is not None:
+        machine['total'] = len(folders)
     skipped = [p for p in args.input if not os.path.isdir(os.path.abspath(p))]
     for p in skipped:
         print(f"warning: skipping non-folder input in batch mode: {p}", file=sys.stderr)
@@ -1138,11 +1338,14 @@ def _run_batch(args, _emit_json=None) -> int:
     # only decide the main path, so one folder's sidecar can land on another
     # folder's result, and a config can change which sidecars a folder writes.
     planned = []
+    folder_plans = []
     for folder in folders:
         name = os.path.basename(folder.rstrip("/\\")) or "stack"
-        folder_args, _override = _folder_run_args(args, folder, name)
+        folder_args, override = _folder_run_args(args, folder, name)
         out_path = os.path.join(args.output_dir, f"{name}{args._batch_ext}")
-        planned += _result_outputs(folder_args, out_path)
+        results = _result_outputs(folder_args, out_path)
+        folder_plans.append((folder, name, folder_args, override, out_path, results))
+        planned.extend(results)
     for flag, path in (("--json", args.json), ("--alignment-report", args.alignment_report)):
         if path:
             planned.append((flag, path))
@@ -1161,7 +1364,7 @@ def _run_batch(args, _emit_json=None) -> int:
     # until this holds; if the inputs cannot be listed, refuse the run rather
     # than write without the guarantee.
     try:
-        input_keys, input_files = _batch_inputs(args, folders, loader)
+        candidates, (input_keys, input_files) = _batch_inputs(args, folders, loader)
     except Exception as exc:  # noqa: BLE001 - refuse rather than write blind
         print(f"error: cannot list the batch inputs: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -1170,17 +1373,18 @@ def _run_batch(args, _emit_json=None) -> int:
         flag, path = overlap
         print(f"error: {flag} would overwrite an input image: {path}", file=sys.stderr)
         return EXIT_USAGE
+    if _allow_summary is not None:
+        _allow_summary(planned, candidates, input_keys, input_files)
     if not args.dry_run:
         os.makedirs(args.output_dir, exist_ok=True)
 
     ok_count, failures = 0, []
     skipped_existing = []
+    if machine is not None:
+        machine['failed'] = failures
+        machine['skipped_existing'] = skipped_existing
     started = time.time()
-    for i, folder in enumerate(folders):
-        name = os.path.basename(folder.rstrip("/\\")) or "stack"
-        out_path = os.path.join(args.output_dir, f"{name}{args._batch_ext}")
-        # Per-folder overrides from --config, keyed by folder name or path.
-        folder_args, override = _folder_run_args(args, folder, name)
+    for i, (folder, name, folder_args, override, out_path, results) in enumerate(folder_plans):
         if (folder_args_mask_conflict(folder_args, out_path) or
                 (folder_args.depth_map and folder_args_mask_conflict(
                     folder_args, _depth_out_path(folder_args, out_path)))
@@ -1192,13 +1396,29 @@ def _run_batch(args, _emit_json=None) -> int:
             continue
         _say(f"\n=== {name} ===")
 
-        # --resume: a finished folder (output exists) is skipped, so rerunning
-        # a failed batch only processes what is still missing.
-        if args.resume and os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
-            _say(f"skip (output exists): {out_path}")
-            skipped_existing.append(name)
-            ok_count += 1
-            continue
+        if args.resume:
+            import stat
+            complete = True
+            try:
+                for _flag, result_path in results:
+                    try:
+                        info = os.stat(result_path)
+                    except FileNotFoundError:
+                        complete = False
+                        continue
+                    if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                        complete = False
+            except OSError as exc:
+                print(f"error: {name}: cannot inspect {result_path}: {exc}", file=sys.stderr)
+                failures.append(name)
+                continue
+            if complete:
+                _say(f"skip (all requested outputs exist): {out_path}")
+                skipped_existing.append(name)
+                ok_count += 1
+                if machine is not None:
+                    machine['succeeded'] = ok_count
+                continue
 
         if override:
             applied = ", ".join(f"{k}={v}" for k, v in override.items())
@@ -1218,6 +1438,8 @@ def _run_batch(args, _emit_json=None) -> int:
                 _say(f"[dry-run] frames={frames} method={folder_args.method} "
                      f"align={folder_args.align} output={out_path}")
                 ok_count += 1
+                if machine is not None:
+                    machine['succeeded'] = ok_count
             except Exception as exc:
                 print(f"error: {name}: {exc}", file=sys.stderr)
                 failures.append(name)
@@ -1233,6 +1455,8 @@ def _run_batch(args, _emit_json=None) -> int:
             paths = _filter_stack_paths(_folder_stack_paths(folder, loader, folder_args), folder_args.dust_map)
             paths = _filter_stack_paths(paths, getattr(folder_args, "defect_mask_path", None))
             _validate_sensor_sources(paths, folder_args)
+            if not folder_args.group_size:
+                _warn_low_storage(folder_args, paths, folder=folder)
             # Count frames, not files: a folder holding one multi-page TIFF
             # Z-stack is a complete stack (same rule as single-stack mode).
             from core.image_loader import count_frames
@@ -1247,8 +1471,8 @@ def _run_batch(args, _emit_json=None) -> int:
                 fused = _fuse_grouped(paths, folder_args)
             else:
                 images = _load_images(
-                    paths, thread_count=getattr(args, "threads", 0) or 0,
-                    resource_preference=getattr(args, "resource_preference", "balanced"),
+                    paths, thread_count=folder_args.threads,
+                    resource_preference=folder_args.resource_preference,
                     registration_steps=int(folder_args.align != 'none'),
                     exposure_match=getattr(folder_args, 'exposure_match', False),
                     lazy=get_fusion(folder_args.method).streaming_sources)
@@ -1271,9 +1495,11 @@ def _run_batch(args, _emit_json=None) -> int:
                 _save_background_extras(folder_args, out_path, stacked, background,
                                         scale_cfg, icc_profile)
                 background = stacked = None
-            if args.depth_map:
+            if folder_args.depth_map:
                 _save_depth(folder_args, out_path)
             ok_count += 1
+            if machine is not None:
+                machine['succeeded'] = ok_count
         except Exception as exc:
             _log.exception("batch folder failed: %s", folder)
             print(f"error: {name}: {exc}", file=sys.stderr)
@@ -1294,6 +1520,8 @@ def _run_batch(args, _emit_json=None) -> int:
         "failed": failures,
         "duration_s": round(time.time() - started, 1),
     }
+    if machine is not None:
+        machine['summary'] = summary
     _say(f"\nBatch {'validation' if args.dry_run else 'processing'} finished: "
          f"{ok_count}/{len(folders)} stacks {'validated' if args.dry_run else 'succeeded'}")
     if skipped_existing:
@@ -1344,7 +1572,7 @@ def run_cli(argv: List[str]) -> int:
     if argv:
         head = argv[0]
         if head in ("version", "--version", "-V"):
-            print(APP_VERSION)
+            print(app_display_version())
             return EXIT_OK
         if head in ("describe", "--describe"):
             print(json.dumps(describe_payload(), ensure_ascii=False))
@@ -1487,23 +1715,165 @@ def _run_recipe_command(argv: List[str]) -> int:
         return EXIT_USAGE
 
 
+def _machine_event(state, **fields):
+    if state['broken']:
+        return
+    if fields.get('event') == 'start':
+        state['start_emitted'] = True
+        state['started_at'] = time.time()
+    elif fields.get('event') == 'done':
+        if not state['start_emitted'] or state['terminal_emitted']:
+            return
+        state['terminal_emitted'] = True
+    try:
+        print(json.dumps(fields, ensure_ascii=False), file=_machine_stream or sys.stdout, flush=True)
+    except BrokenPipeError:
+        state['broken'] = True
+
+
 def _run_with_logging(argv: List[str]) -> int:
     with log_operation("cli", args=argv) as operation:
+        state = None
+        result = EXIT_ERROR
         try:
-            with heavy_job(), scratch_directory():
-                result = _run_cli_admitted(argv)
+            args = build_parser().parse_args(argv)
+            state = args._machine_state = {
+                'start_emitted': False, 'terminal_emitted': False, 'broken': False,
+                'mode': 'batch' if args.output_dir is not None else 'single',
+                'started_at': time.time(), 'total': 0, 'succeeded': 0,
+                'failed': [], 'skipped_existing': [], 'cancelled': False,
+            }
+            directory = None
+            if args.temp_dir is not None:
+                from core.frame_storage import validate_storage_directory
+                try:
+                    directory = validate_storage_directory(args.temp_dir)
+                except OSError as exc:
+                    print(f"error: --temp-dir is not a writable directory: {exc}", file=sys.stderr)
+                    return EXIT_USAGE
+            try:
+                from core import scratch_registry
+                scratch_registry.sweep_in_background([directory] if directory else [])
+            except Exception as exc:
+                _log.warning('could not start scratch sweep: %s', exc)
+            with heavy_job(), scratch_directory(separate=True, explicit_directory=directory):
+                result = _run_cli_admitted(args)
             if result == EXIT_ERROR:
                 operation.fail()
             log_action("cli.exit", exit_code=result)
             return result
         except KeyboardInterrupt:
+            if state is not None:
+                state['cancelled'] = True
             operation.cancel()
             print("interrupted", file=sys.stderr)
             return EXIT_ERROR
+        finally:
+            if state is not None and state['start_emitted']:
+                done = {'event': 'done', 'ok': result == EXIT_OK and not state['cancelled'],
+                        'mode': state['mode'], 'exit_code': result,
+                        'duration_s': round(time.time() - state['started_at'], 1)}
+                if state['mode'] == 'batch':
+                    done.update({key: state[key] for key in
+                                 ('total', 'succeeded', 'failed', 'skipped_existing')})
+                elif 'outputs' in state:
+                    done['outputs'] = state['outputs']
+                if state['cancelled']:
+                    done.update(cancelled=True, code='cancelled', exit_code=EXIT_ERROR)
+                elif result == EXIT_USAGE:
+                    done['code'] = 'usage_error'
+                elif result == EXIT_ERROR:
+                    done['code'] = 'processing_error'
+                _machine_event(state, **done)
 
 
-def _run_cli_admitted(argv: List[str]) -> int:
-    args = build_parser().parse_args(argv)
+def _warn_low_storage(args, paths, *, folder=None):
+    """Print a stderr warning when temporary storage looks low; never blocks."""
+    try:
+        from core.frame_storage import assess_scratch, readable_bytes
+        from core.source_frames import scan_source
+        from core.storage_preflight import render_storage_estimate
+        frames = []
+        for path in paths:
+            # Every page: a multipage TIFF is rendered as a whole stack.
+            frames.extend(scan_source(path, header_only=True))
+        minimum, expected, optional, sources = render_storage_estimate(
+            frames, algorithm=args.method, alignment=args.align,
+            exposure_match=bool(getattr(args, "exposure_match", False)),
+            cleanup=bool(args.defect_mask_path or args.sensor_denoise))
+        assessment = assess_scratch(minimum, expected, optional, sources)
+    except Exception:
+        _log.info("storage preflight unavailable", exc_info=True)
+        return None
+    if assessment["status"] in ("advisory", "critical"):
+        location = f" for {folder}" if folder is not None else ""
+        directory = assessment['directory']
+        where = f" in {directory}" if directory is not None else " across available volumes"
+        bound = '' if directory is not None else 'at most '
+        print(f"warning: low temporary storage{where}{location}: "
+              f"{bound}{readable_bytes(assessment['available_bytes'])} available after the safety "
+              f"reserve, an estimated {readable_bytes(assessment['required_bytes'])} needed "
+              f"(an estimate; caches may be disabled or the render may fail). "
+              f"Use --temp-dir DIR to choose another directory.", file=sys.stderr)
+    return assessment
+
+
+def _run_cli_admitted(args) -> int:
+    if args.log_level is not None:
+        from utils.logging_setup import session_log_path, set_log_level
+        set_log_level(args.log_level)
+        print(f"Log file: {session_log_path()}", file=sys.stderr)
+    if args.profile_performance is None:
+        return _run_cli_parsed(args)
+    return _run_cli_profiled(args)
+
+
+def _cli_performance_report(args, profile, outcome):
+    """Finalize the CLI report once; --json and FILE share the same object."""
+    report = getattr(args, '_performance_report', None)
+    if report is None:
+        report = profile.report(outcome)
+        report['finished_at'] = performance_profile.finished_now()
+        report['runtime'] = performance_profile.runtime_metadata()
+        from core.resource_policy import cpu_facts
+        report['runtime'].update(cpu_facts(getattr(args, 'resource_preference', 'balanced')))
+        args._performance_report = report
+    return report
+
+
+def _run_cli_profiled(args) -> int:
+    """Run with an active profile; a profiling failure never changes the exit code."""
+    profile = performance_profile.PerformanceProfile()
+    args._performance_profile = profile
+    profile.unmeasured('source decoding runs lazily inside registration/fusion for streaming '
+                       'methods; see concurrent.source_decode (summed across threads)')
+    profile.unmeasured('peak live scratch bytes')
+    outcome = 'failed'
+    try:
+        with performance_profile.active(profile):
+            result = _run_cli_parsed(args)
+        outcome = 'completed' if result == EXIT_OK else 'failed'
+    except KeyboardInterrupt:
+        outcome = 'cancelled'
+        raise
+    finally:
+        if getattr(args, '_performance_started', False):
+            try:
+                report = _cli_performance_report(args, profile, outcome)
+                if outcome == 'cancelled':
+                    report['outcome'] = outcome
+                log_action('render.performance', **performance_profile.compact(report))
+                print(performance_profile.summary(report), file=sys.stderr)
+                if isinstance(args.profile_performance, str):
+                    # After a long render: a failed write must not cost an earlier report.
+                    _replace_text_file(args.profile_performance,
+                                       performance_profile.dumps(report) + '\n', ".openfocus_profile_")
+            except Exception as exc:
+                print(f"warning: --profile-performance: {exc}", file=sys.stderr)
+    return result
+
+
+def _run_cli_parsed(args) -> int:
     if args.native_batch_format and (not args.native_raw or not args.output_dir):
         print("error: --native-batch-format requires --native-raw and --output-dir", file=sys.stderr)
         return EXIT_USAGE
@@ -1516,6 +1886,10 @@ def _run_cli_admitted(argv: List[str]) -> int:
                 (args.output_dir and (args.native_batch_format or "dng") == "dng") or
                 (args.output and os.path.splitext(args.output)[1].lower() == ".dng")):
             print("error: scale bars are not supported in native DNG output", file=sys.stderr)
+            return EXIT_USAGE
+    if args.profile_performance is not None:
+        if args.suggest_duplicates or args.output_dir or args.group_size or args.dry_run:
+            print("error: --profile-performance requires a single, non-grouped fusion run", file=sys.stderr)
             return EXIT_USAGE
     if args.alignment_report:
         if args.suggest_duplicates or args.output_dir or args.group_size or args.dry_run:
@@ -1628,9 +2002,20 @@ def _run_cli_admitted(argv: List[str]) -> int:
             print("error: --config requires batch mode (--output-dir)", file=sys.stderr)
             return EXIT_USAGE
         try:
-            import json
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise ValueError(f"duplicate field: {key}")
+                    result[key] = value
+                return result
+
+            def invalid_number(value):
+                raise ValueError(f"invalid number: {value}")
+
             with open(args.config, encoding="utf-8") as f:
-                args._folder_overrides = json.load(f)
+                args._folder_overrides = json.load(f, object_pairs_hook=pairs,
+                                                   parse_constant=invalid_number)
             if not isinstance(args._folder_overrides, dict):
                 raise ValueError("top level must be a JSON object")
         except Exception as exc:
@@ -1638,42 +2023,94 @@ def _run_cli_admitted(argv: List[str]) -> int:
             return EXIT_USAGE
 
     try:
+        _validate_execution_args(args)
         _resolve_algorithm_arguments(args)
         for folder, override in args._folder_overrides.items():
             if not isinstance(override, dict):
                 raise ValueError(f"Overrides for {folder} must be an object")
             unknown = set(override) - {
-                "method", "align", "kernel", "depth_smoothing", "blend_smoothing",
+                "method", "align", "kernel",
                 "ai_mode", "base_frame", "sort", "exposure_match", "sharpen_output", "cpu", "threads",
                 "batch_size", "downscale", "tile_size", "align_shift_limit",
                 "resource_preference", "fusion_parameters", "registration_parameters",
                 "auto_background", "background_mode", "keep_soft_parts"}
             if unknown:
                 raise ValueError(f"Unknown override keys for {folder}: {sorted(unknown)}")
-            _resolve_algorithm_arguments(argparse.Namespace(**{**vars(args), **override}))
+            try:
+                merged = argparse.Namespace(**{**vars(args), **override})
+                _validate_execution_args(merged)
+                _resolve_algorithm_arguments(merged)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"config {folder}: {exc}") from exc
     except (TypeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    def _emit_json(payload: dict) -> None:
+    summary_write_allowed = False
+    summary_plan = None
+
+    def _validate_summary_plan(planned, candidates, keys, identities):
+        # Unlike file_identity, stat must not hide access errors here.
+        current_keys, current_identities = _admitted_input_keys(candidates)
+        for _flag, path in planned:
+            if path:
+                try:
+                    os.stat(path)
+                except FileNotFoundError:
+                    pass
+        duplicate = _first_duplicate(planned)
+        if duplicate:
+            path, flag, earlier = duplicate
+            raise ValueError(f"{path} would be written twice ({earlier} and {flag})")
+        overlap = _first_input_overlap(planned, keys | current_keys,
+                                       identities | current_identities)
+        if overlap:
+            flag, path = overlap
+            raise ValueError(f"{flag} would overwrite an input image: {path}")
+
+    def _allow_summary(planned, candidates, keys, identities):
+        nonlocal summary_write_allowed, summary_plan
         if not args.json:
             return
+        _validate_summary_plan(planned, candidates, keys, identities)
+        summary_plan = (planned, candidates, keys, identities)
+        summary_write_allowed = True
+
+    def _emit_json(payload: dict) -> None:
+        nonlocal summary_write_allowed
+        if not args.json or not summary_write_allowed:
+            return
         import json
+        profile = getattr(args, '_performance_profile', None)
+        if profile is not None and getattr(args, '_performance_started', False):
+            try:
+                payload = {**payload, "performance": _cli_performance_report(
+                    args, profile, 'failed' if 'error' in payload else 'completed')}
+            except Exception as exc:
+                print(f"warning: --profile-performance: {exc}", file=sys.stderr)
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
-            with open(args.json, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-        except OSError as exc:
+            text = json.dumps(payload, ensure_ascii=False, indent=2)
+
+            def before_replace():
+                nonlocal summary_write_allowed
+                try:
+                    cancelled = getattr(args, '_should_cancel', None)
+                    if cancelled is not None and cancelled():
+                        raise RuntimeError("summary write cancelled")
+                    _validate_summary_plan(*summary_plan)
+                except BaseException:
+                    summary_write_allowed = False
+                    raise
+
+            _replace_text_file(args.json, text, ".openfocus_summary_", before_replace)
+        except Exception as exc:
             print(f"warning: --json: {exc}", file=sys.stderr)
 
     def _progress(**fields) -> None:
         if args.json_progress:
-            import json as _json
-            stream = _machine_stream or sys.stdout
-            print(_json.dumps(fields, ensure_ascii=False), file=stream, flush=True)
+            _machine_event(args._machine_state, **fields)
 
     args._progress = _progress
-    started_at = time.time()
 
     batch_mode = args.output_dir is not None
     if batch_mode and isinstance(args.depth_map, str) and args.depth_map:
@@ -1683,7 +2120,7 @@ def _run_cli_admitted(argv: List[str]) -> int:
               file=sys.stderr)
         return EXIT_USAGE
     if args.json_progress:
-        _progress(event="start", version=APP_VERSION,
+        _progress(event="start", version=app_display_version(),
                   mode="batch" if batch_mode else "single",
                   method=args.method, align=args.align)
     if batch_mode:
@@ -1729,7 +2166,7 @@ def _run_cli_admitted(argv: List[str]) -> int:
                 if batch_mode:
                     _validate_native_paths(paths)
             _validate_native_paths(all_paths)
-            destinations = [args.json, args.alignment_report]
+            destinations = [args.json, args.alignment_report, _profile_destination(args)]
             if batch_mode:
                 destinations.extend(os.path.join(args.output_dir,
                     (os.path.basename(os.path.abspath(folder)) or "stack") + args._batch_ext)
@@ -1753,27 +2190,26 @@ def _run_cli_admitted(argv: List[str]) -> int:
             print("error: an output would overwrite the defect mask", file=sys.stderr)
             return EXIT_USAGE
     try:
-        import tempfile
         import cv2
 
-        # Scratch from a crashed earlier run would otherwise shrink this one's disk.
-        # Best-effort housekeeping: a failure must never fail the render.
-        try:
-            from core.scratch_registry import sweep_abandoned
-            sweep_abandoned()
-        except Exception:
-            _log.exception("scratch sweep failed")
-
         if batch_mode:
-            return _run_batch(args, _emit_json)
+            return _run_batch(args, _emit_json, _allow_summary)
+
+        if args.json:
+            from core.image_loader import ImageStackLoader
+            candidates, (input_keys, input_files) = _single_inputs(args, ImageStackLoader())
+            planned = _run_outputs(args, args.output)
+            try:
+                _allow_summary(planned, candidates, input_keys, input_files)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return EXIT_USAGE
 
         from core.multi_focus_fusion import MultiFocusFusion
         from core.frame_storage import storage_directory
 
         # Video inputs are unpacked to a temp dir that is always cleaned up
-        from core.scratch_registry import register
-        with tempfile.TemporaryDirectory(prefix="openfocus_video_", dir=storage_directory()) as video_temp:
-            register(video_temp)
+        with _video_directory(args, storage_directory()) as video_temp:
             _src, paths = _resolve_stack(args, video_temp)
             # No output may replace one of the frames it is made from (or the
             # dust/defect inputs); checked before load, fusion and any write.
@@ -1800,16 +2236,20 @@ def _run_cli_admitted(argv: List[str]) -> int:
                             "output": args.output})
                 return EXIT_OK
 
+            if not args.native_raw and not args.group_size:
+                _warn_low_storage(args, paths)
             _progress(event="load", done=1, total=1, frames=len(paths))
+            args._performance_started = True
             if args.native_raw:
                 images, native_metadata = _load_native_stack(paths, args)
             elif not args.group_size:
-                images = _load_images(
-                    paths, thread_count=getattr(args, "threads", 0) or 0,
-                    resource_preference=getattr(args, "resource_preference", "balanced"),
-                    registration_steps=int(args.align != 'none'),
-                    exposure_match=getattr(args, 'exposure_match', False),
-                    lazy=get_fusion(args.method).streaming_sources)
+                with performance_profile.current().stage('load', resources=True):
+                    images = _load_images(
+                        paths, thread_count=getattr(args, "threads", 0) or 0,
+                        resource_preference=getattr(args, "resource_preference", "balanced"),
+                        registration_steps=int(args.align != 'none'),
+                        exposure_match=getattr(args, 'exposure_match', False),
+                        lazy=get_fusion(args.method).streaming_sources)
             if paths:
                 from utils.image_utils import set_source_exif
                 from core.image_loader import _read_exif_bytes
@@ -1844,10 +2284,11 @@ def _run_cli_admitted(argv: List[str]) -> int:
                 background = _auto_background(args, fused)
                 fused = background.image
 
-        if args.native_raw:
-            _save_native(args.output, fused, native_metadata, scale_cfg)
-        else:
-            _save(args.output, fused, scale_cfg, source_icc_profile)
+        with performance_profile.current().stage('save'):
+            if args.native_raw:
+                _save_native(args.output, fused, native_metadata, scale_cfg)
+            else:
+                _save(args.output, fused, scale_cfg, source_icc_profile)
         _say(f"Saved: {args.output}")
         _progress(event="save", output=args.output)
         outputs = [args.output]
@@ -1859,6 +2300,11 @@ def _run_cli_admitted(argv: List[str]) -> int:
             _save_depth(args, args.output)
             outputs.append(_depth_out_path(args, args.output))
         if args.alignment_report:
+            if getattr(args, '_alignment_reversed', False):
+                for entry in entries:
+                    for key in ('frame_index', 'reference_index'):
+                        if entry.get(key) is not None:
+                            entry[key] = frame_count - 1 - entry[key]
             _write_alignment_report(args.alignment_report, {
                 "method": args.align,
                 "input": args.input,
@@ -1873,19 +2319,14 @@ def _run_cli_admitted(argv: List[str]) -> int:
                                           "mode": args.background_mode,
                                           **_background_summary(background)}
         _emit_json(summary)
-        if args.json_progress:
-            _progress(event="done", ok=True,
-                      duration_s=round(time.time() - started_at, 1),
-                      outputs=outputs)
+        args._machine_state['outputs'] = outputs
         return EXIT_OK
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         _log.exception("CLI processing failed")
-        _emit_json({"mode": "single", "error": str(exc)})
+        _emit_json({"mode": "batch" if batch_mode else "single", "error": str(exc)})
         if args.json_progress:
             _progress(event="error", code="processing_error", message=str(exc))
-            _progress(event="done", ok=False,
-                      duration_s=round(time.time() - started_at, 1))
         return EXIT_ERROR
 
 
@@ -1930,7 +2371,7 @@ def describe_payload() -> dict:
         capabilities["gpu"] = None
     return {
         "schema": "openfocus/describe/1",
-        "version": APP_VERSION,
+        "version": app_display_version(),
         "capabilities": capabilities,
         "methods": methods,
         "registrations": [spec.id for spec in registration_algorithms()],

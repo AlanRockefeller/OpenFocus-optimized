@@ -11,6 +11,8 @@ from controllers.export_manager import ExportManager, LayeredTiffWorker
 from controllers.output_manager import OutputRecord
 from core.render_context import RenderContext, SourceFrame
 
+pytestmark = pytest.mark.usefixtures('isolated_clipboard')
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -149,8 +151,10 @@ def test_cancel_or_failure_does_not_mark_output_exported(qapp, monkeypatch, tmp_
     monkeypatch.setattr('controllers.export_manager.show_error_box', lambda *args: None)
     monkeypatch.setattr(LayeredTiffWorker, 'start', lambda worker: None)
     manager = window.export_manager
+    qapp.clipboard().setText('sentinel')
     manager.export_layered_tiff(record, record, str(tmp_path / 'result.tif'))
     manager._layered_tiff_completed(False, message)
+    assert qapp.clipboard().text() == 'sentinel'
     assert not record.exported and record.protected and not record.export_path
     manager._layered_tiff_finished()
     window.close()
@@ -184,7 +188,7 @@ def test_save_as_explains_unavailable_dng_without_overwriting(qapp, monkeypatch,
     target.write_bytes(b'previous file')
     offered, warnings = [], []
 
-    def select_dng(_parent, _title, _default, filters):
+    def select_dng(_parent, _title, _default, filters, *_):
         offered.extend(filters.split(';;'))
         return str(target), trans.t('linear_dng_filter')
 
@@ -217,6 +221,7 @@ def test_save_as_linear_dng_writes_original_camera_pixels(qapp, monkeypatch, tmp
     window.output_manager.save_output_image_as(item)
     _wait_for_export(qapp, lambda: window.output_manager.linear_dng_worker)
     assert not errors and record.exported
+    assert qapp.clipboard().text() == str(target)
     with tifffile.TiffFile(target) as tif:
         assert tif.pages[0].photometric.value == 34892
         np.testing.assert_array_equal(tif.asarray(), image[..., ::-1])
@@ -241,6 +246,7 @@ def test_save_as_layered_tiff_keeps_source_layers(qapp, monkeypatch, tmp_path):
     window.output_manager.save_output_image_as(item)
     _wait_for_export(qapp, lambda: window.export_manager.layered_worker)
     assert not errors and record.exported
+    assert qapp.clipboard().text() == str(target)
     layers = TiffImageSourceData.fromtiff(target).layers.layers
     assert len(layers) == 2
     assert not int(layers[0].flags) & 2 and int(layers[1].flags) & 2
@@ -263,3 +269,136 @@ def test_save_as_layered_tiff_without_source_reports_error(qapp, monkeypatch, tm
     window.output_manager.save_output_image_as(item)
     assert warnings and not target.exists() and not record.exported
     window.close()
+
+
+@pytest.mark.parametrize('source_owner', ['record', 'context'])
+def test_historical_sources_are_protected_before_worker(qapp, monkeypatch, tmp_path, source_owner):
+    from dataclasses import replace
+    source = tmp_path / 'old.tif'
+    source.write_bytes(b'original')
+    record = _record('display-name.tif')
+    if source_owner == 'record':
+        record.source_paths = (str(source),)
+    else:
+        record.context = replace(record.context, source_paths=(str(source),))
+    window = _window(record)
+    window.image_source_paths = [str(tmp_path / 'new.tif')]
+    manager = ExportManager(window)
+    errors = []
+    monkeypatch.setattr('controllers.export_manager.show_error_box', lambda *args: errors.append(args))
+    manager.export_layered_tiff(record, record, str(source))
+    assert errors and manager.layered_worker is None
+    assert source.read_bytes() == b'original'
+    window.close()
+
+
+@pytest.mark.parametrize('failure', ['count', 'size', 'offset', 'name', 'profile'])
+def test_worker_rejects_descriptors_before_resolution(qapp, monkeypatch, tmp_path, failure):
+    from core.source_frames import ProcessedFrame
+    from controllers import export_manager
+    from utils import layered_tiff
+
+    monkeypatch.setattr(layered_tiff, 'probe_resources', lambda: SimpleNamespace(ram_known=True))
+    monkeypatch.setattr(layered_tiff, 'ram_budget', lambda _: layered_tiff.MAX_WORKING_BYTES)
+    pixels = np.zeros((4, 4, 3), np.uint8)
+    shape = (10000, 10000, 3) if failure == 'size' else pixels.shape
+    lazy = ProcessedFrame(pixels, lambda image: image, shape, pixels.dtype)
+    frame = SourceFrame('id', 'source', lazy)
+    if failure == 'offset':
+        frame.offset_x = -1
+    if failure == 'name':
+        frame.name = 'x' * 256
+    frames = (frame,) * (129 if failure == 'count' else 1)
+    context = RenderContext('ctx', 'test', (), shape[1], shape[0], pixels.dtype, frames)
+    path = tmp_path / 'existing.tif'
+    path.write_bytes(b'original')
+    def forbidden(*args, **kwargs):
+        pytest.fail('preflight must precede pixel resolution')
+    monkeypatch.setattr(export_manager, 'resolve_frame', forbidden)
+    monkeypatch.setattr(export_manager, 'materialize_frames', forbidden)
+    worker = export_manager.LayeredTiffWorker(path, lazy, context,
+                                             b'invalid' if failure == 'profile' else b'')
+    result = []
+    worker.completed.connect(lambda success, message: result.append((success, message)))
+    worker.run()
+    assert result and result[0][0] is False and result[0][1]
+    assert path.read_bytes() == b'original'
+
+
+def test_worker_borrows_arrays_and_materializes_only_lazy_frames(qapp, monkeypatch, tmp_path):
+    from core.source_frames import ProcessedFrame
+    from controllers import export_manager
+    from utils import layered_tiff
+
+    monkeypatch.setattr(layered_tiff, 'probe_resources', lambda: SimpleNamespace(ram_known=True))
+    monkeypatch.setattr(layered_tiff, 'ram_budget', lambda _: layered_tiff.MAX_WORKING_BYTES)
+    pixels = np.ones((4, 4, 3), np.uint8)
+    lazy = ProcessedFrame(pixels, lambda image: image, pixels.shape, pixels.dtype)
+    context = RenderContext('ctx', 'test', (), 4, 4, pixels.dtype,
+                            (SourceFrame('a', 'a', pixels), SourceFrame('b', 'b', lazy)))
+    calls = []
+    def materialize(frames, **kwargs):
+        calls.append((frames, kwargs))
+        return [pixels.copy()]
+    monkeypatch.setattr(export_manager, 'materialize_frames', materialize)
+    captured = []
+    monkeypatch.setattr(layered_tiff, 'export_layered_tiff',
+                        lambda path, image, context, **kwargs: captured.append(context))
+    worker = export_manager.LayeredTiffWorker(tmp_path / 'out.tif', pixels, context, b'')
+    completed = []
+    worker.completed.connect(lambda success, path: completed.append((success, path)))
+    worker.run()
+    assert completed == [(True, str(tmp_path / 'out.tif'))]
+    assert len(calls) == 1 and calls[0][0] == [lazy]
+    assert calls[0][1]['should_cancel'] is not None
+    assert captured[0].frames[0].image is pixels
+
+
+def test_worker_rejects_resolved_descriptor_mismatch(qapp, monkeypatch, tmp_path):
+    from core.source_frames import ProcessedFrame
+    from controllers import export_manager
+    from utils import layered_tiff
+
+    monkeypatch.setattr(layered_tiff, 'probe_resources', lambda: SimpleNamespace(ram_known=True))
+    monkeypatch.setattr(layered_tiff, 'ram_budget', lambda _: layered_tiff.MAX_WORKING_BYTES)
+    pixels = np.ones((4, 4, 3), np.uint8)
+    lazy = ProcessedFrame(pixels, lambda image: image, pixels.shape, pixels.dtype)
+    context = RenderContext('ctx', 'test', (), 4, 4, pixels.dtype,
+                            (SourceFrame('a', 'a', lazy),))
+    monkeypatch.setattr(export_manager, 'materialize_frames',
+                        lambda frames, **kwargs: [pixels[:3]])
+    path = tmp_path / 'out.tif'
+    path.write_bytes(b'original')
+    worker = export_manager.LayeredTiffWorker(path, pixels, context, b'')
+    result = []
+    worker.completed.connect(lambda success, message: result.append((success, message)))
+    worker.run()
+    assert result and not result[0][0] and 'descriptor' in result[0][1]
+    assert path.read_bytes() == b'original'
+
+
+def test_worker_cancellation_during_result_resolution_stops_sources(qapp, monkeypatch, tmp_path):
+    from controllers import export_manager
+    from utils import layered_tiff
+
+    monkeypatch.setattr(layered_tiff, 'probe_resources', lambda: SimpleNamespace(ram_known=True))
+    monkeypatch.setattr(layered_tiff, 'ram_budget', lambda _: layered_tiff.MAX_WORKING_BYTES)
+    pixels = np.ones((4, 4, 3), np.uint8)
+    context = RenderContext('ctx', 'test', (), 4, 4, pixels.dtype,
+                            (SourceFrame('a', 'a', pixels),))
+    path = tmp_path / 'out.tif'
+    path.write_bytes(b'original')
+    worker = export_manager.LayeredTiffWorker(path, pixels, context, b'')
+    def resolve(image, *, should_cancel):
+        worker.cancel()
+        assert should_cancel()
+        return image
+    def forbidden(*args, **kwargs):
+        pytest.fail('cancelled export must not materialize sources')
+    monkeypatch.setattr(export_manager, 'resolve_frame', resolve)
+    monkeypatch.setattr(export_manager, 'materialize_frames', forbidden)
+    result = []
+    worker.completed.connect(lambda success, message: result.append((success, message)))
+    worker.run()
+    assert result == [(False, '')]
+    assert path.read_bytes() == b'original'

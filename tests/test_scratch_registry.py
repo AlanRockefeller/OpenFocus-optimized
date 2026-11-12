@@ -29,7 +29,7 @@ def registry(tmp_path, monkeypatch):
 
 
 def sweep(*extra):
-    return scratch_registry._real_sweep_abandoned(extra)
+    return scratch_registry.sweep_abandoned(extra)
 
 
 def child(registry_dir, body, *, wait=False):
@@ -64,7 +64,9 @@ def test_crashed_process_scratch_is_removed(registry):
         import pathlib
         folder = pathlib.Path({str(folder)!r}); folder.mkdir()
         scratch_registry.register(folder)
-        (folder / "openfocus-frame-inner.bin").write_bytes(b"x" * 100)
+        inner = folder / "openfocus-frame-inner.bin"
+        inner.write_bytes(b"x" * 100)
+        scratch_registry.register(inner)
         frame = pathlib.Path({str(frame)!r}); frame.write_bytes(b"x" * 5000)
         scratch_registry.register(frame)
         os._exit(-7)   # no finalizers or atexit, like SIGBUS
@@ -75,8 +77,37 @@ def test_crashed_process_scratch_is_removed(registry):
     removed, freed = sweep()
 
     assert not frame.exists() and not folder.exists()
-    assert removed == 2 and freed >= 5100
+    assert removed == 3 and freed >= 5100
     assert not list(directory.glob("*.scratch"))
+
+
+def test_sweep_keeps_nonempty_job_directory_and_user_file(registry):
+    directory, scratch = registry
+    folder = scratch / "openfocus-job-with-user-data"
+    folder.mkdir()
+    user_file = make(folder / "photo.tif")
+    child(directory, f"scratch_registry.register({str(folder)!r})\nos._exit(1)")
+    sweep()
+    assert user_file.exists() and folder.exists()
+    assert list(directory.glob("*.scratch"))
+
+
+def test_video_frames_require_registered_video_directory(registry):
+    directory, scratch = registry
+    folder = scratch / "openfocus_video_job"
+    folder.mkdir()
+    frame = folder / "video_00000.png"
+    unrelated = make(scratch / "video_00001.png")
+    child(directory, f"""
+        scratch_registry.register({str(folder)!r})
+        scratch_registry.register({str(frame)!r})
+        scratch_registry.register({str(unrelated)!r})
+        open({str(frame)!r}, 'wb').write(b'video')
+        os._exit(1)
+    """)
+    sweep()
+    assert not frame.exists() and not folder.exists()
+    assert unrelated.exists()
 
 
 def test_running_process_scratch_is_kept(registry):
@@ -115,7 +146,10 @@ def test_registry_cannot_remove_unexpected_paths(registry, tmp_path):
     precious = make(tmp_path / "my-photo.tif")
     target = make(tmp_path / "openfocus-frame-target.bin")
     link = scratch / "openfocus-frame-link.bin"
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
     child(directory, f"""
         for path in ({str(precious)!r}, {str(link)!r}, "relative/openfocus-frame-x.bin"):
             scratch_registry.register(path)
@@ -157,6 +191,8 @@ def test_legacy_frames_removed_only_when_no_process_uses_them(registry):
         """)], text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
         assert process.stdout.readline().strip() == "ready"
+        if scratch_registry._open_by_any_process() is None:
+            pytest.skip("process mappings are not fully visible")
         sweep()
         assert not stale.exists()
         assert mapped.exists() and other.exists()
@@ -287,3 +323,103 @@ def test_scratch_handed_to_another_process_is_not_swept(registry):
     sweep()
     assert not kept.exists()
     assert handed.exists()
+
+
+def test_stale_registry_never_removes_scratch_a_live_process_owns(registry):
+    """forget() can fail after a handover; the window's live registry still
+    owns the files (directly, or through a folder that contains them)."""
+    directory, scratch = registry
+    handed = make(scratch / "openfocus-frame-handed.bin")
+    folder = scratch / "openfocus-job"
+    folder.mkdir()
+    inner = make(folder / "openfocus-frame-inner.bin")
+    gone = make(scratch / "openfocus-frame-worker-only.bin")
+    # The worker exited cleanly but never forgot what it handed over.
+    child(directory, f"""
+        for path in ({str(handed)!r}, {str(inner)!r}, {str(gone)!r}):
+            scratch_registry.register(path)
+    """)
+    owner = child(directory, f"""
+        scratch_registry.register({str(handed)!r})
+        scratch_registry.register({str(folder)!r})
+    """, wait=True)
+    try:
+        sweep()
+        assert handed.exists() and inner.exists()
+        assert not gone.exists()
+        # The stale registry is finished with: the live owner records the rest.
+        assert len(list(directory.glob("*.scratch"))) == 1
+    finally:
+        owner.communicate("\n", timeout=60)
+
+
+def test_windows_uptime_is_read_as_unsigned_64_bit():
+    """GetTickCount64 after 30 days: with ctypes' default signed 32-bit
+    return type the value is negative and boot lands in the future."""
+    import ctypes
+    ticks = 30 * 24 * 3600 * 1000
+
+    class Function:
+        restype = ctypes.c_int
+        argtypes = None
+
+        def __call__(self):
+            if self.restype is ctypes.c_ulonglong:
+                return ticks
+            return ctypes.c_int32(ticks & 0xFFFFFFFF).value
+
+    kernel32 = type("Kernel32", (), {"GetTickCount64": Function()})()
+    boot = scratch_registry._windows_boot_time(kernel32)
+    assert abs(boot - (time.time() - ticks / 1000.0)) < 5
+    assert boot < time.time()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX unlink-while-open race")
+def test_registry_removed_by_a_concurrent_sweep_is_replaced(registry, monkeypatch):
+    """Another process's sweep can find a new registry before it is locked
+    and delete it; recording must continue in a registry that still exists."""
+    directory, scratch = registry
+    real_lock = scratch_registry._try_lock
+    raced = []
+
+    def lock_after_a_sweep(handle):
+        if not raced:
+            raced.append(handle.name)
+            os.unlink(handle.name)        # the other sweep removed it first
+        return real_lock(handle)
+
+    monkeypatch.setattr(scratch_registry, "_try_lock", lock_after_a_sweep)
+    frame = make(scratch / "openfocus-frame-after-race.bin")
+    scratch_registry.register(frame)
+    assert raced and not os.path.exists(raced[0])
+    path = scratch_registry._handle_path
+    assert path is not None and path.exists() and str(path) != raced[0]
+    assert str(frame) in path.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot delete an open file")
+def test_sweep_deletes_a_stale_registry_while_still_holding_its_lock(registry, monkeypatch):
+    """Releasing the lock first would let a new owner lock the file in the
+    gap and then lose it."""
+    import fcntl
+    from pathlib import Path
+    directory, scratch = registry
+    child(directory, f"scratch_registry.register({str(make(scratch / 'openfocus-frame-x.bin'))!r})\nos._exit(9)")
+    stale = next(directory.glob("*.scratch"))
+    locked_at_unlink = []
+    real_unlink = Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        if self == stale:
+            with open(self, "r") as other:
+                try:
+                    fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked_at_unlink.append(False)
+                except OSError:
+                    locked_at_unlink.append(True)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    sweep()
+    assert locked_at_unlink == [True]
+    assert not stale.exists()

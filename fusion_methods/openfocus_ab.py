@@ -4,10 +4,30 @@ from typing import List
 
 import cv2
 import numpy as np
-from constants import FRAME_RAM_BUDGET_BYTES, HF9_MAX_IN_FLIGHT_FRAMES
+from constants import FRAME_RAM_BUDGET_BYTES, OPENFOCUS_MAX_IN_FLIGHT_FRAMES
 
 from utils.sorting import natural_sort_key
 from core.frame_storage import capture_scratch, create_frame, run_with_scratch, store_frame
+
+
+def _collect_directory_sources(directory, should_cancel=None):
+    """Collect naturally ordered image files and their header-only frames."""
+    from core.source_frames import scan_source
+
+    exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
+    _check_cancel(should_cancel)
+    paths = []
+    for name in sorted(os.listdir(directory), key=natural_sort_key):
+        _check_cancel(should_cancel)
+        path = os.path.join(directory, name)
+        if name.lower().endswith(exts) and os.path.isfile(path):
+            paths.append(path)
+    frames = []
+    for path in paths:
+        _check_cancel(should_cancel)
+        frames.extend(scan_source(path, header_only=True,
+                                  should_cancel=lambda: _check_cancel(should_cancel)))
+    return frames, paths
 
 
 def _collect_images(input_source, *, normalize=True, should_cancel=None) -> List[np.ndarray]:
@@ -29,14 +49,7 @@ def _collect_images(input_source, *, normalize=True, should_cancel=None) -> List
 
     if isinstance(input_source, str) and os.path.isdir(input_source):
         if not normalize:
-            from core.source_frames import scan_source
-            exts = ('.png', '.jpg', '.jpeg', '.jpe', '.jfif', '.webp', '.tif', '.tiff', '.bmp')
-            frames = []
-            for name in sorted(os.listdir(input_source), key=natural_sort_key):
-                _check_cancel(should_cancel)
-                if name.lower().endswith(exts):
-                    frames.extend(scan_source(os.path.join(input_source, name), header_only=True,
-                                              should_cancel=should_cancel))
+            frames, _ = _collect_directory_sources(input_source, should_cancel)
             if len(frames) < 2:
                 raise ValueError(f'OpenFocus A/B fusion needs at least 2 images in {input_source}')
             return frames
@@ -73,7 +86,7 @@ def _check_cancel(should_cancel):
 
 def _frame_pass_workers(frames, img_resize, algorithm, thread_count, *, activity_only=False):
     """Admit complete independent producers, including their retained result."""
-    from fusion_methods._hf9_execution import uses_rows, frame_parallelism_allowed
+    from fusion_methods._openfocus_execution import uses_rows, frame_parallelism_allowed
     if uses_rows() or not frame_parallelism_allowed():
         return 1
     if thread_count == 1 or len(frames) < 2:
@@ -107,7 +120,7 @@ def _frame_pass_workers(frames, img_resize, algorithm, thread_count, *, activity
     plan = policy.plan_execution(policy.Workload(
         algorithm=algorithm, frames=len(frames), height=h, width=w,
         fixed_bytes=fixed, per_worker_bytes=per_worker,
-        outer_tasks=min(len(frames), HF9_MAX_IN_FLIGHT_FRAMES)),
+        outer_tasks=min(len(frames), OPENFOCUS_MAX_IN_FLIGHT_FRAMES)),
         preference='maximum' if thread_count is not None else 'balanced', user_threads=thread_count,
         ram_budget_override=budget)
     return plan.workers
@@ -124,7 +137,7 @@ def _ordered_frame_results(count, produce, workers, should_cancel):
     from collections import deque
     from concurrent.futures import ThreadPoolExecutor, wait
     from threading import Event
-    from fusion_methods._hf9_execution import _worker_native_limit
+    from fusion_methods._openfocus_execution import _worker_native_limit
     stop = Event()
 
     def cancelled():

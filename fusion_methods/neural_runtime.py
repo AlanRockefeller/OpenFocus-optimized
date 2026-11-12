@@ -1,4 +1,5 @@
 """ONNX Runtime inference for the bundled dynamic StackMFF graphs."""
+import atexit
 from collections import OrderedDict
 import json
 import hashlib
@@ -6,11 +7,14 @@ import os
 import tempfile
 import uuid
 import threading
+import time
+import traceback
 
 import cv2
 import numpy as np
 
 from utils.logging_setup import get_logger, log_action
+from utils.performance_profile import current as _profile
 
 _LOG = get_logger(__name__)
 _SESSIONS = OrderedDict()
@@ -27,6 +31,11 @@ _ACTUAL_CHECKPOINT = None
 _AVAILABLE_PROVIDERS = ()
 _HARDWARE_ADAPTERS = ()
 _PROBE_ERRORS = ()
+# Verified accelerator that logits() will not admit because its free memory
+# cannot be read; AI jobs then run on CPU.
+_UNADMITTED = None
+# Providers whose jobs logits() admits only against known free device memory.
+VRAM_GATED_KINDS = ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO')
 
 
 def device_diagnostics():
@@ -34,7 +43,57 @@ def device_diagnostics():
     return {'hardware': _HARDWARE_ADAPTERS, 'providers': _AVAILABLE_PROVIDERS,
             'selected': _DEVICE, 'adapter': _DIRECTML_ADAPTER_NAME,
             'actual': _ACTUAL_DEVICE, 'checkpoint': _ACTUAL_CHECKPOINT,
-            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS}
+            'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS,
+            'unadmitted': _UNADMITTED}
+
+
+def unadmitted_accelerator():
+    """The verified accelerator AI jobs cannot use (free memory unreadable), or None."""
+    return _UNADMITTED
+
+
+def admitted_kind(kind):
+    """The device AI jobs will actually run on: CPU for an unadmitted accelerator.
+
+    A provider that passes the probe but whose free memory cannot be read is
+    sent to CPU by every job, so it must not be shown as ready.
+    """
+    if kind is not None and kind == _UNADMITTED:
+        return 'CPU'
+    return kind
+
+
+def _vram_snapshot(kind):
+    """Probe kind's free memory; None when the probe itself fails.
+
+    Provider selection and every job read it the same way, so a probe error
+    means unknown memory (CPU) in both places instead of failing the job.
+    """
+    from core.resource_policy import probe_resources
+    try:
+        return probe_resources(kind)
+    except Exception:
+        _LOG.warning('%s memory probe failed; treating free memory as unknown',
+                     kind, exc_info=True)
+        return None
+
+
+def _vram_unknown(snapshot):
+    return snapshot is None or not snapshot.vram_known
+
+
+def _memory_unreadable(kind):
+    return kind in VRAM_GATED_KINDS and _vram_unknown(_vram_snapshot(kind))
+
+
+def _record_admission(kind, snapshot):
+    """Keep the reported admission tied to the latest probe a job acted on."""
+    global _UNADMITTED
+    with _LOCK:
+        if _vram_unknown(snapshot):
+            _UNADMITTED = kind
+        elif _UNADMITTED == kind:
+            _UNADMITTED = None
 
 
 def start_inference_job():
@@ -126,7 +185,7 @@ class _ProfiledSession:
                 try:
                     self._finish_profile(False)
                 except Exception:
-                    _LOG.warning('Could not remove failed inference profile', exc_info=True)
+                    _LOG.warning('Could not remove failed inference profile\n%s', traceback.format_exc())
             raise
         if self._profiling:
             self.actual_device = self._finish_profile(True)
@@ -137,9 +196,10 @@ def resolve_device(use_gpu):
     if not use_gpu:
         return 'CPU'
     global _DEVICE, _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME
-    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS
+    global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS, _UNADMITTED
     with _LOCK:
         if _DEVICE is None:
+            _UNADMITTED = None
             import onnxruntime as ort
             from utils.weights import weights_path
             available = ort.get_available_providers()
@@ -181,6 +241,8 @@ def resolve_device(use_gpu):
                             set_directml_adapter(adapter_index)
                         if kind == 'DIRECTML':
                             _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME = adapter_index, adapter_name
+                        if _memory_unreadable(kind):
+                            _UNADMITTED = kind
                         device = kind
                         break
                     except Exception as error:
@@ -214,28 +276,109 @@ def estimate_inference_bytes(n, h, w, kind):
             + n * pixels * 4 * 6 + 4 * 1024 * 1024)
 
 
+def _session_key(path, shape, device, threads):
+    path = os.path.abspath(os.path.splitext(path)[0] + '.onnx')
+    stat = os.stat(path)
+    adapter = _DIRECTML_ADAPTER_INDEX if device == 'DIRECTML' else 0
+    return (path, stat.st_mtime_ns, stat.st_size, shape, device, adapter, int(threads or 1))
+
+
+# Optional ONNX Runtime operator traces (Chrome trace JSON), CPU sessions only.
+# Accelerated sessions already profile their first run to verify placement.
+OPERATOR_PROFILE_ENV = 'OPENFOCUS_ORT_OPERATOR_PROFILE'
+OPERATOR_PROFILE_DIR_ENV = 'OPENFOCUS_ORT_PROFILE_DIR'
+_TRACED = {}
+
+
+def operator_trace_directory():
+    """Configured trace directory, or None when operator tracing is off or unusable."""
+    if os.environ.get(OPERATOR_PROFILE_ENV) != '1':
+        return None
+    directory = os.environ.get(OPERATOR_PROFILE_DIR_ENV)
+    if not directory:
+        from utils.logging_setup import logs_dir
+        directory = os.path.join(str(logs_dir()), 'ort-traces')
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError:
+        # A diagnostic must not fail the render it observes.
+        _LOG.warning('ONNX Runtime operator traces disabled: cannot use %s', directory,
+                     exc_info=True)
+        return None
+    return directory
+
+
+def _end_trace(key):
+    session = _TRACED.pop(key, None)
+    if session is None:
+        return
+    try:
+        path = session.end_profiling()
+        log_action('ort_operator_trace', file=os.path.basename(path) if path else None,
+                   shape=list(key[3]), threads=key[6])
+    except Exception:
+        _LOG.warning('Could not finish an ONNX Runtime operator trace\n%s', traceback.format_exc())
+
+
+def finish_operator_traces():
+    """End every open operator trace so ORT writes its file."""
+    for key in list(_TRACED):
+        _end_trace(key)
+
+
+atexit.register(finish_operator_traces)
+
+
+def _describe_session(key):
+    """Path-free session identity for performance reports."""
+    return (os.path.basename(key[0]), tuple(int(v) for v in key[3]), key[4], key[6])
+
+
+def _clear_sessions():
+    profile = _profile()
+    if profile.enabled and _SESSIONS:
+        profile.sessions_cleared([_describe_session(key) for key in _SESSIONS])
+    for key in _SESSIONS:
+        _end_trace(key)
+    _SESSIONS.clear()
+
+
 def _session(path, shape, device, threads):
     import onnxruntime as ort
     global _SESSIONS
     path = os.path.abspath(os.path.splitext(path)[0] + '.onnx')
     if not os.path.isfile(path):
         raise FileNotFoundError(f'ONNX model not found: {path}')
-    stat = os.stat(path)
-    adapter = _DIRECTML_ADAPTER_INDEX if device == 'DIRECTML' else 0
-    key = (path, stat.st_mtime_ns, stat.st_size, shape, device, adapter, int(threads or 1))
+    key = _session_key(path, shape, device, threads)
+    adapter = key[5]
+    profile = _profile()
+    if profile.enabled:
+        profile.session_lookup(_describe_session(key), key in _SESSIONS)
     if key not in _SESSIONS:
-        # Accelerators retain one session so another graph cannot keep VRAM
-        # alive across scales. CPU retains both scales without ORT's arena.
-        limit = 2 if device == 'CPU' else 1
-        while len(_SESSIONS) >= limit:
-            _SESSIONS.popitem(last=False)
+        # Two shapes keep the full and reduced inference scales compiled.
+        # Admission in logits accounts for the retained accelerator session.
+        while len(_SESSIONS) >= 2:
+            evicted, session = _SESSIONS.popitem(last=False)
+            _end_trace(evicted)
+            del session
+            _LOG.debug('Neural session evicted shape=%s device=%s threads=%s for shape=%s',
+                       evicted[3], evicted[4], evicted[6], shape)
+            if profile.enabled:
+                profile.session_evicted(_describe_session(evicted))
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, int(threads or 1))
         options.enable_cpu_mem_arena = False
+        trace_directory = operator_trace_directory() if device == 'CPU' else None
         if device != 'CPU':
             options.enable_profiling = True
             options.profile_file_prefix = os.path.join(
                 tempfile.gettempdir(), 'openfocus-ort-' + uuid.uuid4().hex)
+        elif trace_directory is not None:
+            options.enable_profiling = True
+            options.profile_file_prefix = os.path.join(
+                trace_directory, 'openfocus-ort-{}-t{}-{}'.format(
+                    'x'.join(str(int(v)) for v in shape), options.intra_op_num_threads,
+                    uuid.uuid4().hex[:8]))
         # DirectML needs concrete dimensions for attention MatMul.
         for name, value in zip(('layers', 'height', 'width'), shape):
             options.add_free_dimension_override_by_name(name, int(value))
@@ -243,25 +386,33 @@ def _session(path, shape, device, threads):
             options.enable_mem_pattern = False
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         provider = _provider(device, _DIRECTML_ADAPTER_INDEX if device == 'DIRECTML' else 0)
+        constructed = time.perf_counter_ns() if profile.enabled else 0
         session = ort.InferenceSession(path, sess_options=options,
                                        providers=[provider, 'CPUExecutionProvider']
                                        if device != 'CPU' else ['CPUExecutionProvider'])
         session.disable_fallback()
+        if profile.enabled:
+            constructed = time.perf_counter_ns() - constructed
         if device != 'CPU' and _PROVIDER[device] not in session.get_providers():
             try:
                 _ProfiledSession(session, device)._finish_profile(False)
             finally:
                 raise RuntimeError(f'{device} provider did not initialize')
+        hashed = time.perf_counter_ns() if profile.enabled else 0
         digest = hashlib.sha256()
         with open(path, 'rb') as stream:
             for block in iter(lambda: stream.read(64 * 1024), b''):
                 digest.update(block)
+        if profile.enabled:
+            profile.session_built(time.perf_counter_ns() - hashed, constructed)
         log_action('neural_session', checkpoint=os.path.basename(path),
                    checkpoint_sha256=digest.hexdigest(), provider=_PROVIDER[device],
                    adapter=display_name(device), adapter_index=adapter,
                    shape=shape, threads=options.intra_op_num_threads)
         if device != 'CPU':
             session = _ProfiledSession(session, device)
+        elif trace_directory is not None:
+            _TRACED[key] = session
         _SESSIONS[key] = session
     _SESSIONS.move_to_end(key)
     return _SESSIONS[key]
@@ -269,6 +420,7 @@ def _session(path, shape, device, threads):
 
 def logits(planes, path, device, threads, should_cancel=None):
     from fusion_methods.neural_common import cancel
+    from core.registration import RegistrationCancelled
     cancel(should_cancel)
     h, w = planes.shape[-2:]
     ph, pw = (-h) % 64, (-w) % 64
@@ -280,48 +432,87 @@ def logits(planes, path, device, threads, should_cancel=None):
     global _ACTUAL_DEVICE, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
     if _FALLBACK_CPU:
         device = 'CPU'
-    if device in ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO'):
-        from core.resource_policy import probe_resources, vram_budget
-        snapshot = probe_resources(device)
+    cached = None
+    if device in VRAM_GATED_KINDS:
+        from core.resource_policy import vram_budget
+        try:
+            cached = _SESSIONS.get(_session_key(path, shape, device, threads))
+        except OSError:
+            cached = None
+        # A completed session already owns its workspace; charging its full
+        # estimate against the remaining free VRAM would force a false fallback.
+        reusable = cached is not None and cached.actual_device == device
         n, hp, wp = shape
         required = estimate_inference_bytes(n, hp, wp, device) + n * hp * wp * 4 * 6
-        if not snapshot.vram_known or required > vram_budget(snapshot):
-            _LOG.warning('%s checkpoint=%s shape=%s memory required=%s budget=%s known=%s; using CPU for this job',
-                         device, os.path.basename(path), shape, required,
-                         vram_budget(snapshot), snapshot.vram_known)
-            _FALLBACK_CPU = True
-            _SESSIONS.clear()
-            device = 'CPU'
+
+        def refused(snapshot):
+            return _vram_unknown(snapshot) or required > vram_budget(snapshot)
+
+        if not reusable:
+            snapshot = _vram_snapshot(device)
+            if refused(snapshot) and _SESSIONS:
+                cached = None
+                _clear_sessions()
+                snapshot = _vram_snapshot(device)
+            # What the status shows follows the probe this job acted on.
+            _record_admission(device, snapshot)
+            if refused(snapshot):
+                known = not _vram_unknown(snapshot)
+                _LOG.warning('%s checkpoint=%s shape=%s memory required=%s budget=%s known=%s; using CPU for this job',
+                             device, os.path.basename(path), shape, required,
+                             vram_budget(snapshot) if known else 0, known)
+                _FALLBACK_CPU = True
+                _clear_sessions()
+                device = 'CPU'
     if _FALLBACK_CPU:
         from core.resource_policy import require_memory
         require_memory(estimate_inference_bytes(*shape, 'CPU'))
     session = None
+    profile = _profile()
+    device_failed = False
     try:
-        session = _session(path, shape, device, threads)
-        result = session.run(['logits'], {'input': planes})[0]
+        with profile.stage('session.acquire'):
+            session = _session(path, shape, device, threads)
+        cancel(should_cancel)
+        with profile.stage('session.run'):
+            result = session.run(['logits'], {'input': planes})[0]
         if device != 'CPU':
             device = session.actual_device
             if device == 'CPU':
                 # ORT can initialize a provider yet place this graph entirely
                 # on CPU. Reuse its valid output and keep later scales on CPU.
                 _FALLBACK_CPU = True
-                _SESSIONS.clear()
+                _clear_sessions()
+    except RegistrationCancelled:
+        raise
     except Exception:
         if device == 'CPU':
             raise
+        _LOG.warning('%s checkpoint=%s shape=%s adapter=%s inference failed; falling back to CPU for this job\n%s',
+                     device, os.path.basename(path), shape, display_name(device), traceback.format_exc())
+        device_failed = True
+    if device_failed:
+        session = None
+        cached = None
+        _clear_sessions()
+        cancel(should_cancel)
         with _LOCK:
             _FALLBACK_CPU = True
-        _LOG.warning('%s checkpoint=%s shape=%s adapter=%s inference failed; falling back to CPU for this job',
-                     device, os.path.basename(path), shape, display_name(device), exc_info=True)
-        session = None
-        _SESSIONS.clear()
         from core.resource_policy import require_memory
         require_memory(estimate_inference_bytes(*shape, 'CPU'))
-        session = _session(path, shape, 'CPU', threads)
-        result = session.run(['logits'], {'input': planes})[0]
+        with profile.stage('session.acquire'):
+            session = _session(path, shape, 'CPU', threads)
+        cancel(should_cancel)
+        with profile.stage('session.run'):
+            result = session.run(['logits'], {'input': planes})[0]
         device = 'CPU'
     _ACTUAL_DEVICE = device
     _ACTUAL_CHECKPOINT = os.path.basename(os.path.splitext(path)[0] + '.onnx')
+    if profile.enabled:
+        profile.session_run((_ACTUAL_CHECKPOINT, tuple(int(v) for v in shape), device,
+                             int(threads or 1)))
+        profile.add('threads', 'session_intra_op', max(1, int(threads or 1)))
+        profile.add('render', 'actual_provider', _PROVIDER[device])
     _LOG.debug('Neural inference checkpoint=%s provider=%s adapter=%s shape=%s output=%s fallback=%s',
                _ACTUAL_CHECKPOINT, _PROVIDER[device], display_name(device), shape,
                result.shape, _FALLBACK_CPU)
@@ -336,10 +527,12 @@ def softmax(x):
     return x
 
 
-def _resize_antialias(planes, scale):
+def _resize_antialias(planes, scale, should_cancel=None):
+    from fusion_methods.neural_common import cancel
     # PyTorch bilinear antialias uses a triangle filter widened for downsampling.
     result = planes
     for axis in (2, 3):
+        cancel(should_cancel)
         old = result.shape[axis]
         new = int(old * scale)
         if new < 1:
@@ -347,6 +540,7 @@ def _resize_antialias(planes, scale):
         src = np.moveaxis(result, axis, -1)
         dst = np.empty(src.shape[:-1] + (new,), dtype=np.float32)
         for i in range(new):
+            cancel(should_cancel)
             center = (i + 0.5) / scale - 0.5
             radius = max(1.0, 1.0 / scale)
             first = max(0, int(np.floor(center - radius)) + 1)
@@ -360,19 +554,34 @@ def _resize_antialias(planes, scale):
 
 def probabilities(planes, path, device, threads, sigma, cancel=None):
     from fusion_methods.neural_common import cancel as check
+    profile = _profile()
     h, w = planes.shape[-2:]
-    p = softmax(logits(planes, path, device, threads, cancel))
+    with profile.stage('logits.full'):
+        p = logits(planes, path, device, threads, cancel)
+    with profile.stage('softmax.full'):
+        p = softmax(p)
     check(cancel)
-    small = _resize_antialias(planes, 0.75)
-    q = softmax(logits(small, path, device, threads, cancel))
-    for n in range(p.shape[1]):
-        p[0, n] += cv2.resize(q[0, n], (w, h), interpolation=cv2.INTER_LINEAR)
-    p *= 0.5
-    if sigma:
-        radius = int(3 * sigma + 0.5)
+    with profile.stage('resize.0.75'):
+        small = _resize_antialias(planes, 0.75, cancel)
+    with profile.stage('logits.reduced'):
+        q = logits(small, path, device, threads, cancel)
+    del small
+    with profile.stage('softmax.reduced'):
+        q = softmax(q)
+    with profile.stage('upsample_combine'):
         for n in range(p.shape[1]):
-            p[0, n] = cv2.GaussianBlur(p[0, n], (radius * 2 + 1,) * 2, sigma,
-                                        borderType=cv2.BORDER_REPLICATE)
-        p /= p.sum(axis=1, keepdims=True)
+            check(cancel)
+            p[0, n] += cv2.resize(q[0, n], (w, h), interpolation=cv2.INTER_LINEAR)
+        del q
+        p *= 0.5
+    if sigma:
+        with profile.stage('gaussian'):
+            radius = int(3 * sigma + 0.5)
+            for n in range(p.shape[1]):
+                check(cancel)
+                p[0, n] = cv2.GaussianBlur(p[0, n], (radius * 2 + 1,) * 2, sigma,
+                                            borderType=cv2.BORDER_REPLICATE)
+            check(cancel)
+            p /= p.sum(axis=1, keepdims=True)
     check(cancel)
     return p

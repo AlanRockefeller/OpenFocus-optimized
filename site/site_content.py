@@ -11,7 +11,6 @@ template.html must exist under the matching locale.
 
 import os
 
-from constants import APP_VERSION
 
 REPO = "https://github.com/Xinzhe99/OpenFocus"
 RELEASES = f"{REPO}/releases"
@@ -23,7 +22,6 @@ MANUAL = {
 # Download endpoints resolve the newest complete release even without JavaScript.
 ORIGIN = os.environ.get("SITE_ORIGIN", "").strip().rstrip("/") or "https://openfocus.top"
 RELEASE = {
-    "tag": f"v{APP_VERSION}",
     "page": f"{RELEASES}/latest",
     "windows_setup": f"{ORIGIN}/download/latest/windows-setup",
     "windows_zip": f"{ORIGIN}/download/latest/windows-zip",
@@ -80,7 +78,8 @@ def _en() -> dict:
             "cta_windows": "Download for Windows",
             "cta_macos": "Download for macOS",
             "cta_github": "View on GitHub",
-            "meta": f"{RELEASE['tag']} · Windows 10/11 · macOS Apple Silicon · Linux CLI",
+            "desktop_label": "Desktop downloads (may be beta):",
+            "meta": "Windows 10/11 · macOS Apple Silicon · Linux CLI on PyPI",
             "shot_alt": (
                 "The OpenFocus window: a nine-frame stack, a wipe comparison "
                 "and a 50 mm scale bar on the fused result."
@@ -284,11 +283,13 @@ def _en() -> dict:
             "copy": "Copy",
             "copied": "Copied",
             "all": "All releases and checksums",
-            "note": f"Latest release: {RELEASE['tag']} · MIT application; StackMFF V1/V2 models have separate terms",
+            "channel_notice": "Windows and macOS downloads and updates may be beta releases. The Linux CLI on PyPI is a stable release.",
+            "note": "Desktop downloads · MIT application; StackMFF V1/V2 models have separate terms",
         },
         "privacy": {
             "title": "Privacy",
             "accounts": "The optional account service stores your email address, display name, linked sign-in provider identifiers, sessions and device labels, consent choices and the service records needed to operate your account. These records are separate from desktop usage statistics and are not covered by the 90-day statistics retention period.",
+            "reports": "Optional diagnostic reports can include software and device details, image counts and dimensions, processing settings, interface actions and sanitized error information. They exclude image pixels, image and project files, file names, paths and account credentials. You can review manual reports before sending them; after desktop sign-in, automatic error reporting is enabled by default unless you previously disabled it. You can change it in Advanced Settings. Reports may be sent anonymously or linked to your account.",
             "controls": "You can revoke sessions or delete your account from the account page. Deletion removes your contact profile, linked sign-in identities and sessions; some account, consent and administrative records may remain. Product email is optional: choose whether to opt in during account setup, and use the unsubscribe link in those emails to opt out. Sign-in links and service notices are separate.",
             "manage": "Manage your account",
             "cookies": "The website remembers your language in a cookie and your theme in local storage. The account area also uses cookies for sign-in sessions, request protection, pending sign-in and language preferences.",
@@ -363,7 +364,8 @@ def _zh() -> dict:
             "cta_windows": "下载 Windows 版",
             "cta_macos": "下载 macOS 版",
             "cta_github": "查看源码",
-            "meta": f"{RELEASE['tag']} · Windows 10/11 · macOS Apple Silicon · Linux 命令行",
+            "desktop_label": "桌面版下载（可能为测试版）：",
+            "meta": "Windows 10/11 · macOS Apple Silicon · Linux 命令行请见 PyPI",
             "shot_alt": "OpenFocus 主窗口：九帧源图、拖拽对比，以及融合结果上的 50 mm 比例尺。",
         },
         "why": {
@@ -530,11 +532,13 @@ def _zh() -> dict:
             "copy": "复制",
             "copied": "已复制",
             "all": "所有版本与校验值",
-            "note": f"最新版本：{RELEASE['tag']} · MIT 应用；StackMFF V1/V2 模型另有许可",
+            "channel_notice": "Windows 和 macOS 的下载及更新可能是测试版；PyPI 上的 Linux 命令行版为稳定版。",
+            "note": "桌面版下载 · MIT 应用；StackMFF V1/V2 模型另有许可",
         },
         "privacy": {
             "title": "隐私",
             "accounts": "可选账号服务为提供账号功能，会保存你的邮箱、显示名称、关联登录平台的用户标识、会话与设备标签、同意选择，以及运营账号所需的服务记录。这些记录与桌面使用统计分开保存，不适用统计数据的 90 天保留期限。",
+            "reports": "可选错误报告可能包含软件和设备信息、图像数量与尺寸、处理设置、界面操作及脱敏后的错误信息，不包含图像像素、图像或项目文件、文件名、路径或账号凭据。手动发送前可查看报告；登录桌面应用后，默认启用自动错误报告，此前明确关闭的设置会保留。你可以在高级设置中更改此选项。报告可以匿名发送，也可以关联账号。",
             "controls": "你可以在账号页面撤销会话或删除账号。删除会清除联系资料、关联登录身份和会话；部分账号、同意和管理记录可能保留。产品邮件为可选项：可在账号设置流程中自主选择接收，并通过邮件中的退订链接取消订阅。登录链接和服务通知另行发送。",
             "manage": "管理你的账号",
             "cookies": "网站使用 Cookie 记住语言偏好，使用本地存储记住主题。账号区还使用 Cookie 维持登录会话、提供请求保护、跟踪待完成的登录和记住语言偏好。",

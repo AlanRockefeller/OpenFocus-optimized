@@ -78,6 +78,7 @@ W oknie **Zapisz jako** zwykły TIFF zapisuje wynik jako jeden obraz, a TIFF z w
 ### Uruchamianie aplikacji
 
 Pobierz najnowszą kompilację ze [strony OpenFocus](https://openfocus.top/#download) lub z [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Strona jest preferowana: publikuje bieżący instalator Windows, kompilację macOS i pakiet Linux ze skryptami instalacyjnymi; te artefakty są dokładnym wynikiem potoku wydania, więc wybieraj je zamiast ponownej kompilacji. `pip install openfocus` instaluje tylko headless CLI (koło celowo nie zależy od PyQt6); do interfejsu graficznego użyj gotowej kompilacji albo kodu źródłowego. Po instalacji uruchom OpenFocus na jeden z sposobów:
+Strona i skrypty instalacyjne oferują także nowsze wersje beta, obecnie [wydania przedpremierowego v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Automatyczne aktualizacje aplikacji oferują także nowsze wersje beta; linuksowe CLI z PyPI pozostaje stabilne.
 
 1. **Windows (instalator lub wersja przenośna)**: kliknij dwukrotnie skrót lub `OpenFocus.exe`
 2. **macOS**: przeciągnij `OpenFocus.app` do Programów i uruchom; kompilacje są przeznaczone dla Apple Silicon
@@ -212,6 +213,8 @@ Niewielka krzywa nad suwakiem stosu źródłowego pokazuje ostrość każdej kla
 Programy mikroskopowe (ZEN, NIS-Elements, ImageJ/Fiji) często eksportują cały stos Z jako JEDEN wielostronicowy plik TIFF. OpenFocus czyta każdą stronę takiego pliku jako osobną klatkę stosu — przeciągnij lub otwórz plik, a stos pojawi się w całości (klatki nazywają się `<file>_page_001` itd.). Jednostronicowe pliki TIFF działają jak wcześniej. Odwrotnie również: **Plik → Zapisz stos → (Zarejestrowany / Wejściowy) → Zapisz jako wielostronicowy TIFF** zapisuje cały stos z powrotem do jednego `.tif` z zachowaniem głębi 16 bitów.
 
 ### Pasek skali (ryciny publikacyjne)
+
+Etykiety paska skali używają rzeczywistych pogrubionych glifów, jeśli wybrana rodzina je zawiera; w przeciwnym razie używana jest czytelna czcionka z tej samej rodziny.
 
 Jeśli wybrany cel nie ma użytecznych metadanych, domyślnie wybierana jest kalibracja ręczna i wymagany jest prawidłowy rozmiar piksela.
 
@@ -366,11 +369,11 @@ Rejestracja usuwa przestrzenne przesunięcie klatek w stosie. Jest niezbędna, g
 
 #### OpenFocus (szybko)
 
-- Ograniczone wyrównanie podobieństwa (przesunięcie + obrót + skala) z wyrównaniem jasności klatek i automatycznym przycięciem
+- Ograniczone wyrównanie podobieństwa (przesunięcie + obrót + skala) z automatycznym przycięciem
 - Wyszukiwanie ocenia różnice próbkowanych pikseli; przekształcenie używa interpolacji Lanczosa
-- Klatki przesunięte o **więcej niż 8 % rozmiaru klatki pozostają niewyrównane**, a nie częściowo poprawione. Próg zmienia parametr CLI `--align-shift-limit`
+- Zakres wyszukiwania przesunięcia wynosi domyślnie 3% rozmiaru klatki i można go zmienić przez `--align-shift-limit`. Wyszukiwanie używa poprzedniej wyrównanej klatki i zaczyna od ruchu skumulowanego; łączne przesunięcie może przekroczyć 3%.
 - Dla geometrii nieodkształcalnej lub ekstremalnej wybierz ECC albo homografię
-- **Obsługa odrzuconych klatek** domyślnie kontynuuje z niewyrównaną klatką. Wybierz **Zatrzymaj po odrzuceniu klatki**, aby render lub element wsadu zakończył się błędem przed utworzeniem wyniku, gdy jakość detektora jest niższa niż 0,06 albo oszacowany ruch przekracza skonfigurowany limit przesunięcia, obrót 8° lub zmianę skali 5 %. Klatki są numerowane od 1 w kolejności przetwarzanego stosu. Geometryczne odniesienie domyślnie to klatka 1; słabe bezpośrednie dopasowanie może zostać ponowione z sąsiednią klatką bliższą odniesieniu. Ta polityka wykrywa odrzucone oszacowania, ale nie wszystkie błędne dopasowania: słaba tekstura, powtarzające się wzory, przesłonięcia, duży ruch lub zmiany ostrości nadal mogą pokonać rejestrację. Sprawdź wynik.
+- Przy rzeczywistym błędzie szacowania `failure_policy=continue` (domyślnie) zachowuje niewyrównaną klatkę, a `fail` przerywa pracę. Mało tekstury, powtarzalne wzory i zmiany ostrości mogą nadal powodować niedokładne dopasowania.
 - W CLI tę samą politykę wybiera `--align openfocus --align-param 'failure_policy="fail"'` (cytowanie zależne od powłoki). Elementy wsadu stosują wybraną politykę niezależnie. Domyślnie jest `"continue"`.
 - Ustaw **Klatkę odniesienia** jako liczbę od 1 w kolejności uwzględnionych, przetworzonych klatek, aby zakotwiczyć geometrię w tej klatce. Kolejność klatek jest zachowana; wyrównanie jasności używa własnego odniesienia. Każdy stos wsadu musi zawierać ten numer, inaczej element kończy się błędem. Przykład CLI: `--align openfocus --align-param reference_frame=3`. Wybór odniesienia nie poprawia paralaksy ani słabego dopasowania; sprawdź wynik.
 
@@ -422,7 +425,7 @@ OpenFocus oferuje dziesięć algorytmów fuzji plus tryb tylko wyrównania. W no
 
 Każdy kafelek sieci używa wszystkich klatek. Klatki źródłowe i dane tymczasowe wyrównania mogą być przechowywane na dysku; wolne miejsce i dostępna pamięć ograniczają wielkość stosu. Kafelkowanie przestrzenne V2 przybliża wnioskowanie dla całego obrazu.
 
-Jeśli nie wskazano katalogu tymczasowego, OpenFocus szacuje potrzebne miejsce na podstawie znanych danych wejściowych i danych tymczasowych. Gdy na systemowym dysku tymczasowym brakuje miejsca, może rozważyć zapisywalne stałe dyski lokalne. Jawnie wskazany katalog nie jest automatycznie zastępowany. Sprawdzenie miejsca jest szacunkiem w danej chwili, a nie rezerwacją; później miejsca może zabraknąć. W razie błędu zapisu wybierz katalog z prawem zapisu w ustawieniach zaawansowanych.
+Jeśli nie wskazano katalogu tymczasowego, OpenFocus szacuje potrzebne miejsce na podstawie wejścia i danych tymczasowych, a przy braku miejsca może rozważyć zapisywalne stałe dyski lokalne. Gdy wybrany katalog jest niedostępny, pojawia się ostrzeżenie i tymczasowo używany jest katalog systemowy; każde nowe zadanie ponawia zapisaną opcję. Brak miejsca na wybranym dysku nie powoduje automatycznej zmiany. Sprawdzenie jest szacunkiem, a nie rezerwacją. W razie błędu wybierz zapisywalny katalog w ustawieniach zaawansowanych.
 
 
 ### StackMFF V2 (uczenie głębokie)
@@ -467,33 +470,20 @@ Jeśli nie wskazano katalogu tymczasowego, OpenFocus szacuje potrzebne miejsce n
 
 - **Algorytm**: implementacja metody Fu i in. (*Laser & Optoelectronics Progress*, 2024): mapa ostrości z różnicy rozmyć |I − mean(I)| jest wzbogacana operatorem gradientu quasi-gaussowskiego w czterech sąsiedztwach (GFG), udokładniana szybkim filtrem sterowanym, decyzja podejmowana jest dla każdego piksela (remisy rozstrzyga miara małego obszaru Sobela 3×3), a binarne mapy decyzji są ponownie wygładzane szybkim filtrem sterowanym przed ważonym mieszaniem
 - **Najlepsza do**: mikroskopii i zdjęć z wyraźnymi obszarami ostrości
-- **Zalety**: szybka, ostre granice obszarów ostrości; pamięć nie rośnie z liczbą klatek
+- **Zalety**: szybka, ostre granice; mapy ostrości i wag są przetwarzane w ograniczonych oknach. Źródła i ich opisy, wynik, dekodowanie oraz bufory nadal wymagają RAM i tymczasowego miejsca na dysku.
 - **Parametr**: jądro = rozmiar filtra średniego zgrubnej mapy ostrości (1–51, domyślnie 7)
 
 ### OpenFocus A / B / C
 
-- **OpenFocus A**: wybiera piksele źródłowe według wieloskalowej odpowiedzi ostrości
-- **OpenFocus B**: miesza sąsiednie klatki według wygładzonej mapy głębi
-- **OpenFocus C**: miesza piksele źródłowe według końcowej wygładzonej mapy głębi
-- **Parametry**: A i B używają suwaka jądra do skali odpowiedzi ostrości; C nie ma promienia. Wygładzanie A nie wpływa na wynik, tak jak w HF9 A; B i C wygładzają mapę głębi używaną do łączenia
+A używa wieloskalowej odpowiedzi ostrości (promień 8, wygładzanie 4); jego wygładzanie jest obecnie nieaktywne.
 
-**Wygładzanie**: jedno pole pod suwakiem jądra, znaczenie zależy od wybranej metody (zakres 0–8, krok 0,2):
+B używa mapy głębi (promień 8, wygładzanie 4, feather 3). C używa ważonej piramidy wielopoziomowej (wygładzanie 4) i nie ma promienia.
 
-| Metoda | Etykieta | Domyślnie | Efekt |
-|---|---|---|---|
-| OpenFocus A | Wygładzanie mieszania | 2,0 | Bez wpływu na wynik, tak jak w HF9 A |
-| OpenFocus B | Wygładzanie głębi | 1,44 | Kontroluje wygładzanie mapy głębi kierującej mieszaniem |
-| OpenFocus C | Wygładzanie mieszania | 3,6 | Kontroluje wygładzanie mapy głębi i przejścia łączenia |
+CLI: `--method openfocus_b --param radius=8 --param smoothing=4 --param feather=3`.
 
-Domyślny rozmiar jądra A/B: 17. Zapisane wartości pozostają w użyciu; przywróć ustawienia domyślne, aby użyć nowych wartości.
+W interfejsie dopasowanie ekspozycji jest domyślnie włączone dla A/B/C i odnosi się do pierwszej przetworzonej klatki; dla innych metod jest domyślnie wyłączone i odnosi się do ostatniej. Jawnie zapisane wybory są zachowane; włączone A/B/C używa pierwszej klatki. Korekcja dryfu jasności pozostaje domyślnie wyłączona. Przywrócenie ustawień przywraca wartości domyślne każdej metody. W CLI jest domyślnie włączone dla wszystkich metod; `--no-exposure-match` je wyłącza.
 
-Większe wartości zwiększają wygładzanie przejść. Każda metoda pamięta własną wartość między sesjami, a przetwarzanie wsadowe stosuje tę samą regułę.
-
-C nie ma parametru promienia, więc suwak jądra jest dla niej ukryty.
-
-CLI: `--depth-smoothing VALUE` (B) i `--blend-smoothing VALUE` (A, C).
-
-**Opcje jasności są osobne dla każdej metody.** *Dopasuj ekspozycję przed fuzją* i *Usuń dryf jasności* są pamiętane osobno dla każdej metody fuzji, ponieważ odpowiadają na pytanie konkretnego stosu, a nie na ogólne preferencje. Obie są domyślnie włączone dla OpenFocus A/B/C (które nie mają wbudowanej kalibracji ekspozycji); pozostałe metody zachowują historyczne wartości domyślne (dopasowanie ekspozycji włączone, usuwanie dryfu wyłączone). Przełączenie metody pokazuje jej własne wartości, a one przetrwają restart. **Przywróć domyślne** czyści zapamiętane wartości jasności, wygładzania i promienia wszystkich metod.
+Wybór A/B/C włącza wyrównanie OpenFocus, chyba że jawnie wybrano wyrównanie lub przywrócono projekt. Domyślne przesunięcie wynosi 0,03, a powiększenie 5%.
 
 **Wyostrz wynik łączenia** stosuje łagodną maskę nieostrą po fuzji, przed konwersją do głębi wyjściowej. Jest domyślnie wyłączone i można je włączyć w głównych lub wsadowych opcjach fuzji; odpowiednik w CLI to `--sharpen-output`. Wpływa na obraz po fuzji, a nie na wyrównane klatki ani mapy głębi. Może uwydatnić krawędzie, ale też wzmocnić szum i obwódki. Ustawienie jest zapisywane w projekcie i pamiętane między sesjami.
 
@@ -519,9 +509,9 @@ Wybierz **Tylko wyrównanie (bez fuzji)**, aby zarejestrować stos i dodać do l
 | StackMFF (V1) | Wolno (GPU) | Nie badano tutaj | Luminancja niezależna od kolejności; chrominancja może się różnić przy równych odległościach luminancji |
 | StackMFF V2 | Szybko (GPU) | Nie badano tutaj | Ciągłych serii z bardzo małym modelem |
 | StackMFF V3 | Wolno (GPU) | Doskonała | Najwyższej jakości |
-| OpenFocus A | Zależy od stosu | Zależy od stosu | Wyboru ostrych pikseli według odpowiedzi wieloskalowej |
+| OpenFocus A | Zależy od stosu | Zależy od stosu | Wieloskalowej odpowiedzi ostrości i mieszania obszarów o małej szczegółowości |
 | OpenFocus B | Zależy od stosu | Zależy od stosu | Mieszania sąsiednich klatek według mapy głębi |
-| OpenFocus C | Zależy od stosu | Zależy od stosu | Mieszania pikseli źródłowych według końcowej mapy głębi |
+| OpenFocus C | — | — | Ważona piramida wielopoziomowa |
 
 **Narzędzia → Porównaj metody…** pozwala niezależnie ustawić kilka metod. Nazwa metody, etykiety parametrów i kontrolki pozostają razem przy zwężaniu okna. Zmiany automatycznie aktualizują podgląd. **Podgląd ROI (szybko)** łączy wybrany obszar z otaczającym kontekstem; **Fuzja całego obrazu** sprawdza wynik całego obrazu i pozwala zbadać inny obszar bez ponownego renderowania. Wyniki ROI mogą różnić się od pełnego obrazu, ponieważ statystyki ekspozycji i niektóre algorytmy zależą od rozmiaru obrazu.
 Domyślnie wybrana jest **fuzja całego obrazu**.
@@ -644,6 +634,8 @@ tła dokładnie przywracają obraz, dostępną historię i diagnostykę bez pono
 
 ### Zarządzanie etykietami
 
+Eksport historycznego wyrównanego stosu używa jego własnych identyfikatorów klatek; brak identyfikatorów wymaganych przez etykietę powoduje błąd. Tylko faktycznie stosowane etykiety blokują eksport przezroczystego PNG. **Dopasuj** używa ograniczonej miniatury; **100%** pokazuje oryginalny obszar w skali jeden piksel źródła na piksel urządzenia i może pokazać ładowanie lub błąd. Zapisane duże współrzędne i rozmiary są zachowywane podczas edycji.
+
 Otwórz **Narzędzia → Etykiety** po wczytaniu obrazów lub utworzeniu wyniku. Każda etykieta ma własny cel: stos źródłowy, stos zarejestrowany lub wyniki wyjściowe. Etykiety wyników mogą dotyczyć wszystkich wyników albo wybranego wyniku według nazwy; zmiana nazwy lub kolejności tego wyniku nie zmienia powiązania.
 
 Użyj **Dodaj**, aby utworzyć kolejną etykietę, wybierz pozycję do edycji i włączaj lub wyłączaj ją polem wyboru. Wpisz stały tekst albo wstaw `{value}` dla numeru klatki. Numer to wartość początkowa plus indeks klatki od zera pomnożony przez interwał; pojedynczy wynik zawsze używa wartości początkowej.
@@ -661,6 +653,8 @@ Podgląd używa rzeczywistego celu. Przechodź przyciskami Poprzednia/Następna 
 Otwórz **Ustawienia → Ustawienia zaawansowane**, aby zmienić wydajność, rejestrację, czyszczenie matrycy, nazwy wyników, AI StackMFF i ustawienia uruchamiania. Zmiany pozostają szkicem do naciśnięcia **OK**; Anuluj, Esc i zamknięcie okna je odrzucają. Zmniejszenie rozmiaru kafelka natychmiast aktualizuje widoczny limit nakładki do połowy kafelka. Zapisany limit partii AI pozostaje, ale wnioskowanie obecnie wysyła jeden kafelek na wywołanie; szerokość skalowania rejestracji może zmienić dokładność wyrównania. Zbieranie diagnostyki wyrównania to pole wyboru w sekcji Rejestracja.
 
 Automatyczne pobieranie aktualizacji działa w bezczynności i nigdy nie instaluje aktualizacji samodzielnie. Ukończone pobieranie pozostaje gotowe, dopóki nie wybierzesz jawnie **Uruchom ponownie i zaktualizuj**. Ponowne uruchomienie chroni aktywne edycje i niezapisaną pracę, a następnie zapisuje dane odzyskiwania przed uruchomieniem zamiennika. Anulowanie pobierania lub przygotowania czeka na bieżącą bezpieczną granicę. Istniejąca kompletna, nowsza przygotowana kompilacja może zostać zainstalowana bez sieci.
+
+W Windows aktualizator przygotowuje osobną wersję kandydującą i podczas przełączenia przenosi znacznik wersji przenośnej oraz `OpenFocusData`. W razie błędu przywraca poprzednią instalację; jeśli przywrócenie się nie powiedzie, zachowuje kopię i nie uruchamia aplikacji automatycznie. Może pojawić się jedno żądanie uprawnień. Anulowanie rozpakowywania usuwa nieukończone dane przygotowawcze i jest sprawdzane między odczytami i zapisami po 256 KiB; zablokowana operacja dyskowa lub sieciowa może je opóźnić.
 
 Korekcja pola płaskiego zmienia piksele robocze sesji bez nadpisywania plików źródłowych. Wybierz białe odniesienie i klatkę podglądu, a następnie ponownie zbuduj podgląd po zmianie źródła lub skali. Odniesienie i obrazy robocze/bazowe muszą mieć tę samą dziedzinę współrzędnych i rozmiar. Zastosowanie przygotowuje oba stosy przed zatwierdzeniem; opcjonalne usunięcie klatki odniesienia należy do tego samego kroku cofania. Wyeksportuj poprawione obrazy źródłowe, jeśli chcesz zachować te piksele poza sesją.
 
@@ -736,8 +730,10 @@ Planista uwzględnia fizyczne rdzenie, powinowactwo CPU i limity oraz uruchamia 
 
 StackMFF V1/V2/V3 używają ONNX Runtime. DirectML w Windows i CoreML w macOS mogą przyspieszać wnioskowanie; w przeciwnym razie używany jest CPU. Dostępność dostawcy nie dowodzi wykonania na GPU. Obsługa innych GPU wymaga weryfikacji.
 
+OpenFocus B może przyspieszać przetwarzanie głębi i łączenie źródeł na zgodnym GPU OpenCL; zależnie od budżetu pamięci może używać ograniczonych etapów GPU lub wrócić do CPU. OpenFocus A/C i wyrównanie używają CPU. Zobacz [obsługę GPU](GPU_SUPPORT.md).
+
 - Przełącznik znajduje się w **Ustawienia → Akceleracja GPU**
-- Odznaczenie wymusza metody neuronowe na CPU — przydatne, gdy sterowniki GPU działają niepoprawnie
+- Odznaczenie wymusza obsługiwane metody fuzji na CPU — przydatne przy problemach ze sterownikami GPU
 - Panel stanu pokazuje `N/A`, gdy akcelerator nie jest używany lub niedostępny, oraz `CPU*`, gdy akcelerator istnieje, ale wybrana metoda działa tylko na CPU
 - Wybór działa przy następnym renderowaniu i jest pamiętany
 
@@ -758,7 +754,7 @@ Utwórz pusty plik o nazwie `OpenFocus.portable` obok `OpenFocus.exe` (w przeno�
 
 ### Metadane EXIF
 
-Metadane źródła (model aparatu, ekspozycja, orientacja itd.) są zachowywane: orientacja jest stosowana przy wczytywaniu, a eksport PNG/TIFF/WebP automatycznie osadza oryginalny EXIF. Eksport JPG/BMP nie może przechować pełnego EXIF i jest zapisywany bez niego.
+Eksport PNG/TIFF/JPEG/WebP zachowuje oczyszczone metadane aparatu, obiektywu, ekspozycji, daty i GPS oraz ustawia Orientation na 1. BMP nie osadza EXIF. Jeśli dane EXIF lub ICC pliku JPEG przekraczają limit formatu, OpenFocus zgłasza wyraźny błąd; wybierz PNG lub TIFF. Jeśli oczyszczone EXIF obrazu źródłowego przekracza 16 MiB, OpenFocus odmawia wczytania; najpierw usuń lub zmniejsz EXIF tego pliku.
 
 ### Wejście HEIC/HEIF
 
@@ -835,7 +831,7 @@ W **Ustawienia → Ustawienia zaawansowane → Nazwy wyników** opcjonalny prefi
 
 ### Udostępnianie wyniku
 
-Kliknij wynik prawym przyciskiem myszy i otwórz **Udostępnij**. **Kopiuj obraz podglądu (JPEG)** umieszcza bieżący wynik w pełnej rozdzielczości, wraz z etykietami i paskiem skali, w schowku jako prawdziwy JPEG i udostępnia także zdekodowaną mapę bitową. **Kopiuj ścieżki plików** kopiuje adresy URL trwałych plików wszystkich zaznaczonych wyników; niezapisane lub nieaktualne wyniki wymagają wybrania folderu i są zapisywane jako PNG z bieżącymi pikselami 8/16 bitów i adnotacjami. **Pokaż w folderze** otwiera Eksplorator, Finder lub menedżer plików z zaznaczonym plikiem. Istniejące eksporty są używane ponownie tylko wtedy, gdy nadal odpowiadają bieżącemu obrazowi i adnotacjom. **Utwórz prywatny link** pozostaje wyłączony, dopóki nie będzie udostępniania hostowanego.
+Kliknij wynik prawym przyciskiem myszy i otwórz **Udostępnij**. **Kopiuj obraz podglądu (JPEG)** umieszcza wynik w pełnej rozdzielczości, z etykietami i paskiem skali, w schowku jako prawdziwy JPEG i zdekodowaną mapę bitową. **Kopiuj ścieżki plików** kopiuje lokalne ścieżki jako tekst i adresy URL plików. Zapisany, niezmieniony wynik używa istniejącego pliku; niezapisany, zmieniony lub brakujący wynik jest automatycznie zapisywany jako PNG w systemowym folderze tymczasowym, bez oznaczania go jako zapisanego. System może usunąć pliki tymczasowe; użyj **Zapisz jako**, aby je zachować. **Pokaż w folderze** otwiera Eksplorator, Finder lub menedżer plików z zaznaczonym plikiem, bez pytania o folder. **Utwórz prywatny link** pozostaje wyłączony do czasu udostępnienia hostingu.
 
 ### Format eksportu przez przeciąganie
 
@@ -872,7 +868,7 @@ Dla wyniku retuszu wybierz TIFF z warstwami z listy formatów **Zapisz jako**, a
 ## 14. Interfejs wiersza poleceń
 
 `pip install openfocus` obejmuje model AI, jego wagi oraz dekodowanie HEIC i RAW aparatów.
-Na Pythonie 3.13+ pakiet `dtcwt` jest pomijany, a pozycja DTCWT pozostaje wyłączona z podpowiedzią.
+Aby włączyć DTCWT na Pythonie 3.13+, uruchom następnie `python -m pip install --no-deps dtcwt==0.14.0`. OpenFocus dostarcza adapter NumPy 2; `pip check` nadal zgłosi ograniczenie NumPy w oryginalnym pakiecie.
 
 OpenFocus może działać bez interfejsu graficznego — przydatne w potokach skryptowych i CI. Skrypt konsolowy `openfocus` (instalowany przez `pip install openfocus`) i `python main.py` z kopii roboczej udostępniają te same polecenia. Opcje fuzji działają w obu formach; podpolecenia:
 
@@ -920,15 +916,15 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--input, -i` | Folder (foldery) obrazów, plik wideo, jeden lub kilka plików obrazów albo wielostronicowy TIFF |
 | `--output, -o` | Ścieżka obrazu wyjściowego (rozszerzenie określa format) |
 | `--output-dir, -d` | Tryb wsadowy: łączy każdy folder wejściowy, zapisując `<folder>.png` dla każdego stosu |
-| `--resume` | Tryb wsadowy: pomija foldery, których plik wyjściowy już istnieje |
+| `--resume` | Pomija folder tylko wtedy, gdy wszystkie żądane wyniki są niepustymi zwykłymi plikami; nie sprawdza treści ani parametrów |
 | `--config FILE` | Tryb wsadowy: JSON z nadpisaniami dla każdego folderu, np. `{"stackA": {"method": "dct"}}` |
 | `--method, -m` | `stackmffv3` (domyślnie), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
 | `--param KEY=JSON_VALUE` | Ustawia dowolny parametr fuzji; można powtarzać, nadpisuje starsze flagi |
 | `--align, -a` | `none` (domyślnie), `homography`, `ecc`, `both`, `openfocus` |
 | `--align-param KEY=JSON_VALUE` | Ustawia dowolny parametr rejestracji; można powtarzać |
-| `--align-shift-limit` | Tylko `openfocus`: maksymalne akceptowane przesunięcie jako ułamek rozmiaru klatki (domyślnie 0,08; większe klatki pozostają niewyrównane) |
+| `--align-shift-limit` | Zakres wyszukiwania przesunięcia jako ułamek rozmiaru klatki (domyślnie 0,03); przesunięcie skumulowane może być większe. |
 | `--alignment-report PATH` | Zapisuje wyniki wyrównania klatek w JSON dla pojedynczego, niegrupowego renderu z włączonym wyrównaniem; renderowania wsadowe i grupowe nie są obsługiwane |
-| `--exposure-match` | Dopasowuje średnią każdej klatki do ostatniej klatki przed fuzją (domyślnie włączone; `--no-exposure-match` wyłącza). Wzmocnienia wspólne dla całego stosu, więc wynik kafelkowy pozostaje bezszwowy; dotyczy każdej metody i odniesienia jasności wyrównywacza OpenFocus |
+| `--exposure-match` | W CLI domyślnie włączone dla wszystkich metod; A/B/C używają pierwszej przetworzonej klatki, inne metody ostatniej. `--no-exposure-match` wyłącza. |
 | `--base-frame` | Opcjonalny krok po fuzji: dopasowuje niskie częstotliwości wyniku do klatki `last`/`first` (domyślnie `none`) |
 | `--sort` | Kolejność klatek dla `openfocus_a/b/c`: `asc` (domyślnie, kolejność plików), `desc` (odwrócenie przemiatania od dalekich do bliskich), `off` |
 | `--frame-order` | Folder na wejściu: `auto` (domyślnie) porządkuje klatki od bliskich do dalekich według kroków ostrości z EXIF, gdy mają je wszystkie klatki (bracketing ostrości OM SYSTEM zaczyna się w połowie głębi), w przeciwnym razie według nazwy; `name` zawsze według nazwy pliku. Pliki podane jawnie zachowują swoją kolejność |
@@ -936,9 +932,7 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--dust-map WHITE` | Korekcja pola płaskiego (mapa pyłu) z rozogniskowanego zdjęcia białego pola |
 | `--defect-mask-path MASK` | Maska defektów we współrzędnych matrycy, naprawiana przed rejestracją |
 | `--sensor-denoise` | Ostrożne odszumianie matrycy przed rejestracją |
-| `--kernel, -k` | Rozmiar jądra (wymuszony nieparzysty); skala odpowiedzi ostrości dla `openfocus_a` i `openfocus_b`; C nie ma promienia |
-| `--depth-smoothing VALUE` | Tylko `openfocus_b`: siła wygładzania przejść głębi (domyślnie 1,44) |
-| `--blend-smoothing VALUE` | Tylko `openfocus_a` / `openfocus_c`: siła wygładzania przejść (domyślnie 2,0 dla A, 3,6 dla C) |
+| `--kernel, -k` | Tylko dla metod deklarujących `kernel_size` |
 | `--ai-mode {soft,hard}` | Wyjście StackMFF V3: mieszanie ważone prawdopodobieństwami (domyślnie) lub najbardziej prawdopodobna klatka dla każdego piksela |
 | `--threads, -t` | Górny limit wątków roboczych; `0` = automatycznie (domyślnie), wartości dodatnie ograniczają współbieżność |
 | `--resource-preference` | `balanced` (domyślnie), `responsive` lub `maximum`; steruje planowaniem zasobów |
@@ -1101,6 +1095,7 @@ Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd uży
 
 #### AI niedostępne
 
+- Włącz i zatwierdź funkcje eksperymentalne w ustawieniach zaawansowanych; bez tego metody AI w aplikacji są wyłączone. Środowisko i model to osobne wymagania.
 - Sprawdź ONNX Runtime i dołączony model.
 - Sprawdź przez **Pomoc → Informacje o środowisku**
 - StackMFF V3 nie wymaga torchvision

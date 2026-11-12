@@ -55,10 +55,7 @@
 ## 📢 News
 
 > [!NOTE]
-> **v1.77.0 release candidate** — Auto background and restorable retouch sessions,
-> confirmed settings reset, continuous native inspection, bounded large-stack
-> processing and TIFF conversion, plus microscope mosaic scale/rotation fixes.
-> See the changelog for supported inputs and feature limitations.
+> **[v1.77.0-beta.7 is available](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)** — This prerelease adds OpenCL GPU acceleration for OpenFocus B on compatible devices, with CPU fallback. It also fixes wipe comparison and adds auto background and restorable retouch sessions. See the [Changelog](./CHANGELOG.md) for the full update and supported inputs.
 
 Earlier releases are in the [Changelog](./CHANGELOG.md).
 
@@ -240,7 +237,7 @@ space for the selected source, processing workspace and full-size result.
 <a id="install"></a>
 ## ⬇️ Install
 
-Download the latest Windows or macOS build from the [OpenFocus website](https://openfocus.top/#download). Portable builds and older versions are also available on [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases).
+The [OpenFocus website](https://openfocus.top/#download) and its install scripts offer the newest Windows or macOS build, including a beta when it is newer than stable (currently [v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)). Portable builds and older versions are also available on [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Desktop automatic updates also offer newer beta releases; the Linux CLI installed from PyPI remains stable.
 
 On macOS (Apple Silicon) or Linux, install from a terminal. Linux installs the
 headless CLI; macOS installs the app in `~/Applications`.

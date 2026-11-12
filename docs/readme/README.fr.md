@@ -55,7 +55,7 @@
 ## 📢 Actualités
 
 > [!NOTE]
-> **v1.77.0, version candidate** — Arrière-plan automatique et sessions de retouche restaurables, aperçus JPEG/RAW à mémoire limitée et inspection des pixels d’origine, fusion CPU selon le budget RAM et état d’exécution GPU plus clair. Consultez le journal des modifications pour les entrées prises en charge et les limitations.
+> **[v1.77.0-beta.7, version préliminaire](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)** — Accélération GPU pour les appareils OpenCL compatibles dans OpenFocus B, avec repli sur le CPU ; comparaison par balayage corrigée ; arrière-plan automatique et retouche. Détails dans le [journal des modifications](../../CHANGELOG.md).
 
 Les versions précédentes figurent dans le [journal des modifications](../../CHANGELOG.md).
 
@@ -219,7 +219,7 @@ Un agent peut piloter l'application via un canal local protégé par jeton.
 <a id="install"></a>
 ## ⬇️ Installation
 
-Téléchargez la dernière version Windows ou macOS depuis le [site web d'OpenFocus](https://openfocus.top/#download). Les mêmes fichiers et les versions antérieures sont aussi disponibles sur [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases).
+Le [site web d'OpenFocus](https://openfocus.top/#download) et ses scripts d’installation proposent pour Windows et macOS la version la plus récente, y compris une bêta plus récente (actuellement v1.77.0-beta.7). Les téléchargements sont aussi disponibles sur [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Les mises à jour automatiques du bureau proposent aussi les bêtas plus récentes ; la CLI Linux de PyPI reste stable.
 
 Consultez le [manuel](../USER_MANUAL_FR.md) pour l'installation et le dépannage.
 

@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import zipfile
 
-from constants import APP_VERSION
+from constants import app_display_version
 from utils.app_paths import user_data_dir
 
 LOG_DIR_NAME = "logs"
@@ -35,6 +35,10 @@ _handler = None
 _directory = None
 _session_marker = None
 _session_started = False
+_session_had_error = False
+# A level chosen while running (Advanced Settings, --log-level). It outlives
+# repeated setup_logging() calls, which would otherwise restore the default.
+_runtime_level = None
 _context = ContextVar("openfocus_operation", default=None)
 _SESSION_FILE = re.compile(
     r"openfocus-\d{8}T\d{6}_\d{6}-(\d+)\.(?:log(?:\.\d+)?|crash\.txt)$")
@@ -62,8 +66,22 @@ def session_log_path() -> Path:
     return logs_dir() / f"openfocus-{session_id()}.log"
 
 
+def mark_session_error() -> None:
+    """Retain an error trigger even if its log entry is later rotated out."""
+    global _session_had_error
+    with _lock:
+        _session_had_error = True
+
+
+def session_had_error() -> bool:
+    with _lock:
+        return _session_had_error
+
+
 class _ContextFilter(logging.Filter):
     def filter(self, record):
+        if record.levelno >= logging.ERROR:
+            mark_session_error()
         context = _context.get()
         record.session_id = session_id()
         if not hasattr(record, "operation_id"):
@@ -120,24 +138,68 @@ def _prune_old_logs(directory):
         pass
 
 
+def _resolve_level(level=None) -> int:
+    """An explicit level, else the runtime choice, else the environment, else INFO."""
+    if level is None:
+        level = _runtime_level
+    if level is None:
+        level = os.environ.get("OPENFOCUS_LOG_LEVEL", "INFO")
+    if isinstance(level, str):
+        level = logging.getLevelName(level.strip().upper())
+    return level if isinstance(level, int) and not isinstance(level, bool) else logging.INFO
+
+
+def debug_enabled() -> bool:
+    """True when DEBUG detail is recorded; guard costly diagnostics with it."""
+    return _logger.isEnabledFor(logging.DEBUG)
+
+
+def set_log_level(level) -> int:
+    """Change the level of the running process and return the level applied.
+
+    ``None`` returns to the default (OPENFOCUS_LOG_LEVEL, else INFO). The
+    choice is per process: a caller that starts a worker process passes it on,
+    as the render process does. Changes are recorded so a log shows where its
+    detail starts and stops.
+    """
+    global _runtime_level
+    with _lock:
+        previous = _logger.getEffectiveLevel()
+        _runtime_level = None if level is None else _resolve_level(level)
+        applied = _resolve_level()
+        if applied != previous:
+            # Record the change while the more detailed of the two levels is
+            # in force, at a level that it lets through.
+            detailed = min(applied, previous)
+            _logger.setLevel(detailed)
+            _event("log_level.changed", {"level": logging.getLevelName(applied),
+                                         "previous": logging.getLevelName(previous)},
+                   level=max(detailed, logging.INFO))
+        _logger.setLevel(applied)
+        return applied
+
+
+def set_debug_logging(enabled) -> int:
+    """Detailed (DEBUG) logging on, or back to the default level."""
+    return set_log_level(logging.DEBUG if enabled else None)
+
+
 def setup_logging(log_dir=None, level=None) -> Path:
     """Install one owned handler; repeated calls never duplicate log records.
 
     OPENFOCUS_LOG_DIR and OPENFOCUS_LOG_LEVEL override the defaults for support
     and development. An unwritable directory must not prevent image processing.
     """
-    global _handler, _directory, _session_started
+    global _handler, _directory, _session_started, _runtime_level
     with _lock:
         directory = Path(log_dir) if log_dir is not None else logs_dir()
-        selected_level = level if level is not None else os.environ.get("OPENFOCUS_LOG_LEVEL", "INFO")
-        if isinstance(selected_level, str):
-            selected_level = logging.getLevelName(selected_level.upper())
-        if not isinstance(selected_level, int):
-            selected_level = logging.INFO
+        selected_level = _resolve_level(level)
         if _handler is not None and directory == _directory:
             _logger.setLevel(selected_level)
             return directory
+        runtime_level = _runtime_level
         shutdown_logging()
+        _runtime_level = runtime_level  # Moving the log keeps the chosen detail.
         _directory = directory
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -161,7 +223,7 @@ def setup_logging(log_dir=None, level=None) -> Path:
 
 def shutdown_logging() -> None:
     """Close only OpenFocus's handler; leave embedding/test handlers intact."""
-    global _handler, _directory, _session_started
+    global _handler, _directory, _session_started, _runtime_level
     with _lock:
         if _handler is not None:
             _logger.removeHandler(_handler)
@@ -169,6 +231,7 @@ def shutdown_logging() -> None:
             _handler = None
         _directory = None
         _session_started = False
+        _runtime_level = None
 
 
 def get_logger(name: str = "openfocus") -> logging.Logger:
@@ -179,6 +242,8 @@ def get_logger(name: str = "openfocus") -> logging.Logger:
 
 
 def _event(event, details, *, level=logging.INFO, exc_info=None):
+    if event.endswith('.failed'):
+        mark_session_error()
     context = _context.get()
     try:
         payload = json.dumps(details, ensure_ascii=False, sort_keys=True, default=str)
@@ -194,6 +259,17 @@ def log_action(event: str, **details) -> None:
     _event(event, details)
 
 
+def log_debug(event: str, **details) -> None:
+    """Record a diagnostic event only when DEBUG detail is on.
+
+    For decisions and measurements that explain a result (a plan, a chosen
+    directory, one tile's time), never per pixel or per progress tick. When
+    building ``details`` is itself costly, test ``debug_enabled()`` first.
+    """
+    if _logger.isEnabledFor(logging.DEBUG):
+        _event(event, details, level=logging.DEBUG)
+
+
 def log_session_start() -> None:
     """Emit one banner even when multiple windows/entry points initialize."""
     global _session_started
@@ -201,7 +277,7 @@ def log_session_start() -> None:
         if _session_started or _handler is None:
             return
         _session_started = True
-        log_action("session.started", version=APP_VERSION,
+        log_action("session.started", version=app_display_version(),
                    python=sys.version.split()[0], platform=sys.platform,
                    frozen=bool(getattr(sys, "frozen", False)),
                    log_level=logging.getLevelName(_logger.level))
@@ -214,12 +290,31 @@ def frame_details(images) -> dict:
     except TypeError:
         return {"frame_count": None}
     details = {"frame_count": count}
-    if count:
-        first = images[0]
-        shape = getattr(first, "shape", None)
-        dtype = getattr(first, "dtype", None)
-        details.update(first_shape=tuple(shape) if shape is not None else None,
-                       first_dtype=str(dtype) if dtype is not None else None)
+    if not count:
+        return details
+    first = images[0]
+    shape = getattr(first, "shape", None)
+    dtype = getattr(first, "dtype", None)
+    details.update(first_shape=tuple(shape) if shape is not None else None,
+                   first_dtype=str(dtype) if dtype is not None else None)
+    shapes = {}
+    total_bytes = 0
+    sizes_known = True
+    for frame in images:
+        shape = getattr(frame, "shape", None)
+        dtype = getattr(frame, "dtype", None)
+        key = (tuple(shape) if shape is not None else None,
+               str(dtype) if dtype is not None else None)
+        shapes[key] = shapes.get(key, 0) + 1
+        size = getattr(frame, "nbytes", None)
+        if isinstance(size, int) and size >= 0:
+            total_bytes += size
+        else:
+            sizes_known = False
+    details["frame_shapes"] = [{"shape": shape, "dtype": dtype, "count": count}
+                               for (shape, dtype), count in shapes.items()]
+    if sizes_known:
+        details["total_bytes"] = total_bytes
     return details
 
 
@@ -367,7 +462,7 @@ def export_feedback_package(dest_path, description: str = "",
                 if crash is not None:
                     paths = [crash, *(path for path in paths if path != crash)]
                 index = [
-                    f"OpenFocus {APP_VERSION}; session {session_id()}",
+                    f"OpenFocus {app_display_version()}; session {session_id()}",
                     "Read session_log.txt for the current session, then logs/ for retained history.",
                     "Match operation=<id> to follow a task; parent_operation_id links nested stages.",
                     "Events end in .started, .completed, .failed or .cancelled; elapsed_ms is duration.",

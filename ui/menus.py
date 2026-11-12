@@ -1,8 +1,41 @@
 import cv2
 
+from PyQt6.QtCore import QEvent, QObject
 from PyQt6.QtGui import QAction, QActionGroup
-from PyQt6.QtWidgets import QMainWindow
+from PyQt6.QtWidgets import QMainWindow, QToolTip
 from locales import trans
+from core.experimental import experimental_enabled
+
+
+class _LockedMosaicHint(QObject):
+    def __init__(self, menu, action):
+        super().__init__(menu)
+        self.menu = menu
+        self.action = action
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonPress and not self.action.isEnabled():
+            point = event.position().toPoint()
+            if self.menu.actionAt(point) is self.action:
+                QToolTip.showText(event.globalPosition().toPoint(), self.action.toolTip(), self.menu)
+                return True
+        return super().eventFilter(watched, event)
+
+
+def update_mosaic_experimental_action(window: QMainWindow) -> None:
+    """Refresh the mosaic action after settings or language changes."""
+    action = getattr(window, 'ui_objs', {}).get('mosaic_title')
+    if action is None:
+        return
+    enabled = experimental_enabled(window)
+    action.setText(f"{trans.t('mosaic_title')} ({trans.t('experimental_label')})")
+    action.setEnabled(enabled)
+    action.setToolTip('' if enabled else trans.t('experimental_locked_hint'))
+
+
+def _show_support_dialog(window):
+    from dialogs.about import SupportUsDialog
+    SupportUsDialog(window).exec()
 
 
 def setup_menus(window: QMainWindow) -> None:
@@ -22,6 +55,11 @@ def setup_menus(window: QMainWindow) -> None:
     open_action.triggered.connect(window.open_folder_dialog)
     file_menu.addAction(open_action)
     window.ui_objs['action_open_folder'] = open_action
+
+    open_frames_action = QAction(trans.t('action_open_frames'), window)
+    open_frames_action.triggered.connect(window.source_manager.prompt_and_load_frames)
+    file_menu.addAction(open_frames_action)
+    window.ui_objs['action_open_frames'] = open_frames_action
 
     open_video_action = QAction(trans.t('action_open_video'), window)
     open_video_action.setShortcut("Ctrl+Shift+O")
@@ -74,6 +112,11 @@ def setup_menus(window: QMainWindow) -> None:
     save_action.triggered.connect(window.export_manager.save_result)
     file_menu.addAction(save_action)
     window.ui_objs['action_save'] = save_action
+
+    export_all_action = QAction(trans.t('menu_export_all'), window)
+    export_all_action.triggered.connect(window.output_manager.export_all_results)
+    file_menu.addAction(export_all_action)
+    window.ui_objs['menu_export_all'] = export_all_action
 
     save_stack_menu = file_menu.addMenu(trans.t('menu_save_stack'))
     window.ui_objs['menu_save_stack'] = save_stack_menu
@@ -225,6 +268,7 @@ def setup_menus(window: QMainWindow) -> None:
 
     # --- Tools Menu ---
     batch_menu = menubar.addMenu(trans.t('menu_tools'))
+    batch_menu.setToolTipsVisible(True)
     window.ui_objs['menu_tools'] = batch_menu
 
     batch_action = QAction(trans.t('action_batch_process'), window)
@@ -243,6 +287,9 @@ def setup_menus(window: QMainWindow) -> None:
     mosaic_action.triggered.connect(window.show_mosaic_dialog)
     batch_menu.addAction(mosaic_action)
     window.ui_objs['mosaic_title'] = mosaic_action
+    batch_menu._locked_mosaic_hint = _LockedMosaicHint(batch_menu, mosaic_action)
+    batch_menu.installEventFilter(batch_menu._locked_mosaic_hint)
+    update_mosaic_experimental_action(window)
 
     def open_converter():
         from dialogs.batch_converter import BatchConverterDialog
@@ -401,11 +448,14 @@ def setup_menus(window: QMainWindow) -> None:
     gpu_action = QAction(trans.t('action_gpu_accel'), window)
     gpu_action.setCheckable(True)
     from fusion_methods import neural_runtime
-    from core.multi_focus_fusion import is_ai_fusion_available, neural_device_kind
+    from core.multi_focus_fusion import (is_ai_fusion_available, neural_device_kind,
+                                         openfocus_gpu_available)
     _gpu_kind = neural_device_kind()
+    _opencl = openfocus_gpu_available()
     _runtime_installed = is_ai_fusion_available() if _gpu_kind is None else False
-    _gpu_enabled, _gpu_checked = neural_runtime.gpu_toggle_state(
-        _gpu_kind, getattr(window, 'use_gpu', True), _runtime_installed)
+    _gpu_enabled = (neural_runtime.is_accelerator(_gpu_kind) or _opencl is True
+                    or _opencl is None or (_gpu_kind is None and _runtime_installed))
+    _gpu_checked = bool(_gpu_enabled and getattr(window, 'use_gpu', True))
     gpu_action.setChecked(_gpu_checked)
     gpu_action.setEnabled(_gpu_enabled)
     gpu_action.setToolTip(trans.t('msg_gpu_accel_hint') if _gpu_enabled
@@ -415,7 +465,7 @@ def setup_menus(window: QMainWindow) -> None:
     window.ui_objs['action_gpu_accel'] = gpu_action
     # Resolve the backend in the background when the user opens Settings.
     # Device probing must never delay menu construction.
-    if _gpu_kind is None and _runtime_installed and hasattr(
+    if (_opencl is None or (_gpu_kind is None and _runtime_installed)) and hasattr(
             window, '_probe_device_kind_async'):
         settings_menu.aboutToShow.connect(window._probe_device_kind_async)
 
@@ -472,6 +522,14 @@ def setup_menus(window: QMainWindow) -> None:
     # --- Help Menu ---
     help_menu = menubar.addMenu(trans.t('menu_help'))
     window.ui_objs['menu_help'] = help_menu
+    account_action = QAction(trans.t('account_heading'), window)
+    account_action.setProperty('trans_key', 'account_heading')
+    account_action.triggered.connect(window.show_account_dialog)
+    help_menu.addAction(account_action)
+    window.ui_objs['action_account'] = account_action
+    help_menu.aboutToShow.connect(
+        lambda: getattr(window, '_refresh_account_action', lambda: None)())
+
 
     env_action = QAction(trans.t('action_env_info'), window)
     env_action.triggered.connect(window.show_environment_info)
@@ -490,6 +548,12 @@ def setup_menus(window: QMainWindow) -> None:
     contact_action.triggered.connect(window.show_contact_info)
     help_menu.addAction(contact_action)
     window.ui_objs['action_contact'] = contact_action
+
+    support_action = QAction(trans.t('support_title'), window)
+    support_action.setProperty('trans_key', 'support_title')
+    support_action.triggered.connect(lambda: _show_support_dialog(window))
+    help_menu.addAction(support_action)
+    window.ui_objs['support_title'] = support_action
 
     quickstart_action = QAction(trans.t('menu_quick_start'), window)
     quickstart_action.triggered.connect(window.show_quick_start)

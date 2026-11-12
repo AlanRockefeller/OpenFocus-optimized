@@ -1,4 +1,5 @@
 """Real source-descriptor fusion preserves pixels without retaining decoded stacks."""
+import os
 import weakref
 
 import cv2
@@ -431,3 +432,254 @@ def test_direct_v2_long_resized_sources_stage_once_and_keep_identity(tmp_path, m
         stream.write(b'changed after V2 staging')
     with pytest.raises(OSError, match='Source changed'):
         source.get(0, (0, 0, 13, 11))
+
+
+@pytest.mark.parametrize('exposure', [False, True])
+def test_tiled_v3_stages_deferred_frames_once_and_preserves_pixels(tmp_path, monkeypatch, exposure):
+    from collections import Counter
+    from fusion_methods import stackmffv3
+
+    arrays, descriptors = _sources(tmp_path, count=3, mixed=False)
+    transformed = [cv2.flip(image, 1) for image in arrays]
+    processed = Counter()
+    def flip(image, index):
+        processed[index] += 1
+        return cv2.flip(image, 1)
+    deferred = [source_frames.process_frame(frame, lambda image, i=i: flip(image, i))
+                for i, frame in enumerate(descriptors)]
+    monkeypatch.setattr(stackmffv3, '_probabilities',
+                        lambda batch, *args: np.full_like(batch, 1 / batch.shape[1]))
+    expected = _fusion('stackmffv3', tiled=True, exposure=exposure).fuse(
+        transformed, thread_count=1)
+    monkeypatch.setattr(source_frames, 'SOURCE_CACHE', source_frames.FrameCache(0))
+    decodes = Counter()
+    decode = image_loader.decode_image
+    def tracked_decode(path, **kwargs):
+        decodes[path] += 1
+        return decode(path, **kwargs)
+    monkeypatch.setattr(image_loader, 'decode_image', tracked_decode)
+    preparation, tiles = [], []
+    def progress(done, total):
+        tiles.append((done, total))
+    progress.preparation = lambda done, total: preparation.append((done, total))
+
+    actual = _fusion('stackmffv3', tiled=True, exposure=exposure).fuse(
+        deferred, thread_count=1, progress_callback=progress)
+    np.testing.assert_array_equal(actual, expected)
+    passes = 2 if exposure else 1  # Exposure statistics precede the snapshot.
+    assert decodes == {frame.path: passes for frame in descriptors}
+    assert processed == {index: passes for index in range(len(descriptors))}
+    assert preparation == [(0, 3), (1, 3), (2, 3), (3, 3)]
+    assert tiles[0][0] == 0 and tiles[-1][0] == tiles[-1][1] and tiles[-1][1] > 1
+
+
+def test_tiled_v3_rechecks_staged_source_after_last_tile(tmp_path, monkeypatch):
+    from fusion_methods import stackmffv3
+
+    _arrays, descriptors = _sources(tmp_path, count=2, mixed=False)
+    monkeypatch.setattr(stackmffv3, '_probabilities',
+                        lambda batch, *args: np.full_like(batch, 1 / batch.shape[1]))
+    changed = []
+    def progress(done, total):
+        if done == total:
+            with open(descriptors[0].path, 'ab') as stream:
+                stream.write(b'changed')
+            changed.append(True)
+    with pytest.raises(OSError, match='Source changed'):
+        _fusion('stackmffv3', tiled=True, exposure=False).fuse(
+            descriptors, thread_count=1, progress_callback=progress)
+    assert changed
+
+
+def test_neural_source_staging_cancellation_stops_before_next_decode(tmp_path, monkeypatch):
+    _arrays, descriptors = _sources(tmp_path, count=3, mixed=False)
+    monkeypatch.setattr(source_frames, 'SOURCE_CACHE', source_frames.FrameCache(0))
+    decode = image_loader.decode_image
+    decoded = []
+    def tracked_decode(path, **kwargs):
+        decoded.append(path)
+        return decode(path, **kwargs)
+    monkeypatch.setattr(image_loader, 'decode_image', tracked_decode)
+    cancelled = []
+    def progress(done, total):
+        if done == 1:
+            cancelled.append(True)
+    with pytest.raises(RegistrationCancelled):
+        source_frames.materialize_for_repeated_access(
+            descriptors, lambda: bool(cancelled), thread_count=1,
+            progress_callback=progress)
+    assert decoded == [descriptors[0].path]
+
+
+def test_neural_source_staging_falls_back_only_before_writing(tmp_path, monkeypatch):
+    _arrays, descriptors = _sources(tmp_path, count=2, mixed=False)
+    error = frame_storage.ScratchSpaceError(str(tmp_path), 100, 0)
+    def no_space(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(frame_storage, 'select_scratch', no_space)
+    monkeypatch.setattr(source_frames, 'materialize_frames',
+                        lambda *args, **kwargs: pytest.fail('staging started'))
+    assert source_frames.materialize_for_repeated_access(descriptors) is descriptors
+
+
+def test_neural_source_staging_propagates_write_failure(tmp_path, monkeypatch):
+    _arrays, descriptors = _sources(tmp_path, count=2, mixed=False)
+    monkeypatch.setattr(frame_storage, 'select_scratch', lambda *args, **kwargs: str(tmp_path))
+    def write_failure(*args, **kwargs):
+        raise frame_storage.ScratchSpaceError(str(tmp_path), 100, 0)
+    monkeypatch.setattr(source_frames, 'materialize_frames', write_failure)
+    with pytest.raises(frame_storage.ScratchSpaceError):
+        source_frames.materialize_for_repeated_access(descriptors)
+
+
+def _classic_directory(tmp_path):
+    import tifffile
+
+    rng = np.random.default_rng(741)
+    for name in ('img1.png', 'img10.PNG', 'cover.png', 'slice2_z1.png',
+                 'slice10_z0.png'):
+        image = rng.integers(0, 256, (32, 40, 3), dtype=np.uint8)
+        ok, encoded = cv2.imencode('.png', image)
+        assert ok
+        encoded.tofile(str(tmp_path / name))
+    with tifffile.TiffWriter(tmp_path / 'img2.tif') as tif:
+        for _ in range(2):
+            tif.write(rng.integers(0, 256, (32, 40, 3), dtype=np.uint8),
+                      photometric='rgb')
+    (tmp_path / 'notes.txt').write_text('not an image')
+    (tmp_path / 'sub.png').mkdir()
+
+
+def _classic_direct(method, source, should_cancel=None):
+    if method == 'dct':
+        from fusion_methods.dct import dct_focus_stack_fusion
+        return dct_focus_stack_fusion(source, kernel_size=3, thread_count=1,
+                                      should_cancel=should_cancel)
+    if method == 'dtcwt':
+        from fusion_methods.dtcwt import _dtcwt_impl
+        return _dtcwt_impl(source, None, 1, False, thread_count=1,
+                           should_cancel=should_cancel)
+    if method == 'guided_filter':
+        from fusion_methods.gff import gff_impl
+        return gff_impl(source, None, kernel_size=3, thread_count=1,
+                        should_cancel=should_cancel)
+    from fusion_methods.gfg_fgf import gfgfgf_impl
+    return gfgfgf_impl(source, None, kernel_size=3, thread_count=1,
+                       should_cancel=should_cancel)
+
+
+@pytest.mark.parametrize('method', CLASSICAL)
+def test_classic_directory_matches_shared_ordered_frames(tmp_path, monkeypatch, method):
+    from fusion_methods.openfocus_ab import _collect_directory_sources, _collect_images
+    from utils.sorting import natural_sort_key
+
+    if method == 'dtcwt':
+        pytest.importorskip('dtcwt')
+    _classic_directory(tmp_path)
+    frames, paths = _collect_directory_sources(str(tmp_path))
+    expected_names = ['img1.png', 'img2.tif', 'img10.PNG', 'slice2_z1.png',
+                      'slice10_z0.png', 'cover.png']
+    assert [os.path.basename(path) for path in paths] == expected_names
+    assert paths == sorted(paths, key=natural_sort_key)
+    assert [(frame.path, frame.page) for frame in frames] == [
+        (paths[0], 0), (paths[1], 0), (paths[1], 1), (paths[2], 0),
+        (paths[3], 0), (paths[4], 0), (paths[5], 0)]
+    assert [(f.path, f.page) for f in _collect_images(str(tmp_path), normalize=False)] == [
+        (f.path, f.page) for f in frames]
+
+    scanned = []
+    scan = source_frames.scan_source
+    def record(path, **kwargs):
+        scanned.append(path)
+        return scan(path, **kwargs)
+    monkeypatch.setattr(source_frames, 'scan_source', record)
+    actual = _classic_direct(method, str(tmp_path))
+    assert scanned == paths
+    expected = _classic_direct(method, frames)
+    np.testing.assert_array_equal(actual, expected)
+    if method == 'dct':
+        from fusion_methods.dct import _collect_images_from_folder
+        collected, collected_paths = _collect_images_from_folder(str(tmp_path))
+        assert collected_paths == paths
+        assert [(f.path, f.page) for f in collected] == [(f.path, f.page) for f in frames]
+
+
+@pytest.mark.parametrize('method', CLASSICAL)
+def test_classic_directory_corrupt_image_stops_scan(tmp_path, monkeypatch, method):
+    if method == 'dtcwt':
+        pytest.importorskip('dtcwt')
+    _classic_directory(tmp_path)
+    (tmp_path / 'img2.tif').write_bytes(b'broken image')
+    scanned = []
+    scan = source_frames.scan_source
+    def record(path, **kwargs):
+        scanned.append(path)
+        return scan(path, **kwargs)
+    monkeypatch.setattr(source_frames, 'scan_source', record)
+    with pytest.raises(Exception):
+        _classic_direct(method, str(tmp_path))
+    assert [os.path.basename(path) for path in scanned] == ['img1.png', 'img2.tif']
+
+
+@pytest.mark.parametrize('method', CLASSICAL)
+def test_classic_directory_cancellation_stops_tiff_and_recovers(tmp_path, monkeypatch, method):
+    import tifffile
+    if method == 'dtcwt':
+        pytest.importorskip('dtcwt')
+    with tifffile.TiffWriter(tmp_path / 'img1.tif') as tif:
+        for value in (30, 80):
+            tif.write(np.full((32, 40, 3), value, np.uint8), photometric='rgb')
+    ok, encoded = cv2.imencode('.png', np.full((32, 40, 3), 120, np.uint8))
+    assert ok
+    encoded.tofile(str(tmp_path / 'img2.png'))
+    scanned = []
+    scan = source_frames.scan_source
+    def record(path, **kwargs):
+        scanned.append(path)
+        return scan(path, **kwargs)
+    monkeypatch.setattr(source_frames, 'scan_source', record)
+    with pytest.raises(RegistrationCancelled):
+        _classic_direct(method, str(tmp_path), lambda: True)
+    assert scanned == []
+
+    original_frame = source_frames.SourceFrame
+    created = []
+    def create_frame(*args, **kwargs):
+        frame = original_frame(*args, **kwargs)
+        created.append(frame)
+        return frame
+    with monkeypatch.context() as context:
+        context.setattr(source_frames, 'SourceFrame', create_frame)
+        with pytest.raises(RegistrationCancelled):
+            _classic_direct(method, str(tmp_path), lambda: bool(created))
+    assert len(created) == 1
+    assert scanned == [str(tmp_path / 'img1.tif')]
+    from fusion_methods.openfocus_ab import _collect_directory_sources
+    frames, _ = _collect_directory_sources(str(tmp_path))
+    assert len(frames) == 3
+    np.testing.assert_array_equal(_classic_direct(method, str(tmp_path)),
+                                  _classic_direct(method, frames))
+
+
+def test_classic_empty_and_missing_directory_policies(tmp_path):
+    from fusion_methods.dct import _collect_images_from_folder
+    from fusion_methods.dtcwt import _load_images
+    from fusion_methods.gff import gff_impl
+    from fusion_methods.gfg_fgf import gfgfgf_impl
+    from fusion_methods.openfocus_ab import _collect_images
+
+    directory = str(tmp_path)
+    missing = str(tmp_path / 'missing')
+    assert _collect_images_from_folder(directory) == ([], [])
+    assert _collect_images_from_folder(missing) == ([], [])
+    assert _load_images(directory, None) == []
+    with pytest.raises(ValueError, match='Input path does not exist'):
+        _load_images(missing, None)
+    with pytest.raises(ValueError, match='at least 2'):
+        _collect_images(directory, normalize=False)
+    with pytest.raises(ValueError, match='Input folder is empty'):
+        gff_impl(directory, None)
+    with pytest.raises(ValueError, match='No images found'):
+        gfgfgf_impl(directory)
+    with pytest.raises(ValueError, match='Path not found'):
+        gfgfgf_impl(missing)

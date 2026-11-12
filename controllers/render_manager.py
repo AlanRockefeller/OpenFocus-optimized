@@ -2,7 +2,7 @@ from typing import Any, List, Optional
 from copy import deepcopy
 
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QDialog, QDialogButtonBox,
                              QPlainTextEdit, QVBoxLayout)
 
@@ -14,7 +14,50 @@ from core.render_process import RenderProcessWorker
 from dialogs import ROIRenderOptionsDialog  # Import the new dialog
 from locales import trans
 from core.algorithms import fusion_algorithms, get_fusion, get_registration, alignment_steps
+from core.experimental import (experimental_enabled, fusion_is_experimental,
+                               processing_is_locked)
 
+
+
+_STORAGE_UNSET = object()
+
+
+def _base_frame(method, enabled):
+    if not enabled:
+        return "none"
+    return "first" if method in ("openfocus_a", "openfocus_b", "openfocus_c") else "last"
+
+
+class _StorageProbe(QObject):
+    completed = pyqtSignal(object)
+
+    def start(self, estimate):
+        import threading
+
+        def run():
+            from core.frame_storage import assess_scratch, scratch_directory
+            try:
+                with scratch_directory(separate=True, explicit_directory=None):
+                    result = assess_scratch(*estimate)
+            except Exception as exc:
+                from utils.logging_setup import get_logger
+                get_logger(__name__).info('storage preflight unavailable', exc_info=True)
+                result = {'status': 'unknown', 'directory': None, 'explicit': False,
+                          'reason': str(exc)}
+            try:
+                self.completed.emit(result)
+            except RuntimeError:
+                pass  # The window was destroyed while discovery was running.
+
+        threading.Thread(target=run, name='openfocus-storage-preflight', daemon=True).start()
+
+
+class _StorageCancellation:
+    def __init__(self, manager, request):
+        self.manager, self.request = manager, request
+
+    def cancel(self):
+        self.manager.cancel_storage_preflight(self.request)
 
 
 class RenderManager:
@@ -27,6 +70,12 @@ class RenderManager:
     def __init__(self, window: Any):
         self.window = window
         self.worker: Optional[RenderProcessWorker] = None
+        self.context_worker = None
+        self._context_candidate = None
+        self._retiring_context_workers = set()
+        self._prepared_cache = None
+        self._prepared_cache_key = None
+        self._prepared_cache_source = None
         self._compare_mode = False
         self._compare_cancelling = False
         self._compare_queue: List[str] = []
@@ -48,10 +97,144 @@ class RenderManager:
         self._render_interactive = True
         self._control_progress: Optional[tuple] = None
         self.alignment_diagnostics = None
+        # Temporary-storage assessment of the last render start, if computed.
+        self.last_storage_assessment: Optional[dict] = None
+        # Most recent render performance report (memory only, this session).
+        self.performance_report: Optional[dict] = None
         # An interactive request made while source frames are loading.  Keep
         # the forced algorithm and comparison ownership, not just a Boolean,
         # so the deferred render cannot be mislabeled or outlive cancellation.
         self._render_after_load: Optional[dict] = None
+        self._pending_storage = None
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.clear_prepared_cache)
+        destroyed = getattr(window, 'destroyed', None)
+        if destroyed is not None:
+            destroyed.connect(self.clear_prepared_cache)
+
+    def clear_prepared_cache(self):
+        """Release the retained temporary snapshots for an obsolete stack."""
+        self._prepared_cache = None
+        self._prepared_cache_key = None
+        self._prepared_cache_source = None
+
+    def _storage_request_identity(self):
+        window = self.window
+        frames, names, included = window.effective_stack()
+        method = window.current_fusion_method()
+        from core import frame_storage
+        return (id(window.raw_images), getattr(window, 'source_revision', 0),
+                tuple(id(frame) for frame in frames), tuple(names), tuple(included),
+                tuple(getattr(window, 'image_source_paths', ()) or ()),
+                method, window.current_alignment_method(),
+                deepcopy(self._processing_parameters(method)),
+                tuple(getattr(window, name, None) for name in (
+                    'thread_count', 'resource_preference', 'current_scale_factor',
+                    'align_cache_enabled', 'collect_alignment_report', 'roi_mode_active',
+                    'current_folder_path', 'tile_enabled', 'profile_performance', 'debug_logging')),
+                bool(window.chk_quick_preview.isChecked()), frame_storage._storage_directory,
+                self._compare_token)
+
+    def _begin_storage_preflight(self, frames, force_algorithm, interactive, confirmed, roi_choice,
+                                 cpu_confirmed):
+        request = {'identity': self._storage_request_identity(), 'completion': None,
+                   'force_algorithm': force_algorithm, 'interactive': interactive,
+                   'confirmed': confirmed, 'cpu_confirmed': cpu_confirmed,
+                   'roi_choice': deepcopy(roi_choice), 'previous_state': self.last_state,
+                   'previous_error': self.last_error}
+        estimate = self._storage_estimate(frames)
+        probe = _StorageProbe(self.window)
+        request['probe'] = probe
+        self._pending_storage = request
+        self.last_storage_assessment = None
+        probe.completed.connect(lambda result: self._finish_storage_preflight(request, result),
+                                Qt.ConnectionType.QueuedConnection)
+        self.last_state = 'running'
+        self.last_error = None
+        self.refresh_action_labels()
+        try:
+            probe.start(estimate)
+        except Exception:
+            self._pending_storage = None
+            probe.deleteLater()
+            self._hide_progress_bar()
+            self.refresh_action_labels()
+            raise
+
+    def set_storage_completion(self, completion):
+        request = self._pending_storage
+        if request is None:
+            raise RuntimeError('Storage preflight is no longer pending')
+        request['completion'] = completion
+        return _StorageCancellation(self, request)
+
+    def cancel_storage_preflight(self, request=None):
+        pending = self._pending_storage
+        if pending is None or (request is not None and request is not pending):
+            return False
+        self._pending_storage = None
+        self.last_state = 'cancelled'
+        self._hide_progress_bar()
+        self.refresh_action_labels()
+        completion = pending['completion']
+        if completion is not None:
+            completion('cancelled')
+        return True
+
+    def cancel_pending_start(self):
+        """Invalidate queued and in-progress render starts at their safe boundary."""
+        queued = self._render_after_load is not None
+        self._stop_compare_timer()
+        self._compare_token = object()
+        self._compare_queue = []
+        self._compare_context = None
+        self._compare_current = None
+        self._compare_mode = False
+        self._render_after_load = None
+        self.cancel_storage_preflight()
+        if queued:
+            self.last_state = "cancelled"
+            self._hide_progress_bar()
+            self.refresh_action_labels()
+
+    def _finish_storage_preflight(self, request, assessment):
+        request['probe'].deleteLater()
+        if self._pending_storage is not request:
+            return
+        self._pending_storage = None
+        try:
+            stale = (getattr(self.window, '_shutting_down', False)
+                     or self._storage_request_identity() != request['identity']
+                     or getattr(getattr(self.window, 'source_manager', None), '_load_worker', None) is not None)
+            if stale:
+                self.last_state = 'discarded'
+                self._hide_progress_bar()
+                self.window.statusBar().showMessage(trans.t('msg_render_stack_changed'), 8000)
+                self.refresh_action_labels()
+                status = 'stack_changed'
+            else:
+                status = self.start_render(request['force_algorithm'], interactive=request['interactive'],
+                                           confirmed=request['confirmed'], roi_choice=request['roi_choice'],
+                                           _storage_assessment=assessment,
+                                           _cpu_confirmed=request['cpu_confirmed'])
+                if status != 'started':
+                    if status in ('confirm_storage', 'insufficient_storage'):
+                        self.last_state = request['previous_state']
+                        self.last_error = request['previous_error']
+                    else:
+                        self.last_state = 'cancelled' if status == 'cancelled' else None
+                    self._hide_progress_bar()
+                    self.refresh_action_labels()
+        except Exception as exc:
+            self.last_state = 'error'
+            self.last_error = str(exc)
+            self._hide_progress_bar()
+            self.refresh_action_labels()
+            status = 'error'
+        completion = request['completion']
+        if completion is not None:
+            completion(status)
 
     def show_alignment_report(self, *, parent=None) -> None:
         dialog = QDialog(parent or self.window)
@@ -67,6 +250,60 @@ class RenderManager:
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         dialog.exec()
+
+    def show_performance_report(self, *, parent=None) -> None:
+        from PyQt6.QtGui import QFontDatabase
+        from utils.performance_profile import summary
+        dialog = QDialog(parent or self.window)
+        dialog.setWindowTitle(trans.t('perf_report_title'))
+        dialog.resize(900, 620)
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        # The summary is a table and a tree: its columns need a fixed pitch.
+        # A widget style sheet, because the application's own overrides setFont().
+        fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        text.setFont(fixed)
+        text.setStyleSheet(f'QPlainTextEdit {{ font-family: "{fixed.family()}", monospace; }}')
+        report = self.performance_report
+        text.setPlainText(summary(report) if report else trans.t('perf_report_unavailable'))
+        layout.addWidget(text)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText(trans.t('dialog_close'))
+        save = buttons.addButton(trans.t('perf_report_save'), QDialogButtonBox.ButtonRole.ActionRole)
+        save.setProperty('controlId', 'btn_performance_report_save')
+        save.setEnabled(bool(report))
+        save.clicked.connect(lambda: self.save_performance_report(parent=dialog))
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def save_performance_report(self, path: Optional[str] = None, *, parent=None) -> Optional[str]:
+        """Write the latest report as JSON; asks for a path when none is given."""
+        from utils.file_dialogs import FileDialog
+        from utils.performance_profile import dumps
+        if not self.performance_report:
+            return None
+        if path is None:
+            path, _ = FileDialog.getSaveFileName(
+                parent or self.window, trans.t('perf_report_save'),
+                'openfocus-performance.json', 'JSON (*.json)')
+            if not path:
+                return None
+        try:
+            with open(path, 'w', encoding='utf-8') as stream:
+                stream.write(dumps(self.performance_report) + '\n')
+        except OSError as exc:
+            show_warning_box(parent or self.window, trans.t('perf_report_title'),
+                             trans.t('perf_report_save_failed').format(error=str(exc)))
+            return None
+        return path
+
+    def _capture_performance_report(self) -> None:
+        """Keep the finished worker's report, including a partial one."""
+        report = getattr(self.worker, 'performance_report', None)
+        if report:
+            self.performance_report = report
 
     def alignment_report_text(self) -> str:
         diagnostic = self.alignment_diagnostics
@@ -135,15 +372,29 @@ class RenderManager:
         method = method or window.current_fusion_method()
         getter = getattr(window, "brightness_option_for", None)
         brightness = (bool(getter("exposure_match", method)) if callable(getter)
-                      else bool(getattr(window, "exposure_match", True)))
+                      else bool(getattr(window, "exposure_match", False)))
         alignment = window.current_alignment_method()
         parameters = window.registration_parameters_for(alignment)
+        from core.workers import _ordered_openfocus_registration
+        reverse_registration = _ordered_openfocus_registration(
+            alignment, method, 'desc' if getattr(window, 'stack_reverse_order', False) else 'asc')
         return (getattr(window, "source_revision", 0), tuple(included),
                 tuple(id(window.raw_images[i]) for i in included),
                 alignment_steps(alignment), tuple(sorted(parameters.items())),
                 getattr(window, "reg_downscale_width", None), brightness,
                 bool(getattr(window, "stack_reverse_order", False)),
-                bool(getattr(window, "defect_mask_path", "") or getattr(window, "sensor_denoise", False)))
+                bool(getattr(window, "defect_mask_path", "") or getattr(window, "sensor_denoise", False)),
+                'reverse-registration-v1' if reverse_registration else None)
+
+    def _source_exif_snapshot(self, included) -> tuple:
+        """Per-included-frame EXIF, aligned with the current source list."""
+        window = self.window
+        raw = getattr(window, "raw_images", ()) or ()
+        exifs = tuple(getattr(window, "image_source_exifs", ()) or ())
+        if len(exifs) != len(raw):
+            return ()
+        return tuple(bytes(exifs[index]) if 0 <= index < len(exifs) else b""
+                     for index in included)
 
     def _processing_parameters(self, method):
         window = self.window
@@ -155,15 +406,17 @@ class RenderManager:
             window.current_alignment_method())
         values["exposure_match"] = window.brightness_option_for("exposure_match", method)
         values["base_correct"] = window.brightness_option_for("base_correct", method)
-        from core.multi_focus_fusion import _DEFAULT_TILE_THRESHOLD
-        if method != 'none':
+        if method in ('openfocus_a', 'openfocus_b', 'openfocus_c'):
+            values['tile_enabled'] = False
+        elif method != 'none':
+            from core.multi_focus_fusion import _DEFAULT_TILE_THRESHOLD
             values['tile_enabled'] = bool(values['tile_enabled'] and (
                 get_fusion(method).external_tiling_default
                 or values['tile_threshold'] != _DEFAULT_TILE_THRESHOLD))
         values["sharpen_output"] = bool(getattr(window, "sharpen_output", False))
         values["defect_mask_path"] = getattr(window, "defect_mask_path", "")
         values["sensor_denoise"] = bool(getattr(window, "sensor_denoise", False))
-        values["base_frame"] = "last" if values["base_correct"] else "none"
+        values["base_frame"] = _base_frame(method, values["base_correct"])
         values["sort_mode"] = "desc" if values["stack_reverse_order"] else "asc"
         return values
 
@@ -253,6 +506,135 @@ class RenderManager:
             settings.sync()
         return box.clickedButton() is start_btn
 
+    def _storage_preflight(self, force_algorithm: str | None, frames) -> Optional[dict]:
+        """Assess temporary storage for a full render; no UI, no allocation.
+
+        Drafts, ROI renders and compare-all runs are skipped: they are small or
+        driven programmatically. An estimate that cannot be made returns None
+        (logged), so a render never prompts on a guess.
+        """
+        window = self.window
+        preview = getattr(window, 'chk_quick_preview', None)
+        if (force_algorithm is not None or getattr(window, 'roi_mode_active', False)
+                or (preview is not None and preview.isChecked())):
+            return None
+        try:
+            from core.frame_storage import assess_scratch
+            return assess_scratch(*self._storage_estimate(frames))
+        except Exception:
+            from utils.logging_setup import get_logger
+            get_logger(__name__).info('storage preflight unavailable', exc_info=True)
+            return None
+
+    def _storage_estimate(self, frames):
+        """(minimum, expected, optional, source paths) for the current settings."""
+        from core.storage_preflight import render_storage_estimate
+        window = self.window
+        fusion = window.current_fusion_method()
+        getter = getattr(window, 'brightness_option_for', None)
+        exposure = (bool(getter('exposure_match', fusion)) if callable(getter)
+                    else bool(getattr(window, 'exposure_match', False)))
+        return render_storage_estimate(
+            frames, algorithm=None if fusion == 'none' else fusion,
+            alignment=window.current_alignment_method(), need_fusion=fusion != 'none',
+            exposure_match=exposure,
+            cleanup=bool(getattr(window, 'defect_mask_path', '')
+                         or getattr(window, 'sensor_denoise', False)))
+
+    def _storage_message(self, assessment: dict) -> str:
+        from core.frame_storage import readable_bytes
+        neutral = assessment['directory'] is None
+        text = trans.t('storage_low_text').format(
+            path=assessment['directory'] or '—',
+            free='—' if neutral else readable_bytes(assessment['free_bytes']),
+            available=(trans.t('storage_available_upper_bound').format(
+                size=readable_bytes(assessment['available_bytes'])) if neutral
+                else readable_bytes(assessment['available_bytes'])),
+            required=readable_bytes(assessment['required_bytes']))
+        if assessment['status'] == 'critical':
+            text += '\n\n' + trans.t('storage_low_critical').format(
+                minimum=readable_bytes(assessment['minimum_bytes']))
+        return text
+
+    def _confirm_storage(self, assessment: dict, frames) -> Optional[dict]:
+        """Ask how to proceed with low temporary storage; None cancels the render.
+
+        Returns ``{'directory': path or None, 'keep': bool}``. A chosen
+        directory is validated and re-assessed; a critical result never offers
+        Continue, because the job's own admission would reject it anyway.
+        """
+        from PyQt6.QtWidgets import QMessageBox
+        from core.frame_storage import assess_scratch, validate_storage_directory
+        from utils import style_message_box
+        from utils.file_dialogs import FileDialog
+        window = self.window
+        chosen = None
+        while True:
+            box = QMessageBox(window)
+            style_message_box(box)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle(trans.t('storage_low_title'))
+            box.setText(self._storage_message(assessment))
+            choose = box.addButton(trans.t('storage_choose'), QMessageBox.ButtonRole.ActionRole)
+            choose.setProperty('controlId', 'btn_storage_choose')
+            proceed = None
+            if assessment['status'] != 'critical':
+                proceed = box.addButton(trans.t('storage_continue'), QMessageBox.ButtonRole.AcceptRole)
+                proceed.setProperty('controlId', 'btn_storage_continue')
+            cancel = box.addButton(trans.t('storage_cancel'), QMessageBox.ButtonRole.RejectRole)
+            cancel.setProperty('controlId', 'btn_storage_cancel')
+            box.setDefaultButton(choose)
+            box.exec()
+            clicked = box.clickedButton()
+            if proceed is not None and clicked is proceed:
+                return {'directory': chosen, 'keep': chosen is not None and self._keep_storage(chosen)}
+            if clicked is not choose:
+                return None
+            path = FileDialog.getExistingDirectory(window, trans.t('storage_choose'),
+                                                   assessment['directory'] or '')
+            if not path:
+                continue
+            try:
+                path = validate_storage_directory(path)
+            except OSError as exc:
+                show_warning_box(window, trans.t('storage_low_title'),
+                                 trans.t('advanced_storage_invalid').format(error=str(exc)))
+                continue
+            chosen, assessment = path, assess_scratch(*self._storage_estimate(frames),
+                                                      directory=path)
+            self.last_storage_assessment = assessment
+            if assessment['status'] in ('ok', 'unknown'):
+                return {'directory': chosen, 'keep': self._keep_storage(chosen)}
+
+    def _keep_storage(self, path: str) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+        from utils import style_message_box
+        box = QMessageBox(self.window)
+        style_message_box(box)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(trans.t('storage_keep_title'))
+        box.setText(trans.t('storage_keep_text').format(path=path))
+        keep = box.addButton(trans.t('storage_keep_yes'), QMessageBox.ButtonRole.YesRole)
+        keep.setProperty('controlId', 'btn_storage_keep')
+        once = box.addButton(trans.t('storage_keep_no'), QMessageBox.ButtonRole.NoRole)
+        once.setProperty('controlId', 'btn_storage_once')
+        box.setDefaultButton(once)
+        box.exec()
+        return box.clickedButton() is keep
+
+    def _apply_storage_choice(self, choice: dict) -> Optional[str]:
+        """Persist a kept directory like Advanced Settings; return a one-render override."""
+        directory = choice.get('directory')
+        if directory is None or not choice.get('keep'):
+            return directory
+        from core.frame_storage import configure_storage_directory
+        configure_storage_directory(directory)
+        self.window.storage_directory = directory
+        persist = getattr(self.window, 'persist_settings', None)
+        if callable(persist):
+            persist()
+        return None
+
     def _compare_button(self):
         return getattr(self.window, "btn_compare_all", None)
 
@@ -295,8 +677,9 @@ class RenderManager:
         """
         window = self.window
         render = getattr(window, "btn_render", None)
-        busy = self.worker is not None and self.worker.isRunning()
-        if self._render_after_load is not None:
+        busy = ((self.worker is not None and self.worker.isRunning())
+                or getattr(self, "context_worker", None) is not None)
+        if self._render_after_load is not None or self._pending_storage is not None:
             self._show_progress_bar(trans.t('render_stage_loading'))
             if render is not None:
                 render.setEnabled(True)
@@ -319,9 +702,11 @@ class RenderManager:
             self._set_compare_button("disabled")
         else:
             if render is not None:
-                render.setEnabled(True)
+                locked = processing_is_locked(window)
+                render.setEnabled(not locked)
+                render.setToolTip(trans.t('experimental_locked_hint') if locked else '')
                 render.setText(trans.t('btn_render'))
-            self._set_compare_button("idle")
+            self._set_compare_button('disabled' if processing_is_locked(window) else 'idle')
 
     def _stop_compare_timer(self) -> None:
         timer = getattr(self, "_compare_chain_timer", None)
@@ -352,6 +737,30 @@ class RenderManager:
             self._compare_current = None
             self._restore_ui_controls()
 
+    _RENDER_SETTING_NAMES = (
+        "chk_quick_preview", "chk_exposure_match", "chk_base_correct",
+        "chk_reverse_order", "chk_sharpen_output", "btn_render_settings",
+    )
+
+    def _render_setting_widgets(self):
+        """Yield the render-setting widgets even on duck-typed test hosts."""
+        window = self.window
+        components = getattr(window, "right_panel_components", None)
+        for name in self._RENDER_SETTING_NAMES:
+            widget = getattr(window, name, None)
+            if widget is None and components is not None:
+                widget = getattr(components, name, None)
+            if widget is not None:
+                yield widget
+
+    def _set_render_settings_enabled(self, enabled: bool) -> None:
+        """Lock every setting that would invalidate an in-flight result."""
+        for widget in self._render_setting_widgets():
+            try:
+                widget.setEnabled(bool(enabled))
+            except Exception:
+                pass
+
     def _restore_ui_controls(self) -> None:
         """Re-enable every control disabled by start_render (safe to call anywhere)."""
         window = self.window
@@ -360,6 +769,7 @@ class RenderManager:
             # A comparison queue is still running - keep controls locked and
             # show progress instead. The Compare button stays enabled because
             # it is the only way to stop the run.
+            self._set_render_settings_enabled(False)
             window.btn_render.setEnabled(False)
             done = self._compare_total - len(self._compare_queue)
             window.btn_render.setText(
@@ -379,17 +789,12 @@ class RenderManager:
             window.combo_align.setEnabled(True)
         except Exception:
             pass
-        try:
-            window.chk_quick_preview.setEnabled(True)
-        except Exception:
-            pass
+        self._set_render_settings_enabled(True)
         try:
             window.btn_reset.setEnabled(True)
         except Exception:
             pass
-        window.btn_render.setEnabled(True)
-        window.btn_render.setText(trans.t('btn_render'))
-        self._set_compare_button("idle")
+        self.refresh_action_labels()
 
     def start_compare_all(self) -> None:
         """Render the stack once per available fusion method so the results
@@ -412,12 +817,16 @@ class RenderManager:
                 self._render_after_load = None
                 self.last_state = 'cancelled'
                 self._hide_progress_bar()
-            running = self.worker is not None and self.worker.isRunning()
+            context_worker = getattr(self, "context_worker", None)
+            running = context_worker is not None or (self.worker is not None and self.worker.isRunning())
             if running:
                 # Keep the truth visible until the worker acknowledges the
                 # cancel: no enabled button that would silently do nothing.
                 self._compare_cancelling = True
-                self.worker.is_cancelled = True
+                if context_worker is not None:
+                    context_worker.cancel()
+                else:
+                    self.worker.is_cancelled = True
                 self.refresh_action_labels()
             else:
                 # Between two queued renders nothing is running, so the UI has
@@ -427,7 +836,8 @@ class RenderManager:
                 'depth_cancelling' if running else 'msg_render_cancelled'), 0)
             return
 
-        if getattr(self, "_render_pending", False) or self._render_after_load is not None:
+        if (getattr(self, "_render_pending", False) or self._render_after_load is not None
+                or self._pending_storage is not None):
             key = 'msg_render_queued_after_load' if self._render_after_load is not None else 'btn_render_processing'
             window.statusBar().showMessage(trans.t(key), 3000)
             return
@@ -442,8 +852,12 @@ class RenderManager:
             show_warning_box(window, trans.t("msg_no_images_title"), trans.t("msg_render_need_images_text"))
             return
 
+        if processing_is_locked(window, method='none'):
+            show_warning_box(window, trans.t('experimental_label'), trans.t('experimental_locked_hint'))
+            return
         methods = [spec.id for spec in fusion_algorithms()
-                   if not spec.neural or is_ai_fusion_available()]
+                   if (experimental_enabled(window) or not fusion_is_experimental(spec.id))
+                   and (not spec.neural or is_ai_fusion_available())]
 
         self._compare_queue = list(methods)
         self._compare_total = len(methods)
@@ -476,7 +890,8 @@ class RenderManager:
 
     def start_render(self, force_algorithm: str | None = None, *,
                      interactive: bool = True, confirmed: bool = False,
-                     roi_choice: dict | None = None):
+                     roi_choice: dict | None = None, _storage_assessment=_STORAGE_UNSET,
+                     _cpu_confirmed: bool = False):
         """Start a render and report why it did or did not start.
 
         ``interactive=False`` is the control-channel path: it never opens a
@@ -487,6 +902,11 @@ class RenderManager:
         # 会重入并把 self.worker 覆盖掉——正在运行的 RenderWorker 失去引用
         # 被 C++ 析构，QThread 直接 qFatal abort。守卫必须在任何
         # processEvents 之前设置。
+        if self._pending_storage is not None:
+            if interactive:
+                self.cancel_storage_preflight()
+                return 'cancelled'
+            return 'busy'
         if getattr(self, "_render_pending", False):
             return "busy"
         if (self._compare_mode and self._render_after_load is None
@@ -495,7 +915,8 @@ class RenderManager:
         self._render_pending = True
         try:
             self._start_render_inner(force_algorithm, interactive=interactive,
-                                     confirmed=confirmed, roi_choice=roi_choice)
+                                     confirmed=confirmed, roi_choice=roi_choice,
+                                     storage_assessment=_storage_assessment, cpu_confirmed=_cpu_confirmed)
         except Exception as exc:
             self.last_state = "error"
             self.last_error = str(exc)
@@ -511,12 +932,22 @@ class RenderManager:
 
     def _start_render_inner(self, force_algorithm: str | None = None, *,
                             interactive: bool = True, confirmed: bool = False,
-                            roi_choice: dict | None = None) -> None:
+                            roi_choice: dict | None = None, storage_assessment=_STORAGE_UNSET,
+                            cpu_confirmed: bool = False) -> None:
         window = self.window
         # Why the last start returned; "started" only when a worker runs.
         self._start_status = "started"
 
         # A render is already running: this click cancels it
+        context_worker = getattr(self, "context_worker", None)
+        if context_worker is not None:
+            self._start_status = "busy"
+            if interactive:
+                context_worker.cancel()
+                window.btn_render.setEnabled(False)
+                window.btn_render.setText(trans.t('depth_cancelling'))
+                self._show_progress_bar(trans.t('depth_cancelling'))
+            return
         if self.worker is not None and self.worker.isRunning():
             self._start_status = "busy"
             if interactive:
@@ -542,6 +973,13 @@ class RenderManager:
                 getattr(window, "source_manager", None), "_load_worker", None) is not None else "cancelled"
             window.statusBar().showMessage(trans.t("msg_render_queue_cancelled"), 5000)
             return
+        if processing_is_locked(window, method=force_algorithm):
+            self._start_status = 'unavailable'
+            if interactive:
+                show_warning_box(window, trans.t('experimental_label'),
+                                 trans.t('experimental_locked_hint'))
+                return
+            raise ValueError(trans.t('experimental_locked_hint'))
         # Frames are still loading (a render clicked right after opening a
         # stack used to say "load at least 2 images"): queue the render and
         # start it when the load finishes.  A second click cancels the queue.
@@ -600,7 +1038,7 @@ class RenderManager:
                 return
 
 
-        if self._ai_confirmation_needed(force_algorithm) and not confirmed:
+        if self._ai_confirmation_needed(force_algorithm) and not (confirmed or cpu_confirmed):
             if not interactive:
                 self._start_status = "confirm_ai"
                 self._abort_compare_run()
@@ -608,6 +1046,47 @@ class RenderManager:
             if not self._confirm_cpu_ai_render(force_algorithm):
                 self._start_status = "cancelled"
                 self._abort_compare_run()
+                return
+            cpu_confirmed = True
+        if compare_token is not self._compare_token:
+            self._start_status = "cancelled"
+            self.last_state = "cancelled"
+            self._restore_ui_controls()
+            return
+
+        # One storage assessment per render start, before any UI is locked.
+        storage_override = None
+        from core.frame_storage import automatic_preflight_may_block
+        preview = getattr(window, 'chk_quick_preview', None)
+        if (storage_assessment is _STORAGE_UNSET and force_algorithm is None
+                and not getattr(window, 'roi_mode_active', False)
+                and not (preview is not None and preview.isChecked())
+                and automatic_preflight_may_block()):
+            self._begin_storage_preflight(stack_images, force_algorithm, interactive, confirmed, roi_choice,
+                                          cpu_confirmed)
+            self._start_status = 'preflight'
+            return
+        self.last_storage_assessment = assessment = (
+            self._storage_preflight(force_algorithm, stack_images)
+            if storage_assessment is _STORAGE_UNSET else storage_assessment)
+        status = assessment['status'] if assessment else 'ok'
+        if status == 'critical' or (status == 'advisory' and not confirmed):
+            if not interactive:
+                self._start_status = ("insufficient_storage" if status == 'critical'
+                                      else "confirm_storage")
+                self._abort_compare_run()
+                return
+            choice = self._confirm_storage(assessment, stack_images)
+            if choice is None:
+                self._start_status = "cancelled"
+                self._abort_compare_run()
+                return
+            try:
+                storage_override = self._apply_storage_choice(choice)
+            except OSError as exc:
+                show_warning_box(window, trans.t('storage_low_title'),
+                                 trans.t('advanced_storage_invalid').format(error=str(exc)))
+                self._start_status = "cancelled"
                 return
 
         if force_algorithm:
@@ -633,19 +1112,17 @@ class RenderManager:
             # A single render owns the pipeline; Compare-all cannot start
             # until it ends, so do not leave an enabled silent no-op.
             self._set_compare_button("disabled")
-        try:
-            # Quick-preview toggling mid-run fragments a comparison: later
-            # methods would render as drafts and vanish from the history.
-            window.chk_quick_preview.setEnabled(False)
-        except Exception:
-            pass
+        # Every control that changes the input to the running result must stay
+        # locked until completion, cancellation or failure restores it. A
+        # mid-run change used to discard the finished render as stale.
+        self._set_render_settings_enabled(False)
 
         def _brightness(win, option, method):
             """Per-method brightness option (duck-typed hosts may not have it)."""
             getter = getattr(win, "brightness_option_for", None)
             if callable(getter):
                 return bool(getter(option, method))
-            return bool(getattr(win, "exposure_match", True)) if option == (
+            return bool(getattr(win, "exposure_match", False)) if option == (
                 "exposure_match") else bool(
                     getattr(win, "base_frame_correct", False))
 
@@ -692,6 +1169,7 @@ class RenderManager:
                     getattr(window, "source_revision", 0)
                     or list(getattr(window, "roi_included_indices", None) or []) != list(included_idx)
                     or getattr(window, "roi_reg_downscale_width", None) != window.reg_downscale_width
+                    or getattr(window, "roi_alignment_key", None) != alignment_key
                     or len(window.roi_aligned_images) != len(stack_images)):
                 window.transform_manager.reset_roi_selection()
                 self._restore_ui_controls()
@@ -780,8 +1258,9 @@ class RenderManager:
             source_images = window.roi_aligned_images
             effective_alignment = "none"
             effective_aligned_images = window.roi_aligned_images
-            effective_is_aligned = True
-            effective_last_alignment_options = (("ecc",), {})
+            effective_is_aligned = bool(requested_steps)
+            effective_last_alignment_options = ((requested_steps, registration_parameters)
+                                                if requested_steps else None)
         elif self._preview_mode:
             # Quick preview: downscale the stack so the draft render finishes
             # in a fraction of the time.
@@ -854,11 +1333,15 @@ class RenderManager:
                 window.raw_images is source_ref
                 and getattr(window, "source_revision", 0) == revision)
 
+        if compare_token is not self._compare_token:
+            self._start_status = "cancelled"
+            self.last_state = "cancelled"
+            self._restore_ui_controls()
+            return
         if (window.raw_images is not source_ref
                 or getattr(window, "source_revision", 0) != source_revision
                 or window.included_indices() != included_idx
-                or getattr(getattr(window, "source_manager", None), "_load_worker", None) is not None
-                or (compare_token is not self._compare_token)):
+                or getattr(getattr(window, "source_manager", None), "_load_worker", None) is not None):
             self._start_status = "stack_changed"
             self._abort_compare_run()
             self._restore_ui_controls()
@@ -880,8 +1363,11 @@ class RenderManager:
             # "source" is a filtered copy, so identity must be checked against
             # this, never against "source".
             "source_ref": window.raw_images,
-            "alignment_options": (("ecc",) if use_roi_aligned_images else requested_steps),
-            "alignment_identity": (requested_steps, registration_parameters),
+            "alignment_options": requested_steps,
+            "alignment_identity": ((requested_steps, registration_parameters,
+                                    alignment_key[-1] == 'reverse-registration-v1')
+                                   if 'openfocus' in requested_steps
+                                   else (requested_steps, registration_parameters)),
             "preview": self._preview_mode,
             "roi": roi_rect is not None,
             "roi_rect": ((float(roi_rect.x()), float(roi_rect.y()),
@@ -899,7 +1385,18 @@ class RenderManager:
             "full_filenames": list(window.image_filenames),
             "icc_profile": stack_icc_profile(window, included_idx),
             "linear_dng_metadata": deepcopy(getattr(window, "linear_dng_metadata", None)),
-            "source_paths": tuple(getattr(window, "image_source_paths", ()) or ()),
+            # Match the frames actually sent to the worker, not every loaded
+            # file: EXIF/source provenance is indexed by processed_images.
+            "source_paths": tuple(
+                window.image_source_paths[i]
+                for i in included_idx
+                if 0 <= i < len(getattr(window, "image_source_paths", ()) or ())
+            ),
+            "frame_exif": self._source_exif_snapshot(included_idx),
+            "frame_icc_profiles": tuple(
+                (getattr(window, "image_icc_profiles", ()) or ())[i]
+                if i < len(getattr(window, "image_icc_profiles", ()) or ()) else b""
+                for i in included_idx),
             "parameters": self._processing_parameters(force_algorithm or fusion_method),
         }
         if compare:
@@ -915,9 +1412,9 @@ class RenderManager:
             source_scale_factor=getattr(window, "current_scale_factor", 1.0))
 
         from utils.logging_setup import log_action
-        log_action("render_start", method=fusion_method,
+        log_action("render_start", method=force_algorithm or fusion_method,
                    align=alignment_method, preview=self._preview_mode,
-                   frames=len(window.raw_images or []))
+                   frames=len(stack_images), loaded_frames=len(window.raw_images or []))
         self.last_error = None
         self.last_result = None
         self._control_progress = None
@@ -926,6 +1423,30 @@ class RenderManager:
         all_source_paths = list(getattr(window, "image_source_paths", None) or [])
         source_paths = ([all_source_paths[i] for i in included_idx]
                         if len(all_source_paths) == len(window.raw_images) else [])
+        # The cache contains the exact post-alignment, post-exposure pixels.
+        # Keep one stack only, and bound the retained temporary files to 2 GiB.
+        from core.source_frames import SourceFrame
+        import numpy as np
+        method = (force_algorithm or fusion_method) if need_fusion else None
+        normalized = any(frame.dtype == np.uint16 for frame in stack_images)
+        snapshot_bytes = sum(frame.size * (4 if normalized else frame.dtype.itemsize)
+                             for frame in stack_images)
+        retain_preparation = bool(
+            method and get_fusion(method).neural and not self._preview_mode
+            and roi_rect is None and not use_roi_aligned_images and not collect_report
+            and not getattr(window, 'defect_mask_path', '')
+            and not getattr(window, 'sensor_denoise', False)
+            and snapshot_bytes <= 2 * 1024 ** 3
+            and all(isinstance(frame, SourceFrame) and
+                    not (frame.ndim == 3 and frame.shape[2] == 4)
+                    for frame in stack_images))
+        preparation_key = (alignment_key, method)
+        if (not retain_preparation or self._prepared_cache_source is not source_ref
+                or self._prepared_cache_key != preparation_key
+                or (requested_steps and not reusable)):
+            self.clear_prepared_cache()
+        prepared_cache = (self._prepared_cache if not requested_steps or reusable else None)
+        self._render_context['preparation_key'] = preparation_key if retain_preparation else None
         self.worker = RenderProcessWorker(
             source_images,
             effective_aligned_images,
@@ -948,8 +1469,8 @@ class RenderManager:
             roi_mode=roi_mode,
             roi_base_index=roi_base_index,
             use_gpu=getattr(window, "use_gpu", True),
-            base_frame="last" if _brightness(window, "base_correct",
-                                             force_algorithm or fusion_method) else "none",
+            base_frame=_base_frame(force_algorithm or fusion_method,
+                                   _brightness(window, "base_correct", force_algorithm or fusion_method)),
             sort_mode="desc" if getattr(window, "stack_reverse_order", False)
                 else "asc",
             exposure_match=_brightness(window, "exposure_match", force_algorithm or fusion_method),
@@ -960,8 +1481,12 @@ class RenderManager:
             load_scale_factor=getattr(window, "current_scale_factor", 1.0),
             disk_cache=disk_cache_request,
             collect_alignment_report=collect_report and not use_roi_aligned_images,
+            prepared_cache=prepared_cache,
+            retain_preparation=retain_preparation,
             preview=self._preview_mode,
+            profile_performance=bool(getattr(window, "profile_performance", False)),
         )
+        self.worker.storage_directory = storage_override
 
         self._progress_first_t = None
         self._progress_last_t = None
@@ -1006,10 +1531,10 @@ class RenderManager:
         log_action("render_finished", preview=bool(
             (self._render_context or {}).get("preview")),
             seconds=round(fusion_time, 2))
-        self._hide_progress_bar()
+        # The render stays busy until any provenance copy has finished.
         context = self._render_context
         preview = context["preview"] if context else getattr(self, '_preview_mode', False)
-        self._preview_mode = False
+        # Preserve the request while a context worker is active.
         compare = getattr(self, '_compare_mode', False)
 
         # The stack can change while a render runs (a frame deleted, a new
@@ -1038,15 +1563,51 @@ class RenderManager:
             self._dispose_worker()
             self._restore_ui_controls()
             return
+        candidate = getattr(self, "_context_candidate", None)
+        if candidate is None and fusion_result is not None and not preview:
+            import numpy as np
+            needs_copy = any(isinstance(image, np.ndarray) and
+                             ((context or {}).get("roi_rect") is not None or
+                              image.shape[:2] != fusion_result.shape[:2])
+                             for image in processed_images if image is not None)
+            if needs_copy:
+                from core.workers import RenderContextWorker
+                kwargs = self._render_context_kwargs(context, compare, registration_performed)
+                worker = RenderContextWorker(processed_images, fusion_result, **kwargs)
+                self._retiring_context_workers.add(worker)
+                self.context_worker = worker
+                self._context_candidate = (processed_images, fusion_result, registration_performed,
+                                           alignment_time, fusion_time, device_name)
+                worker.ready.connect(lambda result: self._context_ready(worker, result, None))
+                worker.failed.connect(lambda error: self._context_ready(worker, None, error))
+                worker.finished.connect(lambda: self._context_worker_finished(worker))
+                worker.start()
+                return
+        self._hide_progress_bar()
+        self._preview_mode = False
+        reused_preview_alignment = bool(context and context.get("preview")
+                                        and not context.get("roi")
+                                        and context.get("aligned")
+                                        and context.get("alignment_options"))
+        effective_registration = bool(registration_performed or reused_preview_alignment)
+        if context and context.get('preparation_key') is not None:
+            self._prepared_cache = getattr(self.worker, 'prepared_cache', None)
+            self._prepared_cache_key = context['preparation_key'] if self._prepared_cache is not None else None
+            self._prepared_cache_source = context['source_ref'] if self._prepared_cache is not None else None
+
 
         self.alignment_diagnostics = (
             list(getattr(self.worker, 'alignment_report', None) or []),
             list((context or {}).get('filenames', [])),
             list((context or {}).get('included', [])),
         )
+        self._capture_performance_report()
 
+        previous_preview_record = getattr(window, "_wipe_preview_record", None)
+        display_committed = False
         try:
             window._wipe_preview_record = None
+            # Draft ownership changes only after the replacement pixels are displayed.
             if fusion_result is not None:
                 if preview and not (context or {}).get("roi"):
                     try:
@@ -1056,11 +1617,14 @@ class RenderManager:
                             processed_images, fusion_result,
                             filenames=ctx.get("filenames"),
                             algorithm=ctx.get("algorithm", "unknown"),
-                            aligned=bool(registration_performed),
+                            aligned=effective_registration,
                             source_indices=ctx.get("included"),
                             frame_ids=ctx.get("frame_ids"),
                             source_revision=ctx.get("source_revision", 0),
                             linear_dng_metadata=ctx.get("linear_dng_metadata"),
+                            source_exif=((ctx.get("frame_exif") or (b"",))[0]),
+                            frame_exif=ctx.get("frame_exif"),
+                            frame_icc_profiles=ctx.get("frame_icc_profiles"),
                             source_paths=ctx.get("source_paths"))
                         if preview_context is not None:
                             window._wipe_preview_record = OutputRecord.create(
@@ -1068,6 +1632,7 @@ class RenderManager:
                     except Exception:
                         import logging
                         logging.getLogger("openfocus").exception("could not record preview provenance")
+                previous_fusion = getattr(window, "fusion_result", None)
                 window.fusion_result = fusion_result
                 self.last_result = {
                     "shape": list(fusion_result.shape),
@@ -1075,7 +1640,7 @@ class RenderManager:
                     "device": device_name,
                     "alignment_seconds": round(float(alignment_time), 3),
                     "fusion_seconds": round(float(fusion_time), 3),
-                    "registration_performed": bool(registration_performed),
+                    "registration_performed": effective_registration,
                     "preview": bool(preview),
                     "method": (context or {}).get("algorithm"),
                 }
@@ -1088,6 +1653,15 @@ class RenderManager:
                     window.registration_frame_ids = list((context or {}).get("frame_ids", []))
                     window.registration_filenames = list((context or {}).get("filenames", []))
 
+
+                try:
+                    displayed = window.output_manager.display_specific_fusion_result(fusion_result)
+                    if not displayed:
+                        raise RuntimeError("Could not display render result")
+                except Exception:
+                    window.fusion_result = previous_fusion
+                    raise
+                display_committed = True
                 # 如果是ROI模式下的融合，退出ROI模式（但保留对齐图像供复用）
                 if getattr(window, 'roi_mode_active', False):
                     window.roi_mode_active = False
@@ -1100,43 +1674,32 @@ class RenderManager:
                         window.btn_preview_roi.blockSignals(True)
                         window.btn_preview_roi.setChecked(False)
                         window.btn_preview_roi.blockSignals(False)
-
-                window.output_manager.show_fusion_result()
+                if preview:
+                    window.preview_result = {"kind": "fusion", "image": fusion_result}
+                    # The draft is on the canvas, not in the history. Clear
+                    # the old row so Ctrl+S cannot mistake a previous formal
+                    # result for the draft the user is looking at.
+                    try:
+                        window.output_list.clearSelection()
+                        window.output_list.setCurrentRow(-1)
+                    except Exception:
+                        pass
+                else:
+                    window.preview_result = None
                 new_context = None
                 if not preview:
                     try:
-                        ctx = context or {}
-                        new_context = build_render_context(
-                            processed_images,
-                            fusion_result,
-                            filenames=ctx.get("filenames")
-                            or list(window.image_filenames or []),
-                            algorithm=((self._compare_current if compare else None)
-                                       or ctx.get("algorithm")
-                                       or window.current_fusion_method()),
-                            alignment_options=ctx.get("alignment_options"),
-                            # Only claim registration fill when the worker
-                            # actually fused warped frames. A stack that was
-                            # aligned earlier but rendered with no alignment
-                            # request uses the raw frames.
-                            aligned=bool(registration_performed
-                                         or (ctx.get("roi")
-                                             and ctx.get("aligned"))),
-                            roi_rect=ctx.get("roi_rect"),
-                            frame_ids=ctx.get("frame_ids"),
-                            roi_mode=ctx.get("roi_mode"),
-                            source_indices=ctx.get("included"),
-                            source_revision=ctx.get("source_revision", 0),
-                            parameters=ctx.get("parameters"),
-                            pixel_size_um=ctx.get("pixel_size_um"),
-                            source_px_um=ctx.get("source_px_um"),
-                            source_scale_factor=ctx.get("source_scale_factor", 1.0),
-                            icc_profile=ctx.get("icc_profile", b""),
-                            linear_dng_metadata=ctx.get("linear_dng_metadata"),
-                            source_paths=ctx.get("source_paths"),
-                        )
+                        if candidate is not None:
+                            new_context = candidate["context"]
+                            if candidate["error"]:
+                                raise RuntimeError(candidate["error"])
+                        else:
+                            new_context = build_render_context(
+                                processed_images, fusion_result,
+                                **self._render_context_kwargs(context, compare, registration_performed))
                         window.last_render_context = new_context
                     except Exception:
+                        window.last_render_context = None
                         import logging
                         logging.getLogger("openfocus").exception(
                             "could not record render provenance; "
@@ -1182,7 +1745,7 @@ class RenderManager:
                 logging.getLogger("openfocus").info(
                     "render finished (preview=%s, method fusion, %.1fs)", preview, fusion_time)
             else:
-                if registration_performed:
+                if effective_registration:
                     self.last_result = {
                         "device": device_name,
                         "alignment_seconds": round(float(alignment_time), 3),
@@ -1194,14 +1757,27 @@ class RenderManager:
                     }
                     if preview:
                         # Preview draft: show the small aligned frames without
-                        # touching the full-resolution output history
                         first = processed_images[0] if processed_images else None
-                        if first is not None:
-                            metadata = (context or {}).get('linear_dng_metadata')
-                            if metadata is not None:
-                                from utils.linear_dng import develop_linear
-                                first = develop_linear(first, metadata)
-                            window.lbl_result_img.set_display_pixmap(cv2_to_pixmap(first))
+                        if first is None:
+                            raise ValueError("Registration preview contains no frames")
+                        display = first
+                        metadata = (context or {}).get('linear_dng_metadata')
+                        if metadata is not None:
+                            from utils.linear_dng import develop_linear
+                            display = develop_linear(display, metadata)
+                        pixmap = cv2_to_pixmap(display)
+                        window.lbl_result_img.set_display_pixmap(pixmap)
+                        window.preview_result = {"kind": "registration", "image": first}
+                        display_committed = True
+                        window.fusion_result = None
+                        window.registration_results = []
+                        window.registered_source_indices = []
+                        window.registration_frame_ids = []
+                        window.registration_filenames = []
+                        window.current_result_index = -1
+                        window.aligned_stack_dir = None
+                        window.output_list.clearSelection()
+                        window.output_list.setCurrentRow(-1)
                         window.result_control_bar.setVisible(False)
                         print("Preview registration completed (not added to output history)")
                     else:
@@ -1217,6 +1793,7 @@ class RenderManager:
 
                         window.current_result_index = 0
                         window.update_result_view(0)
+                        window.preview_result = None
                         window.add_label_action.setEnabled(True)
 
                         # Registration results replaced the output history the
@@ -1263,17 +1840,20 @@ class RenderManager:
             total_time = alignment_time + fusion_time
 
             info_lines = []
+            if fusion_result is not None:
+                height, width = fusion_result.shape[:2]
+                info_lines.append(trans.t("status_res_fmt").format(width, height))
 
             if preview:
                 info_lines.append(trans.t("info_preview_quality"))
-            cache_hit = bool(getattr(self.worker, "alignment_reused", False))
-            if registration_performed and cache_hit:
+            cache_hit = bool(getattr(self.worker, "alignment_reused", False) or reused_preview_alignment)
+            if effective_registration and cache_hit:
                 # The frames are aligned, but this run did not align them:
                 # reporting 0.00 s under the method name read as "aligned
                 # instantly" instead of "reused the cached result".
                 info_lines.append(trans.t("alignment_report_cached"))
                 info_lines.append(trans.t("info_align_time").format(0.0))
-            elif registration_performed:
+            elif effective_registration:
                 alignment_method = window.current_alignment_method()
                 align_method_str = trans.t(get_registration(alignment_method).label_key)
                 info_lines.append(trans.t("info_align_method").format(align_method_str))
@@ -1317,13 +1897,21 @@ class RenderManager:
                     and window.output_list.count() > 0):
                 newest = window.output_list.item(0)
                 if newest is not None:
-                    # Long names are cut off in the list: lead with the name
-                    newest.setToolTip("\n".join([newest.text(), ""] + info_lines))
+                    record_for_row = getattr(window.output_manager, "record_for_row", None)
+                    record = record_for_row(0) if callable(record_for_row) else None
+                    refresh = getattr(window.output_manager, "_refresh_output_tooltip", None)
+                    if record is not None and callable(refresh):
+                        record.tooltip_details = tuple(info_lines)
+                        refresh(0)
+                    else:
+                        newest.setToolTip("\n".join([newest.text(), ""] + info_lines))
             self.last_state = "done" if self.last_result is not None else "error"
             if self.last_state == "error":
                 self.last_error = "Render completed without producing a result"
 
         except Exception as exc:
+            if not display_committed:
+                window._wipe_preview_record = previous_preview_record
             import logging
             logging.getLogger("openfocus").exception("render failed with exception")
             self.last_state = "error"
@@ -1353,17 +1941,73 @@ class RenderManager:
                 self._restore_ui_controls()
             self._dispose_worker()
 
+    def _render_context_kwargs(self, context, compare, registration_performed):
+        ctx = context or {}
+        return dict(
+            filenames=ctx.get("filenames") or list(self.window.image_filenames or []),
+            algorithm=((self._compare_current if compare else None) or ctx.get("algorithm")
+                       or self.window.current_fusion_method()),
+            alignment_options=ctx.get("alignment_options"),
+            aligned=bool(registration_performed or (ctx.get("roi") and ctx.get("aligned"))),
+            roi_rect=ctx.get("roi_rect"), frame_ids=ctx.get("frame_ids"),
+            roi_mode=ctx.get("roi_mode"), source_indices=ctx.get("included"),
+            source_revision=ctx.get("source_revision", 0), parameters=ctx.get("parameters"),
+            pixel_size_um=ctx.get("pixel_size_um"), source_px_um=ctx.get("source_px_um"),
+            source_scale_factor=ctx.get("source_scale_factor", 1.0),
+            icc_profile=ctx.get("icc_profile", b""),
+            source_exif=((ctx.get("frame_exif") or (b"",))[0]),
+            frame_exif=ctx.get("frame_exif"), frame_icc_profiles=ctx.get("frame_icc_profiles"),
+            linear_dng_metadata=ctx.get("linear_dng_metadata"), source_paths=ctx.get("source_paths"))
+
+    def _context_ready(self, worker, result, error):
+        if worker is not self.context_worker or not isinstance(self._context_candidate, tuple):
+            return
+        if getattr(self, "_closing", False):
+            self._context_candidate = None
+            self.context_worker = None
+            return
+        args = self._context_candidate
+        if self._stack_changed_since(self._render_context):
+            self._context_candidate = {"context": None, "error": None}
+            self.context_worker = None
+            try:
+                self.on_render_finished(*args)
+            finally:
+                self._context_candidate = None
+            return
+        if getattr(worker, "is_cancelled", False) or (error and error.startswith("CANCELLED")):
+            self._context_candidate = None
+            self.context_worker = None
+            self.on_render_error("CANCELLED: render cancelled")
+            return
+        self._context_candidate = {"context": result, "error": error}
+        self.context_worker = None
+        try:
+            self.on_render_finished(*args)
+        finally:
+            self._context_candidate = None
+
+    def _context_worker_finished(self, worker):
+        self._retiring_context_workers.discard(worker)
+        worker.deleteLater()
+
     def _publish_aligned_stack(self, window, frames) -> None:
         """Stage an align-only result as a folder the output list can show."""
         try:
             from controllers.output_manager import publish_aligned_stack
 
+            ctx = self._render_context or {}
+            frame_exif = tuple(ctx.get("frame_exif") or ())
             publish_aligned_stack(window, frames,
-                                  filenames=(self._render_context or {}).get("filenames"),
-                                  icc_profile=(self._render_context or {}).get("icc_profile", b""),
-                                  linear_dng_metadata=(self._render_context or {}).get("linear_dng_metadata"),
-                                  source_frames=(self._render_context or {}).get("comparison_source"),
+                                  filenames=ctx.get("filenames"),
+                                  icc_profile=ctx.get("icc_profile", b""),
+                                  linear_dng_metadata=ctx.get("linear_dng_metadata"),
+                                  source_exif=(frame_exif[0] if frame_exif else b""),
+                                  frame_exif=frame_exif,
+                                  frame_icc_profiles=ctx.get("frame_icc_profiles"),
+                                  source_frames=ctx.get("comparison_source"),
                                   source_indices=(self._render_context or {}).get("included"),
+                                  alignment_options=(self._render_context or {}).get("alignment_options"),
                                   source_revision=(self._render_context or {}).get("source_revision", 0))
             if getattr(window, "wipe_active", False):
                 window.refresh_wipe_controls()
@@ -1452,8 +2096,9 @@ class RenderManager:
         else:
             key = {'waiting': 'render_stage_waiting', 'prepare': 'render_stage_prepare',
                    'align': 'render_stage_align', 'fuse': 'render_stage_fuse',
-                   'finish': 'render_stage_finish'}.get(stage, 'render_progress')
+                   'finish': 'render_progress'}.get(stage, 'render_progress')
             text = trans.t(key)
+        self._control_progress = None
         self._progress_first_t = None
         self._progress_last_t = None
         self._show_progress_bar(text)
@@ -1477,7 +2122,7 @@ class RenderManager:
         self._control_progress = (int(done), int(total))
         now = _time.time()
         last = getattr(self, '_progress_last_t', None)
-        if last is None or now - last > 1.0:  # throttle to 1 Hz
+        if last is None or now - last > 1.0 or (total > 0 and done >= total):
             self._progress_last_t = now
             pct = int(done * 100 / max(1, total))
             eta = ''
@@ -1487,10 +2132,14 @@ class RenderManager:
                 eta = f" · ~{int(remaining) + 1}s"
             else:
                 self._progress_first_t = now
-            key = ('render_stage_prepare' if getattr(self, '_render_progress_stage', None) == 'prepare'
-                   else 'render_progress')
-            window.statusBar().showMessage(
-                f"{trans.t(key)} {pct}% ({done}/{total}){eta}", 5000)
+            key = {'prepare': 'render_stage_prepare', 'align': 'render_stage_align',
+                   'fuse': 'render_stage_fuse'}.get(
+                       getattr(self, '_render_progress_stage', None), 'render_progress')
+            text = f"{trans.t(key)} {pct}% ({done}/{total}){eta}"
+            label = getattr(self, '_status_bar_label', None)
+            if label is not None:
+                label.setText(text)
+            window.statusBar().showMessage(text, 5000)
 
     def _finish_compare_run(self) -> None:
         """End a comparison run: unlock the UI and report skipped methods."""
@@ -1531,6 +2180,7 @@ class RenderManager:
             if not error_message.startswith('CANCELLED') else [],
             list(context.get('filenames', [])), list(context.get('included', [])),
         )
+        self._capture_performance_report()
         # Every exit path clears the draft flag: a failed or cancelled render
         # must not leave the controller in preview mode.
         self._preview_mode = False
