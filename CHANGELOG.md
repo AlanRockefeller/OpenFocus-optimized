@@ -5,8 +5,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-
-
+### Added
+- Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
 ## [1.77.0] - 2026-11-11
 

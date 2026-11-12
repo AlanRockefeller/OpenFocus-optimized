@@ -102,6 +102,12 @@ _DARK: Dict[str, str] = {
 
 PALETTES: Dict[str, Dict[str, str]] = {"light": _LIGHT, "dark": _DARK}
 
+# Distinct identification colours for items that must be told apart at a
+# glance (the flip review viewer's candidates). Same in both themes; each is
+# readable as a marker on dark and light surfaces.
+CATEGORICAL = ("#4C8DFF", "#F59E0B", "#10B981", "#EF4444",
+               "#A855F7", "#06B6D4", "#EC4899", "#84CC16")
+
 # --------------------------------------------------------------------------
 # Geometry and type
 # --------------------------------------------------------------------------
