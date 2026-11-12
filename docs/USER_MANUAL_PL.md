@@ -78,6 +78,7 @@ W oknie **Zapisz jako** zwykły TIFF zapisuje wynik jako jeden obraz, a TIFF z w
 ### Uruchamianie aplikacji
 
 Pobierz najnowszą kompilację ze [strony OpenFocus](https://openfocus.top/#download) lub z [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Strona jest preferowana: publikuje bieżący instalator Windows, kompilację macOS i pakiet Linux ze skryptami instalacyjnymi; te artefakty są dokładnym wynikiem potoku wydania, więc wybieraj je zamiast ponownej kompilacji. `pip install openfocus` instaluje tylko headless CLI (koło celowo nie zależy od PyQt6); do interfejsu graficznego użyj gotowej kompilacji albo kodu źródłowego. Po instalacji uruchom OpenFocus na jeden z sposobów:
+Strona i skrypty instalacyjne oferują także nowsze wersje beta, obecnie [wydania przedpremierowego v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Automatyczne aktualizacje aplikacji oferują także nowsze wersje beta; linuksowe CLI z PyPI pozostaje stabilne.
 
 1. **Windows (instalator lub wersja przenośna)**: kliknij dwukrotnie skrót lub `OpenFocus.exe`
 2. **macOS**: przeciągnij `OpenFocus.app` do Programów i uruchom; kompilacje są przeznaczone dla Apple Silicon
@@ -212,6 +213,8 @@ Niewielka krzywa nad suwakiem stosu źródłowego pokazuje ostrość każdej kla
 Programy mikroskopowe (ZEN, NIS-Elements, ImageJ/Fiji) często eksportują cały stos Z jako JEDEN wielostronicowy plik TIFF. OpenFocus czyta każdą stronę takiego pliku jako osobną klatkę stosu — przeciągnij lub otwórz plik, a stos pojawi się w całości (klatki nazywają się `<file>_page_001` itd.). Jednostronicowe pliki TIFF działają jak wcześniej. Odwrotnie również: **Plik → Zapisz stos → (Zarejestrowany / Wejściowy) → Zapisz jako wielostronicowy TIFF** zapisuje cały stos z powrotem do jednego `.tif` z zachowaniem głębi 16 bitów.
 
 ### Pasek skali (ryciny publikacyjne)
+
+Etykiety paska skali używają rzeczywistych pogrubionych glifów, jeśli wybrana rodzina je zawiera; w przeciwnym razie używana jest czytelna czcionka z tej samej rodziny.
 
 Jeśli wybrany cel nie ma użytecznych metadanych, domyślnie wybierana jest kalibracja ręczna i wymagany jest prawidłowy rozmiar piksela.
 
@@ -467,7 +470,7 @@ Jeśli nie wskazano katalogu tymczasowego, OpenFocus szacuje potrzebne miejsce n
 
 - **Algorytm**: implementacja metody Fu i in. (*Laser & Optoelectronics Progress*, 2024): mapa ostrości z różnicy rozmyć |I − mean(I)| jest wzbogacana operatorem gradientu quasi-gaussowskiego w czterech sąsiedztwach (GFG), udokładniana szybkim filtrem sterowanym, decyzja podejmowana jest dla każdego piksela (remisy rozstrzyga miara małego obszaru Sobela 3×3), a binarne mapy decyzji są ponownie wygładzane szybkim filtrem sterowanym przed ważonym mieszaniem
 - **Najlepsza do**: mikroskopii i zdjęć z wyraźnymi obszarami ostrości
-- **Zalety**: szybka, ostre granice obszarów ostrości; pamięć nie rośnie z liczbą klatek
+- **Zalety**: szybka, ostre granice; mapy ostrości i wag są przetwarzane w ograniczonych oknach. Źródła i ich opisy, wynik, dekodowanie oraz bufory nadal wymagają RAM i tymczasowego miejsca na dysku.
 - **Parametr**: jądro = rozmiar filtra średniego zgrubnej mapy ostrości (1–51, domyślnie 7)
 
 ### OpenFocus A / B / C
@@ -631,6 +634,8 @@ tła dokładnie przywracają obraz, dostępną historię i diagnostykę bez pono
 
 ### Zarządzanie etykietami
 
+Eksport historycznego wyrównanego stosu używa jego własnych identyfikatorów klatek; brak identyfikatorów wymaganych przez etykietę powoduje błąd. Tylko faktycznie stosowane etykiety blokują eksport przezroczystego PNG. **Dopasuj** używa ograniczonej miniatury; **100%** pokazuje oryginalny obszar w skali jeden piksel źródła na piksel urządzenia i może pokazać ładowanie lub błąd. Zapisane duże współrzędne i rozmiary są zachowywane podczas edycji.
+
 Otwórz **Narzędzia → Etykiety** po wczytaniu obrazów lub utworzeniu wyniku. Każda etykieta ma własny cel: stos źródłowy, stos zarejestrowany lub wyniki wyjściowe. Etykiety wyników mogą dotyczyć wszystkich wyników albo wybranego wyniku według nazwy; zmiana nazwy lub kolejności tego wyniku nie zmienia powiązania.
 
 Użyj **Dodaj**, aby utworzyć kolejną etykietę, wybierz pozycję do edycji i włączaj lub wyłączaj ją polem wyboru. Wpisz stały tekst albo wstaw `{value}` dla numeru klatki. Numer to wartość początkowa plus indeks klatki od zera pomnożony przez interwał; pojedynczy wynik zawsze używa wartości początkowej.
@@ -648,6 +653,8 @@ Podgląd używa rzeczywistego celu. Przechodź przyciskami Poprzednia/Następna 
 Otwórz **Ustawienia → Ustawienia zaawansowane**, aby zmienić wydajność, rejestrację, czyszczenie matrycy, nazwy wyników, AI StackMFF i ustawienia uruchamiania. Zmiany pozostają szkicem do naciśnięcia **OK**; Anuluj, Esc i zamknięcie okna je odrzucają. Zmniejszenie rozmiaru kafelka natychmiast aktualizuje widoczny limit nakładki do połowy kafelka. Zapisany limit partii AI pozostaje, ale wnioskowanie obecnie wysyła jeden kafelek na wywołanie; szerokość skalowania rejestracji może zmienić dokładność wyrównania. Zbieranie diagnostyki wyrównania to pole wyboru w sekcji Rejestracja.
 
 Automatyczne pobieranie aktualizacji działa w bezczynności i nigdy nie instaluje aktualizacji samodzielnie. Ukończone pobieranie pozostaje gotowe, dopóki nie wybierzesz jawnie **Uruchom ponownie i zaktualizuj**. Ponowne uruchomienie chroni aktywne edycje i niezapisaną pracę, a następnie zapisuje dane odzyskiwania przed uruchomieniem zamiennika. Anulowanie pobierania lub przygotowania czeka na bieżącą bezpieczną granicę. Istniejąca kompletna, nowsza przygotowana kompilacja może zostać zainstalowana bez sieci.
+
+W Windows aktualizator przygotowuje osobną wersję kandydującą i podczas przełączenia przenosi znacznik wersji przenośnej oraz `OpenFocusData`. W razie błędu przywraca poprzednią instalację; jeśli przywrócenie się nie powiedzie, zachowuje kopię i nie uruchamia aplikacji automatycznie. Może pojawić się jedno żądanie uprawnień. Anulowanie rozpakowywania usuwa nieukończone dane przygotowawcze i jest sprawdzane między odczytami i zapisami po 256 KiB; zablokowana operacja dyskowa lub sieciowa może je opóźnić.
 
 Korekcja pola płaskiego zmienia piksele robocze sesji bez nadpisywania plików źródłowych. Wybierz białe odniesienie i klatkę podglądu, a następnie ponownie zbuduj podgląd po zmianie źródła lub skali. Odniesienie i obrazy robocze/bazowe muszą mieć tę samą dziedzinę współrzędnych i rozmiar. Zastosowanie przygotowuje oba stosy przed zatwierdzeniem; opcjonalne usunięcie klatki odniesienia należy do tego samego kroku cofania. Wyeksportuj poprawione obrazy źródłowe, jeśli chcesz zachować te piksele poza sesją.
 
@@ -723,8 +730,10 @@ Planista uwzględnia fizyczne rdzenie, powinowactwo CPU i limity oraz uruchamia 
 
 StackMFF V1/V2/V3 używają ONNX Runtime. DirectML w Windows i CoreML w macOS mogą przyspieszać wnioskowanie; w przeciwnym razie używany jest CPU. Dostępność dostawcy nie dowodzi wykonania na GPU. Obsługa innych GPU wymaga weryfikacji.
 
+OpenFocus B może przyspieszać przetwarzanie głębi i łączenie źródeł na zgodnym GPU OpenCL; zależnie od budżetu pamięci może używać ograniczonych etapów GPU lub wrócić do CPU. OpenFocus A/C i wyrównanie używają CPU. Zobacz [obsługę GPU](GPU_SUPPORT.md).
+
 - Przełącznik znajduje się w **Ustawienia → Akceleracja GPU**
-- Odznaczenie wymusza metody neuronowe na CPU — przydatne, gdy sterowniki GPU działają niepoprawnie
+- Odznaczenie wymusza obsługiwane metody fuzji na CPU — przydatne przy problemach ze sterownikami GPU
 - Panel stanu pokazuje `N/A`, gdy akcelerator nie jest używany lub niedostępny, oraz `CPU*`, gdy akcelerator istnieje, ale wybrana metoda działa tylko na CPU
 - Wybór działa przy następnym renderowaniu i jest pamiętany
 
@@ -907,7 +916,7 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--input, -i` | Folder (foldery) obrazów, plik wideo, jeden lub kilka plików obrazów albo wielostronicowy TIFF |
 | `--output, -o` | Ścieżka obrazu wyjściowego (rozszerzenie określa format) |
 | `--output-dir, -d` | Tryb wsadowy: łączy każdy folder wejściowy, zapisując `<folder>.png` dla każdego stosu |
-| `--resume` | Tryb wsadowy: pomija foldery, których plik wyjściowy już istnieje |
+| `--resume` | Pomija folder tylko wtedy, gdy wszystkie żądane wyniki są niepustymi zwykłymi plikami; nie sprawdza treści ani parametrów |
 | `--config FILE` | Tryb wsadowy: JSON z nadpisaniami dla każdego folderu, np. `{"stackA": {"method": "dct"}}` |
 | `--method, -m` | `stackmffv3` (domyślnie), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
 | `--param KEY=JSON_VALUE` | Ustawia dowolny parametr fuzji; można powtarzać, nadpisuje starsze flagi |
@@ -1086,6 +1095,7 @@ Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd uży
 
 #### AI niedostępne
 
+- Włącz i zatwierdź funkcje eksperymentalne w ustawieniach zaawansowanych; bez tego metody AI w aplikacji są wyłączone. Środowisko i model to osobne wymagania.
 - Sprawdź ONNX Runtime i dołączony model.
 - Sprawdź przez **Pomoc → Informacje o środowisku**
 - StackMFF V3 nie wymaga torchvision

@@ -15,6 +15,22 @@ from PyQt6.QtWidgets import (QFileDialog, QLineEdit, QListView, QTreeView,
 from utils.ui_utils import make_folder_path_editable
 
 _control_picker = ContextVar("control_picker", default=False)
+_native_picker_active = False
+
+
+@contextmanager
+def _native_picker_context():
+    global _native_picker_active
+    previous = _native_picker_active
+    _native_picker_active = True
+    try:
+        yield
+    finally:
+        _native_picker_active = previous
+
+
+def native_picker_active():
+    return _native_picker_active
 
 
 @contextmanager
@@ -62,7 +78,6 @@ def _follow_filter_suffix(dialog):
     dialog.setDefaultSuffix(filter_suffix(dialog.selectedNameFilter()))
     dialog.filterSelected.connect(
         lambda name: dialog.setDefaultSuffix(filter_suffix(name)))
-
 
 def _sidebar_urls(dialog):
     """Use Qt's filesystem places and real folders visited in this app."""
@@ -376,8 +391,9 @@ class _NativeFolderDialog:
     def exec(self):
         self._files = []
         try:
-            self._files = _native_folder_paths(self._parent, self._caption,
-                                               self._directory, self._multiple)
+            with _native_picker_context():
+                self._files = _native_folder_paths(self._parent, self._caption,
+                                                   self._directory, self._multiple)
         except OSError as exc:
             QMessageBox.critical(self._parent, self._caption or "Select Folder", str(exc))
             return QFileDialog.DialogCode.Rejected
@@ -493,8 +509,9 @@ class FileDialog(QFileDialog):
     @classmethod
     def _pick(cls, parent, caption, directory, filter, selectedFilter, options, mode, accept):
         if mode != cls.FileMode.Directory and _use_native_file_dialog():
-            return _pick_native_file(parent, caption, directory, filter, selectedFilter,
-                                     options, mode, accept)
+            with _native_picker_context():
+                return _pick_native_file(parent, caption, directory, filter, selectedFilter,
+                                         options, mode, accept)
         dialog = cls(parent, caption, directory, filter)
         dialog.setOptions(options | cls.Option.DontUseNativeDialog)
         dialog.setFileMode(mode)

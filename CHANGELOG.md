@@ -9,9 +9,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add developer tooling for sample focus stacks published outside OpenFocus:
   a versioned manifest, a verified download cache, a packer with a metadata
   check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
+
+## [1.77.0] - 2026-11-11
+
+At the time of the [v1.77.0-beta.3 prerelease](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.3), v1.76.0 is the latest stable release.
+
+### Added
+- Accelerate OpenFocus B depth processing and source merging on compatible
+  OpenCL GPUs, with bounded GPU stages and CPU fallback when full GPU depth is
+  not admitted; OpenFocus A/C and alignment use the CPU. Package PyOpenCL for
+  supported desktop and CLI builds; an OpenCL GPU driver and compiler remain
+  required.
+- Add the Discord community to Contact Us and a Support Us dialog with Alipay and PayPal codes.
+- Reuse a private device identity for account sign-in and display the device limit.
+- Send app run, platform and report build channel metadata to the account service.
+- Skip automatic error reports from development runs.
 - Offer optional account sign-in with a skippable first-launch and update prompt.
 - Show the signed-in account in Help and provide browser account management and sign-out.
-- Restore an existing browser account at startup and open the account center using a short-lived handoff.
+- Restore saved local account sessions and open the account center using a short-lived handoff.
 - Explain where to enable experimental methods in the first-run welcome dialog.
 - Allow users to review and send sanitized error reports, and choose whether to
   send reports automatically after an error. Previous native crashes require
@@ -39,8 +54,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   full precision for saved values and calculations.
 - Add an optional Windows Explorer context-menu command to import selected
   images or folders as a stack, including large multi-selections.
-- Default exposure matching on for every fusion method and the other desktop
-  render options off, while preserving explicitly saved choices.
+- Default desktop render options off while preserving explicitly saved choices.
 - Add **File → Open Image Frames…** to import selected images as one stack,
   with an editable folder address in the file picker.
 - Add opt-in render profiling: **Advanced Settings → Diagnostics → Profile
@@ -139,6 +153,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   source coverage before compositing the display background.
 
 ### Changed
+- Offer newer beta desktop releases through website downloads, installation
+  scripts and automatic updates while keeping PyPI releases stable.
+- Support GitHub beta prereleases without publishing them as PyPI releases.
+- Identify packaged beta builds in the application and diagnostics, and offer the matching stable release when it becomes available.
 - Redesign the account dialog with inline agreement links and a
   low-key skip action. After sign-in under the updated terms, sanitized
   automatic error reports default on unless a previous choice is preserved;
@@ -151,9 +169,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   default registration method even with experimental features enabled; OpenFocus
   registration requires an explicit choice and the experimental opt-in. Saved
   explicit choices are preserved subject to that setting.
-- Enable exposure matching by default for all fusion methods. OpenFocus A/B/C
-  match the first processed frame; other methods match the last. Saved
-  per-method choices remain in effect.
+- Keep exposure matching off by default in the desktop interface. When enabled,
+  OpenFocus A/B/C match the first processed frame and other methods match the
+  last. Saved per-method choices remain in effect; CLI defaults are unchanged.
 - Keep optional base correction off by default; when enabled, OpenFocus A/B/C
   use the first processed frame and other methods use the last. Reversing the
   stack changes processing order and the reference frame.
@@ -227,6 +245,39 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   content. Output pixels are unchanged.
 
 ### Fixed
+- Keep Windows release runtimes separate from older bundled libraries during
+  upgrades, and remove obsolete application runtimes when using the installer.
+- Allow existing desktop releases to receive beta updates through version-pinned
+  compatibility aliases, and keep installed beta builds from repeatedly
+  offering the same update.
+- Show the same complete environment report in feedback and Environment Info, and let signed-in users open their account center from feedback.
+- Enable exposure matching by default for every fusion method in the desktop
+  interface and batch processing; saved per-method choices remain in effect.
+- Restore saved account sessions locally without opening an unrequested browser tab at startup.
+- Provide enough native thread stack for flat-field previews on macOS.
+- Keep the default Unix control socket usable when the temporary directory path is long.
+- Decode 16-bit planar LZW TIFF pages without corrupting their pixel values.
+- Include all supported interface languages in frozen desktop builds.
+- Preserve a label's saved font when its editor opens on a system that lacks it.
+- Allow single-instance startup when the temporary directory has a long path.
+- Preserve existing Unix control endpoints when a second server uses the same name.
+- Report oversized TIFF EXIF snapshots as load errors instead of silently
+  treating the metadata as absent.
+- Identify the rejected sidecar option in batch CLI validation errors.
+- Restore the caller's OpenCV thread count after direct OpenFocus execution,
+  including cancellation and a failed planning import.
+- Protect historical source files when exporting layered TIFFs, depth products
+  and meshes, even after loading a different stack.
+- Keep batch conversion progress and cancellation accurate, validate TIFF
+  layouts before decoding and preserve per-page metadata during conversion.
+- Keep scale-bar previews bounded while retaining native image geometry, and
+  preserve label settings when the editor is accepted without changes.
+- Release failed accelerator sessions before CPU fallback, and keep cancelled
+  preview, comparison and depth workers alive until their work has stopped.
+- Restore project registration defaults and preserve source identity through
+  stack edits, cached alignment and output history.
+- Validate per-folder CLI configuration before processing, and retain
+  responsive navigation and language links when website scripts are unavailable.
 - Dispose closed windows before Qt application teardown during normal exit.
 - Avoid reverse DNS while binding account sign-in callbacks to loopback.
 - Let each window close independently of account tasks owned by other windows.
@@ -435,7 +486,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   GPU Acceleration action follows the same rule, and a failing memory probe no
   longer fails the job.
 
-## [1.77.0] - 2026-11-06
 
 ### Added
 - Add Auto background to Retouch: replace the stacked background with one real
