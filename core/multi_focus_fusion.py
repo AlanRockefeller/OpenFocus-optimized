@@ -1,6 +1,7 @@
 import concurrent.futures
 import importlib
 import os
+import threading
 import time
 import numpy as np
 from typing import Union, List, Tuple, Optional
@@ -100,6 +101,26 @@ def neural_device_kind():
     kind = cached_device()
     return ('N/A' if kind == 'CPU' else kind) if kind is not None else _NEURAL_DEVICE_KIND
 
+_OPENFOCUS_GPU_AVAILABLE = None
+
+
+def openfocus_gpu_available():
+    """Cached OpenCL GPU capability, or None before probing."""
+    return _OPENFOCUS_GPU_AVAILABLE
+
+
+def ensure_openfocus_gpu_available():
+    """Probe the OpenFocus OpenCL backend outside the UI thread."""
+    global _OPENFOCUS_GPU_AVAILABLE
+    if _OPENFOCUS_GPU_AVAILABLE is None:
+        try:
+            from fusion_methods._openfocus_gpu import gpu_available
+            _OPENFOCUS_GPU_AVAILABLE = bool(gpu_available())
+        except Exception:
+            _OPENFOCUS_GPU_AVAILABLE = False
+    return _OPENFOCUS_GPU_AVAILABLE
+
+
 def estimate_peak_bytes(algorithm: str, frames, block_size: int = None,
                         workers: int = 1, height: int = None, width: int = None) -> int:
     """Estimate new stage allocations; resident source buffers are not charged twice."""
@@ -131,8 +152,8 @@ def estimate_peak_bytes(algorithm: str, frames, block_size: int = None,
 
 def memory_budget_bytes() -> int:
     """Most additional RAM fusion may take, above the desktop reserve."""
-    from core.resource_policy import probe_resources, ram_ceiling
-    return ram_ceiling(probe_resources())
+    from core.resource_policy import probe_memory, ram_ceiling
+    return ram_ceiling(probe_memory())
 
 
 # Bound OpenCV's internal parallelism as soon as this module is imported:
@@ -254,6 +275,7 @@ class MultiFocusFusion:
         self.fusion_parameters = resolve_fusion_parameters(algorithm, fusion_parameters)
         self.use_gpu = bool(use_gpu)
         self._actual_device = None
+        self._device_lock = threading.Lock()
         # Tile (tiled fusion) related instance-level settings
         # Descriptor policy keeps whole-image methods out of automatic spatial
         # tiling; a nondefault threshold is an explicit spatial cap.
@@ -333,6 +355,13 @@ class MultiFocusFusion:
                                 should_cancel=kwargs.get('should_cancel'),
                                 progress_callback=kwargs.get('progress_callback'))
 
+    def _record_openfocus_device(self, device):
+        with self._device_lock:
+            if self._actual_device is None or self._actual_device == device:
+                self._actual_device = device
+            elif device not in self._actual_device.split(' / '):
+                self._actual_device += ' / ' + device
+
     def _fuse_openfocus_b(self,
                           input_source: Union[str, List[np.ndarray]],
                           img_resize: Optional[Tuple[int, int]] = None,
@@ -347,7 +376,9 @@ class MultiFocusFusion:
                                 should_cancel=kwargs.get('should_cancel'),
                                 depth_override=kwargs.get('depth_override'),
                                 feather=kwargs.get('feather', 3),
-                                progress_callback=kwargs.get('progress_callback'))
+                                progress_callback=kwargs.get('progress_callback'),
+                                use_gpu=self.use_gpu,
+                                device_callback=self._record_openfocus_device)
 
     def _fuse_openfocus_c(self,
                           input_source: Union[str, List[np.ndarray]],
@@ -456,7 +487,7 @@ class MultiFocusFusion:
                 if frame is not None:
                     from core.source_frames import resolve_frame
                     means.append(_exposure_mean(
-                        resolve_frame(frame), should_cancel, normalize_uint16=normalize_uint16))
+                        resolve_frame(frame, should_cancel=should_cancel), should_cancel, normalize_uint16=normalize_uint16))
             if not means:
                 return []
             target = means[-1]
@@ -566,7 +597,7 @@ class MultiFocusFusion:
 
     def _validate_spatial_environment(self) -> None:
         """验证空间域融合依赖"""
-        if self.use_gpu:
+        if self.use_gpu and self.algorithm != 'openfocus_b':
             print(f"Note: {self.descriptor.display_name} fusion runs on CPU only; switching to CPU mode.")
             self.use_gpu = False
 
@@ -641,6 +672,8 @@ class MultiFocusFusion:
         if unknown:
             raise ValueError(f'Unknown fusion parameters: {sorted(unknown)}')
         kwargs.update(resolve_fusion_parameters(self.algorithm, values))
+        if img_resize is not None and self.descriptor.runner == get_fusion('dct').runner:
+            raise ValueError("DCT fusion does not support dynamic resizing. Resize images before processing.")
         native_codes = self.algorithm in ('openfocus_a', 'openfocus_b', 'openfocus_c')
         streaming_sources = self.descriptor.streaming_sources
         if streaming_sources and isinstance(input_source, str) and os.path.isdir(input_source):
@@ -769,8 +802,7 @@ class MultiFocusFusion:
             needs_tiles = fixed + per_worker > memory_budget_bytes()
         identity_sources = input_source
         resize_for_tiles = (self.tile_enabled and needs_tiles and img_resize is not None
-                            and self.algorithm in ('guided_filter', 'gfgfgf', 'openfocus_a',
-                                                   'dtcwt', 'stackmff', 'stackmffv2', 'stackmffv3'))
+                            and self.algorithm not in ('openfocus_b', 'openfocus_c'))
         deferred_exposure = (not streaming_sources and self.tile_enabled and needs_tiles
                              and isinstance(input_source, list) and not resize_for_tiles
                              and (img_resize is None or self.algorithm not in ('openfocus_b', 'openfocus_c')))
@@ -836,10 +868,14 @@ class MultiFocusFusion:
             pass
         elif self.exposure_match and native_codes:
             from core.source_frames import match_exposure_frames
-            with _profile().stage('exposure_gains'):
+            from core.registration import deferred_warp_threads
+            with _profile().stage('exposure_gains'), deferred_warp_threads(
+                    policy.native_thread_ceiling(self.resource_preference, kwargs.get('thread_count'))):
                 input_source = match_exposure_frames(input_source, should_cancel, reference_index=0)
         elif self.exposure_match:
-            with _profile().stage('exposure_gains'):
+            from core.registration import deferred_warp_threads
+            with _profile().stage('exposure_gains'), deferred_warp_threads(
+                    policy.native_thread_ceiling(self.resource_preference, kwargs.get('thread_count'))):
                 exposure_gains_ = self._exposure_gains_for_source(
                     input_source, should_cancel,
                     normalize_uint16=deferred_exposure or native_codes)
@@ -1321,7 +1357,7 @@ class MultiFocusFusion:
             target_size = tuple(map(int, target_size))
         width, height = map(int, target_size)
         interpolation = getattr(cv2, f'INTER_{self.descriptor.resize_interpolation.upper()}')
-        promote = self.algorithm in ('guided_filter', 'gfgfgf')
+        promote = self.descriptor.promotes_color
         staging_bytes = 0
         workspace = 0
         paths = []
@@ -1344,7 +1380,7 @@ class MultiFocusFusion:
             select_scratch(staging_bytes, paths)
             for frame in frames:
                 check_cancel()
-                image = resolve_frame(frame)
+                image = resolve_frame(frame, should_cancel=should_cancel)
                 if self.algorithm == 'guided_filter':
                     image = np.ascontiguousarray(image)
                 if promote:
@@ -1969,6 +2005,8 @@ class MultiFocusFusion:
             if kind is None:
                 kind = 'N/A'
             device_name = neural_runtime.display_name(kind)
+        elif self.algorithm == 'openfocus_b':
+            device_name = self._actual_device or 'CPU'
         else:
             device_name = 'CPU'
         info = {

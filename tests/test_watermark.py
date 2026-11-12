@@ -103,6 +103,157 @@ def test_safe_config_clamps_corrupt_style_but_keeps_text():
     assert cfg.angle == wm.DEFAULT_ANGLE
     assert wm.safe_config({"text": ""}) is None
 
+@pytest.mark.parametrize("field,value", [("density", []), ("density", {}),
+    ("opacity", 10**400), ("angle", 10**400), ("size_percent", 10**400)])
+def test_corrupt_style_restores_independently_but_strict_burn_rejects(field, value):
+    data = {"text": "Creator", field: value}
+    restored = wm.safe_config(data)
+    assert restored.text == "Creator"
+    assert getattr(restored, field) == getattr(wm, "DEFAULT_" + field.upper())
+    image = np.zeros((240, 400, 3), dtype=np.uint8)
+    original = image.copy()
+    with pytest.raises(wm.WatermarkError):
+        wm.normalize_config(data)
+    with pytest.raises(wm.WatermarkError):
+        wm.burn(image, data)
+    np.testing.assert_array_equal(image, original)
+
+def test_restore_validates_flat_targets_and_output_identities():
+    window = _Window()
+    first, second = _Record('first'), _Record('second', config={'text': 'untouched'})
+    window.output_list.records = [first, second]
+    wm.apply_settings(window, {
+        'text': 'flat', 'density': [],
+        'source': {'text': 'source', 'opacity': 10**400},
+        'registered': {'text': 'registered', 'angle': 10**400},
+        'output': {'text': 'output', 'size_percent': 10**400},
+        'outputs': {'first': {'config': {'text': 'record', 'density': {}}}},
+    })
+    assert window.watermark_text == 'flat'
+    assert window.watermark_density == wm.DEFAULT_DENSITY
+    assert wm.target_config(window, 'source').opacity == wm.DEFAULT_OPACITY
+    assert wm.target_config(window, 'registered').angle == wm.DEFAULT_ANGLE
+    assert wm.target_config(window, 'output').size_percent == wm.DEFAULT_SIZE_PERCENT
+    assert first.watermark_config['text'] == 'record'
+    assert first.watermark_config['density'] == wm.DEFAULT_DENSITY
+    assert second.watermark_config == {'text': 'untouched'}
+
+
+def test_restore_does_not_partially_write_when_validation_fails(monkeypatch):
+    window = _Window()
+    window.watermark_text = 'previous'
+    original = wm.safe_config
+
+    def fail_output(value):
+        if isinstance(value, dict) and value.get('text') == 'fail':
+            raise RuntimeError('injected failure')
+        return original(value)
+
+    monkeypatch.setattr(wm, 'safe_config', fail_output)
+    with pytest.raises(RuntimeError):
+        wm.apply_settings(window, {'text': 'new', 'source': {'text': 'fail'}})
+    assert window.watermark_text == 'previous'
+
+
+@pytest.mark.parametrize("position,rendered", [("prefix", "© Creator"),
+                                                ("suffix", "Creator ©")])
+@pytest.mark.parametrize("channels", [3, 4])
+def test_copyright_pixels_match_literal_text(position, rendered, channels):
+    image = np.full((300, 400, channels), 127, np.uint8)
+    if channels == 4:
+        image[:, :100, 3] = 0
+    config = _config(text="Creator", copyright_enabled=True,
+                     copyright_position=position)
+    expected = _config(text=rendered)
+    np.testing.assert_array_equal(wm.burn(image, config), wm.burn(image, expected))
+    assert config.text == "Creator"
+    assert wm.plan(config, 400, 300).stamp_width == wm.plan(expected, 400, 300).stamp_width
+
+
+def test_legacy_copyright_text_and_disabled_style_are_unchanged():
+    image = np.full((300, 400, 3), 127, np.uint8)
+    legacy = {"text": "© Creator", "size_percent": 6.0}
+    disabled = {**legacy, "copyright_enabled": False, "copyright_position": "suffix"}
+    old_constructor = wm.WatermarkConfig(text="© Creator", size_percent=6.0)
+    np.testing.assert_array_equal(wm.burn(image, legacy), wm.burn(image, disabled))
+    np.testing.assert_array_equal(wm.burn(image, legacy), wm.burn(image, old_constructor))
+    assert not wm.safe_config(legacy).copyright_enabled
+
+
+@pytest.mark.parametrize("field,value", [("copyright_enabled", 1),
+                                         ("copyright_enabled", "true"),
+                                         ("copyright_position", "middle"),
+                                         ("copyright_position", None)])
+def test_copyright_strict_validation_and_safe_restore(field, value):
+    data = {"text": "Creator", field: value}
+    with pytest.raises(wm.WatermarkError):
+        wm.normalize_config(data)
+    with pytest.raises(wm.WatermarkError):
+        wm.normalize_config(wm.WatermarkConfig(**data))
+    restored = wm.safe_config(data)
+    assert restored.copyright_enabled is False
+    assert restored.copyright_position == "prefix"
+
+
+def test_copyright_keeps_original_text_limits():
+    assert wm.normalize_config({"text": "x" * 80, "copyright_enabled": True}).text == "x" * 80
+    for text in ("", " ", "x" * 81):
+        with pytest.raises(wm.WatermarkError):
+            wm.normalize_config({"text": text, "copyright_enabled": True})
+
+
+def test_copyright_round_trips_state_records_and_legacy_restore():
+    window = _Window()
+    window.watermark_text = "Creator"
+    window.watermark_copyright_enabled = True
+    window.watermark_copyright_position = "suffix"
+    cfg = wm.draft_config(window)
+    wm.set_target_config(window, "source", cfg)
+    record = _Record("r")
+    window.output_list.records = [record]
+    wm.set_record_config(record, cfg)
+    snapshot = wm.capture_state(window)
+    window.watermark_copyright_enabled = False
+    wm.set_record_config(record, None)
+    wm.restore_state(window, snapshot)
+    assert wm.export_cfg(window, "source")["copyright_position"] == "suffix"
+    assert wm.record_export_cfg(record)["copyright_enabled"] is True
+    assert window.watermark_copyright_enabled is True
+    wm.apply_settings(window, {"text": "© Legacy", "targets": ["source"]})
+    assert wm.export_cfg(window, "source")["copyright_enabled"] is False
+
+
+def test_empty_draft_retains_copyright_style_in_project_settings():
+    window = _Window()
+    window.watermark_copyright_enabled = True
+    window.watermark_copyright_position = "suffix"
+    settings = wm.settings_from_window(window)
+    restored = _Window()
+    wm.apply_settings(restored, settings)
+    assert restored.watermark_text == ""
+    assert restored.watermark_copyright_enabled is True
+    assert restored.watermark_copyright_position == "suffix"
+
+def test_global_preferences_restore_copyright_without_text(tmp_path, monkeypatch):
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtCore import QSettings
+    from utils import settings_store
+
+    settings = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(settings_store, "get_settings", lambda: settings)
+    window = _Window()
+    window.watermark_text = "private creator"
+    window.watermark_copyright_enabled = True
+    window.watermark_copyright_position = "suffix"
+    settings_store.save_window_settings(window)
+    assert not settings.contains("export/watermark_text")
+    restored = _Window()
+    settings_store.load_window_settings(restored)
+    assert restored.watermark_text == ""
+    assert restored.watermark_copyright_enabled is True
+    assert restored.watermark_copyright_position == "suffix"
+
+
 
 @pytest.mark.parametrize("position,rendered", [("prefix", "© Creator"),
                                                 ("suffix", "Creator ©")])

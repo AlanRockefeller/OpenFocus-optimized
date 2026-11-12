@@ -3,12 +3,13 @@
 
   // Theme: system -> light -> dark
   const themeBtn = $('#theme');
-  if (themeBtn && window.__theme) {
+  if (themeBtn && window.__theme && window.__themeMode) {
     themeBtn.addEventListener('click', () => {
       const order = ['light', 'dark', 'system'];
       const next = order[(order.indexOf(window.__themeMode()) + 1) % order.length];
       window.__theme(next);
     });
+    themeBtn.dataset.enhanced = '';
   }
 
   // The navigation download follows the visitor's OS; the hero shows both
@@ -72,6 +73,7 @@
         menuBtn.setAttribute('aria-expanded', 'false');
       });
     });
+    nav.dataset.enhanced = '';
   }
 
   // Language menu
@@ -106,6 +108,8 @@
         if (menuBtn) menuBtn.setAttribute('aria-expanded', 'false');
       }
     });
+    langMenu.hidden = true;
+    langBtn.closest('.langs').dataset.enhanced = '';
   }
 
   // Hairline under the nav once the page scrolls
@@ -115,18 +119,11 @@
     onScroll();
   }
 
-  // Replace the version in text nodes only: .note also holds the release link
-  // and <code> examples, which must survive the update.
+  // A build-time source version may differ from the current desktop download.
+  // Show a version only after the live release metadata supplies it.
   const applyReleaseTag = (tag) => {
-    document.querySelectorAll('.meta, .note').forEach((root) => {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      nodes.forEach((node) => {
-        const text = node.nodeValue || '';
-        if (!/v\d+\.\d+\.\d+/.test(text)) return;
-        node.nodeValue = text.replace(/v\d+\.\d+\.\d+/g, () => tag);
-      });
+    document.querySelectorAll('[data-release-tag]').forEach((node) => {
+      node.textContent = tag + ' · ';
     });
   };
 

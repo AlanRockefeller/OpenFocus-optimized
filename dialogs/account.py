@@ -221,10 +221,6 @@ class AccountDialog(QDialog):
         self.skip_button.setFont(skip_font)
         self.skip_button.clicked.connect(self.reject)
         root.addWidget(self.skip_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        browser_started = getattr(window_main, 'account_browser_started', None)
-        if browser_started is not None:
-            browser_started.connect(self._follow_browser_job)
-            window_main.account_browser_finished.connect(self._browser_finished)
         self._refresh_controls(busy=True)
         if self.client is None:
             shared_load = getattr(window_main, '_account_load_job', None)
@@ -236,27 +232,12 @@ class AccountDialog(QDialog):
                 window_main.account_session_loaded.connect(self._finished)
         else:
             self._refresh_controls()
-        shared_browser = getattr(window_main, '_account_browser_job', None)
-        if shared_browser is not None:
-            self._follow_browser_job(shared_browser)
 
     def _open_account_center(self):
         if self._job is None and self.client is not None:
             self._start('web_center', lambda _started: self.client.open_web_handoff(
                 cancel=self._cancel, timeout=8))
 
-    def _follow_browser_job(self, job):
-        if self._job is not None:
-            return
-        self._operation = 'browser_auto'
-        self._job = job
-        self._refresh_controls(busy=True)
-        self.status.setText(trans.t('account_wait_browser'))
-        self.status.show()
-
-    def _browser_finished(self, result, error):
-        if self._operation == 'browser_auto':
-            self._finished(result, error)
 
     def _sign_in_browser(self):
         if self._job is not None or self.client is None:
@@ -281,9 +262,11 @@ class AccountDialog(QDialog):
     def _refresh_controls(self, busy=False):
         user = self.client.current_user() if self.client is not None else None
         signed_in = self.client is not None and self.client.is_signed_in()
-        self.form.setVisible(not signed_in)
-        self.form.setEnabled(not busy and self.client is not None)
-        self.logout_button.setVisible(signed_in)
+        pending = self.client is not None and getattr(self.client, 'logout_cleanup_pending', False)
+        self.form.setVisible(not signed_in and not pending)
+        self.form.setEnabled(not busy and self.client is not None and not pending)
+        self.logout_button.setVisible(signed_in or pending)
+        self.logout_button.setText(trans.t('account_cleanup_retry' if pending else 'account_sign_out'))
         self.center_button.setVisible(signed_in)
         self.logout_button.setEnabled(not busy)
         self.center_button.setEnabled(not busy)
@@ -293,6 +276,9 @@ class AccountDialog(QDialog):
         if signed_in:
             email = (user.get('email') or user.get('name') or trans.t('account_title')) if isinstance(user, dict) else trans.t('account_title')
             self.status.setText(trans.t('account_signed_in').format(email=email))
+            self.status.show()
+        elif pending:
+            self.status.setText(trans.t('account_cleanup_pending'))
             self.status.show()
         elif not busy:
             self.status.clear()
@@ -363,29 +349,30 @@ class AccountDialog(QDialog):
             return
         if error is not None and error.category in ('terms_required', 'invalid_terms_version'):
             self.terms.setChecked(False)
-        if operation == 'logout' and self.client is not None and not self.client.is_signed_in():
-            from utils.settings_store import get_settings
-            get_settings().setValue('account/browser_sso_enabled', False)
         if error is not None:
             if operation == 'web_center' and error.category == 'timeout':
                 self._refresh_controls()
                 return
             self._refresh_controls()
-            self.status.setText(self._error_text(error))
+            self.status.setText(trans.t('account_cleanup_pending') if getattr(self.client, 'logout_cleanup_pending', False)
+                                else self._error_text(error))
             self.status.show()
             return
+        report_cleanup_failed = False
         if operation == 'load':
             self.client = result
             self.window_main._account_client = result
-        elif operation in ('email', 'github', 'google'):
-            enable_disclosed_reports(self.window_main, result[1])
-            from utils.settings_store import get_settings
-            get_settings().setValue('account/browser_sso_enabled', True)
-        elif operation == 'browser':
-            enable_disclosed_reports(self.window_main, self.client.accepted_terms_version())
-            from utils.settings_store import get_settings
-            get_settings().setValue('account/browser_sso_enabled', True)
+        elif operation in ('email', 'github', 'google', 'browser'):
+            version = (self.client.accepted_terms_version() if operation == 'browser'
+                       else result[1])
+            try:
+                enable_disclosed_reports(self.window_main, version)
+            except Exception:
+                report_cleanup_failed = True
         self._refresh_controls()
+        if report_cleanup_failed:
+            self.status.setText(trans.t('report_cleanup_failed'))
+            self.status.show()
         if operation == 'web_center' and not result:
             self.status.setText(trans.t('account_generic_error'))
             self.status.show()
@@ -403,6 +390,8 @@ class AccountDialog(QDialog):
             key = 'account_email_unverified'
         elif error.category == 'account_disabled':
             key = 'account_disabled'
+        elif error.category == 'device_limit_reached':
+            key = 'account_device_limit'
         elif error.category in ('invalid_code', 'sign_in_expired'):
             key = 'account_expired'
         elif error.category == 'terms_unavailable':
@@ -423,17 +412,11 @@ class AccountDialog(QDialog):
     def reject(self):
         if self._operation != 'web_center':
             self._cancel.set()
-        cancel_browser = getattr(self.window_main, '_cancel_browser_sso', None)
-        if cancel_browser is not None:
-            cancel_browser()
         super().reject()
 
 
 def cancel_account_jobs(window):
     """Cancel pending sign-ins and report whether account workers remain."""
-    cancel_browser = getattr(window, '_cancel_browser_sso', None)
-    if cancel_browser is not None:
-        cancel_browser()
     for dialog in window.findChildren(AccountDialog):
         dialog._cancel.set()
     return any(job.owner is window for job in _ACTIVE_JOBS)
