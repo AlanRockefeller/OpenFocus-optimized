@@ -347,3 +347,38 @@ def test_shutdown_uses_persisted_session_for_default_scope(
     if sent:
         assert sent[0]['account'] is account
         assert sent[0]['require_account'] is account_only
+
+
+def test_source_run_automatic_reports_are_skipped(monkeypatch):
+    from types import SimpleNamespace
+    from utils import reporting
+
+    calls = []
+    class Reports:
+        def __init__(self, _path):
+            pass
+        def enqueue_and_submit(self, *args, **kwargs):
+            calls.append((args, kwargs))
+    monkeypatch.setattr(reporting, 'build_channel', lambda: 'development')
+    monkeypatch.setattr(reporting, 'ReportClient', Reports)
+    account = SimpleNamespace(current_user=lambda: None, is_signed_in=lambda: False)
+    assert reporting.send_bundle(None, source='auto', locale='en', account=account) is None
+    assert calls == []
+
+
+def test_report_metadata_marks_development(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from utils import reporting
+
+    bundle = SimpleNamespace(fingerprint='f' * 64, platform='windows', subject='s',
+                             summary='m', log_excerpt='l', occurred_at=1)
+    monkeypatch.setattr(reporting, 'build_channel', lambda: 'development')
+    metadata = reporting.report_metadata(bundle, source='manual', locale='en')
+    assert metadata['build_channel'] == 'development'
+    client = ReportClient(tmp_path)
+    server = Server()
+    client._opener = server
+    assert client.submit(metadata, b'zip') == 'sent'
+    assert json.loads(server.requests[0][0].data)['build_channel'] == 'development'
+    with pytest.raises(ReportError, match='metadata'):
+        client.enqueue({'build_channel': 'secret'}, b'zip')

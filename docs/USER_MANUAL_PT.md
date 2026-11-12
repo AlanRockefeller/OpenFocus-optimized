@@ -73,7 +73,8 @@ Em **Salvar como**, TIFF comum salva o resultado como uma única imagem; TIFF em
 
 ### Iniciar o aplicativo
 
-A forma preferida de instalar uma compilação empacotada é o site do projeto, **https://openfocus.top**: ele aponta para o instalador atual do Windows, a compilação do macOS e o pacote do Linux, com scripts de instalação para terminal. Prefira-o a recompilar: esses artefatos são a saída exata do pipeline de lançamento. `pip install openfocus` instala apenas a interface de linha de comando headless (a wheel não depende de PyQt6 de propósito); use uma compilação desktop ou uma cópia do código-fonte para a GUI.
+A forma preferida de instalar uma compilação empacotada é o site do projeto, **https://openfocus.top**: ele aponta para o instalador do Windows, a compilação do macOS e o pacote do Linux, com scripts de instalação para terminal. Prefira-o a recompilar: esses artefatos são a saída exata do pipeline de lançamento. `pip install openfocus` instala apenas a interface de linha de comando headless (a wheel não depende de PyQt6 de propósito); use uma compilação desktop ou uma cópia do código-fonte para a GUI.
+O site e os scripts de instalação também oferecem betas mais novas, atualmente [versão preliminar v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). As atualizações automáticas do desktop também oferecem betas mais novas; a CLI Linux do PyPI permanece estável. A beta também está disponível no GitHub.
 
 Para instalar pelo terminal, visualize primeiro o comando e depois execute-o sem `--dry-run`: no macOS ou Linux, `curl -fsSL https://openfocus.top/install.sh | sh -s -- --dry-run` e depois `curl -fsSL https://openfocus.top/install.sh | sh` (no Linux instala a CLI); no Windows, `irm https://openfocus.top/install.ps1 | iex` no PowerShell.
 
@@ -199,6 +200,8 @@ Uma pequena curva acima do controle de navegação de origem mostra a nitidez de
 Softwares de microscopia (ZEN, NIS-Elements, ImageJ/Fiji) frequentemente exportam toda uma pilha Z como UM único arquivo TIFF multipágina. O OpenFocus lê cada página desse arquivo como um quadro individual da pilha: solte ou abra o arquivo e a pilha aparece completa (os quadros são nomeados `<file>_page_001` e assim por diante). TIFFs de página única se comportam exatamente como antes. O inverso também funciona: **Arquivo → Salvar pilha → (Pilha registrada / Pilha de entrada) → Salvar como TIFF multipágina** grava a pilha inteira em um único `.tif`, preservando a profundidade de 16 bits.
 
 ### Barra de escala (figuras para publicação)
+
+Os rótulos da barra usam glifos realmente em negrito quando a família escolhida os oferece; caso contrário, é usada uma fonte legível da mesma família.
 
 Se o destino escolhido não tiver metadados utilizáveis, a calibração manual será selecionada e exigirá um tamanho de pixel válido.
 
@@ -417,7 +420,7 @@ O OpenFocus oferece dez algoritmos de fusão (além de um modo somente alinhamen
 
 - **Algoritmo**: implementação de Fu et al. (*Laser & Optoelectronics Progress*, 2024): um mapa de foco por diferença de desfoque |I − mean(I)| é enriquecido com o operador de gradiente de quatro vizinhanças do tipo gaussiano (GFG), refinado por um filtro guiado rápido, decidido por pixel (empates resolvidos por uma medida de pequena região Sobel 3×3), e os mapas de decisão binários são suavizados novamente pelo filtro guiado rápido antes da mistura ponderada.
 - **Ideal para**: microscopia e imagens com regiões de foco claras
-- **Vantagens**: rápido, limites de região de foco nítidos; a memória não cresce com o número de quadros
+- **Vantagens**: rápido e com limites de foco nítidos; mapas de foco e pesos são processados em janelas limitadas. Origens e descritores, resultado, decodificação e buffers ainda exigem RAM e espaço temporário em disco.
 - **Parâmetro**: kernel = tamanho do filtro de média do mapa de foco grosseiro
 
 ### StackMFF (V1, aprendizado profundo)
@@ -614,6 +617,8 @@ acessível e os diagnósticos sem recalcular o fundo.
 
 ### Gerenciamento de rótulos
 
+Ao exportar uma pilha alinhada histórica, são usadas suas próprias identidades de quadros; se faltarem para um rótulo vinculado, ocorre um erro. Só rótulos realmente aplicáveis bloqueiam a exportação de PNG transparente. **Ajustar** usa uma miniatura limitada; **100%** mostra a região original com um pixel de origem por pixel do dispositivo e pode mostrar carregamento ou erro. Coordenadas e tamanhos grandes salvos são preservados na edição.
+
 Abra **Ferramentas → Rótulos** após carregar imagens ou produzir um resultado. Cada rótulo tem seu próprio destino: a pilha de origem, a pilha alinhada ou os resultados de saída. Rótulos de saída podem se aplicar a todos os resultados ou ao resultado selecionado pelo nome; renomear ou reordenar esse resultado não altera a associação.
 
 Use **Adicionar** para criar outro rótulo, selecione uma entrada para editá-la e use sua caixa para ativar ou desativar. Insira texto fixo ou `{value}` para um número de quadro. O número é o valor inicial mais o índice do quadro (base zero) multiplicado pelo intervalo; uma saída única sempre usa o valor inicial.
@@ -631,6 +636,8 @@ A prévia usa o destino real. Navegue com Anterior/Próximo ou digite o número 
 Abra **Configurações → Configurações avançadas** para preferências de desempenho, registro, limpeza do sensor, nomes de saída, IA StackMFF e inicialização. As mudanças permanecem rascunhos até **OK**; Cancelar, Esc e fechar as descartam. Reduzir o tamanho do bloco atualiza imediatamente o limite visível de sobreposição para metade de um bloco. O limite de lote salvo da seção de IA é mantido, mas a inferência atualmente envia um bloco por chamada; a largura de registro pode mudar a precisão do alinhamento. A coleta de diagnósticos de alinhamento é uma caixa da seção Registro.
 
 Downloads automáticos de atualização rodam quando o aplicativo está ocioso e nunca instalam sozinhos. Um download concluído permanece pronto até você escolher explicitamente **Reiniciar e atualizar**. A reinicialização protege edições ativas e trabalho não salvo, depois grava os dados de recuperação antes de iniciar a substituição. Cancelar um download ou preparação aguarda o limite seguro atual. Uma compilação preparada completa e mais recente pode ser instalada offline.
+
+No Windows, a atualização prepara uma versão candidata separada e move o marcador portátil e `OpenFocusData` durante a troca. Se a troca falhar, restaura a instalação anterior; se a reversão não terminar, mantém o backup e não reinicia automaticamente. Uma solicitação de permissão pode aparecer uma vez. Cancelar a extração descarta a preparação incompleta e é verificado entre leituras e gravações de 256 KiB; uma operação bloqueada de disco ou rede pode atrasá-lo.
 
 A correção de campo plano altera os pixels de trabalho da sessão sem sobrescrever os arquivos de origem. Selecione a referência branca e um quadro de prévia, depois gere a prévia novamente após mudar origem ou escala. As imagens de referência e de trabalho/base devem compartilhar domínio de coordenadas e tamanho. Aplicar prepara as duas pilhas antes de confirmar; a remoção opcional do quadro de referência faz parte da mesma etapa de desfazer. Exporte as imagens de origem corrigidas quando precisar preservar esses pixels fora da sessão.
 
@@ -705,8 +712,10 @@ O planejador considera núcleos físicos, afinidade e cotas de CPU, e executa um
 
 StackMFF V1/V2/V3 usam ONNX Runtime. DirectML no Windows e CoreML no macOS podem acelerar a inferência; caso contrário, usa-se a CPU. A disponibilidade do provedor não comprova execução na GPU. O suporte a outras GPUs requer validação.
 
+OpenFocus B pode acelerar o processamento de profundidade e a mesclagem de fontes em uma GPU OpenCL compatível; conforme a memória disponível, pode usar etapas GPU limitadas ou voltar à CPU. OpenFocus A/C e alinhamento usam CPU. Consulte [suporte a GPU](GPU_SUPPORT.md).
+
 - Alterne em **Configurações → Aceleração por GPU**
-- Desmarcar força os métodos neurais na CPU — útil quando drivers de GPU dão problema
+- Desmarcar força os métodos de fusão compatíveis na CPU — útil quando drivers de GPU dão problema
 - O painel de status mostra `N/D` quando nenhum acelerador é usado ou está disponível, e `CPU*` quando existe um acelerador mas o método selecionado é somente CPU
 - A escolha se aplica à próxima renderização e é lembrada
 
@@ -882,7 +891,7 @@ Por exemplo, adicione `--align openfocus --alignment-report alignment.json` a um
 | `--input, -i` | Pasta(s) de imagens, arquivo de vídeo, um ou mais arquivos de imagem ou TIFF multipágina |
 | `--output, -o` | Caminho da imagem de saída (a extensão define o formato) |
 | `--output-dir, -d` | Modo lote: funde cada pasta de entrada gravando `<pasta>.png` por pilha |
-| `--resume` | Modo lote: ignora pastas cuja saída já existe |
+| `--resume` | Ignora a pasta somente quando todos os resultados solicitados são arquivos comuns não vazios; não verifica conteúdo ou parâmetros |
 | `--config FILE` | Modo lote: substituições JSON por pasta, p. ex. `{"stackA": {"method": "dct"}}` |
 | `--method, -m` | `stackmffv3` (padrão), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
 | `--param KEY=JSON_VALUE` | Define qualquer parâmetro de fusão; repetível e prevalece sobre opções legadas |
@@ -1038,6 +1047,7 @@ Códigos de saída: `0` sucesso, `1` erro de processamento, `2` erro de uso. Exe
 
 #### IA indisponível
 
+- Ative e confirme os recursos experimentais nas configurações avançadas; sem isso os métodos de IA no desktop ficam desativados. Runtime e modelo são requisitos separados.
 - Verifique o ONNX Runtime e o modelo incluído.
 - Verifique em **Ajuda → Informações do ambiente**
 

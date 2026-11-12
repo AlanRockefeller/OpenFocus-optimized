@@ -54,12 +54,15 @@ def algorithm_host(qapp, extension):
                  "set_fusion_parameters", "registration_parameters_for",
                  "set_registration_parameters", "refresh_algorithm_parameters",
                  "refresh_registration_parameters", "brightness_option_for",
+                 "_set_brightness_option", "set_exposure_match", "set_base_correct",
                  "_set_fusion_option_available", "_sync_brightness_checkboxes", "_capture_parameter_state",
                  "_restore_parameter_state", "_restore_scope", "reset_parameter_memories",
                  "_mark_project_setting_changed", "_mark_project_dirty", "_update_project_title"):
         setattr(host, name, MethodType(getattr(OpenFocus, name), host))
     host.combo_fusion.currentIndexChanged.connect(host.refresh_algorithm_parameters)
     host.combo_align.currentIndexChanged.connect(host.refresh_registration_parameters)
+    host.chk_exposure_match.toggled.connect(host.set_exposure_match)
+    host.chk_base_correct.toggled.connect(host.set_base_correct)
     host.fusion_parameter_panel.valuesChanged.connect(
         lambda values: host.set_fusion_parameters(host.current_fusion_method(), values))
     host.registration_parameter_panel.valuesChanged.connect(
@@ -88,6 +91,43 @@ def test_openfocus_default_alignment_respects_explicit_selection(algorithm_host)
     window.set_alignment_method('openfocus')
     window.set_fusion_method('openfocus_c')
     assert window.current_alignment_method() == 'openfocus'
+
+
+def test_fresh_panel_defaults_and_recommended_labels(qapp):
+    from locales import trans
+    from ui.algorithm_combo import retranslate_fusion_combo
+    from ui.right_panel import (ALIGN_DEFAULT, FUSION_DEFAULT, alignment_items,
+                                create_right_panel, label_recommended)
+
+    previous = trans.current_lang
+    parts = create_right_panel()
+    try:
+        assert parts.combo_fusion.currentData() == "openfocus_b"
+        assert parts.combo_align.currentData() == "ecc"
+        assert trans.t("recommended") in parts.combo_fusion.currentText()
+        assert trans.t("recommended") in parts.combo_align.currentText()
+        assert parts.chk_exposure_match.isChecked()
+        for control in (parts.chk_quick_preview, parts.chk_reverse_order,
+                        parts.chk_base_correct, parts.chk_sharpen_output):
+            assert not control.isChecked()
+        parts.combo_fusion.setCurrentIndex(parts.combo_fusion.findData("dct"))
+        parts.combo_align.setCurrentIndex(parts.combo_align.findData("homography"))
+        for language in trans.PACK_ORDER:
+            trans.current_lang = language
+            retranslate_fusion_combo(parts.combo_fusion, none_label="radio_no_fusion",
+                                     none_hint="radio_no_fusion_hint")
+            label_recommended(parts.combo_fusion, FUSION_DEFAULT)
+            for code, key, _hint in alignment_items():
+                parts.combo_align.setItemText(parts.combo_align.findData(code), trans.t(key))
+            label_recommended(parts.combo_align, ALIGN_DEFAULT)
+            assert parts.combo_fusion.currentData() == "dct"
+            assert parts.combo_align.currentData() == "homography"
+            for combo, code in ((parts.combo_fusion, FUSION_DEFAULT),
+                                (parts.combo_align, ALIGN_DEFAULT)):
+                assert trans.t("recommended") in combo.itemText(combo.findData(code))
+    finally:
+        trans.current_lang = previous
+        parts.widget.deleteLater()
 
 
 def _edit_fraction(editors, fraction, direction):
@@ -248,13 +288,16 @@ def test_exposure_defaults_on_preserves_choice_and_reset(algorithm_host):
 
     host = algorithm_host
     host._brightness_by_method.clear()
-    for method in (spec.id for spec in fusion_algorithms()):
+    for method in ["none", *(spec.id for spec in fusion_algorithms())]:
         host.set_fusion_method(method)
-        assert host.chk_exposure_match.isChecked()
+        assert host.chk_exposure_match.isChecked() == (method != "none")
         assert not host.chk_base_correct.isChecked()
 
-    host._brightness_by_method[("exposure_match", "openfocus_a")] = False
-    host._brightness_by_method[("base_correct", "openfocus_a")] = True
+    host.set_fusion_method("openfocus_a")
+    host.chk_exposure_match.setChecked(False)
+    host.chk_base_correct.setChecked(True)
+    host.set_fusion_method("openfocus_b")
+    assert host.chk_exposure_match.isChecked()
     host.set_fusion_method("openfocus_a")
     assert not host.chk_exposure_match.isChecked()
     assert host.chk_base_correct.isChecked()
@@ -271,6 +314,10 @@ def test_exposure_defaults_on_preserves_choice_and_reset(algorithm_host):
         host.chk_quick_preview, host.chk_reverse_order,
         host.chk_base_correct, host.chk_sharpen_output))
     assert host._brightness_by_method == {}
+    for method in ["none", *(spec.id for spec in fusion_algorithms())]:
+        host.set_fusion_method(method)
+        assert host.chk_exposure_match.isChecked() == (method != "none")
+        assert not host.chk_base_correct.isChecked()
 
 
 def test_fusion_gpu_preference_does_not_change_ecc_backend(qapp):
