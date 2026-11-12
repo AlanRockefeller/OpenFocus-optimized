@@ -297,8 +297,8 @@ def rgb_to_bgr(rgb: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(rgb[:, :, ::-1])
 
 
-def _raw_half_size_target(raw, scale_factor: float) -> Optional[Tuple[int, int]]:
-    """Scaled (width, height) when LibRaw can combine each Bayer block itself.
+def _raw_half_size(raw, scale_factor: float) -> bool:
+    """Whether LibRaw can combine each Bayer block itself for this load.
 
     At half scale or less every 2x2 sensor block ends up inside one output
     pixel, so interpolating the missing colours at full resolution first only
@@ -306,26 +306,13 @@ def _raw_half_size_target(raw, scale_factor: float) -> Optional[Tuple[int, int]]
     the camera-linear loader.
     """
     if not 0 < scale_factor <= 0.5:
-        return None
+        return False
     if (raw.raw_type != rawpy.RawType.Flat or raw.num_colors != 3
             or np.shape(raw.raw_pattern) != (2, 2)):
-        return None
-    sizes = raw.sizes
-    width, height = sizes.width, sizes.height
-    if width % 2 or height % 2:
-        # The block on an odd edge is incomplete and decodes with a colour
-        # missing, which would tint the last row or column.
-        return None
-    aspect = float(sizes.pixel_aspect)
-    if aspect < 1:
-        height = round(height / aspect)
-    elif aspect > 1:
-        width = round(width * aspect)
-    if sizes.flip in (4, 5, 6, 7):
-        width, height = height, width
-    # The size the full decode would be scaled to, so that a frame has the
-    # same dimensions whichever route decoded it.
-    return max(1, int(width * scale_factor)), max(1, int(height * scale_factor))
+        return False
+    # The block on an odd edge is incomplete and decodes with a colour
+    # missing, which would tint the last row or column.
+    return raw.sizes.width % 2 == 0 and raw.sizes.height % 2 == 0
 
 
 def _read_raw(path: str, scale_factor: float = 1.0) -> Optional[np.ndarray]:
@@ -358,17 +345,21 @@ def _read_raw(path: str, scale_factor: float = 1.0) -> Optional[np.ndarray]:
             output = max(1, int(width * output_scale)) * max(1, int(height * output_scale)) * 6
             require_memory(raw_decode_bytes(sensor_width, sensor_height, output, os.path.getsize(path)))
             raw.unpack()
-            target = _raw_half_size_target(raw, scale_factor)
+            half_size = _raw_half_size(raw, scale_factor)
             rgb = raw.postprocess(use_camera_wb=True, output_bps=16,
                                   no_auto_bright=True, gamma=(2.4, 12.92),
-                                  half_size=target is not None)
+                                  half_size=half_size)
         # Resize while still RGB to avoid a second full-size channel-swapped
         # copy. INTER_AREA treats each channel independently, so the result
         # is identical to resizing BGR after conversion.
-        if target is None:
+        if not half_size:
             rgb = _downscale_page(rgb, scale_factor)
-        elif (rgb.shape[1], rgb.shape[0]) != target:
-            rgb = cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
+        else:
+            # The size a scaled full decode has, so that a frame keeps its
+            # dimensions whichever route decoded it.
+            target = max(1, int(width * scale_factor)), max(1, int(height * scale_factor))
+            if (rgb.shape[1], rgb.shape[0]) != target:
+                rgb = cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
         return rgb_to_bgr(rgb)
     except ResourceLimitError:
         raise
