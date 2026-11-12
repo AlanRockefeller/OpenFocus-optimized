@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Add developer tooling for sample focus stacks published outside OpenFocus:
+  a versioned manifest, a verified download cache, a packer with a metadata
+  check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
 ### Changed
