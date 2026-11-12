@@ -395,7 +395,7 @@ def test_a_plan_cached_from_full_decodes_is_not_applied_to_half_size_pixels(tmp_
 
     # The plan an earlier version left behind: full decodes, unmarked request.
     with monkeypatch.context() as earlier:
-        earlier.setattr(il, '_raw_half_size_target', lambda _raw, _scale: None)
+        earlier.setattr(il, '_raw_half_size', lambda _raw, _scale: False)
         earlier.setattr(align_cache, '_reduced_raw_decode', lambda _source: False)
         sources = scan()
         engine = registration.ImageRegistration('ecc', downscale_width=80, defer_warps=True)
