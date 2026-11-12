@@ -54,6 +54,16 @@ def test_ram_only_admission_tracks_lost_and_unknown_memory(monkeypatch):
             policy.require_memory(required, policy.probe_memory())
 
 
+def test_memory_probe_reads_the_os_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    monkeypatch.setattr(memory, "_posix_memory",
+                        lambda: calls.append(1) or (GiB, 4 * GiB))
+    monkeypatch.setattr(memory, "process_rss_bytes", lambda: 0)
+    snapshot = policy.probe_memory()
+    assert (snapshot.available_ram, snapshot.total_ram, len(calls)) == (GiB, 4 * GiB, 1)
+
+
 def test_ram_only_admission_does_not_query_cpu_topology(monkeypatch):
     from core.multi_focus_fusion import memory_budget_bytes
 
@@ -492,16 +502,6 @@ def test_missing_memory_availability_is_never_invented(monkeypatch):
     _files(monkeypatch, {"/proc/meminfo": "MemTotal: 8388608 kB\n"})
     assert memory.available_memory_bytes() == 0
     assert memory.total_memory_bytes() == 8 * GiB
-
-
-def test_memory_probe_reads_the_os_once(monkeypatch):
-    calls = []
-    monkeypatch.setattr(memory.sys, "platform", "linux")
-    monkeypatch.setattr(memory, "_posix_memory",
-                        lambda: calls.append(1) or (GiB, 4 * GiB))
-    monkeypatch.setattr(memory, "process_rss_bytes", lambda: 0)
-    snapshot = policy.probe_memory()
-    assert (snapshot.available_ram, snapshot.total_ram, len(calls)) == (GiB, 4 * GiB, 1)
 
 
 def test_cgroup_path_cache_observes_migration_mounts_and_read_failure(monkeypatch):
