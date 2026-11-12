@@ -14,9 +14,8 @@ class TranslationManager(QObject):
         super().__init__()
         self.current_lang = 'en'
         
-        # Auto-detect from the system locale. The lookup is table-driven off
-        # the packs that actually loaded, so adding a pack module is enough to
-        # make 'xx' selectable AND auto-detected; nothing here needs editing.
+        # Auto-detect from the packs that actually loaded. Register shipped
+        # languages in PACK_ORDER; source installations may discover extras.
         # The legacy UTC+8 fallback stays for hosts where QLocale reports an
         # unusable value (some stripped Linux images answer 'C').
         detected = None
@@ -38,6 +37,23 @@ class TranslationManager(QObject):
         self.translations = {"en": dict(EN), "zh": dict(ZH)}
 
         self._load_language_packs()
+        support_text = {
+            'en': ('Support Us', 'Thank you for supporting OpenFocus! Include your username in the transfer note to receive permanent acknowledgment in the project.'),
+            'zh': ('支持我们', '感谢您支持 OpenFocus！请在转账备注中填写您的用户名，项目将永久鸣谢您。'),
+            'ja': ('応援する', 'OpenFocus へのご支援ありがとうございます。送金時のメモにユーザー名を記入すると、プロジェクトに永続的に謝辞が掲載されます。'),
+            'es': ('Apóyanos', '¡Gracias por apoyar OpenFocus! Incluye tu nombre de usuario en la nota de la transferencia para recibir un reconocimiento permanente en el proyecto.'),
+            'de': ('Unterstützen', 'Vielen Dank für Ihre Unterstützung von OpenFocus! Geben Sie Ihren Benutzernamen im Verwendungszweck an, um dauerhaft im Projekt erwähnt zu werden.'),
+            'fr': ('Nous soutenir', 'Merci de soutenir OpenFocus ! Indiquez votre nom d’utilisateur dans la note du transfert pour recevoir une mention permanente dans le projet.'),
+            'ru': ('Поддержать нас', 'Спасибо за поддержку OpenFocus! Укажите имя пользователя в комментарии к переводу, чтобы получить постоянную благодарность в проекте.'),
+            'ko': ('후원하기', 'OpenFocus를 후원해 주셔서 감사합니다! 송금 메모에 사용자 이름을 적어 주시면 프로젝트에 영구적으로 감사 인사를 남깁니다.'),
+            'pt': ('Apoie-nos', 'Obrigado por apoiar o OpenFocus! Inclua seu nome de usuário na nota da transferência para receber um agradecimento permanente no projeto.'),
+            'it': ('Sostienici', 'Grazie per sostenere OpenFocus! Inserisci il tuo nome utente nella nota del trasferimento per ricevere un ringraziamento permanente nel progetto.'),
+            'nl': ('Steun ons', 'Bedankt voor uw steun aan OpenFocus! Vermeld uw gebruikersnaam in de omschrijving van de overschrijving voor een blijvende vermelding in het project.'),
+            'pl': ('Wesprzyj nas', 'Dziękujemy za wsparcie OpenFocus! Podaj nazwę użytkownika w tytule przelewu, aby otrzymać trwałe podziękowanie w projekcie.'),
+        }
+        for code, (title, message) in support_text.items():
+            if code in self.translations:
+                self.translations[code].update(support_title=title, support_message=message)
         labels = {
             'en': ('Radius:', 'Smoothing:', 'Feather:', 'OpenFocus A does not currently use smoothing.'),
             'zh': ('半径：', '平滑度：', '羽化：', 'OpenFocus A 目前不使用平滑度。'),
@@ -114,11 +130,10 @@ class TranslationManager(QObject):
     def _load_language_packs(self) -> None:
         """Merge every community pack into self.translations.
 
-        Packs are discovered as modules rather than hardcoded: adding a
-        language means dropping a <code>.py file into this package with
-        a PACK dict. A broken pack must never be swallowed silently — the
-        completeness tests iterate the merged table, so a bare `pass` once let
-        the whole Japanese pack vanish while every test stayed green.
+        Shipped packs are registered in PACK_ORDER and can be imported from
+        archives without source files on disk. Source installations may also
+        discover extra two-character modules with a PACK dict. Report broken
+        packs without preventing the remaining languages from loading.
         """
         import importlib
 
@@ -133,21 +148,21 @@ class TranslationManager(QObject):
         except Exception as exc:  # noqa: BLE001 - report, never hide
             print(f"Warning: extra language pack failed to load: {exc}")
 
-        # One module per language: <code>.py inside this package with a PACK dict.
+        # Known packs work even when modules are stored in a frozen archive.
+        candidates = set(self.PACK_ORDER) - loaded
         here = os.path.dirname(os.path.abspath(__file__))
         try:
-            files = sorted(os.listdir(here))
+            files = os.listdir(here)
         except OSError as exc:
             print(f"Warning: cannot scan for language packs: {exc}")
-            return
+            files = ()
         for fname in files:
             if not fname.endswith(".py"):
                 continue
             code = fname[:-len(".py")]
-            # _extra.py holds ja/es; en/zh ship as full tables above;
-            # __init__.py is this manager. None is a standalone pack.
-            if code.startswith("_") or len(code) != 2 or code in loaded:
-                continue
+            if not code.startswith("_") and len(code) == 2 and code not in loaded:
+                candidates.add(code)
+        for code in sorted(candidates):
             try:
                 module = importlib.import_module(f".{code}", __name__)
                 pack = getattr(module, "PACK", None)

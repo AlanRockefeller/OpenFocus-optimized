@@ -44,15 +44,23 @@ def test_affinity_and_fractional_quota_limit_all_preferences():
 
 def test_ram_only_admission_tracks_lost_and_unknown_memory(monkeypatch):
     available = iter((8 * GiB, 0, policy.RESERVE_BYTES // 2))
-    monkeypatch.setattr(memory, 'available_memory_bytes',
-                        lambda: next(available))
-    monkeypatch.setattr(memory, 'total_memory_bytes', lambda: 16 * GiB)
+    monkeypatch.setattr(memory, 'system_memory_bytes',
+                        lambda: (next(available), 16 * GiB))
     monkeypatch.setattr(memory, 'process_rss_bytes', lambda: GiB)
     required = 64 * 1024 ** 2
     assert policy.require_memory(required, policy.probe_memory()) >= required
     for _ in range(2):
         with pytest.raises(policy.ResourceLimitError):
             policy.require_memory(required, policy.probe_memory())
+
+
+def test_ram_only_admission_does_not_query_cpu_topology(monkeypatch):
+    from core.multi_focus_fusion import memory_budget_bytes
+
+    monkeypatch.setattr(policy, 'cpu_limits',
+                        lambda: pytest.fail('CPU topology queried for RAM admission'))
+    _probe(monkeypatch, 8 * GiB)
+    assert memory_budget_bytes() == policy.ram_ceiling(_snapshot())
 
 
 def test_fixed_allocations_reduce_concurrency_before_workers():
@@ -486,6 +494,16 @@ def test_missing_memory_availability_is_never_invented(monkeypatch):
     assert memory.total_memory_bytes() == 8 * GiB
 
 
+def test_memory_probe_reads_the_os_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(memory.sys, "platform", "linux")
+    monkeypatch.setattr(memory, "_posix_memory",
+                        lambda: calls.append(1) or (GiB, 4 * GiB))
+    monkeypatch.setattr(memory, "process_rss_bytes", lambda: 0)
+    snapshot = policy.probe_memory()
+    assert (snapshot.available_ram, snapshot.total_ram, len(calls)) == (GiB, 4 * GiB, 1)
+
+
 def test_cgroup_path_cache_observes_migration_mounts_and_read_failure(monkeypatch):
     files = {
         "/proc/self/cgroup": "0::/job\n",
@@ -634,3 +652,20 @@ def test_explicit_source_resolution_replaces_legacy_directory_estimate():
             *args, snapshot=snapshot, directory=True,
             source_resolution_bytes=mib + 64 * 1024,
             source_cache_bytes=224 * 1024)
+
+
+@pytest.mark.parametrize('aspect,expected', [(1, (4100, 6200)), (2, (4100, 12400)),
+                                              (0.5, (4100, 12400))])
+def test_raw_sensor_geometry_and_workspace(aspect, expected):
+    sizes = SimpleNamespace(width=6000, height=4000, raw_width=6200,
+                            raw_height=4100, pixel_aspect=aspect)
+    height, width = policy.raw_sensor_shape(sizes)
+    assert (height, width) == expected
+    assert policy.raw_decode_bytes(width, height, 144_000_000, 100) == width * height * 64 + 144_000_200
+
+
+@pytest.mark.parametrize('aspect', [0, -1, float('nan'), float('inf')])
+def test_raw_sensor_rejects_invalid_aspect(aspect):
+    sizes = SimpleNamespace(width=2, height=2, raw_width=2, raw_height=2, pixel_aspect=aspect)
+    with pytest.raises(ValueError):
+        policy.raw_sensor_shape(sizes)

@@ -16,8 +16,9 @@ command line with, for example, `--method openfocus_b --param radius=8
 multiplying it by 0.24 and 0.6 respectively. Saved explicit settings migrate
 to the new units; older B settings retain F0.
 
-Exposure matching adjusts frame brightness before fusion and defaults on for
-all methods. OpenFocus A/B/C use the first frame in processing order; other
+Exposure matching adjusts frame brightness before fusion. It defaults off in
+the desktop interface and on in the CLI. OpenFocus A/B/C use the first frame in
+processing order; other
 methods use the last frame. An existing enabled OpenFocus exposure option now
 uses the first processed frame instead of the last; its saved on/off
 choice is retained. OpenFocus A/B/C input can be sorted with `--sort asc|desc|off`;
@@ -26,11 +27,18 @@ supports 8-bit and 16-bit output. The depth-map dialog uses the shared B/C
 depth estimator. B's external tiles share a full-image depth map; resizing uses
 whole frames.
 
+Direct Python directory inputs to the DCT, DTCWT, guided filter and GFG-FGF
+backends collect regular image files with supported extensions, ignoring case
+and excluding other files and directories. Files are naturally sorted by each
+numeric segment, and multipage TIFF frames retain their page order. A damaged
+image raises an error instead of being skipped. This directory input ordering
+and selection may differ from older releases; an explicitly ordered frame list
+keeps its existing behavior.
+
 Optional base correction is off by default. When enabled, it adjusts the fused
 result toward the first processed frame for OpenFocus A/B/C and the last for
 other methods. Reversing the stack changes processing order and the reference.
 The C pyramid uses four-tap binomial downsampling and first-frame initialization.
-
 The desktop application processes OpenFocus A/B/C as whole images, regardless
 of the general tile settings used by other methods. Explicit non-default tile
 thresholds in the command-line and Python interfaces can opt A/B into external
@@ -63,6 +71,13 @@ before bilinear expansion to the exact source canvas; C depth export uses F0. B 
 retains strong full-resolution detail that downsampling would erase. Expansion
 keeps the float32 scale and half-pixel offset operations separate, including
 when the requested width or height is odd.
+With GPU acceleration enabled, B can run depth resampling, filtering, activity
+and selection, guided smoothing and ordered merging on an OpenCL GPU. Full GPU
+depth processing requires sufficient host and verified device memory; otherwise
+bounded GPU activity and merging can still run. A compatible GPU driver and
+compiler are required. Unavailable devices and device failures fall back to CPU.
+See [GPU support](GPU_SUPPORT.md).
+OpenFocus A, OpenFocus C and application alignment use the CPU.
 
 
 StackMFF V1 and V2 use retrained single-scale attention networks, each with
@@ -96,6 +111,7 @@ processes may still require additional space. Changing the setting does not
 move existing mappings.
 
 
+<a id="gfg-fgf-memory"></a>
 GFG-FGF converts source frames to its float32 working range as each pass
 needs them, instead of retaining a second float32 color copy of every frame.
 This trades repeated conversion work for lower working memory. The source

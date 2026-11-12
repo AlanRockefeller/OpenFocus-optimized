@@ -74,7 +74,8 @@ Load at full size, choose no alignment, turn off Quick Preview and ROI, then
 render and save as PNG. Batch requires a fusion method and PNG output without
 saving an aligned stack. Alignment, resizing or downsampling, flat-field
 correction, depth maps, method comparison, retouching and scale bars are
-unavailable for transparent data, and labels cannot be burned into an export.
+unavailable for transparent data. Export rejects a label that actually applies
+to a transparent image; labels for other outputs or frames do not block it.
 A fusion method that changes the rectangle's dimensions is
 rejected. Varying or feathered masks, different frame masks, transparent TIFF
 input and non-PNG output, including GIF and multi-page TIFF, are unsupported.
@@ -97,10 +98,11 @@ In **Save As**, ordinary TIFF saves the result as a single image; layered TIFF i
 
 ### Downloading and Starting the Application
 
-The preferred way to install a packaged build is the project website,
-**https://openfocus.top** — it links the current Windows installer, macOS build
-and Linux package, with install scripts for terminal use. Prefer it over
-rebuilding: those artifacts are the exact release pipeline output.
+The [project website](https://openfocus.top/#download) and its installation
+scripts offer the newest Windows or macOS build, including a beta when newer
+than stable (currently [v1.77.0-beta.7 prerelease](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)). Downloads are also available on
+[GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Desktop automatic updates also offer newer beta
+releases. The Linux CLI installed from PyPI remains stable.
 `pip install openfocus` installs only the headless command-line interface (the
 wheel deliberately does not depend on PyQt6); use a desktop build or a source
 checkout for the GUI.
@@ -125,10 +127,10 @@ After sign-in, automatic error reports are enabled by default unless you
 previously disabled them. Change this under
 **Settings → Advanced Settings → Diagnostics**.
 
-When there is no desktop session, OpenFocus checks the default browser for an
-existing account at startup; this opens a browser tab. Signing out in the app
-stops automatic restoration until you sign in again. Browser and desktop
-sessions are separate, so signing out here does not sign out the browser.
+OpenFocus restores a saved desktop session locally at startup without opening a
+browser. To use an existing browser account, choose the browser sign-in button
+on the account screen. Browser and desktop sessions are separate, so signing
+out here does not sign out the browser.
 
 For email sign-in, open the link on your phone or computer and confirm it;
 the waiting desktop app signs in automatically. If the account service has
@@ -170,7 +172,7 @@ The right panel contains all configuration options organized vertically:
 1. **Fusion Settings**: Select fusion algorithm and kernel size
 2. **Registration Settings**: Enable/disable alignment methods
 3. **Action Buttons**: Start Render, plus reset, **Render settings**, and render all methods. The render settings dialog contains quick preview, frame order, exposure matching, brightness drift removal, and output sharpening
-   Exposure matching is enabled by default; the other options are unchecked for new settings and after reset. Saved choices are preserved.
+   These options are unchecked for new desktop settings and after reset. Saved choices are preserved.
 4. **Source Images List**: Shows all loaded images with filenames
 5. **Output List**: Shows generated results
 
@@ -182,7 +184,7 @@ The top menu bar provides access to all functions:
 - **Edit**: Undo/redo, reset the current stack, image transformations and retouching
 - **Tools**: Image stitching, batch processing and conversion, method comparison, depth map, flat-field correction, scale bar, watermark and labels
 - **Settings**: Advanced Settings (performance, registration and alignment diagnostics, sensor cleanup, output naming, AI, diagnostics, startup), GPU acceleration, theme and language
-- **Help**: Environment info, contact information, update check, and the log folder
+- **Help**: Environment info, contact information and the Discord community, Support Us, update check, and the log folder. Support Us displays Alipay and PayPal codes; include your username in the transfer note for permanent project acknowledgment.
 
 **Tools → Stitch Images…** opens a separate workspace for already-fused
 microscope regions and camera panoramas; it does not modify the current stack.
@@ -413,6 +415,8 @@ Single-page TIFFs behave exactly as before. The reverse works too:
 writes the entire stack back into a single `.tif`, preserving 16-bit depth.
 
 ### Scale Bar (Publication Figures)
+
+Scale bar labels use true bold glyphs when the chosen font family provides them; otherwise a readable font from the same family is used.
 
 Tools → Scale Bar… configures a scale bar burned into exported images.
 The pixel size (µm/px) is auto-detected from TIFF or Linear DNG metadata —
@@ -905,8 +909,10 @@ as recommended. Existing user selections are preserved. CLI defaults are separat
   small-region measure), and the binary decision maps are smoothed by the
   fast guided filter again before the weighted blend.
 - **Best for**: Microscopy and images with clear focus regions
-- **Advantages**: Fast, sharp focus-region boundaries; memory does not grow
-  with the number of frames
+- **Advantages**: Fast, sharp focus-region boundaries; focus and weight maps are
+  processed in bounded windows. Source data and descriptors, output, decoding
+  and working buffers still require RAM and temporary disk space as the stack
+  grows. See [GFG-FGF](FUSION_METHODS.md#gfg-fgf-memory) and [Memory](PERFORMANCE.md#memory).
 - **Parameter**: Kernel = size of the mean filter of the coarse focus map
 
 ### StackMFF (V1, deep learning)
@@ -971,7 +977,10 @@ also checked before rendering. Caches may be disabled and processing can still f
 fills. Quick previews,
 ROI renders and **Compare all** do not ask. On the command line, warnings go to
 standard error and do not stop the run; batch warnings identify each folder.
-Grouped fusion skips this estimate. Use `--temp-dir DIR` to choose a directory
+Grouped fusion skips this advisory estimate but separately checks its estimated
+temporary TIFF space against free space after the system reserve. Insufficient
+space fails before writing and cleans intermediate work; this is not a disk
+reservation, so later disk use can still cause failure. Use `--temp-dir DIR` to choose a directory
 for that invocation. The command line
 does not use the GUI's Temporary directory setting.
 
@@ -996,7 +1005,7 @@ Each method remembers its own settings. For example, use `--method openfocus_b
 saved values are converted to the new units when read.
 
 **Brightness options are per method.** *Match exposure before fusion* defaults
-on for every fusion method. OpenFocus A/B/C match the first frame in processing
+off for every desktop fusion method. OpenFocus A/B/C match the first frame in processing
 order; other methods use the last frame. *Remove brightness drift* is optional
 and defaults off. It adjusts the fused result's low frequencies toward the first
 processed frame for OpenFocus A/B/C, or the last for other methods. Reversing
@@ -1177,6 +1186,10 @@ cannot contain NUL or characters outside the Basic Multilingual Plane, such as
 many emoji. It refuses unsafe contexts and jobs estimated to exceed 512 MiB
 of working memory or the available RAM budget, reporting the failure instead
 of writing an incomplete export.
+Structure and the conservative working-memory estimate are checked from
+metadata before full-resolution pixels are loaded. The 512 MiB limit is an
+estimate, not a measured peak or a cap on all decoding memory; pixel validation
+still follows. Cancellation may wait for an active decode or encoder call.
 GIMP 3.2.6 on Windows imports the 8-bit and 16-bit layers, including their
 offsets and transparent registration fill. The result is visible and source
 layers are hidden; GIMP also adds a visible Background layer. Other editors
@@ -1295,11 +1308,19 @@ Invalid or unavailable frame numbers prevent applying the draft. Current and
 custom ranges follow the selected source identities when the stack is reordered;
 all-frame labels also apply to appended frames. Missing targets stay associated
 with their original identities until you explicitly choose a new target.
+Each historical registered stack uses its own recorded frame identities when
+exported, even when another stack is selected. If identities needed by a
+frame-bound label are missing, that export reports an error instead of placing
+the label on the wrong frame. An inapplicable or disabled label does not block
+transparent PNG export; an applicable label still does.
 
 The preview uses the actual target. Navigate with Previous/Next or type its frame
-number, choose **Fit** or **100%**, and drag the image to pan at 100%. Position and
-font size use image pixels. A fallback font or an unsuccessful draw is reported.
-Labels preserve the original bit depth when exported as PNG or TIFF.
+number. **Fit** uses a bounded thumbnail; **100%** displays the original region
+at one source pixel per device pixel, and can show loading or an error. Drag to
+pan. Position and font size use image pixels. Existing large coordinates and
+sizes are preserved when editing; an invalid position is reported for correction.
+A fallback font or an unsuccessful draw is reported. Labels preserve the
+original bit depth when exported as PNG or TIFF.
 
 **Apply and Close** commits the complete draft as one undoable change. Cancel,
 Esc and closing the dialog discard it. Selecting another label keeps your draft
@@ -1351,6 +1372,8 @@ copies may count as one installation; reinstalling retains it only if the
 existing settings are kept.
 
 Automatic update downloads run while idle and never install automatically. A completed download remains ready until you explicitly choose **Restart and Update**. Restart protects active edits and unsaved work, then writes recovery data before launching replacement. Cancelling a download or preparation waits for the current safe boundary. An existing complete, newer staged build can be installed offline.
+
+On Windows, the updater builds a separate candidate and moves the portable marker and `OpenFocusData` during the switch. If the switch fails it restores the old installation; if rollback cannot finish, the backup is kept and the app does not restart automatically. A permission prompt may appear once. Cancelling extraction discards incomplete staging and is checked between 256 KiB reads and writes; a blocked disk or network operation can delay it.
 
 Flat-field correction changes session working pixels without overwriting source files. Select the white reference and a preview frame, then generate the preview again after changing source or scale. Reference and working/base images must share a coordinate domain and size. Applying prepares both stacks before committing; optional reference-frame removal belongs to the same undo step. Export corrected source images when you need to preserve these pixels outside the session.
 
@@ -1422,6 +1445,9 @@ correction scale before saving or export the corrected stack.
 
 **Help → Send feedback** opens local logs. Copy copies the visible session log;
 the local feedback ZIP can contain file paths, so review it before sharing.
+Signed-in users can open their account center in the browser to submit feedback.
+The Environment Info control shows the same system and dependency report as
+**Help → Environment Info**.
 **Review error report** shows the sanitized diagnostics that will be sent;
 nothing is uploaded until you choose **Send to OpenFocus**. Automatic reports
 are sent only after a session with an error when enabled. A previous native
@@ -1528,11 +1554,13 @@ unchanged; choosing smaller tiles yourself can change output pixels.
 
 ### GPU Acceleration Toggle
 
-StackMFF V1/V2/V3 use ONNX Runtime. DirectML on Windows and CoreML on macOS may accelerate inference; otherwise it runs on CPU. Provider availability alone does not prove GPU execution. Wider GPU support requires validation.
+OpenFocus B can use an OpenCL GPU for depth resampling, filtering, activity and selection, guided smoothing and source merging when a compatible GPU driver and compiler are available. Full GPU depth processing requires sufficient host and verified device memory; bounded GPU activity and merging can still run when full depth processing is not admitted. Unavailable devices and device failures fall back to CPU. StackMFF V1/V2/V3 use ONNX Runtime; DirectML on Windows and CoreML on macOS may accelerate inference. Installed runtimes or available providers alone do not prove GPU execution. See [GPU support](GPU_SUPPORT.md) for platform requirements.
+
+OpenFocus A, OpenFocus C and alignment use the CPU.
 
 
 - Toggle via **Settings → GPU Acceleration**
-- Unchecking forces neural methods onto the CPU — useful when GPU drivers misbehave
+- Unchecking forces supported fusion methods onto the CPU — useful when GPU drivers misbehave
 - The status panel shows `N/A` when no accelerator is used or available, and
   `CPU*` when an accelerator exists but the selected method is CPU-only
 - The choice takes effect on the next render and is remembered
@@ -1589,6 +1617,9 @@ OpenFocus can store registration results in a `.openfocus_cache` folder
 next to the source stack. Re-opening the same stack (files unchanged)
 then skips alignment entirely. Toggle it in **Settings → Advanced Settings →
 Registration**; stale entries are replaced automatically.
+Encoded aligned frames and registration plan manifests share the default 2 GiB
+cache budget. Evicted plans are estimated again when needed; source files are
+not affected by eviction.
 
 ### Persisted Settings
 
@@ -1785,6 +1816,10 @@ each page's own valid RGB profile independently.
 Choose **File → Export All Results to Folder** and select a destination to
 export every output-list entry. Image results are saved as PNG and aligned
 stacks as folders. Existing files and folders are not overwritten.
+Automatically named exports publish complete files without replacing an existing
+name, including names created concurrently. If safe publication is unavailable,
+the export reports failure and keeps existing files. Explicit **Save As** still
+allows replacement when you choose and confirm the target.
 
 In **Settings → Advanced Settings → Output naming**, an optional filename
 prefix helps identify newly rendered results. The example updates as you type;
@@ -1794,6 +1829,14 @@ change. The prefix becomes part of new output-list names and their suggested
 export names; existing results keep their names. You can still edit a name in
 the save dialog. This preference does not rename source files or change batch
 output names.
+
+### Exporting All Results
+
+Choose **File → Export All Results to Folder** and select a destination to
+export every entry in the output list. Image results are saved as PNG with
+their current annotations; aligned stack entries are saved as folders. Existing
+files and folders are preserved by giving new exports unique names. OpenFocus
+reports any export failures and warns if the output list is empty.
 
 
 ### Sharing a Result
@@ -1947,7 +1990,7 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--input, -i` | Image folder(s), video file, one or more image files, or multi-page TIFF |
 | `--output, -o` | Output image path (extension sets the format) |
 | `--output-dir, -d` | Batch mode: fuse every input folder, writing `<folder>.png` per stack |
-| `--resume` | Batch mode: skip folders whose output already exists |
+| `--resume` | Batch mode: skip a folder only when every currently requested output is a nonempty regular file |
 | `--config FILE` | Batch mode: JSON per-folder overrides, e.g. `{"stackA": {"method": "dct"}}` |
 | `--method, -m` | `stackmffv3` (default), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
 | `--param KEY=JSON_VALUE` | Set any fusion parameter; repeatable and overrides legacy flags |
@@ -1990,6 +2033,22 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--profile-performance [FILE]` | Time the render's stages for a single, non-grouped run. Prints a summary to stderr, adds the report to `--json` under `performance`, and writes it to FILE when given. See [PERFORMANCE.md](./PERFORMANCE.md#diagnosing-a-slow-render) |
 | `--log-level LEVEL` | Detail of this run's log file: `debug`, `info` (default), `warning` or `error`. Overrides `OPENFOCUS_LOG_LEVEL` and prints the log file path to stderr |
 | `--dry-run` | Validate inputs and print the plan without fusing |
+
+`--resume` checks the main image and every requested depth, stacked,
+missing-data overlay and category-mask file. A missing, empty or non-file
+output reruns the whole folder; an inaccessible output reports that folder as
+failed and processing continues. Existing files can be replaced individually,
+so a later failure does not roll back earlier replacements. Resume checks only
+existence and size, not parameter fingerprints or content correctness.
+
+Each `--config` override is validated before processing, including overrides
+for folders not present in the input. Types, ranges and option combinations
+match the CLI; duplicate JSON keys and NaN/Infinity are rejected. `threads`
+must be an integer at least 0, `batch_size` at least 1, `downscale` null or an
+integer at least 1, and `tile_size` null or an integer at least 64. Booleans
+must be JSON booleans, not strings or integers. Folder-specific `threads` and
+`resource_preference` apply to both loading and fusion. Invalid configuration
+exits with code 2 before output creation or pixel processing.
 
 There is no `--method none` value: the CLI always fuses. Use the desktop
 application for alignment-only output.
@@ -2161,6 +2220,7 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 
 #### AI Unavailable
 
+- Enable experimental features in [Settings](#11-settings-and-configuration) and confirm the settings; AI methods are disabled in the desktop until opted in. This is separate from runtime and model availability.
 - Check that ONNX Runtime and the bundled model are installed.
 - Check via **Help → Environment Info**
 

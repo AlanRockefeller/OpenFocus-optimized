@@ -88,28 +88,30 @@ Every page and asset request therefore counts as a Worker invocation.
   `/?lang=en`; `?lang=zh` stays Chinese. Valid explicit selections on either
   page set a one-year, host-only `lang` cookie (`SameSite=Lax`, `Secure` on
   HTTPS) and return `no-store`, including for HEAD requests.
-- `/api/latest` — GitHub `releases/latest` reduced to
-  `{tag, published, assets: {windows-setup, windows-zip, macos-dmg,
-  macos-zip}}`. For a release with split GitHub assets, missing complete files
-  are filled from the validated R2 manifest only when its tag matches GitHub.
-  Complete responses are cached per data center for five minutes; incomplete
-  responses are not cached. Clients receive `Cache-Control: no-store`. If
-  GitHub is unavailable, the Worker serves the last complete mirror manifest
-  and identifies it with `X-OpenFocus-Release-Source: mirror`.
-- `/download/latest/<kind>` — resolves the latest asset, streams the R2 object
-  with `ETag`, `Last-Modified`, `If-None-Match`/`304`, and single-range
-  `Range`/`206` support. All responses are `Cache-Control: no-store` because
-  the URL always names the latest release. When a complete GitHub asset exists,
+- `/api/latest` — selects the newer of GitHub's latest stable release and the
+  verified beta R2 manifest. A stable release outranks a beta of the same
+  version. The response includes `{tag, published, assets}`; a matching stable
+  mirror supplies complete assets missing from a split GitHub release.
+  Complete GitHub responses are cached per data center for five minutes;
+  clients receive `Cache-Control: no-store`. If GitHub is unavailable, the
+  Worker uses the stable R2 manifest when available before comparing beta.
+- `/download/latest/<kind>` — resolves the selected desktop asset, streams the R2
+  object with `ETag`, `Last-Modified`, `If-None-Match`/`304`, and single-range
+  `Range`/`206` support. Responses are `Cache-Control: no-store` because
+  the selected release can change. When a complete GitHub asset exists,
   a full request can fall back to a `302` GitHub URL if R2 is missing. Range
   requests and assets assembled only on R2 return `503` with `Retry-After`
   when the object is unavailable; split parts are never offered as a full file.
-- `/api/updates` — returns the last complete R2 manifest. New manifests include
-  asset SHA-256 digests and up to 30 release notes; older ones can omit them.
-  It returns `503` when unavailable and never asks GitHub during a desktop check.
-- `/download/releases/<tag>/<kind>` — streams the specified mirrored asset
-  with the same range and validator support. Missing assets return `503`;
-  desktop updates never redirect to GitHub. Older versioned objects can be
-  pruned after a new release is mirrored.
+- `/api/updates` — selects the newer verified stable or beta R2 manifest without
+  contacting GitHub. For beta updates, it includes the real `actual_tag` and a
+  numeric `tag` of the form `v<version>.999999999.<beta-number>` for older
+  clients. Asset names use this alias while sizes and digests identify the
+  real beta files. The marker is reserved from release version numbers.
+- `/download/releases/<tag>/<kind>` — streams the specified stable or beta
+  asset; numeric beta aliases resolve to the corresponding immutable beta
+  object. The route supports ranges and validators; missing assets return `503`
+  and never redirect to GitHub. Stable objects can be pruned after a new stable
+  release; beta objects are retained for cached and version-pinned requests.
 - `www.openfocus.top` — every path returns a `301` to `https://openfocus.top/`
   with the path preserved (for example `/zh/?x=1`).
 - Everything else — `site/dist` with `html_handling: auto-trailing-slash`,
@@ -312,9 +314,11 @@ template resolves `{{dotted.key}}` placeholders; missing keys fail the build.
   registries in `core/algorithms.py`; check before changing them.
 - Media is copied from `assets/` (app screenshot, README posters, benchmark
   chart) — do not duplicate binaries under `site/`.
-- `site_content.py` derives the static version from `constants.APP_VERSION`.
-  Static download links use the Worker's latest endpoints; rebuild and
-  redeploy to refresh no-JavaScript version labels and JSON-LD.
+- The website inserts the selected desktop version from `/api/latest` when
+  JavaScript is available. Static pages do not claim a version that might be
+  newer than the available download; they identify desktop downloads as
+  potentially beta. Linux CLI installation through PyPI stays on the stable
+  package channel.
 - The English and Chinese slogans are intentionally different: the English
   line is "Every pixel, its sharpest frame."; the Chinese line is
   "每一像素，皆取自最清晰的一帧。"
@@ -323,11 +327,11 @@ template resolves `{{dotted.key}}` placeholders; missing keys fail the build.
 
 ## 5. Installer scripts
 
-The macOS and Windows installers resolve the latest release from
-`https://openfocus.top/api/latest` and download through
-`https://openfocus.top/download/latest/<kind>` so China downloads use the R2
-mirror instead of GitHub. The Linux path installs the CLI from PyPI and does
-not use the release API.
+The macOS and Windows installers resolve the latest selected desktop release
+from `https://openfocus.top/api/latest` and download through
+`https://openfocus.top/download/latest/<kind>`, using the R2 mirror when
+available. They may install a newer beta. The Linux path installs the stable CLI
+from PyPI and does not use the release API.
 
 `install.sh`:
 
@@ -387,32 +391,51 @@ false`) so an older re-run cannot prune a newer tag.
 Steps:
 
 1. Resolve the tag from the event (`release.tag_name`, `inputs.tag` or the
-   workflow run's head branch), strip `refs/tags/`, require it to match
-   `^v[0-9A-Za-z._+-]+$`, and confirm the release exists.
+   workflow run's head branch), strip `refs/tags/`, and require a published
+   stable tag or a `v<version>-beta.<positive number>` prerelease.
 2. Download the Windows asset manifest and its named files, verify each part
-   and reassemble any split archives with `tools/release_archives.py`. Download
-   the macOS assets and require four non-empty complete files. Older releases
-   without a manifest are downloaded directly.
-3. `aws s3 cp assets/ s3://openfocus-downloads/ --recursive` against the R2
-   S3 endpoint (`https://<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`), with
-   `application/octet-stream` and `public, max-age=86400` metadata. Objects
-   keep their release filenames.
-4. If the mirrored tag is still GitHub's latest release, publish metadata for
-   those four exact assets to `openfocus-meta/latest-release.json` only after
-   their uploads complete. Older manual runs never replace that manifest.
-5. Wait 330 seconds for the five-minute Worker metadata cache to expire. If
-   the mirrored tag is still the latest release, delete older keys matching
-   the four recognized `OpenFocus-v*-...` asset names. This keeps range
-   requests using cached metadata working while releases change. Current
-   assets, the manifest and unrelated objects are kept.
+   and reassemble split archives with `tools/release_archives.py`; download
+   the macOS assets. Older releases without a Windows manifest use complete
+   files. Reassembly verifies each split asset before replacing its destination
+   atomically. If replacement fails, the previous destination remains intact
+   and the temporary `.joining` file is removed. Each asset is committed
+   separately; a later failure does not roll back an earlier reassembly.
+3. Before the first R2 write, verify all four complete logical assets against
+   trusted sizes and SHA-256 hashes. The release build identity and GitHub
+   asset digests supply evidence; a split manifest supplies the complete
+   Windows hash. The workflow can also use previously published mirror
+   metadata when its tag matches. For a workflow-run trigger, the release
+   identity must match that run's commit; the default-branch checkout used by
+   the mirror tools is not the release commit. Historical backfills undergo
+   the same preflight. If a legacy asset lacks a trusted upstream hash, the
+   mirror fails before writing. The workflow automatically reads only the
+   existing `openfocus-meta/latest-release.json` as prior metadata, and only
+   when its tag matches; dispatch has no input for other evidence. The
+   `write-mirror-manifest` tool accepts independently saved matching metadata
+   through `--trusted-metadata` for local verification, but that alone does
+   not supply it to the workflow. A hash calculated only from the current
+   download is not independent evidence.
+4. Upload only the four files listed in the verified temporary manifest to
+   their canonical R2 keys, with `application/octet-stream` and `public,
+   max-age=86400` metadata. Verify each uploaded object's size and streamed
+   SHA-256 before publishing metadata or pruning. A failed or cancelled
+   upload can leave some objects written; R2 does not provide a transaction
+   across the four objects.
+5. After all four objects are verified, publish metadata to
+   `openfocus-meta/latest-release.json` for the latest stable release or to
+   `openfocus-meta/beta-release.json` for the newest mirrored beta. A beta
+   never replaces the stable manifest; an older beta cannot replace a newer one.
+6. Stable mirror runs wait 330 seconds for cached metadata to expire before
+   pruning older stable assets. Beta assets are retained, including those
+   referenced by numeric compatibility aliases; beta mirror runs do not prune.
 
-The workflow does not purge the Worker cache. Successful GitHub metadata can
-remain cached for five minutes per data center. During a GitHub outage the
-uncached mirror manifest is used; it advances only after a successful mirror.
+The workflow does not purge the Worker cache. Successful GitHub stable metadata
+can remain cached for five minutes per data center. Stable and beta R2
+manifests advance only after a successful mirror.
 
 Why R2: egress is free at any volume; the free tier is 10 GB-month storage, 1M
 Class A operations and 10M Class B operations per month. Release sizes vary;
-old releases are pruned because the site only serves the latest.
+older stable assets are pruned, while beta assets remain for pinned updates.
 
 The workflow must exist on the **default branch** (`main`) for release and
 `workflow_run` events to fire. `workflow_dispatch` also requires it on `main`
@@ -425,19 +448,29 @@ gh workflow run r2-mirror.yml -R Xinzhe99/OpenFocus --ref main -f tag=v1.74.0
 gh run list -R Xinzhe99/OpenFocus --workflow r2-mirror.yml --limit 3
 ```
 
-If the action fails, a full download can fall back to GitHub only when that
+If the action fails, inspect the preflight or upload error and repair the
+underlying failure before re-running it. A missing trusted hash requires
+independent evidence and an available workflow evidence source, as described
+above; repeatedly dispatching the same inputs will not fix it. A preflight
+failure makes no R2 writes; a later failure can
+leave partially uploaded objects, but does not advance latest metadata or
+prune older objects. A full download can fall back to GitHub only when that
 asset exists there as a complete file. A split asset and range requests return
-`503` until its complete R2 object is ready. Fix the action, then re-run it;
-no website redeploy is needed.
+`503` until its complete R2 object is ready. No website redeploy is needed.
 
 ### Release checklist
 
-1. `constants.APP_VERSION` equals the release tag.
-2. Push the `v*` tag. **Build & Publish Release** verifies the four logical
-   installer assets, splitting oversized Windows files before publishing.
+1. `constants.APP_VERSION` matches the numeric release version. A stable tag
+   is `v<version>`; a beta tag is `v<version>-beta.<number>`. Published tags
+   and their bytes are immutable; issue a new tag for changed bytes.
+2. Push the tag. **Build & Publish Release** runs the three-OS tests and
+   installed headless wheel acceptance on the locked commit, builds the
+   desktop assets, then verifies the complete draft and build identity before
+   publishing. PyPI publication is limited to stable tags; branch dispatches
+   only produce preview artifacts.
 3. Wait for `r2-mirror` to succeed. It is chained to the release workflow; a
    release published by hand uses the `release: published` trigger. If neither
-   path fired, run the manual dispatch below.
+   path fired, run the manual dispatch above.
 4. Verify:
    - `https://openfocus.top/api/latest` returns the new tag with
      `Cache-Control: no-store`;
@@ -449,9 +482,9 @@ no website redeploy is needed.
      fallback and does not occur for a range request;
    - `https://openfocus.top/` shows the new version within 5 minutes per data
      center.
-5. Rebuild and redeploy the site when the static version labels and JSON-LD
-   need refreshing. They are generated from `constants.APP_VERSION`; the
-   download links themselves follow the latest release without a redeploy.
+5. Rebuild and redeploy the site for changes to its code or content. Its static
+   pages do not claim a desktop version; JavaScript displays the selected
+   version from `/api/latest`, and links resolve through the Worker.
 
 ---
 
