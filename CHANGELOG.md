@@ -11,6 +11,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
+### Fixed
+- Run deferred ECC and homography resampling on the render's planned threads
+  with the published OpenCV packages. Their Python bindings do not expose the
+  active parallel backend, so every warp ran on one core; the backend is now
+  read from OpenCV's build summary. Output pixels are unchanged.
+
 ### Changed
 - Reduce the tile overlap of neural tiled fusion in proportion when the tile is
   made smaller to fit memory, instead of keeping the overlap requested for the
