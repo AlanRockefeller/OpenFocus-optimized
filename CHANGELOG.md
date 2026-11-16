@@ -11,13 +11,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
-### Fixed
-- Run deferred ECC and homography resampling on the render's planned threads
-  with the published OpenCV packages. Their Python bindings do not expose the
-  active parallel backend, so every warp ran on one core; the backend is now
-  read from OpenCV's build summary. Output pixels are unchanged.
-
 ### Changed
+- Prepare ECC source frames concurrently within the alignment stage's CPU and
+  memory budgets. Preparation and pair estimation share one bounded worker
+  pool; RAW decoder OpenMP work stays serial inside each worker. Alignment
+  transforms, cropping and output pixels are unchanged.
 - Reduce the tile overlap of neural tiled fusion in proportion when the tile is
   made smaller to fit memory, instead of keeping the overlap requested for the
   larger tile, but never below 128 pixels. A default 1024-pixel tile halved to
@@ -27,6 +25,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   as camera-linear import already does. Loading and rendering such stacks is
   faster; pixels can differ slightly from a full-size decode followed by
   downsampling, and frame dimensions are unchanged.
+
+### Fixed
+- Run deferred ECC and homography resampling on the render's planned threads
+  with the published OpenCV packages. Their Python bindings do not expose the
+  active parallel backend, so every warp ran on one core; the backend is now
+  read from OpenCV's build summary. Output pixels are unchanged.
 
 ## [1.77.0] - 2026-11-11
 
