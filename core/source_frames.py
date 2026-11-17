@@ -916,11 +916,42 @@ def exposure_frames(frames, gains, should_cancel=None):
             for frame, gain in zip(frames, gains)]
 
 
+def _matched_strip(strip, gain):
+    """Exposure-matched copy of one strip, in the strip's own dtype."""
+    from utils.image_utils import apply_exposure_gain, normalize_fuse_input, quantize_fuse_output
+    if strip.dtype == np.uint16:
+        # Match normalized float32 exposure before restoring native codes.
+        normalized, _ = normalize_fuse_input([strip])
+        adjusted = apply_exposure_gain(normalized[0], gain)
+        del normalized
+        return quantize_fuse_output(adjusted, True)
+    return apply_exposure_gain(strip, gain)
+
+
+# Integer frames this many times larger than their lookup table use the table.
+_EXPOSURE_TABLE_MIN_RATIO = 4
+
+
+def _exposure_table(gain, dtype, shape):
+    """Matched value of every integer code, per channel: (codes, channels).
+
+    Matching is element-wise: a sample's result depends only on its code, its
+    channel (alpha is not gained) and the frame's gain. The table is computed by
+    _matched_strip itself over a ramp of every code, so mapping a frame through
+    it gives exactly the strip-by-strip result.
+    """
+    codes = np.arange(np.iinfo(dtype).max + 1, dtype=dtype)
+    if len(shape) == 2:
+        ramp = codes[None, :]
+    else:
+        ramp = np.ascontiguousarray(np.repeat(codes[None, :, None], shape[2], axis=2))
+    return np.ascontiguousarray(np.asarray(_matched_strip(ramp, gain))[0]
+                                .reshape(codes.size, -1))
+
+
 def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
     """Resolve the selected target mean once and retain one gain per source."""
-    from utils.image_utils import (
-        _exposure_mean, apply_exposure_gain, normalize_fuse_input, quantize_fuse_output,
-    )
+    from utils.image_utils import _exposure_mean
     from core.frame_storage import create_transient_frame
     reference = frames[reference_index]
     target = _exposure_mean(resolve_frame(reference), should_cancel, normalize_uint16=True)
@@ -935,19 +966,24 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
             if gain == 1.0:
                 return image
             output = create_transient_frame(image.shape, image.dtype)
+            channels = image.shape[2] if image.ndim == 3 else 1
+            if (image.dtype in (np.uint8, np.uint16) and image.ndim in (2, 3)
+                    and image.size >= _EXPOSURE_TABLE_MIN_RATIO * channels
+                    * (np.iinfo(image.dtype).max + 1)):
+                from fusion_methods._openfocus_execution import run_bands
+                from fusion_methods._openfocus_kernels import table_rows
+                table = _exposure_table(gain, image.dtype, image.shape)
+
+                def rows(start, stop):
+                    if should_cancel is not None and should_cancel():
+                        raise RegistrationCancelled()
+                    table_rows(image, table, output, start, stop)
+                run_bands(image.shape[0], 128, rows)
+                return output
             for y in range(0, image.shape[0], 128):
                 if should_cancel is not None and should_cancel():
                     raise RegistrationCancelled()
-                strip = image[y:y + 128]
-                if image.dtype == np.uint16:
-                    # Match normalized float32 exposure before restoring native codes.
-                    normalized, _ = normalize_fuse_input([strip])
-                    adjusted = apply_exposure_gain(normalized[0], gain)
-                    del normalized
-                    output[y:y + 128] = quantize_fuse_output(adjusted, True)
-                    del adjusted
-                else:
-                    output[y:y + 128] = apply_exposure_gain(strip, gain)
+                output[y:y + 128] = _matched_strip(image[y:y + 128], gain)
             return output
         return match
 
