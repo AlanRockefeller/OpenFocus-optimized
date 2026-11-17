@@ -11,7 +11,7 @@ from core.multi_focus_fusion import MultiFocusFusion
 from core.fusion_diagnostics import log_effective_fusion
 from core.frame_storage import store_frame, scratch_directory, estimate_fusion_space
 from core.source_frames import materialize_frames, processing_preview, resolve_frame
-from core.resource_policy import heavy_job, require_memory
+from core.resource_policy import ResourceLimitError, heavy_job, require_memory
 from utils import resource_path
 from utils.image_utils import prepare_fusion_input, to_display_uint8
 from copy import deepcopy
@@ -27,6 +27,15 @@ from constants import (
 from core.algorithms import (get_fusion, alignment_steps, resolve_fusion_parameters,
                              resolve_registration_parameters)
 from core.resource_policy import cpu_facts, log_render_resources
+
+
+def _render_error_category(exc):
+    for exception_type, category in (
+            (ResourceLimitError, 'resource_limit'), (MemoryError, 'memory'),
+            (OSError, 'os'), (ValueError, 'value'), (RuntimeError, 'runtime')):
+        if isinstance(exc, exception_type):
+            return category
+    return 'other'
 
 logger = get_logger(__name__)
 
@@ -184,6 +193,7 @@ class StackLoadWorker(QThread):
             self.loader.progress_callback = self.progress.emit
             try:
                 with heavy_job(lambda: self.is_cancelled):
+                    log_action('stack_load.admitted')
                     if self.is_cancelled:
                         operation.cancel()
                         self._previous_loader_state.clear()
@@ -520,12 +530,14 @@ class RenderWorker(QThread):
         self.alignment_report_provenance = None
         self.profile_performance = bool(profile_performance)
         self.performance_report = None
+        self._render_error_category = None
 
     def cancel(self):
         """Request cancellation; checked between registration/fusion stages."""
         self.is_cancelled = True
 
     def run(self):
+        self._render_error_category = None
         with log_operation("render", method=self.algorithm, parameters=self.fusion_parameters,
                            registration=self.alignment, registration_parameters=self.registration_parameters,
                            reg_downscale_width=self.reg_downscale_width, thread_count=self.thread_count,
@@ -555,12 +567,14 @@ class RenderWorker(QThread):
                             operation.cancel()
                             self.error_signal.emit("CANCELLED: render cancelled")
                         except Exception as e:
+                            self._render_error_category = _render_error_category(e)
                             operation.fail()
                             self.error_signal.emit(str(e))
                 except RegistrationCancelled:
                     operation.cancel()
                     self.error_signal.emit("CANCELLED: render cancelled")
                 except Exception as e:
+                    self._render_error_category = _render_error_category(e)
                     operation.fail()
                     self.error_signal.emit(str(e))
                 finally:
@@ -1123,7 +1137,7 @@ class RenderWorker(QThread):
             from utils.output_sharpen import sharpen_output
             with profile.stage('sharpen'):
                 result = sharpen_output(result, should_cancel)
-        device = fusion.get_info()['device'] if (get_fusion(self.algorithm).neural or self.algorithm == 'openfocus_b') else 'CPU'
+        device = fusion.get_info()['device'] if (get_fusion(self.algorithm).neural or self.algorithm in ('openfocus_b', 'openfocus_c')) else 'CPU'
         with profile.stage('finalize_output'):
             result = quantize_fuse_output(result, is_16bit)
             return store_frame(restore_transparent_canvas(result, transparent)), device
@@ -1324,7 +1338,7 @@ class BatchWorker(QThread):
         self.split_method = split_method
         self.split_param = split_param
         self.single_folder_images_with_times = single_folder_images_with_times or []
-        # GPU preference applies to OpenFocus B and supported neural methods.
+        # GPU preference applies to OpenFocus B/C and supported neural methods.
         self.use_gpu = bool(use_gpu)
         self.runtime_settings = dict(self.processing_settings.get('runtime_settings') or {})
         self.runtime_settings.update(runtime_settings or {})

@@ -178,8 +178,12 @@ def _launch_command(socket_name=None, paths=()):
     return command
 
 
-def launch_gui(socket_name=None, timeout=45.0, paths=(), *, env=None):
-    """Start a detached GUI and wait for its control discovery file."""
+def launch_gui(socket_name=None, timeout=45.0, paths=(), *, env=None, process_factory=None):
+    """Start a detached GUI and wait for its control discovery file.
+
+    ``process_factory``, when provided, receives the same arguments as
+    ``subprocess.Popen`` and returns a process with ``poll`` and ``returncode``.
+    """
     before = None
     child_env = os.environ.copy() if env is None else env.copy()
     override = child_env.get("OPENFOCUS_CONTROL_FILE")
@@ -193,7 +197,7 @@ def launch_gui(socket_name=None, timeout=45.0, paths=(), *, env=None):
         creation = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_GROUP
     if override:
         child_env["OPENFOCUS_CONTROL_FILE"] = str(path)
-    process = subprocess.Popen(
+    process = (subprocess.Popen if process_factory is None else process_factory)(
         _launch_command(socket_name, paths), cwd=str(Path(__file__).resolve().parents[2]), env=child_env,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=creation,
@@ -346,6 +350,7 @@ def tool_session(timeout=60.0, launch=False, allow_existing=False,
     import tempfile
     if launch:
         from PyQt6.QtCore import QSettings
+        from constants import app_display_version
 
         root = Path(tempfile.mkdtemp(prefix="openfocus-tool-"))
         settings = QSettings(str(root / "settings.ini"), QSettings.Format.IniFormat)
@@ -354,6 +359,8 @@ def tool_session(timeout=60.0, launch=False, allow_existing=False,
         settings.setValue("ui/ask_load_scale", False)
         settings.setValue("rendering/use_gpu", False)
         settings.setValue("rendering/ai_cpu_warning_dismissed", True)
+        settings.setValue("ui/experimental_features", True)
+        settings.setValue("account/intro_version", app_display_version())
         settings.sync()
         if settings.status() != QSettings.Status.NoError:
             raise ControlError("internal", "Could not initialize private settings")
@@ -362,8 +369,10 @@ def tool_session(timeout=60.0, launch=False, allow_existing=False,
         env["OPENFOCUS_CONTROL_FILE"] = str(root / "control.json")
         env["OPENFOCUS_INSTANCE_NAME"] = f"OpenFocus-tool-instance-{root.name}"
         env.pop("OPENFOCUS_LOG_DIR", None)
-        discovery = launch_gui(f"OpenFocus-tool-control-{root.name}",
-                               timeout=launch_timeout, env=env)
+        socket_name = f"OpenFocus-tool-control-{root.name}"
+        if os.name == 'posix':
+            socket_name = f"/tmp/ofc-{root.name}"
+        discovery = launch_gui(socket_name, timeout=launch_timeout, env=env)
         return Session(discovery=discovery, timeout=timeout)
     if not allow_existing and discovery_path().exists():
         raise ControlError(
