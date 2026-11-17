@@ -712,6 +712,9 @@ class ProcessedFrame:
     dtype: np.dtype
     should_cancel: object = None
     scratch_bytes: int = 0
+    # False when this frame's own cached result is the only later reader of
+    # its processed source: the source is then looked up but never stored.
+    store_source: bool = True
 
     @property
     def ndim(self):
@@ -738,12 +741,16 @@ class ProcessedFrame:
     def preview_is_available(self):
         return True
 
-    def full_resolution(self, *, should_cancel=None, cache_result=True):
+    def full_resolution(self, *, should_cancel=None, cache_result=True, store_result=True):
         """Resolve the processed pixels.
 
         ``cache_result=False`` neither looks up nor stores this frame in the
         render's resolution cache; its source still resolves through it. For
         a descriptor that is discarded after one use.
+
+        ``store_result=False`` still returns a cached copy, but stores neither
+        this frame nor its processed sources: for an intermediate whose only
+        later reader is a cached consumer.
         """
         from core.registration import RegistrationCancelled
         def cancelled():
@@ -764,7 +771,10 @@ class ProcessedFrame:
                     return hit
             from core.resource_policy import require_memory
             require_memory(frame_resolution_bytes(self))
-            image = resolve_frame(self.source, should_cancel=cancelled)
+            if isinstance(self.source, ProcessedFrame) and not (store_result and self.store_source):
+                image = self.source.full_resolution(should_cancel=cancelled, store_result=False)
+            else:
+                image = resolve_frame(self.source, should_cancel=cancelled)
             if cancelled():
                 raise RegistrationCancelled()
             image = self.processor(image)
@@ -772,7 +782,7 @@ class ProcessedFrame:
                 raise RegistrationCancelled()
             if image.shape != self.shape or image.dtype != self.dtype:
                 raise ValueError('Processed frame does not match its declared shape/dtype')
-            if cache is not None:
+            if cache is not None and store_result:
                 stored = cache.put(self, image, should_cancel=cancelled)
                 if stored is not None:
                     _check_resolution_cancel(cancelled)
@@ -801,7 +811,7 @@ class RetainedFrame(ProcessedFrame):
     """
     pixels: object = None
 
-    def full_resolution(self, *, should_cancel=None, cache_result=True):
+    def full_resolution(self, *, should_cancel=None, cache_result=True, store_result=True):
         from core.registration import RegistrationCancelled
         if ((should_cancel is not None and should_cancel()) or
                 (self.should_cancel is not None and self.should_cancel())):
@@ -831,13 +841,14 @@ def without_retained_pixels(frame):
 
 
 def process_frame(frame, processor, *, shape=None, dtype=None, should_cancel=None,
-                  scratch_bytes=None):
+                  scratch_bytes=None, store_source=True):
     """Describe processing and its additional peak workspace without decoding."""
     shape = tuple(frame.shape if shape is None else shape)
     dtype = np.dtype(frame.dtype if dtype is None else dtype)
     scratch = (math.prod(shape) * dtype.itemsize * 2 if scratch_bytes is None
                else max(0, int(scratch_bytes)))
-    return ProcessedFrame(frame, processor, shape, dtype, should_cancel, scratch)
+    return ProcessedFrame(frame, processor, shape, dtype, should_cancel, scratch,
+                          store_source)
 
 
 def _crop_pixels(image, *, x, y, width, height, channels):
@@ -951,12 +962,18 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
             return output
         return match
 
+    # A matched frame is cached for every later reader in the render, so its
+    # processed (for example aligned) source is needed again only when the GUI
+    # may retain aligned pixels afterwards. Larger stacks are never retained.
+    from core.frame_resolution_cache import RETAINED_FRAME_LIMIT_BYTES
+    store_sources = sum(frame.nbytes for frame in frames) <= RETAINED_FRAME_LIMIT_BYTES
     # Native u16 restoration peaks at three float32 strips; outputs stay bounded.
     return [process_frame(frame, matcher(1.0 if frame is reference else None),
                           should_cancel=should_cancel,
                           scratch_bytes=frame.nbytes + min(frame.shape[0], 128)
                           * math.prod(frame.shape[1:])
-                          * (12 if frame.dtype == np.uint16 else 4 + frame.dtype.itemsize))
+                          * (12 if frame.dtype == np.uint16 else 4 + frame.dtype.itemsize),
+                          store_source=store_sources)
             for frame in frames]
 
 
