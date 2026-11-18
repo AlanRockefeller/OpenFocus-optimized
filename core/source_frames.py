@@ -932,6 +932,16 @@ def _matched_strip(strip, gain):
 _EXPOSURE_TABLE_MIN_RATIO = 4
 
 
+def _uses_exposure_table(shape, dtype):
+    """Whether matching maps a frame through a code table rather than strips."""
+    dtype = np.dtype(dtype)
+    if dtype not in (np.uint8, np.uint16) or len(shape) not in (2, 3):
+        return False
+    channels = shape[2] if len(shape) == 3 else 1
+    return (math.prod(shape)
+            >= _EXPOSURE_TABLE_MIN_RATIO * channels * (np.iinfo(dtype).max + 1))
+
+
 def _exposure_table(gain, dtype, shape):
     """Matched value of every integer code, per channel: (codes, channels).
 
@@ -966,10 +976,7 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
             if gain == 1.0:
                 return image
             output = create_transient_frame(image.shape, image.dtype)
-            channels = image.shape[2] if image.ndim == 3 else 1
-            if (image.dtype in (np.uint8, np.uint16) and image.ndim in (2, 3)
-                    and image.size >= _EXPOSURE_TABLE_MIN_RATIO * channels
-                    * (np.iinfo(image.dtype).max + 1)):
+            if _uses_exposure_table(image.shape, image.dtype):
                 from fusion_methods._openfocus_execution import run_bands
                 from fusion_methods._openfocus_kernels import table_rows
                 table = _exposure_table(gain, image.dtype, image.shape)
@@ -999,7 +1006,7 @@ def _exposure_workspace_bytes(frame):
     dtype = np.dtype(frame.dtype)
     strip = (min(frame.shape[0], 128) * math.prod(frame.shape[1:])
              * (12 if dtype == np.uint16 else 4 + dtype.itemsize))
-    if dtype not in (np.uint8, np.uint16):
+    if not _uses_exposure_table(frame.shape, dtype):
         return strip
     # Building a table runs the strip path over a ramp of every code: the ramp,
     # two float32 copies, the quantized codes and the table itself.

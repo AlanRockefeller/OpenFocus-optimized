@@ -805,12 +805,15 @@ def test_openfocus_b_exposure_table_matches_strip_matching(monkeypatch, thread_c
     np.testing.assert_array_equal(np.asarray(with_table), np.asarray(strips))
 
 
-@pytest.mark.parametrize('dtype,shape', [(np.uint16, (4096, 64, 3)), (np.uint16, (4096, 256)),
-                                         (np.uint8, (64, 64, 4)), (np.uint16, (130, 1000, 3))])
-def test_exposure_matching_admits_the_larger_of_strip_and_table_workspace(dtype, shape):
+@pytest.mark.parametrize('dtype,shape,table', [
+    (np.uint16, (4096, 64, 3), True), (np.uint16, (4096, 256), True), (np.uint8, (64, 64, 4), True),
+    (np.uint16, (128, 64, 3), False), (np.uint16, (130, 1000, 3), False), (np.uint8, (8, 9, 3), False),
+])
+def test_exposure_matching_admits_the_workspace_of_the_path_it_takes(dtype, shape, table):
     frame = np.zeros(shape, dtype)
     matched = source_frames.match_exposure_frames([frame, frame], reference_index=0)[1]
+    assert source_frames._uses_exposure_table(shape, dtype) == table
     channels = shape[2] if len(shape) == 3 else 1
-    table = (np.iinfo(dtype).max + 1) * channels * 16
     strip = min(shape[0], 128) * int(np.prod(shape[1:])) * (12 if dtype == np.uint16 else 5)
-    assert matched.scratch_bytes == frame.nbytes + max(strip, table)
+    workspace = max(strip, (np.iinfo(dtype).max + 1) * channels * 16) if table else strip
+    assert matched.scratch_bytes == frame.nbytes + workspace
