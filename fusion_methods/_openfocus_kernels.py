@@ -34,12 +34,17 @@ def gray_rows(image, output, start, stop, scale, depth_color=False):
 
 @njit(nogil=True)
 def table_rows(image, table, output, start, stop):
-    """Map every sample through its channel's column of an integer table."""
-    for y in range(start, stop):
-        for x in range(image.shape[1]):
-            if image.ndim == 2:
+    """Map every sample through its channel's column of an integer table.
+
+    A two-dimensional image is one plane of samples that all use column 0.
+    """
+    if image.ndim == 2:
+        for y in range(start, stop):
+            for x in range(image.shape[1]):
                 output[y, x] = table[image[y, x], 0]
-            else:
+    else:
+        for y in range(start, stop):
+            for x in range(image.shape[1]):
                 for channel in range(image.shape[2]):
                     output[y, x, channel] = table[image[y, x, channel], channel]
 

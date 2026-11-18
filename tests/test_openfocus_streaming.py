@@ -744,35 +744,56 @@ def _every_code(dtype, shape):
         [np.roll(rows, 977 * channel) for channel in range(shape[2])], axis=2))
 
 
+def _count_table_rows(monkeypatch):
+    """Record (image dimensions, table columns) of every table kernel call."""
+    from fusion_methods import _openfocus_kernels
+    calls = []
+    original = _openfocus_kernels.table_rows
+
+    def counted(image, table, *args):
+        calls.append((image.ndim, table.shape[1]))
+        return original(image, table, *args)
+    monkeypatch.setattr(_openfocus_kernels, 'table_rows', counted)
+    return calls
+
+
+def _matched_and_gain(reference, image):
+    from utils.image_utils import _exposure_mean
+    frames = source_frames.match_exposure_frames([reference, image], reference_index=0)
+    gain = (_exposure_mean(reference, normalize_uint16=True)
+            / _exposure_mean(image, normalize_uint16=True))
+    return source_frames.resolve_frame(frames[1]), gain
+
+
 @pytest.mark.parametrize('dtype,shape', [
     (np.uint16, (512, 512)), (np.uint16, (512, 512, 3)), (np.uint16, (521, 509, 4)),
     (np.uint8, (61, 67)), (np.uint8, (61, 67, 3)), (np.uint8, (61, 67, 4)),
 ])
 @pytest.mark.parametrize('level', [0.11, 0.47, 0.5003, 0.93])
 def test_exposure_table_matches_the_strip_path_for_every_code(monkeypatch, dtype, shape, level):
-    from fusion_methods import _openfocus_kernels
-    calls = []
-    original = _openfocus_kernels.table_rows
-
-    def counted(*args):
-        calls.append(args[3:])
-        return original(*args)
-    monkeypatch.setattr(_openfocus_kernels, 'table_rows', counted)
+    calls = _count_table_rows(monkeypatch)
     image = _every_code(dtype, shape)
-    maximum = np.iinfo(dtype).max
-    reference = np.full(shape, int(level * maximum), dtype)
-    frames = source_frames.match_exposure_frames([reference, image], reference_index=0)
-    matched = source_frames.resolve_frame(frames[1])
+    reference = np.full(shape, int(level * np.iinfo(dtype).max), dtype)
+    matched, gain = _matched_and_gain(reference, image)
 
-    from utils.image_utils import _exposure_mean
-    gain = (_exposure_mean(reference, normalize_uint16=True)
-            / _exposure_mean(image, normalize_uint16=True))
-    assert gain != 1.0 and calls
+    assert gain != 1.0
     assert matched.dtype == dtype
     np.testing.assert_array_equal(matched, _strip_reference(image, gain))
     if len(shape) == 3 and shape[2] == 4:
-        # Alpha is not gained; it keeps exactly what the strip path makes of it.
-        np.testing.assert_array_equal(matched[:, :, 3], _strip_reference(image, gain)[:, :, 3])
+        # Alpha is not gained, and its trip through float32 returns every code.
+        np.testing.assert_array_equal(matched[:, :, 3], image[:, :, 3])
+        assert set(calls) == {(3, 4)}        # so it keeps a column of its own
+    else:
+        assert set(calls) == {(2, 1)}        # one plane of samples, one column
+
+
+def test_exposure_table_maps_strided_frames_per_channel(monkeypatch):
+    calls = _count_table_rows(monkeypatch)
+    image = _every_code(np.uint16, (512, 512, 4))[:, :, :3]
+    assert not image.flags.c_contiguous      # cannot be viewed as one plane
+    matched, gain = _matched_and_gain(np.full(image.shape, 30000, np.uint16), image)
+    assert set(calls) == {(3, 3)}
+    np.testing.assert_array_equal(matched, _strip_reference(image, gain))
 
 
 def test_exposure_matching_keeps_the_strip_path_for_small_frames(monkeypatch):
@@ -781,13 +802,8 @@ def test_exposure_matching_keeps_the_strip_path_for_small_frames(monkeypatch):
                         lambda *args: pytest.fail('small frames must not build a table'))
     rng = np.random.default_rng(5)
     image = rng.integers(0, 65536, (37, 41, 3), dtype=np.uint16)
-    reference = np.full(image.shape, 30000, np.uint16)
-    frames = source_frames.match_exposure_frames([reference, image], reference_index=0)
-    from utils.image_utils import _exposure_mean
-    gain = (_exposure_mean(reference, normalize_uint16=True)
-            / _exposure_mean(image, normalize_uint16=True))
-    np.testing.assert_array_equal(source_frames.resolve_frame(frames[1]),
-                                  _strip_reference(image, gain))
+    matched, gain = _matched_and_gain(np.full(image.shape, 30000, np.uint16), image)
+    np.testing.assert_array_equal(matched, _strip_reference(image, gain))
 
 
 @pytest.mark.parametrize('thread_count', [1, 2])

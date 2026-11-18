@@ -932,14 +932,18 @@ def _matched_strip(strip, gain):
 _EXPOSURE_TABLE_MIN_RATIO = 4
 
 
+def _exposure_table_entries(shape, dtype):
+    """Size of an integer frame's exposure table: one entry per code and channel."""
+    return (np.iinfo(dtype).max + 1) * (shape[2] if len(shape) == 3 else 1)
+
+
 def _uses_exposure_table(shape, dtype):
     """Whether matching maps a frame through a code table rather than strips."""
     dtype = np.dtype(dtype)
     if dtype not in (np.uint8, np.uint16) or len(shape) not in (2, 3):
         return False
-    channels = shape[2] if len(shape) == 3 else 1
     return (math.prod(shape)
-            >= _EXPOSURE_TABLE_MIN_RATIO * channels * (np.iinfo(dtype).max + 1))
+            >= _EXPOSURE_TABLE_MIN_RATIO * _exposure_table_entries(shape, dtype))
 
 
 def _exposure_table(gain, dtype, shape):
@@ -954,9 +958,43 @@ def _exposure_table(gain, dtype, shape):
     if len(shape) == 2:
         ramp = codes[None, :]
     else:
-        ramp = np.ascontiguousarray(np.repeat(codes[None, :, None], shape[2], axis=2))
+        ramp = np.repeat(codes[None, :, None], shape[2], axis=2)
     return np.ascontiguousarray(np.asarray(_matched_strip(ramp, gain))[0]
                                 .reshape(codes.size, -1))
+
+
+def _match_through_table(image, gain, output, should_cancel):
+    """Fill output with the matched frame, in row bands a row job shares."""
+    from core.registration import RegistrationCancelled
+    from fusion_methods._openfocus_execution import run_bands
+    from fusion_methods._openfocus_kernels import table_rows
+    table = _exposure_table(gain, image.dtype, image.shape)
+    if (image.ndim == 3 and image.flags.c_contiguous and output.flags.c_contiguous
+            and (table == table[:, :1]).all()):
+        # Without alpha every channel maps alike. The frame is then one plane
+        # of samples behind a single column, which about halves a worker's time.
+        table = np.ascontiguousarray(table[:, :1])
+        image = image.reshape(image.shape[0], -1)
+        output = output.reshape(output.shape[0], -1)
+
+    def rows(start, stop):
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+        table_rows(image, table, output, start, stop)
+    run_bands(image.shape[0], 128, rows)
+
+
+def _exposure_workspace_bytes(frame):
+    """Peak matcher workspace besides the output: one strip, or the code table."""
+    dtype = np.dtype(frame.dtype)
+    strip = (min(frame.shape[0], 128) * math.prod(frame.shape[1:])
+             * (12 if dtype == np.uint16 else 4 + dtype.itemsize))
+    if not _uses_exposure_table(frame.shape, dtype):
+        return strip
+    # The mean still reads one strip. Building a table runs the strip path over
+    # a ramp of every code: the ramp, two float32 copies, the quantized codes
+    # and the table itself.
+    return max(strip, _exposure_table_entries(frame.shape, dtype) * 16)
 
 
 def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
@@ -977,15 +1015,7 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
                 return image
             output = create_transient_frame(image.shape, image.dtype)
             if _uses_exposure_table(image.shape, image.dtype):
-                from fusion_methods._openfocus_execution import run_bands
-                from fusion_methods._openfocus_kernels import table_rows
-                table = _exposure_table(gain, image.dtype, image.shape)
-
-                def rows(start, stop):
-                    if should_cancel is not None and should_cancel():
-                        raise RegistrationCancelled()
-                    table_rows(image, table, output, start, stop)
-                run_bands(image.shape[0], 128, rows)
+                _match_through_table(image, gain, output, should_cancel)
                 return output
             for y in range(0, image.shape[0], 128):
                 if should_cancel is not None and should_cancel():
@@ -999,19 +1029,6 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
                           should_cancel=should_cancel,
                           scratch_bytes=frame.nbytes + _exposure_workspace_bytes(frame))
             for frame in frames]
-
-
-def _exposure_workspace_bytes(frame):
-    """Peak matcher workspace besides the output: one strip, or the code table."""
-    dtype = np.dtype(frame.dtype)
-    strip = (min(frame.shape[0], 128) * math.prod(frame.shape[1:])
-             * (12 if dtype == np.uint16 else 4 + dtype.itemsize))
-    if not _uses_exposure_table(frame.shape, dtype):
-        return strip
-    # Building a table runs the strip path over a ramp of every code: the ramp,
-    # two float32 copies, the quantized codes and the table itself.
-    channels = frame.shape[2] if len(frame.shape) == 3 else 1
-    return max(strip, (np.iinfo(dtype).max + 1) * channels * 16)
 
 
 def crop_transparent_frames(frames, should_cancel=None):
