@@ -35,6 +35,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   OpenFocus stacks. Output pixels are unchanged.
 - Record render dispatch and stack-load admission milestones in local logs to
   help diagnose stalled work.
+- Advance OpenFocus depth IIR filters in 2048-row native calls instead of
+  128-row calls, so row workers no longer wait on each other to start the
+  next call. Output pixels are unchanged.
 - Record Windows memory commitment and process usage when neural sessions fail.
 - Mark Dust Map and batch flat-field correction as experimental desktop tools.
 - Default desktop updates and public downloads to stable releases. Users can
