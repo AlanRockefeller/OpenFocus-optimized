@@ -53,8 +53,8 @@ def _snap_lut(feather=0):
 
 # Rows advanced per native call in one 64-column strip. Each call takes the
 # GIL for dispatch and a cancel check; 128-row calls (about 8k samples) made
-# that the bottleneck with several workers. 2048 rows keep a call near a
-# millisecond, which still bounds cancellation latency.
+# that the bottleneck with several workers. A 2048-row call still lasts only
+# a fraction of a millisecond, so cancellation stays prompt.
 _AXIS_BLOCK_ROWS = 2048
 
 
