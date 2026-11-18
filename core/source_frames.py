@@ -771,8 +771,9 @@ class ProcessedFrame:
                     return hit
             from core.resource_policy import require_memory
             require_memory(frame_resolution_bytes(self))
-            if isinstance(self.source, ProcessedFrame) and not (store_result and self.store_source):
-                image = self.source.full_resolution(should_cancel=cancelled, store_result=False)
+            if isinstance(self.source, ProcessedFrame):
+                image = self.source.full_resolution(
+                    should_cancel=cancelled, store_result=store_result and self.store_source)
             else:
                 image = resolve_frame(self.source, should_cancel=cancelled)
             if cancelled():
@@ -842,7 +843,11 @@ def without_retained_pixels(frame):
 
 def process_frame(frame, processor, *, shape=None, dtype=None, should_cancel=None,
                   scratch_bytes=None, store_source=True):
-    """Describe processing and its additional peak workspace without decoding."""
+    """Describe processing and its additional peak workspace without decoding.
+
+    ``store_source=False`` keeps a processed source out of the render's cache
+    when this frame's cached result is that source's only later reader.
+    """
     shape = tuple(frame.shape if shape is None else shape)
     dtype = np.dtype(frame.dtype if dtype is None else dtype)
     scratch = (math.prod(shape) * dtype.itemsize * 2 if scratch_bytes is None
@@ -965,15 +970,15 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
     # A matched frame is cached for every later reader in the render, so its
     # processed (for example aligned) source is needed again only when the GUI
     # may retain aligned pixels afterwards. Larger stacks are never retained.
-    from core.frame_resolution_cache import RETAINED_FRAME_LIMIT_BYTES
-    store_sources = sum(frame.nbytes for frame in frames) <= RETAINED_FRAME_LIMIT_BYTES
+    from core.frame_resolution_cache import within_retention_limit
+    store_sources = within_retention_limit(frames)
     # Native u16 restoration peaks at three float32 strips; outputs stay bounded.
     return [process_frame(frame, matcher(1.0 if frame is reference else None),
+                          store_source=store_sources,
                           should_cancel=should_cancel,
                           scratch_bytes=frame.nbytes + min(frame.shape[0], 128)
                           * math.prod(frame.shape[1:])
-                          * (12 if frame.dtype == np.uint16 else 4 + frame.dtype.itemsize),
-                          store_source=store_sources)
+                          * (12 if frame.dtype == np.uint16 else 4 + frame.dtype.itemsize))
             for frame in frames]
 
 
