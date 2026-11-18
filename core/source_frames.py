@@ -990,10 +990,21 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
     # Native u16 restoration peaks at three float32 strips; outputs stay bounded.
     return [process_frame(frame, matcher(1.0 if frame is reference else None),
                           should_cancel=should_cancel,
-                          scratch_bytes=frame.nbytes + min(frame.shape[0], 128)
-                          * math.prod(frame.shape[1:])
-                          * (12 if frame.dtype == np.uint16 else 4 + frame.dtype.itemsize))
+                          scratch_bytes=frame.nbytes + _exposure_workspace_bytes(frame))
             for frame in frames]
+
+
+def _exposure_workspace_bytes(frame):
+    """Peak matcher workspace besides the output: one strip, or the code table."""
+    dtype = np.dtype(frame.dtype)
+    strip = (min(frame.shape[0], 128) * math.prod(frame.shape[1:])
+             * (12 if dtype == np.uint16 else 4 + dtype.itemsize))
+    if dtype not in (np.uint8, np.uint16):
+        return strip
+    # Building a table runs the strip path over a ramp of every code: the ramp,
+    # two float32 copies, the quantized codes and the table itself.
+    channels = frame.shape[2] if len(frame.shape) == 3 else 1
+    return max(strip, (np.iinfo(dtype).max + 1) * channels * 16)
 
 
 def crop_transparent_frames(frames, should_cancel=None):

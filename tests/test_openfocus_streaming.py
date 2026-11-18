@@ -803,3 +803,14 @@ def test_openfocus_b_exposure_table_matches_strip_matching(monkeypatch, thread_c
     monkeypatch.setattr(source_frames, '_EXPOSURE_TABLE_MIN_RATIO', 1 << 40)
     strips = MultiFocusFusion(**options).fuse(list(frames), thread_count=thread_count)
     np.testing.assert_array_equal(np.asarray(with_table), np.asarray(strips))
+
+
+@pytest.mark.parametrize('dtype,shape', [(np.uint16, (4096, 64, 3)), (np.uint16, (4096, 256)),
+                                         (np.uint8, (64, 64, 4)), (np.uint16, (130, 1000, 3))])
+def test_exposure_matching_admits_the_larger_of_strip_and_table_workspace(dtype, shape):
+    frame = np.zeros(shape, dtype)
+    matched = source_frames.match_exposure_frames([frame, frame], reference_index=0)[1]
+    channels = shape[2] if len(shape) == 3 else 1
+    table = (np.iinfo(dtype).max + 1) * channels * 16
+    strip = min(shape[0], 128) * int(np.prod(shape[1:])) * (12 if dtype == np.uint16 else 5)
+    assert matched.scratch_bytes == frame.nbytes + max(strip, table)
