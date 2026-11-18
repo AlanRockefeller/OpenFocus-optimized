@@ -10,8 +10,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a versioned manifest, a verified download cache, a packer with a metadata
   check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
+- Add an opt-in OpenCL GPU path for OpenFocus C pyramid fusion
+  (`use_gpu=True`), porting the full weighted-pyramid chain — normalize,
+  Gaussian down/up, detail+weight, IIR weight filter, merge, collapse and
+  output — to device kernels. Verified bit-exact against the CPU path
+  (92-frame 2048x1366 stack: ndiff=0, ~3.8x faster on RTX 4060 Laptop);
+  falls back to CPU when the device budget or build fails.
 
 ### Changed
+- Include allowlisted error categories, render stages, and memory admission
+  figures in sanitized reports, without adding exception messages or paths.
+- Require an account to enter the desktop application; a saved sign-in can be
+  used offline. Signing out returns to the sign-in screen.
+- Expose the active render stage through the local control channel.
+- Record render dispatch and stack-load admission milestones in local logs to
+  help diagnose stalled work.
+- Record Windows memory commitment and process usage when neural sessions fail.
+- Mark Dust Map and batch flat-field correction as experimental desktop tools.
+- Default desktop updates and public downloads to stable releases. Users can
+  opt in to beta updates through Advanced Settings or the welcome dialog.
 - Prepare ECC source frames concurrently within the alignment stage's CPU and
   memory budgets. Preparation and pair estimation share one bounded worker
   pool; RAW decoder OpenMP work stays serial inside each worker. Alignment
@@ -27,10 +44,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   downsampling, and frame dimensions are unchanged.
 
 ### Fixed
+- Bound Windows memory admission by reported commit headroom as well as
+  available physical RAM, avoiding plans above the reported commit limit.
+- Include the immediate Windows job object's per-process commit limit in
+  admission when that limit is present.
+- Close the isolated language audit without project confirmation, including
+  when an audit error interrupts the run.
+- Remove temporary launch-film frames when full video generation fails or is
+  interrupted with Ctrl-C; preview frames remain available for inspection.
+- Keep sign-in methods available while a browser or email sign-in is pending;
+  choosing another method or retrying cancels the previous attempt and ignores
+  its late callbacks.
+- Wait for asynchronous image progress dialogs in the menu action sweep.
+- Keep private control sockets within Unix path length limits.
+- Honor cancellation after the final linear RAW header is read, before memory
+  admission, and ignore native crash headers embedded in exception text.
+- Apply watermark changes and keep source and output scale-bar calibration
+  separate when both targets are selected.
+- Close finished batch progress dialogs before showing their summaries, and
+  report retouch source loading as busy to the local control channel.
+- Handle Windows lock contention when opening the report queue and depth cache.
 - Run deferred ECC and homography resampling on the render's planned threads
   with the published OpenCV packages. Their Python bindings do not expose the
   active parallel backend, so every warp ran on one core; the backend is now
   read from OpenCV's build summary. Output pixels are unchanged.
+- Release an older retained aligned mapping when a frame derived from it is
+  retained again. The new mapping's provenance kept the older one alive
+  beside it, outside the 2 GiB retention limit.
+
 
 ## [1.77.0] - 2026-11-11
 

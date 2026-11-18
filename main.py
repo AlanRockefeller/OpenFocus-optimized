@@ -911,7 +911,7 @@ class OpenFocus(QMainWindow):
             kind = ('…' if state == 'pending'
                     else trans.t('neural_provider_ready').format(neural_runtime.display_name(device))
                     if state == 'ready' else neural_runtime.display_name(device))
-            if self.combo_fusion.currentData() == 'openfocus_b':
+            if self.combo_fusion.currentData() in ('openfocus_b', 'openfocus_c'):
                 kind = ('CPU' if not getattr(self, 'use_gpu', True) or opencl is False
                         else '…' if opencl is None
                         else trans.t('neural_provider_ready').format('OpenCL'))
@@ -921,7 +921,7 @@ class OpenFocus(QMainWindow):
             self.lbl_status_gpu.setToolTip('\n'.join(filter(None, (
                 hardware,
                 'ONNX Runtime: ' + ', '.join(diagnostics['providers']),
-                'OpenFocus B: ' + ('OpenCL' if opencl else 'CPU' if opencl is False else '…'),
+                'OpenFocus B/C: ' + ('OpenCL' if opencl else 'CPU' if opencl is False else '…'),
                 trans.t('env_gpu_accel') + ': ' + neural_runtime.display_name(capability)
                 if neural_runtime.is_accelerator(capability)
                 else trans.t('env_gpu_memory_unknown').format(
@@ -1426,7 +1426,7 @@ class OpenFocus(QMainWindow):
         """Resolve the accelerator only when the selected method uses it."""
         try:
             code = self.combo_fusion.currentData()
-            if code == 'openfocus_b' or (code != 'none' and get_fusion(code).neural):
+            if code in ('openfocus_b', 'openfocus_c') or (code != 'none' and get_fusion(code).neural):
                 self._probe_device_kind_async()
         except Exception:
             pass
@@ -1505,8 +1505,8 @@ class OpenFocus(QMainWindow):
 
     def apply_experimental_features(self) -> None:
         """Refresh desktop gates while preserving the selected project settings."""
-        from ui.menus import update_mosaic_experimental_action
-        update_mosaic_experimental_action(self)
+        from ui.menus import update_experimental_actions
+        update_experimental_actions(self)
         if getattr(self, 'combo_fusion', None) is not None and getattr(self, 'combo_align', None) is not None:
             self.refresh_method_availability()
         manager = getattr(self, 'render_manager', None)
@@ -2727,6 +2727,10 @@ class OpenFocus(QMainWindow):
 
     def show_dust_map_dialog(self) -> None:
         """Flat-field (dust map) correction from a defocused white shot."""
+        if not experimental_enabled(self):
+            show_warning_box(self, trans.t('experimental_label'),
+                             trans.t('experimental_locked_hint'))
+            return
         if any(image.ndim == 3 and image.shape[2] == 4 for image in self.raw_images):
             show_warning_box(self, trans.t('msg_warning'),
                              trans.t('transparent_desktop_unsupported').format(path=''))
@@ -2862,7 +2866,8 @@ class OpenFocus(QMainWindow):
             if request == active_request and not active_worker.cancelled:
                 self._source_preview_pending = None
                 return
-            if selected_index is None and active_request[2] is not None and not active_worker.cancelled:
+            if (selected_index is None and active_request[2] is not None
+                    and request[:2] == active_request[:2] and not active_worker.cancelled):
                 return
             self._source_preview_pending = request
             active_worker.request_cancel()
@@ -2874,6 +2879,7 @@ class OpenFocus(QMainWindow):
                     (self.file_list.item(index) is not None and
                      self.file_list.item(index).icon().isNull())])
         if not indices:
+            TransformManager._update_sharpness_curve(self)
             return
         worker = (SourcePreviewWorker(self.raw_images, request, indices, selected_display=True)
                   if selected_index is not None else SourcePreviewWorker(self.raw_images, request, indices))
@@ -3587,10 +3593,25 @@ class OpenFocus(QMainWindow):
         action.setText(QFontMetrics(action.font()).elidedText(
             text, Qt.TextElideMode.ElideRight, 360).replace('&', '&&'))
 
+    def _require_account(self) -> bool:
+        """Allow a saved local session, otherwise require an interactive sign-in."""
+        client = getattr(self, '_account_client', None)
+        if client is not None and client.is_signed_in():
+            return True
+        from dialogs.account import AccountDialog
+        AccountDialog(self, required=True).exec()
+        client = getattr(self, '_account_client', None)
+        return client is not None and client.is_signed_in()
+
     def show_account_dialog(self) -> None:
-        """Open optional account and reporting preferences."""
+        """Manage the account and require another sign-in after sign-out."""
         from dialogs.account import AccountDialog
         AccountDialog(self).exec()
+        while not getattr(self, '_shutting_down', False):
+            if self._require_account():
+                return
+            if self.close():
+                return
 
     def show_feedback_dialog(self) -> None:
         """Report a bug or suggestion, with the session log attached."""
@@ -4859,6 +4880,19 @@ if __name__ == "__main__":
     app.set_main_window(window)
     _log.info("main window ready")
 
+    # An existing local session is sufficient offline; a new profile must sign in.
+    _quit_on_last_window = app.quitOnLastWindowClosed()
+    app.setQuitOnLastWindowClosed(False)
+    try:
+        _signed_in = window._require_account()
+    finally:
+        app.setQuitOnLastWindowClosed(_quit_on_last_window)
+    if not _signed_in or getattr(window, '_shutting_down', False):
+        app.aboutToQuit.emit()
+        window.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        sys.exit(0)
+
     # ---- Local agent control channel ----
     _control_server = None
     try:
@@ -4977,26 +5011,6 @@ if __name__ == "__main__":
             show_warning_box(window, trans.t('update_check_failed_title'),
                              trans.t('update_failed_after_restart'))
 
-    # The account prompt precedes the main window on first launch and updates.
-    from constants import app_display_version
-    from utils.settings_store import get_settings
-    _account_settings = get_settings()
-    _shown_version = str(_account_settings.value('account/intro_version', '') or '')
-    if _shown_version != app_display_version() or any(ok for _, ok, _ in _update_results):
-        _quit_on_last_window = app.quitOnLastWindowClosed()
-        app.setQuitOnLastWindowClosed(False)
-        try:
-            window.show_account_dialog()
-        finally:
-            app.setQuitOnLastWindowClosed(_quit_on_last_window)
-        if getattr(window, '_shutting_down', False):
-            # The prompt runs before app.exec(); release control and instance
-            # resources without reopening the window after an authorized close.
-            app.aboutToQuit.emit()
-            window.deleteLater()
-            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            sys.exit(0)
-        _account_settings.setValue('account/intro_version', app_display_version())
 
     # Crash auto-recovery: a leftover lock means the last session died
     # without a clean close. Offer the saved snapshot before anything else.
