@@ -251,8 +251,6 @@ def merge_rows(accumulator, image, depth, index, step, start, stop,
                              + value * weight) >> 10)
 
 
-
-
 @njit(nogil=True)
 def active_source_rows(depth, step, active, start, stop):
     """Mark every source that a depth code in these rows gives merge weight.

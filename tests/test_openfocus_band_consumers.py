@@ -146,8 +146,6 @@ def test_depth_filter_respects_a_half_mebibyte_scratch_budget(guided):
     np.testing.assert_array_equal(actual, expected)
 
 
-
-
 def _numpy_active_sources(depth, count):
     """The original NumPy selection, kept as the reference definition."""
     active = np.zeros(count, dtype=bool)

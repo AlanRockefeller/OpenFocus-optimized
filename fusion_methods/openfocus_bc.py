@@ -113,7 +113,7 @@ def _active_sources(depth, count, should_cancel):
     """Reject whole sources before decoding when no code band uses them."""
     from fusion_methods.openfocus_ab import _check_cancel
     from fusion_methods._openfocus_kernels import active_source_rows
-    active = np.zeros(count, dtype=np.bool_)
+    active = np.zeros(count, dtype=bool)
     active[0] = True  # The first merge initializes every output sample.
     step = 65535 // (count - 1)
     for start in range(0, depth.shape[0], 128):
