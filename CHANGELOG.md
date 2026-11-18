@@ -29,6 +29,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Smooth OpenFocus B detail scores with per-row column sums, reflecting rows
   once per row and columns only at the edges. Output pixels are unchanged.
 - Expose the active render stage through the local control channel.
+- Stop writing aligned frames to the render's frame cache when only their
+  exposure-matched frames are read again and the stack is too large for the
+  desktop to retain aligned pixels, halving that scratch traffic for large
+  OpenFocus stacks. Output pixels are unchanged.
 - Record render dispatch and stack-load admission milestones in local logs to
   help diagnose stalled work.
 - Record Windows memory commitment and process usage when neural sessions fail.
