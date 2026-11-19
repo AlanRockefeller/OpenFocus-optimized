@@ -28,6 +28,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   used offline. Signing out returns to the sign-in screen.
 - Smooth OpenFocus B detail scores with per-row column sums, reflecting rows
   once per row and columns only at the edges. Output pixels are unchanged.
+- Resample OpenFocus gray reductions and depth expansion one vertical tap at a
+  time across a whole row, so the column loop vectorises; each pixel keeps its
+  order of float32 operations. Output pixels are unchanged.
 - Expose the active render stage through the local control channel.
 - Stop writing aligned frames to the render's frame cache when only their
   exposure-matched frames are read again and the stack is too large for the
