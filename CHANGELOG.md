@@ -171,16 +171,6 @@ This stable release includes the features introduced in the 1.77.0 beta series.
   memory budgets. Preparation and pair estimation share one bounded worker
   pool; RAW decoder OpenMP work stays serial inside each worker. Alignment
   transforms, cropping and output pixels are unchanged.
-- Reduce the tile overlap of neural tiled fusion in proportion when the tile is
-  made smaller to fit memory, instead of keeping the overlap requested for the
-  larger tile, but never below 128 pixels. A default 1024-pixel tile halved to
-  512 computes about half as many tiles; its blend bands are narrower, so
-  pixels can differ slightly from earlier versions.
-- Decode Bayer camera RAW at half size when the loading scale is 50% or less,
-  as camera-linear import already does. Loading and rendering such stacks is
-  faster; pixels can differ slightly from a full-size decode followed by
-  downsampling, and frame dimensions are unchanged.
-
 ### Fixed
 - Open Linux desktop menu entries from bundle paths that contain percent signs.
 - Show embedded TIFF thumbnails stored after the main image in the batch converter, including their display orientation.
