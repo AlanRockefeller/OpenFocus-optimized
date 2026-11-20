@@ -149,10 +149,18 @@ def _owner(image):
 
 
 def _store_behind(scratch, image):
-    """Copy a frame into the job's scratch directory on the writer thread."""
+    """Copy a frame into the caller's scratch directory on the writer thread.
+
+    ``put`` retained ``scratch`` so that a directory owned by the resolving
+    call outlives that call; from here on the stored mapping keeps it.
+    """
     from core import frame_storage
-    return frame_storage.run_with_scratch(scratch, frame_storage.store_frame, image,
-                                          prefer_ram=False)
+    try:
+        return frame_storage.run_with_scratch(scratch, frame_storage.store_frame, image,
+                                              prefer_ram=False)
+    finally:
+        if scratch is not None:
+            scratch.release()
 
 
 def _source_paths(frames):
@@ -456,9 +464,12 @@ class ResolutionCache:
                     return None
                 if behind and self._lend(image):
                     from core.frame_storage import capture_scratch
+                    scratch = capture_scratch()
+                    if scratch is not None:
+                        scratch.retain()
                     stored = image
                     self._entries[frame] = (
-                        self._writer.submit(_store_behind, capture_scratch(), image), size)
+                        self._writer.submit(_store_behind, scratch, image), size)
                 else:
                     try:
                         from core import frame_storage

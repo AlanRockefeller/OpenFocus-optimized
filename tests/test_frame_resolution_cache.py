@@ -641,3 +641,56 @@ def test_put_shares_pixels_the_cache_already_holds(tmp_path, monkeypatch):
     assert len(threads) == 3
     assert cache._used == 2 * image.nbytes + stored[1:].nbytes
     cache.close()
+
+
+def test_write_behind_keeps_an_owned_scratch_directory_until_the_copy_is_stored(
+        tmp_path, monkeypatch):
+    import gc
+    started, release = threading.Event(), threading.Event()
+
+    def hold():
+        started.set()
+        assert release.wait(10)
+    _stores(monkeypatch, tmp_path, before=hold)
+    cache = cache_module.ResolutionCache(1 << 20)
+    owned = tmp_path / 'owned'
+    owned.mkdir()
+    # A resolving call with no job scope around it owns its scratch directory
+    # and removes it on return, unless a mapping or a pending write holds it.
+    with frame_storage.scratch_directory(separate=True) as state:
+        state.directory, state.owned = str(owned), True
+        lent = cache.put('frame', _pixels(), behind=True)
+        assert started.wait(10)
+    assert owned.exists()
+    release.set()
+    stored = cache.get('frame')
+    assert cache.degraded is False
+    assert os.path.samefile(os.path.dirname(frame_storage._mapped_base(stored).filename), owned)
+    np.testing.assert_array_equal(stored, lent)
+    cache.close()
+    del stored
+    gc.collect()
+    assert not owned.exists()                # gone with its last mapping
+
+
+def test_write_behind_from_a_producer_thread_without_a_scratch_scope(tmp_path):
+    counter = []
+
+    def processor(image):
+        counter.append(1)
+        return np.array(image, copy=True)
+    processed = process_frame(_source(tmp_path), processor, write_behind=True)
+    with cache_module.render_scope([processed]) as cache:
+        results = []
+
+        def work():
+            results.append(processed.full_resolution())
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+        main = processed.full_resolution()
+        assert cache.degraded is False
+        assert frame_storage.is_mapped_frame(main)
+    assert len(counter) == 1
+    assert np.array_equal(np.asarray(main), np.asarray(results[0]))
