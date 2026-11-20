@@ -64,12 +64,15 @@ def test_dynamic_onnx_checkpoints_are_packaged():
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]
     assert {'*.onnx', '*.pth'} <= set(data['weights'])
     assert 'accelerator_win64.json' in data['core']
+    shipped = {}
     for name in ("stackmff_final.onnx", "stackmff_v2_final.onnx", "stackmff_v3_final.onnx"):
         graph = ROOT / "weights" / name
         checkpoint = graph.with_suffix(".pth")
-        graph_hash = hashlib.sha256(graph.read_bytes()).hexdigest()
-        checkpoint_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
-        assert _TORCH_EXPORTS[graph_hash] == (checkpoint.name, checkpoint_hash)
+        shipped[hashlib.sha256(graph.read_bytes()).hexdigest()] = (
+            checkpoint.name, hashlib.sha256(checkpoint.read_bytes()).hexdigest())
+    # Exactly the shipped graphs: code that checks every entry against its
+    # graph file would reject one kept for a replaced graph.
+    assert _TORCH_EXPORTS == shipped
 
 
 def test_optional_input_decoders_ship_by_default():
