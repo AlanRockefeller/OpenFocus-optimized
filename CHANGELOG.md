@@ -44,6 +44,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Mark Dust Map and batch flat-field correction as experimental desktop tools.
 - Find the sources an OpenFocus B depth map uses in one compiled pass instead
   of NumPy slices. Output pixels are unchanged.
+- Convert and scale 16-bit strips in one compiled pass into a reused buffer
+  when OpenFocus exposure matching measures a frame's mean, instead of two
+  NumPy passes over a fresh copy of every strip. Output pixels are unchanged.
 - Default desktop updates and public downloads to stable releases. Users can
   opt in to beta updates through Advanced Settings or the welcome dialog.
 - Prepare ECC source frames concurrently within the alignment stage's CPU and
