@@ -23,6 +23,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   time and one plane at a time. Output pixels are unchanged.
 - Rotate images whose EXIF orientation is a quarter turn with OpenCV instead
   of copying a rotated NumPy view.
+- Reduce a JPEG that is loaded at a smaller scale before applying its EXIF
+  orientation, so the rotation moves only the reduced image. Image dimensions
+  are unchanged; a pixel value can differ by one level where rounding falls
+  the other way.
 
 ### Fixed
 - Keep checking the original file when a crop of a prepared frame is prepared
