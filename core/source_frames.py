@@ -1018,14 +1018,17 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
     from utils.image_utils import _exposure_mean
     from core.frame_storage import create_transient_frame
     reference = frames[reference_index]
-    target = _exposure_mean(resolve_frame(reference), should_cancel, normalize_uint16=True)
+    # The OpenFocus methods this serves run compiled kernels already.
+    target = _exposure_mean(resolve_frame(reference), should_cancel, normalize_uint16=True,
+                            compiled=True)
 
     def matcher(gain):
         def match(image):
             nonlocal gain
             from core.registration import RegistrationCancelled
             if gain is None:
-                mean = _exposure_mean(image, should_cancel, normalize_uint16=True)
+                mean = _exposure_mean(image, should_cancel, normalize_uint16=True,
+                                      compiled=True)
                 gain = 1.0 if target <= 1e-6 or mean <= 1e-6 else target / mean
             if gain == 1.0:
                 return image

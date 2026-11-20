@@ -1163,15 +1163,24 @@ def quantize_fuse_output(result, is_16bit: bool):
 # ---------------------------------------------------------------------------
 # Exposure matching (pipeline-level, before fusion)
 # ---------------------------------------------------------------------------
-def _exposure_mean(frame, should_cancel=None, *, normalize_uint16=False):
+def _exposure_mean(frame, should_cancel=None, *, normalize_uint16=False, compiled=False):
     """Mean of color channels, using at most 128 rows of float32 scratch.
 
     Deferred tiled input uses the same per-pixel uint16 normalization as the
     whole-frame preparation pass. Accumulate in float64 so strip boundaries
     and stack depth do not amplify float32 reduction error.
+
+    ``compiled=True`` is for callers that already run compiled kernels: a
+    contiguous uint16 strip being normalized is then converted and scaled in
+    one compiled pass, into a buffer reused for every strip. OpenCV receives
+    the same float32 values in the same arrays either way.
     """
     total = 0.0
     count = 0
+    scale = buffer = None
+    if compiled and normalize_uint16 and frame.dtype == np.uint16:
+        from fusion_methods._openfocus_kernels import scaled_samples
+        scale = np.float32(255.0 / 65535.0)
     for y in range(0, frame.shape[0], 128):
         if should_cancel is not None and should_cancel():
             from core.registration import RegistrationCancelled
@@ -1179,9 +1188,16 @@ def _exposure_mean(frame, should_cancel=None, *, normalize_uint16=False):
         strip = frame[y:y + 128]
         if strip.ndim == 3 and strip.shape[2] > 3:
             strip = strip[:, :, :3]
-        strip = np.ascontiguousarray(strip, dtype=np.float32)
-        if normalize_uint16 and frame.dtype == np.uint16:
-            strip *= 255.0 / 65535.0
+        if scale is not None and strip.flags.c_contiguous:
+            if buffer is None:
+                buffer = np.empty(strip.shape, np.float32)
+            scaled = buffer[:strip.shape[0]]
+            scaled_samples(strip.reshape(-1), scale, scaled.reshape(-1))
+            strip = scaled
+        else:
+            strip = np.ascontiguousarray(strip, dtype=np.float32)
+            if normalize_uint16 and frame.dtype == np.uint16:
+                strip *= 255.0 / 65535.0
         # Contiguous float32 input lets OpenCV accumulate into doubles without
         # another layout copy or NumPy's buffered float64 casting workspace.
         total += sum(cv2.sumElems(strip))

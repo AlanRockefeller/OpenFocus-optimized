@@ -50,6 +50,17 @@ def table_rows(image, table, output, start, stop):
 
 
 @njit(nogil=True)
+def scaled_samples(codes, scale, output):
+    """Write float32(code) * scale for a flat run of integer samples.
+
+    One float32 multiplication per sample with nothing to contract, so the
+    values equal NumPy's float32 conversion followed by an in-place scale.
+    """
+    for index in range(codes.size):
+        output[index] = np.float32(codes[index]) * scale
+
+
+@njit(nogil=True)
 def down2_rows(image, output, start, stop, scale=1):
     height, width = image.shape[:2]
     for y in range(start, stop):

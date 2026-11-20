@@ -833,3 +833,178 @@ def test_exposure_matching_admits_the_workspace_of_the_path_it_takes(dtype, shap
     strip = min(shape[0], 128) * int(np.prod(shape[1:])) * (12 if dtype == np.uint16 else 5)
     workspace = max(strip, (np.iinfo(dtype).max + 1) * channels * 16) if table else strip
     assert matched.scratch_bytes == frame.nbytes + workspace
+
+
+def _strip_step_mean(frame, should_cancel=None, *, normalize_uint16=False, compiled=False):
+    """_exposure_mean as it was before the compiled pass: cast, scale, then sum."""
+    total = 0.0
+    count = 0
+    for y in range(0, frame.shape[0], 128):
+        if should_cancel is not None and should_cancel():
+            raise RegistrationCancelled()
+        strip = frame[y:y + 128]
+        if strip.ndim == 3 and strip.shape[2] > 3:
+            strip = strip[:, :, :3]
+        strip = np.ascontiguousarray(strip, dtype=np.float32)
+        if normalize_uint16 and frame.dtype == np.uint16:
+            strip *= 255.0 / 65535.0
+        total += sum(cv2.sumElems(strip))
+        count += strip.size
+        del strip
+    return total / count if count else float('nan')
+
+
+class _RecordedSums:
+    """Stand in for cv2.sumElems: keep every input and sum it from one fixed address.
+
+    OpenCV builds that sum float32 through IPP return a double that depends on
+    where the buffer starts in memory. Summing a copy at one address gives both
+    implementations the same placement, so their doubles compare bit for bit.
+    """
+
+    def __init__(self, monkeypatch):
+        self.seen = []
+        self.sum = cv2.sumElems
+        self.block = np.zeros(1 << 20, np.uint8)
+        self.start = (-self.block.ctypes.data) % 64
+        monkeypatch.setattr(cv2, 'sumElems', self)
+
+    def __call__(self, array):
+        assert type(array) is np.ndarray and array.dtype == np.float32
+        self.seen.append((array.shape, bool(array.flags.c_contiguous), array.tobytes()))
+        placed = np.frombuffer(self.block, np.float32, array.size, self.start).reshape(array.shape)
+        placed[...] = array
+        return self.sum(placed)
+
+    def take(self):
+        seen, self.seen = self.seen, []
+        return seen
+
+
+def _mean_layouts(array, directory):
+    """One frame as contiguous, read-only, strided and memory-mapped inputs."""
+    yield 'contiguous', array
+    readonly = array.copy()
+    readonly.flags.writeable = False
+    yield 'read-only', readonly
+    yield 'fortran order', np.asfortranarray(array)
+    yield 'every other row', array[::2]
+    yield 'every other column', array[:, ::2]
+    yield 'reversed rows', array[::-1]
+    wider = np.full(array.shape[:2] + ((array.shape[2] if array.ndim == 3 else 1) + 2,),
+                    7, array.dtype)
+    if array.ndim == 3:
+        wider[:, :, 1:-1] = array
+        yield 'channels of a wider frame', wider[:, :, 1:-1]
+    else:
+        wider[:, :, 1] = array
+        yield 'one channel of a color frame', wider[:, :, 1]
+    path = directory / 'frame.bin'
+    array.tofile(path)
+    for mode in ('r', 'r+'):
+        mapped = np.memmap(path, dtype=array.dtype, mode=mode, shape=array.shape)
+        yield f'memory-mapped {mode}', mapped
+        yield f'memory-mapped {mode}, strided', mapped[:, 1:]
+        del mapped
+
+
+@pytest.mark.parametrize('dtype', [np.uint8, np.uint16, np.float32])
+@pytest.mark.parametrize('channels', [None, 3, 4])
+def test_compiled_exposure_mean_matches_the_strip_steps(monkeypatch, tmp_path, dtype, channels):
+    import struct
+    from utils.image_utils import _exposure_mean
+    sums = _RecordedSums(monkeypatch)
+    rng = np.random.default_rng(31)
+    top = 255.0 if dtype == np.float32 else np.iinfo(dtype).max
+    for height in (1, 100, 128, 129, 300):
+        for width in (5, 64):
+            shape = (height, width) if channels is None else (height, width, channels)
+            frames = [(rng.random(shape) * top).astype(dtype),
+                      rng.choice(np.array([0, 1, top - 1, top], dtype), size=shape)]
+            for frame in frames:
+                for layout, pixels in _mean_layouts(frame, tmp_path):
+                    for normalize in (False, True):
+                        expected = _strip_step_mean(pixels, normalize_uint16=normalize)
+                        expected_strips = sums.take()
+                        for compiled in (False, True):
+                            where = (layout, shape, normalize, compiled)
+                            mean = _exposure_mean(pixels, normalize_uint16=normalize,
+                                                  compiled=compiled)
+                            # The same float32 strips reach OpenCV in the same order,
+                            # and the double they add up to is the same bit pattern.
+                            assert sums.take() == expected_strips, where
+                            assert struct.pack('<d', mean) == struct.pack('<d', expected), where
+                    del pixels
+    assert np.isnan(_exposure_mean(np.zeros((0, 4, 3), dtype), normalize_uint16=True,
+                                   compiled=True))
+
+
+def test_compiled_exposure_scale_equals_numpy_for_every_code():
+    from fusion_methods._openfocus_kernels import scaled_samples
+    codes = np.arange(65536, dtype=np.uint16)
+    expected = np.ascontiguousarray(codes, dtype=np.float32)
+    expected *= 255.0 / 65535.0
+    scaled = np.empty(65536, np.float32)
+    scaled_samples(codes, np.float32(255.0 / 65535.0), scaled)
+    assert scaled.tobytes() == expected.tobytes()
+
+
+def test_exposure_matcher_takes_the_compiled_mean_only_for_contiguous_16bit_strips(monkeypatch):
+    from fusion_methods import _openfocus_kernels
+    from utils.image_utils import _exposure_mean, exposure_gains
+    calls = []
+    original = _openfocus_kernels.scaled_samples
+
+    def counted(codes, scale, output):
+        calls.append(codes.size)
+        return original(codes, scale, output)
+    monkeypatch.setattr(_openfocus_kernels, 'scaled_samples', counted)
+    rng = np.random.default_rng(17)
+    color = rng.integers(0, 65536, (300, 40, 3), dtype=np.uint16)
+    reference = np.full(color.shape, 30000, np.uint16)
+
+    matched = source_frames.match_exposure_frames([reference, color], reference_index=0)
+    assert calls == [128 * 120, 128 * 120, 44 * 120]         # the target, strip by strip
+    del calls[:]
+    source_frames.resolve_frame(matched[1])
+    assert calls == [128 * 120, 128 * 120, 44 * 120]         # the frame's own mean
+
+    del calls[:]
+    alpha = rng.integers(0, 65536, (300, 40, 4), dtype=np.uint16)
+    # Dropping alpha leaves strided strips, 8-bit frames are not scaled, and
+    # callers outside the OpenFocus matcher never ask for the compiled pass.
+    _exposure_mean(alpha, normalize_uint16=True, compiled=True)
+    _exposure_mean((color >> 8).astype(np.uint8), normalize_uint16=True, compiled=True)
+    _exposure_mean(color, compiled=True)
+    _exposure_mean(color, normalize_uint16=True)
+    exposure_gains([color, reference])
+    assert calls == []
+
+
+def test_compiled_exposure_mean_polls_cancellation_before_each_strip():
+    from utils.image_utils import _exposure_mean
+    polls = []
+
+    def cancel():
+        polls.append(len(polls))
+        return len(polls) == 3
+    with pytest.raises(RegistrationCancelled):
+        _exposure_mean(np.zeros((1000, 4, 3), np.uint16), cancel, normalize_uint16=True,
+                       compiled=True)
+    assert len(polls) == 3
+
+
+@pytest.mark.parametrize('thread_count', [1, 2])
+def test_openfocus_b_compiled_exposure_mean_matches_strip_steps(monkeypatch, thread_count):
+    from core.multi_focus_fusion import MultiFocusFusion
+    from utils import image_utils
+    rng = np.random.default_rng(79)
+    base = rng.integers(2000, 50000, (523, 517, 3)).astype(np.float64)
+    frames = [np.clip(base * scale + rng.normal(0, 900, base.shape), 0, 65535).astype(np.uint16)
+              for scale in (1.0, 0.83, 1.17)]
+    options = dict(algorithm='openfocus_b', use_gpu=False, exposure_match=True,
+                   base_frame='none', sort_mode='off', tile_enabled=False)
+    compiled = MultiFocusFusion(**options).fuse(list(frames), thread_count=thread_count)
+    monkeypatch.setattr(image_utils, '_exposure_mean', _strip_step_mean)
+    strips = MultiFocusFusion(**options).fuse(list(frames), thread_count=thread_count)
+    np.testing.assert_array_equal(np.asarray(compiled), np.asarray(strips))
