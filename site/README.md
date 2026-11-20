@@ -1,9 +1,8 @@
 # OpenFocus website
 
-Static product site for OpenFocus: English at `/`, Simplified Chinese at
-`/zh/`. No framework, no runtime, no third-party requests — one HTML file per
-language with CSS and JavaScript inlined, deployed as Cloudflare Workers
-static assets.
+Static product site for OpenFocus with English at `/` and Simplified Chinese
+at `/zh/`. The build produces one HTML file per language with inlined CSS
+and JavaScript. A Cloudflare Worker serves the static assets and live routes.
 
 Full operating manual (architecture, R2 mirror, release checklist,
 troubleshooting): [`docs/WEBSITE_OPERATIONS.md`](../docs/WEBSITE_OPERATIONS.md).
@@ -17,6 +16,15 @@ python tools/build_site.py
 Output goes to `site/dist/` (git-ignored). The build also writes `robots.txt`,
 `sitemap.xml`, `_headers` and a bilingual `404.html`, and derives the icon,
 Open Graph image and WebP screenshots from `assets/`.
+
+The community section uses `/wechat-group.png` and `/wechat-official-account.jpg`
+for its same-origin WeChat image links. The Worker proxies both paths to the
+public QR endpoints at `https://account.openfocus.top` and serves PNG bytes at
+both URLs. Responses use `Cache-Control: no-store`. An unpublished QR returns
+`404`, and an upstream failure returns `502`.
+
+Publish or rotate the QR codes in the account service admin console. The website
+uses the current values on subsequent requests without a site rebuild or deploy.
 
 Set the public Worker origin so canonical URLs, Open Graph tags, the sitemap
 and no-JavaScript download links point at the correct deployment:
@@ -38,9 +46,12 @@ python -m http.server 8788 --directory site/dist
 ```
 
 `http://127.0.0.1:8788/` is English, `/zh/` is Chinese. This static server
-does not implement the Worker download/API routes or the custom 404 page.
+omits the Worker QR, download and API routes and the custom 404 page.
 
 ## Deploy
+
+Before deploying the QR routes, publish both WeChat codes in the account
+service so the live image URLs are available when the site switches over.
 
 A production deploy needs an authenticated Cloudflare account that can reach
 the `openfocus.top` zone, the `openfocus-site` Worker, the
@@ -88,8 +99,8 @@ footer; publish it before enabling the analytics binding.
 | `site/site_content.py` | Copy, links and download cards; the current desktop version comes from `/api/latest` |
 | `site/template.html` | Page structure; `{{placeholders}}` resolve from the content |
 | `site/style.css` | Design tokens (light/dark), layout, responsive rules |
-| `site/app.js` | Theme, OS-aware navigation download, copy button, menus; the hero shows both desktop downloads |
-| `site/worker.js` | `/` language negotiation; `www` → apex; `/api/latest` and `/download/latest/*` for website downloads; mirror-only `/api/updates` and `/download/releases/<tag>/<kind>` for desktop updates |
+| `site/app.js` | Theme, OS-aware navigation download, Linux desktop availability, copy button and menus |
+| `site/worker.js` | Language negotiation, `www` → apex, live WeChat QR routes, website downloads and mirror-only desktop updates |
 | `site/install.sh` | macOS app installer + Linux CLI installer (`curl … | sh`, `--dry-run`) |
 | `site/install.ps1` | Windows installer (`irm … | iex`, `OPENFOCUS_DRY_RUN=1`) |
 | `site/wrangler.jsonc` | Worker name and static-asset routing |
@@ -104,14 +115,17 @@ and system changes still work for the current page. With JavaScript disabled,
 the English and Chinese links and all navigation links remain available,
 including on mobile screens.
 
-The Worker serves the latest stable release for `/api/latest` and
-`/download/latest/*`. Desktop installation scripts and the Linux CLI from PyPI
-use stable releases. With JavaScript
-disabled, the download links still work and no unverified static version is
-displayed. With JavaScript enabled, the version and file sizes come from the
-live release metadata. Complete GitHub metadata is cached for five minutes per
-data center; clients receive `no-store`. The Worker falls back to the R2
-metadata when GitHub is unavailable. Range requests require the R2 object.
+The Worker resolves `/api/latest` and `/download/latest/*` from stable release
+metadata. The Linux x86-64 desktop download and extraction commands appear only
+when `/api/latest` reports `assets["linux-desktop"]`. Without JavaScript or when
+metadata cannot be fetched, the page explains that availability cannot be
+checked. Linux navigation points to the download section, and `install.sh`
+installs the separate PyPI headless CLI on Linux. Windows and macOS download
+links work without JavaScript. With JavaScript enabled, the desktop version and
+file sizes come from live metadata.
+Complete GitHub metadata is cached for five minutes per data center; clients
+receive `no-store`. The Worker falls back to R2 metadata when GitHub is
+unavailable. Range requests require the R2 object.
 
 ## Download mirror (R2)
 
@@ -126,20 +140,20 @@ A beta uses a numeric compatibility tag of the form
 `v<version>.999999999.<beta-number>` and its real tag in `actual_tag`.
 Clients validate the association and display the beta tag. Versioned alias
 downloads continue to resolve to the same beta bytes. Metadata carries the
-four asset sizes and SHA-256 digests.
+asset sizes and SHA-256 digests, including `linux-desktop` when available.
 
 `GET` and `HEAD /download/releases/<tag>/<kind>` serve stable, beta and
 compatibility-alias downloads from R2, with byte ranges and ETag validation.
-The recognized kinds are `windows-setup`, `windows-zip`, `macos-dmg` and
-`macos-zip`. Invalid paths return `404`; missing objects return `503` without a
+The recognized kinds are `windows-setup`, `windows-zip`, `macos-dmg`,
+`macos-zip` and `linux-desktop`. Invalid paths return `404`; missing objects return `503` without a
 GitHub redirect. Stable objects may be pruned after a newer stable release;
 beta objects are retained for version-pinned and cached update requests.
 
 - Bucket: `openfocus-downloads` (binding `DOWNLOADS`)
 - Workflow: `.github/workflows/r2-mirror.yml` runs after a successful
   **Build & Publish Release** run, on manually published releases, and on
-  manual dispatch. It verifies and uploads the four complete files before
-  publishing either `openfocus-meta/latest-release.json` for the latest stable
+  manual dispatch. It verifies and uploads complete release files, including
+  Linux desktop when present, before publishing either `openfocus-meta/latest-release.json` for the latest stable
   release or `openfocus-meta/beta-release.json` for the newest beta. Beta
   mirroring never replaces the stable manifest. Stable pruning preserves beta
   assets; beta mirrors do not prune. Runs are serialized.

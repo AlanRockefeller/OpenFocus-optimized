@@ -28,7 +28,7 @@ OpenFocus est une application de bureau professionnelle de fusion d'images multi
 ### Fonctionnalités principales
 
 - **Fusion d'images multifocus** : combine plusieurs images mises au point à des distances différentes en une seule image entièrement nette
-- **Dix algorithmes de fusion** : filtre guidé, DCT, DTCWT, GFG-FGF, StackMFF V1/V2/V3, OpenFocus A/B/C, plus le mode alignement seul
+- **Dix algorithmes de fusion**. OpenFocus A/B/C sont stables. Le filtre guidé, DCT, DTCWT, GFG-FGF et StackMFF V1/V2/V3 sont expérimentaux. Un mode d’alignement seul est également disponible.
 - **Recalage d'images** : aligne les séquences désalignées avec OpenFocus (rapide), ECC, l'homographie ou l'enchaînement homographie → ECC
 - **Arrière-plan automatique** : remplacer un arrière-plan empilé irrégulier par une vraie image et voir où aucune image n'a vu la scène nettement
 - **Vue de comparaison par balayage** : vérifie l'alignement et compare les résultats avec un séparateur A/B
@@ -56,7 +56,7 @@ Les piles PNG transparentes peuvent être fusionnées dans l'application de bure
 
 Chargez en taille réelle, choisissez Aucun alignement, désactivez l'aperçu rapide et la ROI, puis rendez et enregistrez en PNG. Le mode par lots exige une méthode de fusion et une sortie PNG sans enregistrer de pile alignée. L'alignement, le redimensionnement ou la réduction, la correction de champ plat, les cartes de profondeur, la comparaison de méthodes, la retouche et les barres d'échelle ne sont pas pris en charge pour les données transparentes, et les libellés ne peuvent pas être incrustés dans un export. Une méthode de fusion qui modifie les dimensions du rectangle est refusée. Les masques variables ou à bords adoucis, les masques différents entre images, l'entrée TIFF transparente et les sorties non PNG, y compris GIF et TIFF multipage, ne sont pas pris en charge. La CLI refuse aussi le nettoyage du capteur et les cartes de profondeur pour une entrée transparente.
 
-Par exemple, l'équivalent en CLI est `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none`.
+Par exemple, l'équivalent en CLI est `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none --experimental`.
 
 ### Formats de sortie pris en charge
 
@@ -74,7 +74,9 @@ Dans **Enregistrer sous**, le TIFF ordinaire enregistre le résultat comme une s
 ### Lancer l'application
 
 La façon préférée d'installer une version packagée est le site du projet, **https://openfocus.top** : il pointe vers l'installateur Windows, la version macOS et le paquet Linux, avec des scripts d'installation pour le terminal. Préférez-le à une recompilation : ces artefacts sont la sortie exacte du pipeline de publication. `pip install openfocus` installe uniquement l'interface en ligne de commande headless (le paquet wheel ne dépend volontairement pas de PyQt6) ; utilisez une version de bureau ou une copie du code source pour l'interface graphique.
-Le site et les scripts d’installation proposent aussi les bêtas plus récentes, actuellement [version préliminaire v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Les mises à jour automatiques du bureau proposent aussi les bêtas plus récentes ; la CLI Linux de PyPI reste stable. La bêta est aussi disponible sur GitHub.
+Le site propose par défaut les versions stables de bureau. L’application de bureau pour Linux x86-64 est disponible à partir de la version 2.0.0. Sous Windows et macOS, vous pouvez activer les mises à jour bêta. Sous Linux, mettez à jour en téléchargeant une nouvelle archive de bureau. La CLI PyPI est distribuée séparément.
+
+Les versions actuelles pour Windows ne sont pas signées. Avant de lancer le fichier téléchargé, comparez son empreinte SHA-256 à celle indiquée dans le manifeste de la version.
 
 Pour installer depuis un terminal, prévisualisez d'abord la commande puis exécutez-la sans `--dry-run` : sous macOS ou Linux, `curl -fsSL https://openfocus.top/install.sh | sh -s -- --dry-run` puis `curl -fsSL https://openfocus.top/install.sh | sh` (la CLI est installée sous Linux) ; sous Windows, `irm https://openfocus.top/install.ps1 | iex` dans PowerShell.
 
@@ -82,7 +84,8 @@ Après l'installation, lancez OpenFocus de l'une des façons suivantes :
 
 1. **Windows (exécutable)** : double-cliquez sur le raccourci ou l'exécutable OpenFocus
 2. **macOS** : glissez `OpenFocus.app` dans Applications et ouvrez-le depuis ce dossier
-3. **Source Python** : exécutez `pip install -r requirements.txt`, puis `python main.py` dans votre environnement activé
+3. **Linux (x86-64)** : extrayez l'archive de bureau et lancez `OpenFocus/OpenFocus` dans le dossier extrait
+4. **Source Python** : exécutez `pip install -r requirements.txt`, puis `python main.py` dans votre environnement activé
 
 Le premier lancement ouvre la boîte de bienvenue, où vous pouvez choisir le thème et charger la pile de démonstration fournie. Un profil neuf utilise le thème clair par défaut ; le choix est mémorisé.
 
@@ -119,7 +122,7 @@ Le panneau droit regroupe toutes les options de configuration, de haut en bas :
 
 1. **Réglages de fusion** : choix de l'algorithme et de ses paramètres
 2. **Réglages de recalage** : activation ou désactivation des méthodes d'alignement
-3. **Boutons d'action** : lancer le rendu, réinitialiser, ouvrir les paramètres de rendu et lancer toutes les méthodes. La boîte **Paramètres de rendu** contient l'aperçu rapide, l'ordre des images, l'égalisation de l'exposition, la suppression de la dérive de luminosité et la netteté de sortie
+3. Les **boutons d'action** permettent de lancer le rendu, de réinitialiser les réglages, d’ouvrir les paramètres de rendu et de lancer le rendu avec toutes les méthodes disponibles. La boîte **Paramètres de rendu** contient l'aperçu rapide, l'ordre des images, l'égalisation de l'exposition, la suppression de la dérive de luminosité et la netteté de sortie
 4. **Liste des images sources** : toutes les images chargées avec leur nom de fichier
 5. **Liste des sorties** : les résultats générés
 
@@ -130,8 +133,8 @@ La barre de menus supérieure donne accès à toutes les fonctions :
 - **Fichier** : importation et exportation, projets, modèles de traitement et liste des fichiers récents
 - **Édition** : transformations d'images, retouche et libellés
 - **Outils** : assemblage d’images, traitement par lots, comparaison de méthodes, carte de profondeur, correction de champ plat, barre d'échelle et libellés
-- **Paramètres** : paramètres avancés (performances, recalage et diagnostics d'alignement, nettoyage du capteur, nommage des sorties, IA et démarrage), accélération GPU, thème et langue
-- **Aide** : informations sur l'environnement, contact, recherche de mises à jour et dossier des journaux
+- **Paramètres** : paramètres avancés (Général, Fusion, Recalage, Démarrage et mises à jour), accélération GPU, thème et langue
+- **Aide** : Envoyer un commentaire (diagnostic et journaux), contact et recherche de mises à jour
 
 **Outils → Assembler des images…** ouvre un espace de travail séparé pour des régions de microscope déjà fusionnées et des panoramas photographiques ; il ne modifie pas la pile actuelle. L’onglet **Assistant de projet** regroupe l’importation, l’alignement et les points de contrôle ; **Images sources** contient la liste, la grille et le placement manuel ; **Éditeur de panorama** contient les réglages de raccords, de mélange, d’exposition/couleur, de sortie, de projection, de caméra et de HDR ainsi que les superpositions d’aperçu. Utilisez **Ajouter des fichiers…**, **Ouvrir un dossier** ou **Ajouter des résultats…** pour copier des résultats choisis de la session en cours, ou déposez fichiers et dossiers sur la liste ou le canevas. L’import d’un dossier ne prend que les fichiers pris en charge directement dedans, sans sous-dossiers. Les imports suivent l’ordre naturel des noms, ignorent les chemins en double et ajoutent chaque page d’un TIFF multipage comme image distincte. Sélectionnez une image et appuyez sur Suppr ou Retour arrière pour la retirer de l’espace de travail sans supprimer le fichier.
 
@@ -158,7 +161,7 @@ L’**Éditeur de panorama** contrôle le mélange réel. Sous **Rechercher les 
 3. Une boîte de dialogue d'échelle de chargement apparaît : choisissez l'échelle (100 % = résolution complète)
 4. Cliquez sur OK pour charger les images
 
-Cochez **Ne plus demander** dans cette boîte pour toujours charger à l'échelle choisie sans invite ; **Paramètres → Paramètres avancés → Demander l'échelle de chargement à l'importation** réactive l'invite. Une pile déjà chargée peut encore être réduite avec **Édition → Redimensionner**.
+Cochez **Ne plus demander** dans cette boîte pour toujours charger à l'échelle choisie sans invite ; **Paramètres → Paramètres avancés → Démarrage et mises à jour → Demander l'échelle de chargement à l'importation** réactive l'invite. Une pile déjà chargée peut encore être réduite avec **Édition → Redimensionner**.
 
 Le logiciel effectue automatiquement les opérations suivantes :
 
@@ -355,20 +358,17 @@ Le recalage corrige le désalignement spatial entre les images de votre pile. Il
 - Recherche des transformations de similarité bornées par différences d'images échantillonnées et applique un warp par interpolation Lanczos
 - Le domaine de recherche du décalage vaut par défaut 3 % de la taille de l’image et se modifie avec `--align-shift-limit`. La recherche utilise l’image précédente alignée et part du mouvement cumulé ; le déplacement total peut dépasser 3 %.
 - Pour une géométrie non rigide ou extrême, préférez ECC ou l'homographie
-- En cas d’erreur réelle d’estimation, `failure_policy=continue` (défaut) conserve l’image non alignée ; `fail` interrompt le traitement. Un manque de texture, des motifs répétés ou des changements de mise au point peuvent néanmoins produire des correspondances imprécises.
-- En CLI, sélectionnez la même politique avec `--align openfocus --align-param 'failure_policy="fail"'` (avec le quoting adapté à votre shell). Les éléments de lot appliquent la politique choisie indépendamment. La valeur par défaut est `"continue"`.
+- Si le recalage rejette une image, l’application de bureau arrête la pile concernée. Consultez le numéro de l’image et le motif dans le message d’erreur, puis examinez cette image avant de réessayer. Un manque de texture, des motifs répétés ou des changements de mise au point peuvent néanmoins produire des correspondances imprécises.
+- La CLI utilise `continue` par défaut. Employez `--align openfocus --align-param 'failure_policy="fail"'` pour arrêter la pile si une image est rejetée.
 - Réglez **Image de référence** sur un nombre à base 1 dans l'ordre de la pile incluse et traitée pour ancrer la géométrie sur cette image. L'ordre est conservé ; l'égalisation de luminosité utilise sa propre référence. Chaque pile de lot doit contenir ce numéro, sinon l'élément échoue. Exemple CLI : `--align openfocus --align-param reference_frame=3`. Choisir une référence ne corrige ni la parallaxe ni une mauvaise correspondance ; inspectez le résultat.
 
-Les rapports d'alignement identifient la référence et le résultat de chaque image. Un repli signifie que la méthode n'a pas pu établir l'alignement ou dépend d'une estimation précédente échouée ; la raison indiquée distingue les estimations faibles et le mouvement hors limites lorsqu'il est connu. Les valeurs de qualité sont propres à chaque méthode, sans garantie d'exactitude. Les transformations projettent les coordonnées sources sur le canevas de référence de l'étape de recalage avant le recadrage commun ; les méthodes composites rapportent leurs étapes séparément. L'homographie et l'ECC acceptent aussi le paramètre facultatif `failure_policy="fail"` pour s'arrêter lorsque leurs algorithmes détectent un échec. La valeur par défaut reste `"continue"` ; inspectez les résultats même lorsque l'alignement réussit.
-
-Pour inspecter un rendu, activez **Paramètres → Paramètres avancés → Recalage → Collecter les diagnostics d'alignement**, puis relancez le rendu. L'alignement est recalculé au lieu de réutiliser les images en cache. Le statut de fin met en évidence les replis ; ouvrez **Paramètres → Paramètres avancés → Recalage → Diagnostics d'alignement** pour le rapport par image. Il indique les raisons d'échec disponibles, les scores propres à la méthode, le nombre de correspondances, les images référencées et les transformations. Les numéros et noms de référence renvoient à la liste source d'origine, même lorsque des images sont exclues. Les rendus par lots et groupés ne fournissent pas ce rapport.
+Pour un traitement individuel en ligne de commande avec recalage et sans groupes, `--alignment-report FILE` enregistre un rapport par image. Les rapports d'alignement identifient la référence et le résultat de chaque image. Un repli signifie que la méthode n'a pas pu établir l'alignement ou dépend d'une estimation précédente échouée ; la raison indiquée distingue les estimations faibles et le mouvement hors limites lorsqu'il est connu. Les valeurs de qualité sont propres à chaque méthode, sans garantie d'exactitude. Les transformations projettent les coordonnées sources sur le canevas de référence de l'étape de recalage avant le recadrage commun ; les méthodes composites rapportent leurs étapes séparément. L'homographie et l'ECC acceptent aussi le paramètre facultatif `failure_policy="fail"` pour s'arrêter lorsque leurs algorithmes détectent un échec. La valeur par défaut reste `"continue"` ; inspectez les résultats même lorsque l'alignement réussit.
 
 ### Activer le recalage
 
 1. Dans le panneau droit, repérez le groupe **Recalage**
-2. Choisissez une méthode dans la liste : **Aucun alignement**, **OpenFocus (rapide)**, **Aligner (ECC)**, **Aligner (homographie)** ou **Homographie → ECC** (enchaîné)
-3. Choisissez **Gestion des images rejetées** dans **Paramètres → Paramètres avancés → Recalage** ; toute modification s'applique aux méthodes. Pour OpenFocus (rapide), choisissez aussi une image de référence.
-4. **Collecter les diagnostics d'alignement** se trouve désormais dans Paramètres avancés (voir ci-dessus)
+2. Choisissez **Aucun alignement** ou **Aligner (ECC)**. Si les fonctions expérimentales sont activées, vous pouvez aussi choisir **OpenFocus (rapide)**, **Aligner (homographie)** ou **Homographie → ECC** (enchaîné)
+3. Réglez l’image de référence et les limites de recherche d’OpenFocus dans **Paramètres → Paramètres avancés → Recalage**.
 
 ### Quand utiliser le recalage
 
@@ -384,13 +384,12 @@ Les réglages supplémentaires se trouvent dans **Paramètres → Paramètres av
 - **Largeur de réduction** : résolution de prétraitement pour le recalage (1024 px par défaut)
 - Valeurs plus faibles = traitement plus rapide, précision éventuellement moindre
 - Valeurs plus élevées = traitement plus lent, précision éventuellement meilleure
-- **Collecter les diagnostics d'alignement** et **Cache de recalage** se trouvent dans la même section
 
 ---
 
 ## 8. Méthodes de fusion d'images
 
-OpenFocus propose dix algorithmes de fusion (plus un mode alignement seul). Un profil neuf démarre sur **StackMFF V3** avec le recalage **ECC** ; les listes ci-dessous décrivent tous les choix. Chacun présente des caractéristiques adaptées à différents types d'images.
+Un nouveau profil de bureau utilise **OpenFocus B** avec le recalage **ECC**. Les méthodes de fusion stables sont OpenFocus A, B et C. Pour utiliser les autres méthodes de fusion sur le bureau, cochez **Activer les fonctions expérimentales** dans **Paramètres → Paramètres avancés → Général**, puis confirmez. En ligne de commande, ajoutez `--experimental` à chaque commande qui utilise une méthode de fusion expérimentale.
 
 ### Filtre guidé
 
@@ -439,8 +438,6 @@ OpenFocus propose dix algorithmes de fusion (plus un mode alignement seul). Un p
 
 ### StackMFF V3 (apprentissage profond)
 
-C'est la méthode présélectionnée dans une nouvelle installation.
-
 - **Algorithme** : classification de la source pixel par pixel (ONNX Runtime). Le réseau prédit, pour chaque pixel, l'image d'entrée dont il provient, puis mélange les images selon ces probabilités ou en choisit une
 - **Mode de sortie IA** (panneau droit, uniquement pour cette méthode) :
   - **Mélange doux (pondéré)** — par défaut ; chaque pixel est un mélange des images pondéré par les probabilités. Transitions douces, sans coutures dures ; correspond à la configuration publiée dans l'article
@@ -464,7 +461,7 @@ CLI: `--method openfocus_b --param radius=8 --param smoothing=4 --param feather=
 
 Dans l’interface, l’égalisation d’exposition est activée par défaut pour A/B/C et utilise la première image traitée ; pour les autres méthodes, elle est désactivée par défaut et utilise la dernière. Les choix explicitement enregistrés sont conservés ; si A/B/C est activé, la première image sert de référence. La correction de dérive de luminosité reste désactivée par défaut. Réinitialiser rétablit les valeurs propres à chaque méthode. Dans la CLI, elle est activée par défaut pour toutes les méthodes ; `--no-exposure-match` la désactive.
 
-La sélection de A/B/C utilise le recalage OpenFocus sauf si un recalage a été explicitement choisi ou un projet restauré. Ses valeurs par défaut sont un décalage de 0,03 et un grossissement de 5 %.
+ECC reste le recalage par défaut pour A/B/C, même si les fonctions expérimentales sont activées. Sélectionnez explicitement le recalage OpenFocus pour l’utiliser. Ses valeurs par défaut sont un décalage de 0,03 et un grossissement de 5 %.
 
 **Accentuer la sortie fusionnée** applique un léger masque flou après la fusion, avant la conversion du résultat vers sa profondeur de sortie. Désactivé par défaut, il s'active dans les options de fusion principales ou du lot ; l'option CLI équivalente est `--sharpen-output`. Cela affecte l'image fusionnée, pas les images recalées ni les cartes de profondeur. Cela peut rendre les contours plus nets, mais aussi amplifier le bruit et les halos. Le réglage est enregistré avec le projet et mémorisé entre les sessions.
 
@@ -497,6 +494,8 @@ Sélectionnez **Alignement seul (sans fusion)** pour recaler la pile et ajouter 
 Ouvrez **Outils → Comparaison de méthodes** pour régler plusieurs méthodes indépendamment. Le nom, les libellés de paramètres et les contrôles de chaque méthode restent groupés lorsque la fenêtre se rétrécit. Les modifications actualisent l'aperçu automatiquement. **Aperçu ROI (rapide)** fusionne la zone sélectionnée avec le contexte environnant ; **Fusion pleine image** vérifie le résultat sur toute l'image et permet d'inspecter une autre zone sans relancer le rendu. Les résultats ROI peuvent différer de ceux en pleine image, car les statistiques d'exposition et certains algorithmes dépendent de l'étendue de l'image.
 La **fusion pleine image** est sélectionnée par défaut.
 
+Pour inclure les méthodes expérimentales dans la comparaison, activez les fonctions expérimentales.
+
 Une indication visible explique la sélection : cliquez sur un résultat ou utilisez `Tab` pour lui donner le focus, puis `Entrée` ou `Espace` pour le sélectionner.
 
 Utilisez **Taille de l'aperçu (px)** au-dessus des volets de droite pour choisir un carré de 160 à 960 pixels, en faisant glisser le curseur ou en saisissant un nombre. Toutes les méthodes utilisent la même taille et s'adaptent à la largeur disponible. La taille est mémorisée pour la prochaine ouverture. La modifier conserve l'agrandissement courant et ajuste le carré d'inspection autour de son centre, en le limitant aux bords de l'image.
@@ -515,7 +514,7 @@ Régler les paramètres sur de grandes piles est lent en pleine résolution. Ouv
 
 ### Rotation
 
-1. Allez dans **Édition → Pivoter**
+1. Allez dans **Édition → Pivoter et retourner**
 2. Choisissez le type de rotation :
    - **90° horaire** : pivote toutes les images de 90 degrés vers la droite
    - **90° antihoraire** : pivote toutes les images de 90 degrés vers la gauche
@@ -523,7 +522,7 @@ Régler les paramètres sur de grandes piles est lent en pleine résolution. Ouv
 
 ### Retournement
 
-1. Allez dans **Édition → Retourner**
+1. Allez dans **Édition → Pivoter et retourner**
 2. Choisissez le type de retournement :
    - **Retournement horizontal** : miroir de gauche à droite
    - **Retournement vertical** : miroir de haut en bas
@@ -543,7 +542,7 @@ Les transformations s'appliquent à toute la pile d'images, en conservant l'alig
 
 ## 10. Retouche, libellés et annotations
 
-### Retoucher le résultat (Édition → Retoucher le résultat…, `Ctrl+T`)
+### Retoucher le résultat (Édition → Retoucher le résultat → Sortie de cet espace de travail…, `Ctrl+T`)
 
 La fusion peut encore laisser un défaut local — un halo autour d'un contour très contrasté, un poil pris dans la mauvaise image, du bruit dans une zone plane. L'espace de travail copie les pixels des images exactes qui ont produit le résultat sélectionné :
 
@@ -562,7 +561,7 @@ Pour une correction tonale locale, sélectionnez **Pinceau d'exposition**, régl
 
 La provenance voyage avec la sortie : les images alignées, les décalages de recadrage/collage ROI, le rognage des bords DCT et la profondeur de bits sont enregistrés au moment du rendu. Les fichiers de lot, les résultats hérités et les entrées de dossier d'alignement seul n'ont pas de source enregistrée : ils sont donc listés comme indisponibles au lieu d'être devinés depuis la pile actuelle. Les traits non appliqués et l'historique d'annulation ne durent que le temps de la session ; enregistrer un projet ne les stocke pas.
 
-Pour un fichier image existant, choisissez **Édition → Retoucher des fichiers image…**, puis sélectionnez le résultat et une ou plusieurs images sources. Les sources doivent déjà être alignées sur le résultat dans la même grille de pixels ; des dimensions identiques ne prouvent pas l'alignement. Les images PNG, TIFF, JPEG et BMP d'une seule page, de dimensions verticales, canaux et profondeur 8 ou 16 bits identiques, sont acceptées ; l'orientation EXIF est appliquée au chargement. Les images avec alpha et multipage ne sont pas prises en charge. Les images sélectionnées sont fournies par l'utilisateur, pas issues d'une provenance de rendu enregistrée. Appliquer crée une sortie séparée non exportée ; enregistrez-la depuis la liste des sorties. Les fichiers choisis sont protégés contre l'écrasement pendant cette session, y compris les exports de cartes de profondeur et de maillages 3D. Comme pour les autres résultats, les fichiers de projet ne stockent ni ces pixels ni l'historique du pinceau.
+Pour un fichier image existant, choisissez **Édition → Retoucher le résultat → Résultat fusionné depuis un fichier…**, puis sélectionnez le résultat et une ou plusieurs images sources. Les sources doivent déjà être alignées sur le résultat dans la même grille de pixels ; des dimensions identiques ne prouvent pas l'alignement. Les images PNG, TIFF, JPEG et BMP d'une seule page, de dimensions verticales, canaux et profondeur 8 ou 16 bits identiques, sont acceptées ; l'orientation EXIF est appliquée au chargement. Les images avec alpha et multipage ne sont pas prises en charge. Les images sélectionnées sont fournies par l'utilisateur, pas issues d'une provenance de rendu enregistrée. Appliquer crée une sortie séparée non exportée ; enregistrez-la depuis la liste des sorties. Les fichiers choisis sont protégés contre l'écrasement pendant cette session, y compris les exports de cartes de profondeur et de maillages 3D. Comme pour les autres résultats, les fichiers de projet ne stockent ni ces pixels ni l'historique du pinceau.
 
 ### Remplacer l'arrière-plan (Arrière-plan automatique)
 
@@ -638,13 +637,18 @@ L'aperçu utilise la cible réelle. Naviguez avec Précédent/Suivant ou saisiss
 
 ## 11. Paramètres et configuration
 
-Ouvrez **Paramètres → Paramètres avancés** pour les préférences de performance, de recalage, de nettoyage du capteur, de nommage des sorties, d'IA StackMFF et de démarrage. Les modifications restent des brouillons jusqu'à **OK** ; Annuler, Échap et fermer les rejettent. Réduire la taille de tuile met immédiatement à jour la limite de chevauchement visible à la moitié d'une tuile. La limite de lot enregistrée de la section IA est conservée, mais l'inférence actuelle soumet une tuile par appel ; la largeur de recalage peut modifier la précision de l'alignement. La collecte des diagnostics d'alignement est une case de la section Recalage.
+**Paramètres → Paramètres avancés**
+
+- **Général** — Fonctions expérimentales, répertoire de travail et préfixe du nom de sortie. Sous **Confidentialité**, les rapports d’erreurs automatiques et les statistiques d’utilisation ont chacun leur case. Les deux sont cochées au départ. Toute désactivation explicite est conservée. Les versions de distribution envoient un rapport après une session ayant enregistré une erreur si vous avez accepté les conditions lors de la connexion ou activé explicitement l’envoi. Un plantage natif antérieur demande confirmation.
+- **Fusion** — Choisissez le mode de ressources et les paramètres de tuilage. Sélectionnez **Nettoyage du capteur** pour déplier ses réglages.
+- **Recalage** — Réglez la largeur de réduction. Sélectionnez **OpenFocus (rapide)** pour déplier les réglages de l’image de référence et des limites de recherche.
+- **Démarrage et mises à jour** — Restauration de la dernière pile, demande de l’échelle à l’importation et mises à jour.
+
+Validez avec **OK**. Annuler, Échap ou fermer la fenêtre abandonne les modifications.
 
 Les téléchargements automatiques de mises à jour s'exécutent lorsque l'application est inactive et ne s'installent jamais seuls. Un téléchargement terminé reste prêt jusqu'à ce que vous choisissiez explicitement **Redémarrer et mettre à jour**. Le redémarrage protège les modifications actives et le travail non enregistré, puis écrit les données de récupération avant de lancer le remplacement. Annuler un téléchargement ou une préparation attend la limite de sécurité courante. Une version préparée complète et plus récente peut être installée hors ligne.
 
-La correction de champ plat modifie les pixels de travail de la session sans écraser les fichiers sources. Sélectionnez la référence blanche et une image d'aperçu, puis régénérez l'aperçu après avoir changé la source ou l'échelle. Les images de référence et de travail/base doivent partager le même domaine de coordonnées et la même taille. Appliquer prépare les deux piles avant validation ; la suppression facultative de l'image de référence fait partie de la même étape d'annulation. Exportez les images sources corrigées lorsque vous devez conserver ces pixels hors de la session.
-
-Le traitement par lots accepte une image de champ blanc facultative dans ses options. Choisissez une référence défocalisée à la résolution d'origine des images ; elle est mise à l'échelle avec la pile d'entrée et appliquée avant le recalage, avec la taille de poussière par défaut. Une référence illisible ou de taille incompatible fait échouer visiblement la pile concernée. La référence est exclue des entrées de dossier, y compris le traitement groupé ; au moins deux images sources doivent rester pour la fusion. La correction de champ plat ne peut pas être combinée avec une entrée transparente. Laissez le champ vide pour traiter sans correction. La CLI accepte aussi la référence avec `--dust-map WHITE`.
+La carte de poussière, la correction de champ plat par lots et l’assemblage d’images sont en cours de développement et indisponibles.
 
 Le nettoyage du capteur est facultatif et s'exécute sur les images d'origine en coordonnées capteur avant le recalage. Sélectionnez un masque de défauts explicite pour corriger des pixels chauds ou morts connus ; OpenFocus n'infère pas de masque à partir des images du spécimen. Le masque doit être une image monocanal 8 ou 16 bits de mêmes dimensions que la source : zéro signifie non affecté, et 1 ou la valeur maximale du canal marque les défauts. Vérifiez son étendue avant le traitement. Les masques couvrant plus de 10 % de l'image, ou les défauts sans voisin non masqué, sont refusés. Conservez le masque à la résolution d'origine et ne le sélectionnez pas comme image source. Pour le traitement dans l'interface, chargez les images sources à pleine échelle lors de l'utilisation d'un masque de défauts ; le masque n'est jamais redimensionné. Le nettoyage du capteur (y compris la réduction du bruit) ne peut pas être appliqué à une pile de l'interface après une rotation, un retournement, une correction de champ plat ou toute autre modification de source : rechargez les images d'origine ou désactivez le nettoyage. Cela vaut aussi pour les projets restaurés avec de tels historiques de source. Le traitement ROI préaligné ne peut pas être combiné avec le nettoyage du capteur ; quittez le mode ROI et rendez la pile complète. Les réglages de nettoyage appartiennent à la session et au projet enregistré, pas aux préférences globales de l'application. Le lot et la CLI traitent leurs entrées d'origine séparément, avec le nettoyage du capteur avant la correction de champ plat et le recalage. Les masques de défauts exigent des fichiers sources à orientation EXIF neutre. Les fichiers orientés, les RAW d'appareil photo et les sources dont l'orientation ne peut pas être établie sont refusés, car leurs pixels décodés peuvent ne plus correspondre aux coordonnées du capteur. Utilisez des images sources et un masque dans la même orientation de pixels connue, avec des métadonnées d'orientation neutres. La réduction du bruit seule ne nécessite pas de masque de défauts.
 
@@ -654,19 +658,25 @@ Les recettes exigent que leur sortie se trouve hors de tous les dossiers d'entr�
 
 Lorsqu'une référence de fichier est appliquée dans Outils à l'échelle de base de la pile, un projet enregistré conserve son chemin absolu, le hash du contenu et la taille de poussière, et la réapplique une fois aux sources d'origine à l'ouverture. Gardez le fichier de référence inchangé et en place : une référence manquante ou modifiée empêche l'ouverture du projet. Une référence sélectionnée depuis la pile, ou une correction à une autre échelle de travail/base, exige encore d'exporter la pile source corrigée avant d'enregistrer un projet. Si l'échelle de travail change après la correction, rétablissez l'échelle de correction avant d'enregistrer ou exportez la pile corrigée.
 
-**Aide → Envoyer des commentaires** ouvre les journaux locaux. Copier copie le journal visible de la session ; le ZIP de commentaires contient les journaux de session et de l'application complète, ainsi que les informations d'environnement. Relisez le paquet avant de l'envoyer vous-même. Ouvrir GitHub ne fait qu'ouvrir le tracker. Annuler un export laisse les fichiers inchangés ; une erreur conserve le fichier de destination précédent et affiche le chemin en échec.
+**Aide → Envoyer un commentaire** ouvre l’onglet **Canaux de retour**, qui donne accès au centre de compte et à GitHub. Dans **Diagnostic**, consultez **Journal de la session** ou **Informations sur l'environnement**. Le bouton **Ouvrir le dossier des journaux** se trouve en bas, à côté de Fermer. Copier copie le journal visible de la session ; le ZIP de commentaires contient les journaux de session et de l'application complète, ainsi que les informations d'environnement. Relisez le paquet avant de l'envoyer vous-même. Ouvrir GitHub ne fait qu'ouvrir le tracker. Annuler un export laisse les fichiers inchangés ; une erreur conserve le fichier de destination précédent et affiche le chemin en échec.
 
-Chaque lancement écrit son propre journal rotatif, de sorte que les tâches GUI/CLI simultanées conservent des enregistrements séparés. Les identifiants de tâche relient paramètres, durée et résultats terminés/annulés/échoués ; les erreurs inattendues incluent une trace complète. Le ZIP de commentaires contient aussi le rapport de plantage courant et les versions des dépendances. Utilisez **Aide → Ouvrir le dossier des journaux** ou le chemin affiché sur la page de commentaires pour trouver les fichiers. Les journaux tournent à 1 Mo avec trois sauvegardes par processus ; les journaux de sessions inactives de plus de 14 jours sont supprimés. Pour des journaux de support détaillés, définissez `OPENFOCUS_LOG_LEVEL=DEBUG` avant le lancement ; `OPENFOCUS_LOG_DIR` permet de choisir un autre dossier.
+Chaque lancement écrit son propre journal rotatif, de sorte que les tâches GUI/CLI simultanées conservent des enregistrements séparés. Les identifiants de tâche relient paramètres, durée et résultats terminés/annulés/échoués ; les erreurs inattendues incluent une trace complète. Le ZIP de commentaires contient aussi le rapport de plantage courant et les versions des dépendances. Utilisez **Aide → Envoyer un commentaire → Ouvrir le dossier des journaux** ou le chemin affiché sur la page de commentaires pour trouver les fichiers. Les journaux tournent à 1 Mo avec trois sauvegardes par processus ; les journaux de sessions inactives de plus de 14 jours sont supprimés. Pour des journaux de support détaillés, définissez `OPENFOCUS_LOG_LEVEL=DEBUG` avant le lancement ; `OPENFOCUS_LOG_DIR` permet de choisir un autre dossier.
 
 ### Paramètres des tuiles (optimisation de la mémoire)
 
-Pour les grandes images, OpenFocus utilise un traitement par tuiles afin d'éviter les problèmes de mémoire.
+Le tuilage est activé par défaut. Le message sous les champs décrit le traitement utilisé par la méthode sélectionnée. Sur le bureau, OpenFocus A, B et C traitent l’image entière. Le mode alignement seul saute la fusion. Dans ces modes, vous pouvez régler la taille, le chevauchement et le seuil pour la prochaine méthode compatible. DTCWT décide selon la mémoire estimée. Vous pouvez régler la taille et le chevauchement, tandis que le champ du seuil est désactivé. Sur une pile profonde, les méthodes neuronales peuvent utiliser des tuiles sous le seuil. Désactiver le tuilage désactive les trois champs numériques et conserve leurs valeurs.
 
-Accès : **Paramètres → Paramètres avancés → Performances** :
+Accès : **Paramètres → Paramètres avancés → Fusion** :
 
 - **Taille de bloc de tuile** : taille de chaque tuile de traitement (1024 px par défaut)
 - **Chevauchement des tuiles** : chevauchement entre tuiles pour un mélange sans couture (256 px par défaut)
 - **Seuil de tuilage** : taille d'image au-delà de laquelle les tuiles sont utilisées (2048 px par défaut)
+
+Limites en pixels
+
+- Taille de bloc de tuile — 64–16384
+- Chevauchement des tuiles — 0–min(4096, la moitié de la tuile)
+- Seuil de tuilage — 256–131072
 
 **Recommandations** :
 
@@ -681,7 +691,6 @@ Accès : **Paramètres → Paramètres avancés → Recalage** :
 - **Largeur de réduction** : résolution de prétraitement pour le recalage
   - Défaut : 1024 px
   - Plus faible pour la vitesse, plus élevée pour la précision
-- **Collecter les diagnostics d'alignement** : recalcule l'alignement au prochain rendu et active **Paramètres → Paramètres avancés → Recalage → Diagnostics d'alignement**
 
 ### Référence de performances
 
@@ -689,19 +698,9 @@ Voir [PERFORMANCE.md](./PERFORMANCE.md) pour les débits et la mémoire mesurés
 
 Le panneau d'état affiche la mémoire physique utilisée et totale lorsque le système peut fournir les deux mesures ; sinon, il affiche `N/D`.
 
-### Paramètres du nombre de threads
-
-Contrôlez le traitement parallèle du CPU :
-
-Accès : **Paramètres → Paramètres avancés → Performances** :
-
-- `0` sélectionne l'ordonnancement automatique et constitue la valeur par défaut des nouveaux réglages.
-- Les valeurs positives sont des limites supérieures ; les limites enregistrées survivent aux mises à jour.
-- La capacité CPU, le mode de ressources et la marge mémoire peuvent réduire la concurrence. Plus de threads ne rend pas nécessairement un rendu plus rapide.
-
 ### Mode de ressources
 
-**Paramètres → Paramètres avancés → Performances → Mode de ressources** décide de la part de la machine qu'un rendu peut utiliser. Il ne modifie jamais l'image fusionnée.
+**Paramètres → Paramètres avancés → Fusion → Mode de ressources** décide de la part de la machine qu'un rendu peut utiliser. Il ne modifie jamais l'image fusionnée.
 
 | Mode | Comportement |
 |---|---|
@@ -715,23 +714,16 @@ Le planificateur tient compte des cœurs physiques, de l'affinité et des quotas
 
 StackMFF V1/V2/V3 utilisent ONNX Runtime. DirectML sous Windows et CoreML sous macOS peuvent accélérer l’inférence ; sinon le CPU est utilisé. La disponibilité du fournisseur ne prouve pas une exécution sur GPU. La prise en charge d’autres GPU reste à valider.
 
-OpenFocus B peut accélérer le traitement de profondeur et la fusion des sources sur un GPU OpenCL compatible ; selon la mémoire disponible, il peut utiliser des étapes GPU bornées ou revenir au CPU. Lorsque l'accélération GPU est activée, OpenFocus C peut effectuer la fusion pyramidale pleine image sur un GPU OpenCL compatible ; si la mémoire est insuffisante ou en cas de problème de périphérique ou de pilote, il revient au CPU. L'export de la carte de profondeur de C utilise le CPU. OpenFocus A et le recalage utilisent le CPU. Voir [prise en charge GPU](GPU_SUPPORT.md).
+OpenFocus B peut accélérer le traitement de profondeur et la fusion des sources sur un GPU OpenCL compatible ; selon la mémoire disponible, il peut utiliser des étapes GPU bornées ou revenir au CPU. Lorsque l'accélération GPU est activée, OpenFocus A, OpenFocus C, Filtre guidé, GFG-FGF, DCT et DTCWT peuvent effectuer la fusion pleine image sur un GPU OpenCL compatible ; si la mémoire est insuffisante ou en cas de problème de périphérique ou de pilote, ils reviennent au CPU. L'export de la carte de profondeur de C et le recalage utilisent le CPU. Voir [prise en charge GPU](GPU_SUPPORT.md).
 
 - Basculez via **Paramètres → Accélération GPU**
 - La décocher force les méthodes de fusion compatibles sur le CPU — utile en cas de problème de pilote GPU
 - Le panneau d'état affiche `N/D` lorsqu'aucun accélérateur n'est utilisé ou disponible, et `CPU*` lorsqu'un accélérateur existe mais que la méthode sélectionnée est réservée au CPU
 - Le choix s'applique au rendu suivant et est mémorisé
 
-### Taille de lot IA
-
-Accès : **Paramètres → Paramètres avancés → IA** :
-
-- La limite de lot enregistrée est de 2 par défaut ; la politique d'exécution actuelle plafonne l'inférence réelle à une tuile par appel sur tous les appareils.
-- Augmenter cette limite n'active pas de lots GPU non validés et ne réduit pas la taille des tuiles spatiales.
-
 ### Thèmes
 
-Deux thèmes d'interface sont disponibles : **Clair (par défaut)** et **Sombre**. Changez via **Paramètres → Thème** ; le choix s'applique immédiatement (la barre de titre Windows suit) et est mémorisé. Au premier lancement, l'utilisateur choisit un thème dans la boîte de bienvenue ; un choix enregistré l'emporte toujours.
+Les thèmes **Clair (par défaut)**, **Sombre** et **Gris neutre** sont disponibles. Gris neutre utilise un fond gris moyen pour examiner, comparer et retoucher les images. Changez via **Paramètres → Thème** ; le choix s'applique immédiatement (la barre de titre Windows suit) et est mémorisé. Au premier lancement, l'utilisateur choisit un thème dans la boîte de bienvenue ; un choix enregistré l'emporte toujours.
 
 ### Mode portable
 
@@ -753,11 +745,11 @@ Sous Windows, la mise à jour prépare une version candidate distincte et dépla
 
 ### Cache de recalage
 
-OpenFocus peut stocker les résultats de recalage dans un dossier `.openfocus_cache` à côté de la pile source. Rouvrir la même pile (fichiers inchangés) évite alors totalement l'alignement. Activez ou désactivez via **Paramètres → Paramètres avancés → Recalage → Cache de recalage** ; les entrées obsolètes sont remplacées automatiquement.
+OpenFocus enregistre les résultats de recalage dans le cache de l’utilisateur. Lorsqu’une pile inchangée est rouverte avec les mêmes paramètres, OpenFocus réutilise le résultat enregistré. Toutes les piles partagent une limite de 2 Gio. Les entrées les moins récemment utilisées sont supprimées lorsque de l’espace est nécessaire. Les anciens dossiers `.openfocus_cache` à côté des piles sources sont conservés.
 
 ### Paramètres persistants
 
-Tout ce qui suit survit automatiquement au redémarrage : nombre de threads, mode de ressources, paramètres de tuiles, largeur de réduction du recalage, taille de lot de la fusion IA (StackMFF V3), accélération GPU, cache de recalage et cases de diagnostics d'alignement, langue de l'interface, taille de fenêtre et disposition des panneaux, format d'export par glisser-déposer, options de luminosité par méthode, valeurs de lissage et de rayon, et piles récemment ouvertes. Les boîtes de paramètres enregistrent dès confirmation ; tout est aussi enregistré à la fermeture. Les préférences sont stockées par utilisateur dans `OpenFocus/OpenFocus.ini` (format INI de QSettings).
+Tout ce qui suit survit automatiquement au redémarrage : mode de ressources, paramètres de tuiles, largeur de réduction du recalage, accélération GPU, langue de l'interface, taille de fenêtre et disposition des panneaux, format d'export par glisser-déposer, options de luminosité par méthode, valeurs de lissage et de rayon, et piles récemment ouvertes. Les boîtes de paramètres enregistrent dès confirmation ; tout est aussi enregistré à la fermeture. Les préférences sont stockées par utilisateur dans `OpenFocus/OpenFocus.ini` (format INI de QSettings).
 
 ### Langue de l'interface
 
@@ -801,6 +793,12 @@ La boîte de dialogue affiche la progression en temps réel. Vous pouvez annuler
 - PNG/TIFF conservent les données 16 bits ; choisir explicitement JPG/BMP convertit en 8 bits.
 - L'annulation attend l'arrêt du worker. Les fichiers validés restent disponibles ; les tâches partielles, échouées, annulées et non démarrées sont comptées séparément.
 
+### Conversion d’images par lots
+
+Ouvrez le convertisseur d’images dans le menu Outils et ajoutez les fichiers. Par défaut, un dossier de sortie portant le suffixe `_converted` est créé à côté de chaque dossier source. Modifiez le suffixe ou choisissez un sous-dossier nommé, le dossier source ou une destination commune. L’exemple indique le chemin de la ligne sélectionnée.
+
+Conservez la taille originale, limitez le grand côté à 2048, 4096 ou 8192 pixels ou saisissez un pourcentage de réduction. Les petites images ne sont pas agrandies. Le DNG conserve les dimensions du capteur. Les fichiers déjà au format choisi qui ne nécessitent aucune réduction sont comptés comme ignorés. Retirez les lignes sélectionnées de la file par clic droit, Suppr ou Retour arrière.
+
 ---
 
 ## 13. Exportation des résultats
@@ -812,7 +810,7 @@ La boîte de dialogue affiche la progression en temps réel. Vous pouvez annuler
 3. Choisissez le format et l'emplacement
 4. Cliquez sur Enregistrer
 
-Dans **Paramètres → Paramètres avancés → Nommage des sorties**, un préfixe de nom de fichier facultatif aide à identifier les résultats nouvellement rendus. L'exemple se met à jour pendant la saisie ; utilisez jusqu'à 40 lettres, chiffres, traits de soulignement ou traits d'union. Laissez vide pour conserver le nommage d'origine. Confirmez avec **OK** pour le mémoriser, ou annulez pour abandonner la modification. Le préfixe fait partie des nouveaux noms de la liste des sorties et de leurs noms d'export suggérés ; les résultats existants gardent leurs noms. Vous pouvez toujours modifier un nom dans la boîte d'enregistrement. Cette préférence ne renomme pas les fichiers sources et ne change pas les noms de sortie des lots.
+Dans **Paramètres → Paramètres avancés → Général → Nommage des sorties**, un préfixe de nom de fichier facultatif aide à identifier les résultats nouvellement rendus. L'exemple se met à jour pendant la saisie ; utilisez jusqu'à 40 lettres, chiffres, traits de soulignement ou traits d'union. Laissez vide pour conserver le nommage d'origine. Confirmez avec **OK** pour le mémoriser, ou annulez pour abandonner la modification. Le préfixe fait partie des nouveaux noms de la liste des sorties et de leurs noms d'export suggérés ; les résultats existants gardent leurs noms. Vous pouvez toujours modifier un nom dans la boîte d'enregistrement. Cette préférence ne renomme pas les fichiers sources et ne change pas les noms de sortie des lots.
 
 ### Partager un résultat
 
@@ -858,7 +856,7 @@ openfocus describe                      # JSON : méthodes, paramètres, capacit
 openfocus gui [--control] [--socket NAME] [paths…]   # démarre l'application de bureau
 openfocus ctl <command> [flags]          # pilote une fenêtre en cours (voir AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
-openfocus recipe run FILE [--dry-run]    # rejoue une recette headless enregistrée
+openfocus recipe run FILE [--dry-run] [--experimental]
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -867,20 +865,20 @@ openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 Depuis un environnement Python (ou à côté de l'exécutable packagé) :
 
 ```bash
-# Fusionne un dossier avec la méthode IA par défaut
+# Fusionne un dossier avec la méthode par défaut (OpenFocus B)
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT avec recalage ECC, 8 threads
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 forcé sur le CPU avec une taille de tuile personnalisée
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Liste de fichiers explicite ; les fichiers vidéo sont aussi acceptés en entrée
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Une seule pile Z TIFF multipage avec barre d'échelle calibrée par métadonnées
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Inspecte les images adjacentes similaires sans fusionner ni modifier l'entrée
 python main.py -i ./stack_folder --suggest-duplicates
@@ -898,7 +896,8 @@ Par exemple, ajoutez `--align openfocus --alignment-report alignment.json` à un
 | `--output-dir, -d` | Mode lot : fusionne chaque dossier d'entrée et écrit `<dossier>.png` par pile |
 | `--resume` | Ignore un dossier seulement si tous les résultats demandés sont des fichiers ordinaires non vides ; ne vérifie ni contenu ni paramètres |
 | `--config FILE` | Mode lot : surcharges JSON par dossier, p. ex. `{"stackA": {"method": "dct"}}` |
-| `--method, -m` | `stackmffv3` (défaut), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
+| `--method, -m` | Méthodes stables (`openfocus_a`, `openfocus_b` par défaut, `openfocus_c`) et expérimentales (`guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2`, `stackmffv3`) |
+| `--experimental` | Autorise les méthodes de fusion expérimentales pour cette exécution, y compris celles choisies via `--config` |
 | `--param KEY=JSON_VALUE` | Définit tout paramètre de fusion ; répétable et prioritaire sur les options héritées |
 | `--align, -a` | `none` (défaut), `homography`, `ecc`, `both`, `openfocus` |
 | `--align-param KEY=JSON_VALUE` | Définit tout paramètre de recalage ; répétable |
@@ -909,7 +908,6 @@ Par exemple, ajoutez `--align openfocus --alignment-report alignment.json` à un
 | `--sort` | Ordre des images pour `openfocus_a/b/c` : `asc` (défaut, ordre des fichiers), `desc` (inverse un balayage de loin en proche), `off` |
 | `--frame-order` | Dossier en entrée : `auto` (défaut) ordonne les images du plus proche au plus lointain selon les pas de mise au point EXIF quand toutes les images en ont (le bracketing de mise au point OM SYSTEM commence à mi-profondeur), sinon par nom ; `name` trie toujours par nom de fichier. Les fichiers listés explicitement gardent leur ordre |
 | `--sharpen-output` | Applique un léger masque flou à la sortie fusionnée (désactivé par défaut) |
-| `--dust-map WHITE` | Correction de champ plat (carte de poussière) à partir d'une prise de champ blanc défocalisée |
 | `--defect-mask-path MASK` | Masque de défauts en coordonnées capteur réparé avant le recalage |
 | `--sensor-denoise` | Réduction du bruit du capteur prudente avant le recalage |
 | `--kernel, -k` | Uniquement pour les méthodes déclarant `kernel_size` |
@@ -946,10 +944,12 @@ Une recette est un fichier JSON portable d'options de traitement CLI avec des ch
 
 ```bash
 openfocus recipe create line.json --input ./stack --output ./out/fused.tif \
-  --method dtcwt --align ecc --threads 8
+  --method openfocus_b --align ecc --threads 8
 openfocus recipe run line.json
 openfocus recipe run line.json --dry-run
 ```
+
+Si la recette utilise une méthode de fusion expérimentale, ajoutez `--experimental` à chaque exécution, y compris lors d’un essai avec `--dry-run`. La recette enregistre la méthode choisie.
 
 `recipe create --project project.ofproj --input ./stack --output ./out/fused.tif` capture les réglages de traitement d'un projet sur des entrées choisies explicitement ; les sources du projet peuvent avoir été déplacées. Les recettes refusent les contrôles transitoires tels que `--dry-run`, `--resume`, `--json` et `--config`, et exigent que la sortie soit hors de tous les dossiers d'entrée (et différente d'une entrée explicitement sélectionnée). Un masque de défauts est stocké par chemin relatif avec une empreinte SHA-256, de sorte qu'un masque manquant ou modifié fait échouer l'exécution. Les modifications de source du projet (rotation, retournement, champ plat) ne peuvent pas être capturées ; exportez d'abord la pile corrigée.
 
@@ -1009,7 +1009,7 @@ Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisatio
 | `Ctrl+W` | Vider la pile |
 | `Ctrl+Q` | Quitter |
 | `Ctrl+R` | Lancer le rendu |
-| `Ctrl+Shift+R` | Comparer toutes les méthodes |
+| `Ctrl+Shift+R` | Comparer les méthodes disponibles |
 | `Ctrl+T` | Retoucher le résultat |
 | `Ctrl+M` | Carte de profondeur |
 | `Ctrl+E` | Basculer la comparaison par balayage |
@@ -1054,31 +1054,29 @@ Codes de sortie : `0` succès, `1` erreur de traitement, `2` erreur d'utilisatio
 
 - Activez et confirmez les fonctions expérimentales dans les paramètres avancés ; les méthodes IA du bureau restent désactivées sans ce choix. Le moteur et le modèle sont des prérequis distincts.
 - Vérifiez ONNX Runtime et le modèle fourni.
-- Vérifiez via **Aide → Informations sur l'environnement**
+- Vérifiez via **Aide → Envoyer un commentaire → Diagnostic → Informations sur l'environnement**
 
 #### Erreurs de mémoire insuffisante
 
-- Activez le traitement par tuiles dans **Paramètres → Paramètres avancés → Performances**
+- Activez le traitement par tuiles dans **Paramètres → Paramètres avancés → Fusion**
 - Réduisez la taille de bloc de tuile
 - Utilisez des noyaux plus petits
 - Redimensionnez les images
 
 #### Le recalage échoue
 
-- Utilisez **OpenFocus (rapide)** pour un mouvement rigide borné, ou activez **Arrêter sur image rejetée** pour échouer tôt au lieu d'accepter des images non alignées
+- Si le recalage rejette une image, l’application de bureau arrête la pile concernée. Consultez le numéro de l’image et le motif dans le message d’erreur, puis examinez cette image avant de réessayer.
 - Réduisez la largeur de réduction dans **Paramètres → Paramètres avancés → Recalage**
 - Assurez-vous que les images ont assez de contraste et de caractéristiques
-- Activez **Collecter les diagnostics d'alignement**, relancez le rendu et consultez **Paramètres → Paramètres avancés → Recalage → Diagnostics d'alignement** pour les images en échec
 
 #### Traitement lent
 
-- Laissez les threads sur automatique (`0`) ; la capacité CPU, le mode de ressources et la marge mémoire plafonnent déjà la concurrence
 - Utilisez le mode de ressources Maximum pour un lot non surveillé, ou le filtre guidé / GFG-FGF au lieu d'une méthode IA
 - Réduisez la résolution des images ou utilisez **Aperçu rapide** pendant les réglages
 
 #### Avertissement Windows SmartScreen au premier lancement
 
-La signature des binaires Windows dépend de la release concernée (voir les notes de version) ; la signature n'est pas garantie. Téléchargez-les depuis **https://openfocus.top** plutôt que depuis un miroir tiers. Si SmartScreen vous avertit, cliquez sur **Informations complémentaires → Exécuter quand même**. Le premier lancement après décompression peut prendre 30 à 60 secondes.
+Les versions actuelles pour Windows ne sont pas signées. Téléchargez le fichier depuis le site officiel d’OpenFocus (**https://openfocus.top**). Avant de lancer le fichier téléchargé, comparez son empreinte SHA-256 à celle indiquée dans le manifeste de la version. Si SmartScreen vous avertit, cliquez sur **Informations complémentaires → Exécuter quand même**. Le premier lancement après décompression peut prendre 30 à 60 secondes.
 
 #### macOS indique que l'application « ne peut pas être ouverte » ou « est endommagée »
 
@@ -1094,7 +1092,7 @@ ou cliquez droit sur l'application et choisissez **Ouvrir**. Les versions macOS 
 
 ### Obtenir de l'aide
 
-1. **Informations sur l'environnement** : allez dans **Aide → Informations sur l'environnement** pour vérifier votre installation
+1. **Informations sur l'environnement** : allez dans **Aide → Envoyer un commentaire → Diagnostic → Informations sur l'environnement** pour vérifier votre installation
 2. **Contacter le support** : allez dans **Aide → Nous contacter** pour les informations de support
 
 ---

@@ -36,8 +36,7 @@ _directory = None
 _session_marker = None
 _session_started = False
 _session_had_error = False
-# A level chosen while running (Advanced Settings, --log-level). It outlives
-# repeated setup_logging() calls, which would otherwise restore the default.
+# Explicit CLI and control-channel overrides survive repeated logging setup.
 _runtime_level = None
 _context = ContextVar("openfocus_operation", default=None)
 _SESSION_FILE = re.compile(
@@ -139,14 +138,14 @@ def _prune_old_logs(directory):
 
 
 def _resolve_level(level=None) -> int:
-    """An explicit level, else the runtime choice, else the environment, else INFO."""
+    """Prefer an explicit level, a process override, then the environment."""
     if level is None:
         level = _runtime_level
     if level is None:
-        level = os.environ.get("OPENFOCUS_LOG_LEVEL", "INFO")
+        level = os.environ.get("OPENFOCUS_LOG_LEVEL", "DEBUG")
     if isinstance(level, str):
         level = logging.getLevelName(level.strip().upper())
-    return level if isinstance(level, int) and not isinstance(level, bool) else logging.INFO
+    return level if isinstance(level, int) and not isinstance(level, bool) else logging.DEBUG
 
 
 def debug_enabled() -> bool:
@@ -157,7 +156,7 @@ def debug_enabled() -> bool:
 def set_log_level(level) -> int:
     """Change the level of the running process and return the level applied.
 
-    ``None`` returns to the default (OPENFOCUS_LOG_LEVEL, else INFO). The
+    ``None`` returns to the default (OPENFOCUS_LOG_LEVEL, else DEBUG). The
     choice is per process: a caller that starts a worker process passes it on,
     as the render process does. Changes are recorded so a log shows where its
     detail starts and stops.
@@ -177,11 +176,6 @@ def set_log_level(level) -> int:
                    level=max(detailed, logging.INFO))
         _logger.setLevel(applied)
         return applied
-
-
-def set_debug_logging(enabled) -> int:
-    """Detailed (DEBUG) logging on, or back to the default level."""
-    return set_log_level(logging.DEBUG if enabled else None)
 
 
 def setup_logging(log_dir=None, level=None) -> Path:
@@ -356,12 +350,12 @@ class _Operation:
 
 
 @contextmanager
-def log_operation(name: str, **details):
+def log_operation(name: str, *, cancel_on=(), **details):
     """Correlate nested task logs; record one terminal outcome and elapsed time.
 
     Catching an error inside the scope requires operation.fail() in the except
-    block. Cooperative cancellation requires operation.cancel(). Neither changes
-    processing, signals, or exception propagation.
+    block. Use cancel_on for the operation's cooperative cancellation exceptions.
+    These choices preserve processing, signals and exception propagation.
     """
     operation = _Operation(name)
     parent = _context.get()
@@ -374,7 +368,7 @@ def log_operation(name: str, **details):
         try:
             yield operation
         except BaseException as exc:
-            if isinstance(exc, KeyboardInterrupt):
+            if isinstance(exc, KeyboardInterrupt) or isinstance(exc, cancel_on):
                 operation.cancel()
             elif isinstance(exc, SystemExit):
                 operation.status = "completed" if exc.code in (None, 0) else "failed"
@@ -415,16 +409,20 @@ def all_log_files():
 
 def session_log_excerpt(max_bytes: int = 60_000) -> str:
     """Read a bounded tail across this process's rotations, newest lines last."""
+    _flush()
+    return read_log_tail(session_log_path(), max_bytes)
+
+
+def read_log_tail(path: Path, max_bytes: int) -> str:
+    """Return a bounded, chronological tail for a specific process log."""
     if max_bytes <= 0:
         return ""
-    _flush()
-    current = session_log_path()
     parts = []
     remaining = max_bytes
     trimmed = False
-    for path in (current, *(Path(f"{current}.{i}") for i in range(1, BACKUP_COUNT + 1))):
+    for candidate in (path, *(Path(f"{path}.{i}") for i in range(1, BACKUP_COUNT + 1))):
         try:
-            with path.open("rb") as stream:
+            with candidate.open("rb") as stream:
                 size = stream.seek(0, os.SEEK_END)
                 count = min(size, remaining)
                 if count:
@@ -466,7 +464,7 @@ def export_feedback_package(dest_path, description: str = "",
                     "Read session_log.txt for the current session, then logs/ for retained history.",
                     "Match operation=<id> to follow a task; parent_operation_id links nested stages.",
                     "Events end in .started, .completed, .failed or .cancelled; elapsed_ms is duration.",
-                    "Failures include tracebacks when available. DEBUG detail requires OPENFOCUS_LOG_LEVEL=DEBUG.",
+                    "Failures include tracebacks when available. Session logs include DEBUG detail by default.",
                     "These local records may contain file paths. Review before manually sharing; nothing is uploaded.",
                     f"Log tails: at most {MAX_BYTES} bytes each, {FEEDBACK_MAX_LOG_BYTES} bytes total, {FEEDBACK_MAX_LOG_FILES} files.",
                     "",

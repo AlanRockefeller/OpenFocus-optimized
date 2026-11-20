@@ -27,19 +27,34 @@ def test_rejected_admissions_record_safe_snapshot_without_changing_decisions(mon
     snapshot = _snapshot()
     policy.require_memory(1, snapshot)
     assert events == []
-    with pytest.raises(policy.ResourceLimitError, match='Insufficient memory'):
+    with pytest.raises(policy.ResourceLimitError, match='Insufficient memory') as caught:
         policy.require_memory(100 * GiB, snapshot)
     assert events == [('resource_admission', {'resource_status': 'insufficient',
         'required_bytes': 100 * GiB, 'available_ram_bytes': 8 * GiB,
         'total_ram_bytes': 16 * GiB, 'ram_ceiling': policy.ram_ceiling(snapshot)})]
+    assert caught.value.admission == events[0][1]
     events.clear()
-    with pytest.raises(policy.ResourceLimitError, match='could not be determined'):
+    with pytest.raises(policy.ResourceLimitError, match='could not be determined') as caught:
         policy.require_memory(10**16, _snapshot(available_ram=0))
     assert events == [('resource_admission', {'resource_status': 'unknown',
         'required_bytes': 10**15, 'total_ram_bytes': 16 * GiB})]
+    assert caught.value.admission == events[0][1]
     monkeypatch.setattr(policy, 'log_action', lambda *args, **kwargs: 1 / 0)
-    with pytest.raises(policy.ResourceLimitError, match='Insufficient memory'):
+    with pytest.raises(policy.ResourceLimitError, match='Insufficient memory') as caught:
         policy.require_memory(100 * GiB, snapshot)
+    assert caught.value.admission['required_bytes'] == 100 * GiB
+
+
+def test_rejection_reuses_single_probe_and_its_effective_limit(monkeypatch):
+    probes = iter([_snapshot(commit_headroom=0, process_commit_headroom=GiB)])
+    monkeypatch.setattr(policy, 'probe_resources', lambda: next(probes))
+    with pytest.raises(policy.ResourceLimitError) as caught:
+        policy.require_memory(123)
+    assert caught.value.admission == {
+        'resource_status': 'insufficient', 'required_bytes': 123, 'ram_ceiling': 0,
+        'available_ram_bytes': 8 * GiB, 'total_ram_bytes': 16 * GiB,
+        'available_commit_bytes': 0, 'process_commit_headroom_bytes': GiB,
+    }
 
 
 def _workload(**changes):
@@ -509,6 +524,42 @@ def test_heavy_job_releases_on_exception_and_preentry_cancellation():
     assert entered.is_set()
 
 
+def test_wait_diagnostic_failure_does_not_block_later_jobs(monkeypatch):
+    lock = threading.RLock()
+    waited = threading.Event()
+    checks = 0
+    monkeypatch.setattr(policy, '_HEAVY_JOB_LOCK', lock)
+
+    def should_cancel():
+        nonlocal checks
+        checks += 1
+        if checks >= 2:
+            waited.set()
+        return False
+
+    def fail_log(*args, **kwargs):
+        raise MemoryError('diagnostic allocation failed')
+
+    monkeypatch.setattr(policy, 'log_debug', fail_log)
+
+    def waiter():
+        with policy.heavy_job(should_cancel):
+            pytest.fail('work should not start after the diagnostic fails')
+
+    with lock:
+        call = _thread_call(waiter)
+        assert waited.wait(2), 'waiter never encountered lock contention'
+    with pytest.raises(MemoryError, match='diagnostic allocation failed'):
+        _result(call)
+
+    acquired = lock.acquire(timeout=1)
+    try:
+        assert acquired, 'later jobs could not acquire the heavy-job lock'
+    finally:
+        if acquired:
+            lock.release()
+
+
 def test_cancellation_after_acquiring_lease_releases_it():
     checks = iter((False, True))
     with pytest.raises(RegistrationCancelled):
@@ -773,3 +824,43 @@ def test_raw_sensor_rejects_invalid_aspect(aspect):
     sizes = SimpleNamespace(width=2, height=2, raw_width=2, raw_height=2, pixel_aspect=aspect)
     with pytest.raises(ValueError):
         policy.raw_sensor_shape(sizes)
+
+
+def test_render_estimate_uses_raw_metadata_and_predicts_v2_cpu_fallback(monkeypatch, tmp_path):
+    import numpy as np
+    from core.render_preflight import estimate_render_memory
+    from core.source_frames import SourceFrame
+    from fusion_methods import neural_runtime
+
+    # No file on disk: the descriptor retains the scale, sensor shape and encoded size.
+    encoded = 50 * 1024 ** 2
+    frame = SourceFrame(str(tmp_path / 'frame.nef'), 0, (5504, 8256, 3),
+                        np.dtype('uint16'), None, (encoded, 0), raw_sensor_shape=(5520, 8288))
+    snapshot = _snapshot(available_ram=18 * GiB, total_ram=32 * GiB,
+                         free_vram=0, total_vram=8 * GiB, device_kind='DIRECTML',
+                         commit_headroom=12 * GiB, process_commit_headroom=1)
+    monkeypatch.setattr(policy, 'probe_resources', lambda kind: snapshot)
+    monkeypatch.setattr(neural_runtime, 'cached_device', lambda: 'DIRECTML')
+
+    estimate = estimate_render_memory([frame] * 57, 'stackmffv2', {}, register=True,
+                                      tile_block=1024)
+    assert (estimate.width, estimate.height, estimate.frames) == (8256, 5504, 57)
+    assert estimate.source_ram == policy.raw_decode_bytes(8288, 5520, frame.nbytes, encoded)
+    assert estimate.registration_ram > estimate.source_ram
+    assert estimate.gpu_fallback and estimate.accelerator == 'DIRECTML'
+    assert estimate.vram_required > 0 and estimate.tile < 1024
+    assert estimate.whole_ram > estimate.fusion_ram and not estimate.ram_short
+    assert policy.ram_ceiling(estimate.snapshot) == 12 * GiB
+
+
+def test_render_estimate_tracks_preview_and_roi_working_geometry(monkeypatch):
+    import numpy as np
+    from core.render_preflight import estimate_render_memory
+
+    frames = [np.zeros((600, 800, 3), dtype=np.uint8)] * 3
+    monkeypatch.setattr(policy, 'probe_resources', lambda kind: _snapshot())
+    preview = estimate_render_memory(frames, 'guided_filter', {}, preview=True)
+    roi = estimate_render_memory(frames, 'guided_filter', {}, roi=(720, 550, 100, 100))
+    assert (preview.width, preview.height) == (400, 300)
+    assert (roi.width, roi.height) == (80, 50)
+    assert 0 < roi.fusion_ram < preview.fusion_ram

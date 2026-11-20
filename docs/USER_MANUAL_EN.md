@@ -85,7 +85,7 @@ input and non-PNG output, including GIF and multi-page TIFF, are unsupported.
 The CLI rejects sensor cleanup and depth maps for transparent input as well.
 
 For example, the CLI equivalent is `python main.py --input ./png-stack
---output ./result.png --method guided_filter --align none`.
+--output ./result.png --method guided_filter --align none --experimental`.
 
 ### Supported Output Formats
 
@@ -101,25 +101,29 @@ In **Save As**, ordinary TIFF saves the result as a single image; layered TIFF i
 
 ### Downloading and Starting the Application
 
-The [project website](https://openfocus.top/#download) and its installation
-scripts offer the newest Windows or macOS build, including a beta when newer
-than stable (currently [v1.77.0-beta.7 prerelease](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)). Downloads are also available on
-[GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Desktop automatic updates also offer newer beta
-releases. The Linux CLI installed from PyPI remains stable.
+The [project website](https://openfocus.top/#download) offers Windows x64,
+macOS Apple Silicon and Linux x86-64 desktop builds. Previous versions are
+available on [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases).
+Desktop updates use the stable channel unless beta updates are enabled. On
+Linux, download and extract a new desktop build to update it manually.
 `pip install openfocus` installs only the headless command-line interface (the
 wheel deliberately does not depend on PyQt6); use a desktop build or a source
 checkout for the GUI.
+
+Current Windows builds are unsigned. Before running the download, compare its SHA-256 hash with the value in the release manifest.
 
 After installation, launch OpenFocus by:
 
 1. **Windows**: Double-click the OpenFocus shortcut or executable file
 2. **macOS**: Open `OpenFocus.app` from Applications
-3. **Python Source**: Run `pip install -r requirements.txt`, then
+3. **Linux (x86-64)**: Download and extract the desktop archive, then run
+   `OpenFocus/OpenFocus` from the extracted directory
+4. **Python Source**: Run `pip install -r requirements.txt`, then
    `python main.py` in your activated environment
 
-The first launch opens the welcome dialog, where you can choose the theme and
-load the bundled demo stack. A fresh profile defaults to the light theme; the
-choice is remembered.
+On the welcome screen, choose **Load Demo Stack** to try the bundled photos, or
+**Open workspace** to start with your own. Expand **Settings** to change the
+theme or opt in to beta updates. A fresh profile uses the light theme.
 
 Sign in online once on each device using email, GitHub or Google. A saved local
 session permits offline use until you sign out or remove it. A device that has
@@ -128,13 +132,18 @@ and privacy policy; the links are available to review. The **Help** menu shows *
 account. Open it to sign out or securely open your account center in the browser.
 After sign-in, automatic error reports are enabled by default unless you
 previously disabled them. Change this under
-**Settings → Advanced Settings → Diagnostics**.
+**Settings → Advanced Settings → General → Privacy**.
 
 OpenFocus restores a saved desktop session locally at startup without opening a
 browser, including while offline. After sign-out or session removal, sign in
 online again. To use an existing browser account, choose the browser sign-in
 button on the account screen. Browser and desktop sessions are separate, so
 signing out here does not sign out the browser.
+
+Windows builds run by the same Windows user share one account device slot,
+including source builds with a separate settings directory. To release a slot
+occupied by an older registration, remove that entry in the account center.
+Removing a registration also signs out any session using it.
 
 For email sign-in, open the link on your phone or computer and confirm it;
 the waiting desktop app signs in automatically. If the account service has
@@ -147,10 +156,10 @@ again to retry. The previous desktop sign-in attempt is canceled.
 ### Quick Start Workflow
 
 1. Import your image sequence (File → Open Folder or drag-and-drop)
-2. Configure fusion settings in the right panel
+2. Choose a fusion method in the right panel
 3. Registration starts on **ECC**; choose **No alignment** if the frames are
    already aligned
-4. Adjust kernel size if needed
+4. Open **Parameters** for the selected method if you need to adjust its settings
 5. *(optional)* Open **Render settings** and check **Quick preview** to test parameters on a downscaled draft first
 6. Click "Start Render" to begin processing
 7. Export your results
@@ -176,8 +185,8 @@ You can resize the panels by dragging the splitter handle between them.
 
 The right panel contains all configuration options organized vertically:
 
-1. **Fusion Settings**: Select fusion algorithm and kernel size
-2. **Registration Settings**: Enable/disable alignment methods
+1. **Fusion Settings**: Choose a fusion method and open **Parameters** to adjust its settings.
+2. **Registration Settings**: Choose an alignment method and open **Parameters** when available. Parameter editors start collapsed, leaving more space for the source and output lists.
 3. **Action Buttons**: Start Render, plus reset, **Render settings**, and render all methods. The render settings dialog contains quick preview, frame order, exposure matching, brightness drift removal, and output sharpening
    These options are unchecked for new desktop settings and after reset. Saved choices are preserved.
 4. **Source Images List**: Shows all loaded images with filenames
@@ -190,11 +199,12 @@ The top menu bar provides access to all functions:
 - **File**: import/export operations, projects, processing templates and the recent-files list
 - **Edit**: Undo/redo, reset the current stack, image transformations and retouching
 - **Tools**: Image stitching, batch processing and conversion, method comparison, depth map, flat-field correction, scale bar, watermark and labels
-- **Settings**: Advanced Settings (performance, registration and alignment diagnostics, sensor cleanup, output naming, AI, diagnostics, startup), GPU acceleration, theme and language
-- **Help**: Environment info, contact information and the Discord community, Support Us, update check, and the log folder. Support Us displays Alipay and PayPal codes; include your username in the transfer note for permanent project acknowledgment.
+- **Settings** offers Advanced Settings, GPU acceleration, theme, font size, and language.
+- **Help**: Report a Problem, Contact Us, Support Us, and check for updates. Contact Us shows the published contact details, GitHub and Discord links, and QR codes for Discord and WeChat. Support Us loads the current Alipay and PayPal codes. Reopen either dialog to fetch updates.
+- **Extensions (In development)** is visible and disabled.
 
-**Tools → Stitch Images…** opens a separate workspace for already-fused
-microscope regions and camera panoramas; it does not modify the current stack.
+**Tools → Stitch Images… (In development)** is currently unavailable. The following describes the workspace under development.
+
 The **Project assistant** tab gathers import, alignment and control points;
 **Source images** holds the list, grid and manual placement; **Panorama editor**
 holds seam, blend, exposure/color, output, projection, camera and HDR settings
@@ -377,9 +387,9 @@ File → Open Project rebuilds the recorded frames before replacing the current
 stack. If sources moved, choose the new source root and confirm the complete
 old/new path mapping. Save the project again to retain the relocated references.
 
-A project behaves like a document: the title bar shows its name with a `*` while
-there are unsaved changes, and closing the app or opening another project asks
-before discarding them. Source images are referenced, not copied.
+The title bar shows a named project's file name with a `*` while it has unsaved
+changes. An unnamed workspace displays **OpenFocus**. Closing the app or opening
+another project still asks before discarding unsaved edits. Source images are referenced, not copied.
 
 ### Processing Templates
 
@@ -445,6 +455,9 @@ text. The CLI supports it via `--scale-bar` (auto calibration) and
 When the selected target has no usable metadata, the dialog starts in manual
 calibration mode and waits for a valid pixel size.
 
+The automatic caption size follows the target image resolution. The dialog
+shows the calculated size in image pixels. Enter a size to set it manually.
+
 The preview draws at the target's native pixel geometry before fitting it to
 the viewport. Fit, 100%, pan and frame navigation change only the view. Apply
 commits one undoable edit; Cancel preserves the previous calibration. Historical
@@ -509,10 +522,15 @@ recorded source. Missing historical provenance is never replaced with the
 current stack. The source and texture stay bound to that snapshot.
 Depth maps are unavailable for transparent PNG stacks, in the GUI and the CLI.
 
-All seven depth-capable methods — DCT, DTCWT, GFG-FGF, OpenFocus B, OpenFocus C,
-StackMFF V2 and StackMFF V3 — require an explicit **Compute** click. StackMFF V1
-has no depth map. Opening the dialog or changing the measure,
-source, registration or parameters never starts computation. The parameter editor
+Selected outputs from OpenFocus B/C and StackMFF V2/V3 can retain their focus
+positions. The source summary names the saved measure. Opening the dialog,
+pressing **Compute** with the recorded settings, or returning to those settings
+shows the saved positions in their original frame order and ROI. The 2D preview
+uses the saved plane and alignment validity. Opening the 3D tab or exporting a
+model builds the surface and texture on demand. OpenFocus C records the winning
+frame in its finest detail layer. For an output without saved positions, the
+current stack, or another measure or parameter value, press **Compute** for a
+separate estimate. StackMFF V1 has no depth map. The parameter editor
 appears directly below the measure selector: DCT median kernel and GFG initial kernel
 use odd values 1–51 (default 7). OpenFocus B uses Radius, Smoothing and Feather;
 OpenFocus C's depth export uses Smoothing without a radius. DTCWT decomposition levels
@@ -686,20 +704,21 @@ To remove all loaded images, go to **File → Clear Stack** or press `Ctrl+W`.
   follows
 - **Keyboard**: There is no global previous/next-frame shortcut; focus the
   source list first
+- Each frame’s checkbox controls its participation in the render. Right-click a frame to include or exclude the highlighted rows. With the list focused, `Ctrl+Shift+I` checks every frame and `Ctrl+Shift+X` unchecks every frame. `Ctrl+A` highlights all rows. On macOS, use `Command` in place of `Ctrl`. Hover over the source count to see the shortcuts.
 
 ### Reviewing similar frames
 
-Click **Review frames** in the source header, immediately left of **Select all**, to find adjacent frames
-whose pixels are nearly identical. The button changes to **Cancel review**
-while analysis runs. Each suggested row names its reference frame and difference;
-inspect both before using the source checkbox to exclude a frame from fusion.
+Right-click any source frame and choose **Review frames** to find nearly identical adjacent frames throughout the stack.
+While analysis runs, the same menu offers **Cancel review**. With the list focused, `Ctrl+Shift+F` (`Command+Shift+F` on macOS) also starts or cancels review.
+Each suggested row names its reference frame and difference. Inspect both frames
+before using the source checkbox to exclude a frame from fusion.
 Suggestions never change checkboxes or delete files. This conservative
 comparison can miss similar frames; changes confined to a small focused region
 are not averaged away. Results are discarded if the stack changes.
 Suggestions are shown only when both the suggested frame and its reference
 are included; changing a checkbox updates the displayed suggestions.
 
-Clearing the stack removes review status and disables the review button.
+Clearing the stack removes review status. Load at least two frames to start another review.
 
 ### Zooming and Panning
 
@@ -799,16 +818,12 @@ Image registration corrects spatial misalignment between frames in your image st
   changed with `--align-shift-limit`. Successive estimates can accumulate beyond
   that range; it is not a guaranteed rejection threshold.
 - For non-rigid or extreme geometry, pick ECC or Homography instead
-- **Rejected frame handling** defaults to continuing with the unaligned frame
-  when estimation fails. Choose **Stop on rejected frame** to fail the render
-  or batch item instead. Frames are numbered from 1 in the processed stack;
+- Desktop registration stops the affected stack if a frame is rejected. Read the frame and reason in the error message and inspect that source image before retrying. Frames are numbered from 1 in the processed stack. Their
   geometry defaults to frame 1 and successive estimates follow the adjacent
   aligned frame. Low texture, repeated patterns, occlusion, large motion, or
   focus changes can still produce an inaccurate match without an error.
   Inspect the result.
-- In the CLI, select the same policy with `--align openfocus --align-param
-  'failure_policy="fail"'` (use shell-appropriate quoting). Batch items use
-  the selected policy independently. The default is `"continue"`.
+- The CLI defaults to `continue`. Use `--align openfocus --align-param 'failure_policy="fail"'` to stop the stack on a rejected frame.
 - Set **Reference frame** to a 1-based number in the included, processed stack
   order to anchor geometry to that frame. Frame order is preserved; brightness
   equalization uses its own reference. Every batch stack must contain that
@@ -816,35 +831,14 @@ Image registration corrects spatial misalignment between frames in your image st
   reference_frame=3`. Choosing a reference cannot correct parallax or a poor
   match; inspect the result.
 
-Alignment reports identify the reference and each frame's outcome. A fallback
-means the method could not establish the alignment or depends on an earlier
-failed estimate; the reported reason distinguishes weak estimates and motion
-outside the limits when known. Quality values are method-specific, not a
-guarantee of accuracy.
-Transforms map source coordinates to the registration stage's reference canvas
-before the common crop; composite methods report their stages separately.
-Homography and ECC also accept the opt-in `failure_policy="fail"` registration
-parameter to stop when their algorithms detect failure. The default remains
-`"continue"`; inspect results even when alignment succeeds.
-
-To inspect a render, enable **Settings → Advanced Settings → Registration →
-Collect alignment diagnostics** and render again. This recomputes alignment
-instead of reusing cached images. The completion
-status highlights fallbacks; open **Settings → Advanced Settings → Registration → Alignment diagnostics** for the
-per-frame report. It shows available failure reasons, method-specific scores,
-match counts, referenced frames and transforms. Reference numbers and names
-refer to the original source list, including when frames are excluded. Batch
-and grouped renders do not provide this report.
+For a single, non-grouped CLI render with registration, `--alignment-report FILE` saves the per-frame results.
 
 ### Enabling Registration
 
 1. In the right panel, locate the **Registration** group
 2. Pick one method from the dropdown: **No alignment**, **OpenFocus (fast)**,
    **ECC**, **Homography**, or **Homography → ECC**
-3. The defaults work without further adjustment. For OpenFocus (fast), adjust
-   the reference frame and search limits under **Settings → Advanced Settings → Registration**.
-   Set **Rejected frame handling** there for all registration methods.
-4. **Collect alignment diagnostics** now lives in Advanced Settings (see above)
+3. Adjust the OpenFocus reference frame and search limits in **Settings → Advanced Settings → Registration**.
 
 ### When to Use Registration
 
@@ -869,16 +863,15 @@ Access additional settings via **Settings → Advanced Settings → Registration
 - **Downscale Width**: Control preprocessing resolution (default: 1024px)
 - Lower values = faster processing, potentially lower accuracy
 - Higher values = slower processing, potentially higher accuracy
-- **Collect alignment diagnostics** and **Registration cache** sit in the same
-  section
 
 ---
 
 ## 8. Image Fusion Methods
 
-OpenFocus offers ten fusion algorithms (plus an alignment-only mode). A fresh
-desktop profile uses **OpenFocus B** with **ECC** registration; both are marked
-as recommended. Existing user selections are preserved. CLI defaults are separate.
+OpenFocus A, B and C are the stable fusion methods. To use the other fusion
+methods, enable **Experimental features** in Advanced Settings or pass
+`--experimental` in the CLI. A fresh desktop profile uses **OpenFocus B** with
+**ECC** registration. Existing method selections are preserved.
 
 ### Guided Filter
 
@@ -964,7 +957,7 @@ explicitly selected directory stays in the settings. If it becomes unavailable,
 OpenFocus warns and temporarily uses the system temporary directory; each new
 job retries the saved choice. A full selected disk is not replaced automatically.
 Choose an existing writable folder under **Settings → Advanced Settings →
-Performance → Temporary directory** if a storage error occurs. Free-space
+General → Working storage → Temporary directory** if a storage error occurs. Free-space
 checks are estimates, not reservations; space may run out later. Existing
 frames remain in their original directory until released.
 
@@ -999,9 +992,12 @@ Each neural tile uses every frame. Source frames and alignment scratch can be di
 - **OpenFocus B**: blends neighboring frames guided by a smoothed depth map.
 - **OpenFocus C**: combines source detail across a multilevel weighted pyramid.
 - **Parameters**: A and B expose Radius and Smoothing; B also exposes Feather.
-  The defaults are R8/S4 for A, R8/S4/F3 for B and S4 for C. A's Smoothing
-  control currently has no effect, unlike the reference method. B smooths its
-  depth map; C smooths its multilevel fusion weights. C has no Radius control.
+  The defaults are R8/S4 for A, R8/S4/F3 for B and S4 for C. A currently ignores
+  Smoothing. B smooths its depth map and C smooths its multilevel fusion weights.
+  C has no Radius control.
+- **Smoothing levels**: The desktop controls move one whole level per click. If
+  a saved level is fractional, the field shows the nearest integer and its tooltip
+  gives the exact value. Rendering and saving use that value until you edit Smoothing.
 
 ECC remains the default registration method for A/B/C even when experimental
 features are enabled. OpenFocus alignment is used when explicitly selected;
@@ -1021,18 +1017,22 @@ saved choices remain in use. **Reset** clears remembered choices and restores
 the method defaults. The CLI defaults exposure matching on and accepts
 `--no-exposure-match` to disable it.
 
-**Sharpen fused output** applies a mild unsharp mask after fusion, before the
-result is converted to its output bit depth. It is off by default and can be
-enabled in the main fusion options or batch options; the equivalent CLI flag is
-`--sharpen-output`. This affects the fused image, not registered frames or
-depth maps. It can make edges more distinct, but may amplify noise and halos.
-It is saved with the project and remembered between sessions.
+**Render settings → Output → Sharpen fused output** applies an unsharp mask
+after fusion and before conversion to the output bit depth. Sharpening is off
+by default. When enabled, a slider and percentage field adjust the strength
+from 0% to 200%. At 0% the result is unchanged. At 100% the strength matches
+earlier releases. Higher values may amplify noise and halos. The project and
+desktop preferences remember the strength independently of the on/off switch.
+Batch processing also offers both controls. The CLI equivalents are
+`--sharpen-output` and `--sharpen-strength PERCENT`.
 
 ### Alignment only (no fusion)
 
-Select **Alignment only (no fusion)** to register the stack and add one stack
-entry to the output list. The frames stay in memory until you export them;
-alignment-only does not create an extra cache or write beside the source files.
+Select **Alignment only (no fusion)** to add a registered stack to the output
+list. OpenFocus reuses the stack from a completed render if the frames and
+registration settings match. The mode initially carries over the current
+exposure matching option. If you change it here, the mode remembers that
+choice. Frames are available for review and are written on export.
 Save the entry to create one folder inside your chosen destination. Original
 filename stems are retained, with the extension of the format you select.
 
@@ -1067,7 +1067,11 @@ the selected area with surrounding context; **Full-image fusion** checks the
 whole-image result and lets you inspect another area without rendering again.
 ROI results can differ from full-image results because exposure statistics and
 some algorithms depend on the image extent.
-Full-image fusion is selected by default.
+The comparison opens in full-image mode and shows the whole result. It selects
+methods with compatible workspace results and uses their saved settings and
+aligned image coordinates. Switch to detail view to inspect a crop. Moving the
+inspection square or changing the preview size updates existing results while
+other methods fuse.
 
 Use **Preview size (px)** above the right panes to choose a square size from
 160 to 960 pixels, by dragging the slider or entering a number. All methods
@@ -1110,7 +1114,7 @@ pollutes the full-resolution alignment cache.
 
 ### Rotation
 
-1. Go to **Edit → Rotate**
+1. Go to **Edit → Rotate and Flip**
 2. Choose rotation type:
    - **90° Clockwise**: Rotate all images 90 degrees right
    - **90° Counter-Clockwise**: Rotate all images 90 degrees left
@@ -1118,7 +1122,7 @@ pollutes the full-resolution alignment cache.
 
 ### Flipping
 
-1. Go to **Edit → Flip**
+1. Go to **Edit → Rotate and Flip**
 2. Choose flip type:
    - **Horizontal Flip**: Mirror left-to-right
    - **Vertical Flip**: Mirror top-to-bottom
@@ -1139,7 +1143,7 @@ Transformations are applied to the entire image stack, maintaining alignment bet
 
 ## 10. Retouching, Labels and Annotations
 
-### Retouching the Result (Edit → Retouch Result…, `Ctrl+T`)
+### Retouching the Result (Edit → Retouch Result → Output in This Workspace…, `Ctrl+T`)
 
 Fusion can still leave a local defect — a halo around a high-contrast edge,
 a bristle taken from the wrong frame, noise in a flat area. The workspace
@@ -1230,7 +1234,7 @@ recorded source, so they are listed as unavailable instead of being guessed
 from the current stack. Unapplied strokes and undo history are session-only;
 saving a project does not store them.
 
-For an existing image file, choose **Edit → Retouch Image Files…**, then select
+For an existing image file, choose **Edit → Retouch Result → Fused Result from File…**, then select
 the result and one or more source images. The sources must already be aligned
 to the result on the same pixel grid; matching dimensions alone cannot prove
 alignment. Single-page PNG, TIFF, JPEG and BMP images with matching upright
@@ -1251,21 +1255,23 @@ frame from the same stack. The subject stays exactly as stacked. The background
 is derived from a frame and the stacked result; processing may reconstruct,
 adjust, and blend its pixels.
 
+Background replacement works best for isolated macro or microscope subjects against broad bokeh or a clean, solid color. Examples include insects, fungi, flower stamens, and specimens on slides. If detail fills the frame continuously from near to far, keep the original stack and touch up local background flaws with the **Source Brush**.
+
 1. Open the result in the retouch workspace and click **Auto background…**.
-2. Choose the background:
+2. Under **Background source**, choose a frame selection mode:
    - **Automatic** (recommended) uses the soft background, unless the stack
      recorded much of the background in focus. Then it uses the sharp one.
    - **Soft background** uses the frame where the background is blurriest.
    - **Sharp background** uses the frame focused farthest away.
-3. Leave **Clean edge halos** on to remove halos along the subject's edges. It
+3. Under **Subject edges**, leave **Clean edge halos** on to remove halos along the subject's edges. It
    never goes beyond what the frames recorded. Turn it off to keep the stack's
    own edge look.
 4. Tick **Keep soft parts attached to the subject** when parts of the subject
    sit just outside the depth of field, such as the knob at the end of a spine.
    It can also keep background objects next to the subject as stacked, so check
    the result.
-5. Click **Replace background**. A 20-megapixel stack of 15 frames takes about
-   a minute and needs about 3.5 GB of free memory. **Cancel** stops it.
+5. Click **Replace background** to see the current processing stage. A 20-megapixel stack of 15 frames takes about
+   a minute and needs about 3.5 GB of free memory. **Cancel** stops the operation and keeps your current edits.
 
 The change is one undoable step, and strokes you painted on the subject before
 are kept. Use the **Restore Brush** to bring back stacked pixels wherever you
@@ -1326,6 +1332,8 @@ number. **Fit** uses a bounded thumbnail; **100%** displays the original region
 at one source pixel per device pixel, and can show loading or an error. Drag to
 pan. Position and font size use image pixels. Existing large coordinates and
 sizes are preserved when editing; an invalid position is reported for correction.
+New labels start with a size based on the previewed target image. The chosen
+size is saved with the label when you apply it.
 A fallback font or an unsuccessful draw is reported. Labels preserve the
 original bit depth when exported as PNG or TIFF.
 
@@ -1336,29 +1344,31 @@ The menu removal actions clear source labels, registered-stack labels, output
 labels, or all labels independently and can also be undone. Applying labels changes the session display;
 export an image to write the annotations to a file.
 
+Labels, Scale Bar and Watermark can update their Fit previews during fusion.
+At 100%, available original pixels appear immediately. If the original still
+needs to be decoded, the Fit image stays visible while the decode waits.
+
 ---
 
 ## 11. Settings and Configuration
 
-**Enable experimental features** in **Settings → Advanced Settings** is off by
-default and is remembered for this installation. With it off, desktop fusion
-offers OpenFocus A/B/C and No fusion; registration offers ECC and No alignment.
-Other fusion and registration methods and image stitching remain visible as
-experimental but cannot be used. Enable the option and click **OK** to unlock
-them; required dependencies may still limit availability. The experimental
-features are under development and may have performance, quality or availability
-limitations. Projects and templates do not override this preference. Restoring
-default settings turns it off again.
+**Enable experimental features** in **Settings → Advanced Settings → General**
+unlocks experimental fusion and registration methods when their dependencies
+are available. The installation remembers this preference. Restoring default
+settings turns it off.
 
-Open **Settings → Advanced Settings** for performance, registration, sensor
-cleanup, output naming, StackMFF AI, diagnostics and startup preferences. Changes remain
-drafts until **OK**; Cancel, Esc and closing discard them. Reducing the tile
-size immediately updates the visible overlap limit to half a tile. The AI
-section's saved batch limit is retained, but inference currently submits one
-tile per call; registration width can change alignment accuracy.
-Alignment-diagnostic collection is a checkbox in the Registration section.
+**Settings → Theme → Follow system** updates the interface when the operating system changes between light and dark. **Settings → Font size** offers Small (9 pt), Medium (10 pt), and Large (13 pt). **Custom…** previews 8–18 pt alongside the default before applying the size.
 
-**Settings → Advanced Settings → Share usage statistics** is enabled by
+**Settings → Advanced Settings**
+
+- **General** — Experimental features, working storage and the output filename prefix. Under **Privacy**, automatic error reports and usage statistics have separate checkboxes. Both start checked. An explicit opt-out stays saved for each. Release builds send an automatic report after a session records an error if you accepted the reporting terms at sign-in or explicitly enabled reporting. A previous native crash requires confirmation.
+- **Fusion** — Choose the resource mode and tile settings. Select **Sensor cleanup** to expand its controls.
+- **Registration** — Set the downscale width. Select **OpenFocus (fast)** to expand the reference frame and search limits.
+- **Startup & updates** — Restore the previous stack, choose the import scale prompt and manage updates.
+
+Choose **OK** to save changes. Cancel, Esc or closing the dialog discards them.
+
+**Settings → Advanced Settings → General → Privacy → Share usage statistics** is enabled by
 default when no preference exists; an explicit previous opt-out is preserved.
 OpenFocus sends only a random installation ID, application version and operating
 system to openfocus.top, at most once per day after a successful send. No images,
@@ -1382,23 +1392,11 @@ Automatic update downloads run while idle and never install automatically. A com
 
 On Windows, the updater builds a separate candidate and moves the portable marker and `OpenFocusData` during the switch. If the switch fails it restores the old installation; if rollback cannot finish, the backup is kept and the app does not restart automatically. A permission prompt may appear once. Cancelling extraction discards incomplete staging and is checked between 256 KiB reads and writes; a blocked disk or network operation can delay it.
 
-The Dust Map tool and batch flat-field option are experimental. Enable
-**Experimental features** in Advanced Settings to use them.
-
-Flat-field correction changes session working pixels without overwriting source files. Select the white reference and a preview frame, then generate the preview again after changing source or scale. Reference and working/base images must share a coordinate domain and size. Applying prepares both stacks before committing; optional reference-frame removal belongs to the same undo step. Export corrected source images when you need to preserve these pixels outside the session.
-
-Batch processing accepts an optional white-field image in its processing options.
-Choose a defocused reference at the original frame resolution; it is scaled with
-the input stack and applied before registration, using the default dust size.
-An unreadable reference or a size mismatch fails the affected stack visibly.
-The reference is excluded from folder inputs, including grouped processing;
-at least two source frames must remain for fusion. Flat-field correction cannot
-be combined with transparent input. Leave the field empty to process without
-correction. The CLI also accepts the reference with `--dust-map WHITE`.
+**Dust Map (In development)** and white-field correction in Batch Processing and the command line are currently unavailable.
 
 Sensor cleanup is optional and runs on the original sensor-coordinate frames
 before registration. In the desktop application it lives in **Settings →
-Advanced Settings → Sensor cleanup**; the batch dialog has the same controls.
+Advanced Settings → Fusion → Sensor cleanup**; the batch dialog has the same controls.
 Select an explicit defect mask to correct known hot or
 dead pixels; OpenFocus does not infer a mask from specimen images. The mask must
 be a single-channel 8-bit or 16-bit image with the same dimensions as the source:
@@ -1414,7 +1412,7 @@ restored projects with such source histories. Pre-aligned ROI processing cannot
 be combined with sensor cleanup; leave ROI mode and render the full stack.
 Cleanup settings belong to the current session and saved project, not global
 application preferences. Batch and CLI process their original inputs separately,
-with sensor cleanup before flat-field correction and registration.
+with sensor cleanup before registration.
 Defect masks require source files with neutral EXIF orientation. Oriented files,
 camera RAW files, and sources whose orientation cannot be established are
 rejected because their decoded pixels may no longer match sensor coordinates.
@@ -1443,21 +1441,13 @@ carry the sensor-denoise flag but not a defect-mask path; recipes store the mask
 path and its fingerprint. Opening the project itself still
 requires its sources and any recorded flat-field reference.
 
-When a flat-field file reference is applied in **Tools → Dust Map
-(Flat-field)** at the stack's base scale, a saved
-project records its absolute path, content hash and dust size, and reapplies it
-once to the original sources on open. Keep the reference file unchanged and in
-place: a missing or changed reference prevents the project from opening. A
-reference selected from the stack, or correction at a different working/base
-scale, still requires exporting the corrected source stack before saving a
-project. If the working scale changes after correction, restore it to the
-correction scale before saving or export the corrected stack.
+Projects saved with a base-scale file-based flat-field reference still replay that correction on open. Keep the reference file unchanged and in place for project restoration.
 
-**Help → Send feedback** opens local logs. Copy copies the visible session log;
+**Help → Report a Problem** opens on **Feedback Channels**, with links to the account center and GitHub.
+Under **Diagnostics**, **Session log** shows the local log and **Environment Info** shows the system and dependency report.
+**Open Logs Folder** is at the bottom next to Close. Copy copies the visible session log;
 the local feedback ZIP can contain file paths, so review it before sharing.
 Signed-in users can open their account center in the browser to submit feedback.
-The Environment Info control shows the same system and dependency report as
-**Help → Environment Info**.
 **Review error report** shows the sanitized diagnostics that will be sent;
 nothing is uploaded until you choose **Send to OpenFocus**. Automatic reports
 are sent only after a session with an error when enabled. A previous native
@@ -1467,27 +1457,28 @@ user file names or paths. See [Privacy Policy](PRIVACY.md) for details.
 Each launch writes its own rotating log, so concurrent GUI/CLI jobs keep separate
 records. Task IDs link parameters, elapsed time and completed/cancelled/failed
 outcomes; unexpected errors include a full traceback. The feedback ZIP also
-includes the current crash report and dependency versions. Use **Help → Open Logs
+includes the current crash report and dependency versions. Use **Help → Report a Problem → Open Logs
 Folder** or the path shown on the feedback page to find the files. Logs rotate at
 1 MB with three backups per process; inactive session logs older than 14 days are
-removed. For detailed support logs, enable **Settings → Advanced Settings →
-Diagnostics → Detailed logging** (see [Diagnostics](#diagnostics)), or set
-`OPENFOCUS_LOG_LEVEL=DEBUG` before launch; `OPENFOCUS_LOG_DIR` optionally selects
+removed. For detailed support logs, set `OPENFOCUS_LOG_LEVEL=DEBUG` before
+launch. `OPENFOCUS_LOG_DIR` optionally selects
 a different log folder.
 
 ### Tile Settings (Memory Optimization)
 
-Methods supporting external tiles can use them above the configured threshold.
-OpenFocus A/B/C process the whole image at the default threshold. For A and B,
-changing the threshold explicitly enables their external tile path; C does not
-support external tiles. Their bounded row/frame
-passes still reduce working memory while retaining global depth and reconstruction.
+Tiled fusion is on by default. The status below the controls describes how the selected method processes the image. OpenFocus A, B and C process the whole image on the desktop. Alignment only skips fusion. With any of these selected, you can still set tile size, overlap and threshold for the next compatible method. DTCWT uses estimated memory to decide when to tile, so you can set its tile size and overlap. Its threshold field is disabled. Deep neural stacks can tile below the size threshold. Turning tiling off disables all three numeric fields and preserves their values.
 
-Access via **Settings → Advanced Settings → Performance**:
+Access via **Settings → Advanced Settings → Fusion**:
 
 - **Tile Block Size**: Size of each processing tile (default: 1024px)
 - **Tile Overlap**: Overlap between tiles for seamless blending (default: 256px)
 - **Tile Threshold**: Image size above which tiles are used (default: 2048px)
+
+Limits in pixels
+
+- Tile Block Size — 64–16384
+- Tile Overlap — 0–min(4096, half the tile size)
+- Tile Threshold — 256–131072
 
 **Recommendations**:
 - Smaller block size: Lower memory usage, slower processing
@@ -1511,43 +1502,13 @@ high-resolution input.
 The status panel shows used and total physical memory when the operating
 system can provide both readings; otherwise it shows `N/A`.
 
-### Diagnostics
+### Diagnosing a slow render
 
-Access via **Settings → Advanced Settings → Diagnostics**. Both switches are
-off by default, are remembered for this installation only (not in projects or
-templates) and do not change the rendered image.
-
-- **Profile rendering performance** times the stages of each following render,
-  preview and comparison render. **Performance report** shows the most recent
-  report with its finish time: where the time went, the stage tree in execution order with CPU time
-  and peak-memory growth, tile geometry, thread counts and cache activity. A
-  cancelled or failed render still reports the part that ran. **Save as JSON…**
-  exports the full report; reports are otherwise kept only until the
-  application closes. Collecting the report adds negligible time to a render.
-- **Detailed logging** records why a render was planned as it was: resource
-  plans, tile size and count, the temporary directory chosen, memory before
-  and after, and the time of every tile. It takes effect immediately, including
-  for the next render, and makes log files grow faster. **Open Logs Folder**
-  opens the same folder as **Help → Open Logs Folder**.
-
-Turn both on before reproducing a slow render, then attach the saved report
-and a feedback package. [PERFORMANCE.md](./PERFORMANCE.md#diagnosing-a-slow-render)
-explains how to read them.
-
-### Thread Count Settings
-
-Control CPU parallel processing:
-
-Access via **Settings → Advanced Settings → Performance**:
-
-- `0` selects automatic scheduling and is the default for new settings.
-- Positive values are upper limits; saved limits survive upgrades.
-- CPU capacity, resource mode and memory headroom may lower concurrency.
-  More threads do not necessarily make a render faster.
+For a single, non-grouped CLI render, add `--profile-performance FILE` to save the stage timings. Use `--log-level debug` for detailed logging during that run. Find the desktop logs under **Help → Report a Problem → Open Logs Folder**. [Performance guide](./PERFORMANCE.md#diagnosing-a-slow-render)
 
 ### Resource Mode
 
-**Settings → Advanced Settings → Performance → Resource mode** decides how
+**Settings → Advanced Settings → Fusion → Resource mode** decides how
 much of the machine a render may use. It never changes the fused image.
 
 | Mode | Behaviour |
@@ -1564,9 +1525,11 @@ unchanged; choosing smaller tiles yourself can change output pixels.
 
 ### GPU Acceleration Toggle
 
-OpenFocus B can use an OpenCL GPU for depth resampling, filtering, activity and selection, guided smoothing and source merging when a compatible GPU driver and compiler are available. Full GPU depth processing requires sufficient host and verified device memory; bounded GPU activity and merging can still run when full depth processing is not admitted. Unavailable devices and device failures fall back to CPU. StackMFF V1/V2/V3 use ONNX Runtime; DirectML on Windows and CoreML on macOS may accelerate inference. Installed runtimes or available providers alone do not prove GPU execution. See [GPU support](GPU_SUPPORT.md) for platform requirements.
+OpenFocus B can use an OpenCL GPU for depth resampling, filtering, activity and selection, guided smoothing and source merging when a compatible GPU driver and compiler are available. Full GPU depth processing requires sufficient host and verified device memory. Bounded GPU activity and merging can still run when full depth processing is unavailable. Device failures fall back to CPU.
 
-With GPU acceleration enabled, OpenFocus C can use a compatible OpenCL GPU for full-image pyramid fusion. Insufficient memory, an unavailable device or a device failure can cause CPU fallback. C's depth-map export uses the CPU. OpenFocus A and alignment use the CPU.
+For StackMFF V1/V2/V3, open **Settings → AI acceleration components** to check the GPU and install the optional Windows NVIDIA pack. OpenFocus tries TensorRT, PyTorch CUDA, an accelerated ONNX Runtime provider, and CPU as applicable. Windows includes DirectML and macOS can use CoreML. The first TensorRT run for a model and tile shape includes compilation. Feedback diagnostics report the engine that ran the model and the reasons for fallback. See [GPU support](GPU_SUPPORT.md).
+
+With GPU acceleration enabled, OpenFocus A, OpenFocus C, Guided Filter, GFG-FGF, DCT and DTCWT can use a compatible OpenCL GPU for full-image fusion. Insufficient memory, an unavailable device or a device failure can cause CPU fallback. C's depth-map export uses the CPU. ECC alignment can use a supported GPU to shrink large images before the CPU estimates the transforms.
 
 
 - Toggle via **Settings → GPU Acceleration**
@@ -1575,18 +1538,11 @@ With GPU acceleration enabled, OpenFocus C can use a compatible OpenCL GPU for f
   `CPU*` when an accelerator exists but the selected method is CPU-only
 - The choice takes effect on the next render and is remembered
 
-### AI Batch Size
-
-Access via **Settings → Advanced Settings → AI**:
-
-- The saved batch limit defaults to 2; the current execution policy caps actual
-  inference at one tile per call on every device.
-- Increasing this limit does not enable unvalidated GPU batching or reduce
-  spatial tile size.
-
 ### Themes
 
-Two interface themes are available: **Light (default)** and **Dark**. Switch via
+Choose **Light (default)**, **Dark**, or **Neutral Gray**. Neutral Gray uses a
+mid-gray canvas for viewing, comparing and retouching images and for previewing
+depth maps, labels, watermarks and scale bars. Switch via
 **Settings → Theme**; the choice is applied immediately (the Windows title
 bar follows) and remembered. First-launch users choose a theme in the
 welcome dialog; a saved choice always wins.
@@ -1615,28 +1571,34 @@ iPhone photos load directly. Requires `pillow-heif`, which
 ### Updates
 
 **Help → Check for Updates** compares your version with the release information
-at `openfocus.top`. A newer release is downloaded from the same site in the
-background while the app is idle; once the build is staged, the banner and
-status area offer **Restart and Update**, which applies it offline. Builds that
-cannot self-update open the website download page instead. Automatic checks run
-quietly at most once a day.
+at `openfocus.top`. Supported desktop builds download the newest release for
+the selected channel while the app is idle. Choose **Restart and Update** when
+the verified package is ready. The update can then be applied offline. Use
+**View What's New** to see the changes by version. In Advanced Settings you can
+opt in to beta releases or disable automatic downloads. Automatic checks still
+run quietly at most once a day. Builds without self-update open the website.
 
 ### Registration Cache
 
-OpenFocus can store registration results in a `.openfocus_cache` folder
-next to the source stack. Re-opening the same stack (files unchanged)
-then skips alignment entirely. Toggle it in **Settings → Advanced Settings →
-Registration**; stale entries are replaced automatically.
-Encoded aligned frames and registration plan manifests share the default 2 GiB
-cache budget. Evicted plans are estimated again when needed; source files are
-not affected by eviction.
+OpenFocus stores registration results in your user cache. Reopening an
+unchanged stack with the same registration settings reuses the saved result.
+
+- Windows — `%LOCALAPPDATA%\OpenFocus\alignment-cache`
+- macOS — `~/Library/Caches/OpenFocus/alignment-cache`
+- Linux — `$XDG_CACHE_HOME/OpenFocus/alignment-cache`, or
+  `~/.cache/OpenFocus/alignment-cache` by default
+
+Encoded aligned frames and registration plans share a 2 GiB budget across
+all stacks. Cache entries persist across launches. When a new entry needs
+space, OpenFocus evicts the least recently used entries. Evicted entries are
+recomputed when needed. OpenFocus leaves legacy
+`.openfocus_cache` folders beside source stacks in place.
 
 ### Persisted Settings
 
 All of the following survive an application restart automatically:
-thread count, resource mode, tile parameters, registration downscale width, AI
-Fusion (StackMFF V3) batch size, the GPU acceleration toggle, the registration
-cache and alignment-diagnostic toggles, interface language, window size/panel
+resource mode, tile parameters, registration downscale width, GPU acceleration,
+interface language, window size/panel
 layout, the drag-out export format, the per-method brightness options,
 smoothing and Radius values, and your recently opened stacks. Settings dialogs
 save when you confirm them; everything is also saved when the application
@@ -1683,11 +1645,11 @@ Process multiple folders automatically:
      dialog (or on the folder list) to queue them all at once; dropping
      switches to multi-folder mode and the thumbnails appear as they decode
    - **Remove Folders**: Remove selected folders from the list
-3. Configure output settings:
+3. Review the fusion and registration choices in **Method**. Grouping and sensor cleanup are in **Options**.
+4. Set the file format and destination in **Output**:
    - **Save to Subfolder**: Creates results in each input folder
    - **Save to Same Folder**: Saves alongside input while preserving existing files
    - **Custom Folder**: Specify output location
-4. Review current fusion/registration settings
 5. Click **Start Batch** to begin
 
 The batch dialog shows real-time progress. You can cancel processing at any time.
@@ -1697,7 +1659,7 @@ The batch dialog shows real-time progress. You can cancel processing at any time
 - Starts from a snapshot of the main window settings; batch controls override it.
 - Each folder or split group is processed independently through the same pipeline.
 - **Grouped fusion** is an optional way to process long stacks in multiple-folder
-  mode. Tick **Process large stacks in groups**; the **Group size** and
+  mode. In **Options**, tick **Process large stacks in groups**. The **Group size** and
   **Overlap** controls appear only while it is on. Group size must be at least 2
   and overlap between 0 and the group size minus 2. The desktop overlap starts
   at 1 and is limited to the allowed range when the size changes. Groups
@@ -1723,8 +1685,7 @@ The batch dialog shows real-time progress. You can cancel processing at any time
   line, an example is `python main.py --input stack --output fused.png --group-size 8 --group-overlap 1`.
   Grouped CLI input must be a folder and cannot be combined with `--depth-map`.
   A different stack-wide OpenFocus alignment reference cannot be combined with
-  grouping. A flat-field reference is applied to original frames before
-  registration; output sharpening is applied once after the final group.
+  grouping. Output sharpening is applied once after the final group.
 - **What lands where, by mode.** With **align only**, the selected destination
   receives one `<stack>_aligned` folder per stack and the output panel lists
   that folder. With **fusion + save aligned**, the fused image is written as
@@ -1743,21 +1704,23 @@ The batch dialog shows real-time progress. You can cancel processing at any time
 
 ### Batch image conversion
 
-Open **Tools → Batch Image Converter** independently of the current stack. Add files or all supported images in a folder, choose or enter an output folder and a format, then select **Convert**. The converter starts with PNG (lossless and 16-bit) and restores the last format you explicitly chose; an example filename below the selector shows the actual extension. This tool converts individual files and is separate from fusion Batch processing, which has its own output format. Missing output folders are created when conversion starts. The list shows output paths and errors per source; the summary reports successful and failed sources. Cancel stops between operations; already completed files remain available. Closing during conversion requests cancellation and closes the window when processing stops.
+Open **Tools → Batch Image Converter** and add images. By default, files in `Photos` are written to a sibling folder named `Photos_converted`. Edit the suffix, choose a named subfolder of each source folder, use the source folder itself, or browse to a single destination. The example shows the path for a selected file or the first queued file. Existing files keep their names and new outputs receive a number when necessary.
+
+Choose a format and output size, then select **Convert**. The initial format is lossless PNG. The dialog remembers your last format. Keep the original size, cap the long edge at 2048, 4096 or 8192 pixels, or enter a percentage. Each image keeps its aspect ratio and smaller images stay at their native resolution. DNG keeps the sensor dimensions. Switching back to a raster format restores your size choice.
+
+An image already in the target format is skipped unless it actually needs shrinking. For example, JPEG → JPEG at original size leaves the file untouched. If every file already matches at original size, choose another format or reduce the size to enable **Convert**. Skipped rows have their own count in the summary. Double-click a completed row for output paths or errors. Cancel or close to stop after the current operation. Completed files remain available.
 
 Drag local image files or folders onto the queue or dialog to add them. Folder
 imports include direct children only. Files are naturally sorted and deduplicated;
-the import summary reports added and skipped entries. Convert becomes available
-when the queue contains images and the output path names an existing directory
-or a new directory. Quoted paths and environment variables are supported.
-The selected format's relevant limitations appear below the format selector;
-hover over the selector for the full conversion guidance.
+the import summary reports added and skipped entries. Custom paths support
+quotes and environment variables. Missing output folders are created when
+needed. The selected format’s limits appear below the controls.
 
-The fixed 96×72 thumbnail sits to the left of each row. Select multiple rows and
-press **Delete** or **Backspace**, or choose **Remove**. These keys edit text
-normally when the output field has focus. Import and removal remain disabled
-until conversion or cancellation actually finishes. Thumbnails run in a separate,
-bounded queue and
+The fixed 96×72 thumbnail sits to the left of each row. Right-click a selected
+row and choose **Remove from queue** to remove the selection. Right-click an
+unselected row to act on it alone. **Delete** and **Backspace** remove selected
+rows while the list has focus. Queue edits are available again once conversion
+or cancellation finishes. Thumbnails run in a separate, bounded queue and
 use JPEG decoder scaling or small raster pages. Large RAW files use bounded
 embedded JPEG ranges from TIFF-based RAW or RAF containers; a format without a
 safe preview, including some CR3 files, shows a placeholder instead of unpacking
@@ -1772,9 +1735,8 @@ Supported three-color Bayer and X-Trans sensors retain the exact active CFA
 samples, their black levels, white level, as-shot white balance, D65 camera
 matrix, crop and orientation. Masked optical borders are omitted; active pixels
 are neither resized nor developed. Samples use a 16-bit TIFF container while
-retaining the original 12/14/16-bit white level. Existing DNG files are copied
-byte-for-byte, preserving their profiles, processing opcodes and proprietary
-metadata. Non-CFA three-color sensors use **LinearRaw**, containing camera-linear
+retaining the original 12/14/16-bit white level. Existing DNG inputs are skipped.
+Non-CFA three-color sensors use **LinearRaw**, containing camera-linear
 RGB rather than a sensor mosaic. Ordinary JPEG/PNG/TIFF inputs cannot become
 camera RAW by choosing DNG and are reported as errors.
 
@@ -1805,6 +1767,10 @@ Each job runs native codecs with one thread. Cancellation stops new admissions
 and checks between pages, decode/write stages and DNG strips; native codec calls
 finish cooperatively. Completed files remain available and incomplete temporary
 files are removed. Output-name reservation is atomic across concurrent jobs.
+The converter writes color JPEGs at quality 95 with full chroma resolution
+using a temporary disk buffer. If a file fails, its row shows the codec or
+filesystem error. After freeing the indicated memory or disk space, you can
+convert just the affected files.
 
 For ordinary image output, camera RAW is developed with LibRaw using camera white balance and without automatic brightening. Available RAW support depends on the installed LibRaw version. Multipage TIFF is exported as separately numbered images. JPEG is lossy, and JPEG, BMP and WebP reduce 16-bit pixels to 8-bit; PNG and TIFF retain 16-bit pixels. Transparent images require PNG. LZW TIFF pages with alpha, unsupported TIFF color layouts and sample types are reported as errors. Existing files and inputs are never replaced: name conflicts receive numbered suffixes. Every image still requires enough free memory and disk space for its decoder and encoder. Safe camera EXIF and compatible RGB profiles are retained where supported; some formats or pages cannot carry all metadata.
 
@@ -1815,6 +1781,11 @@ each page's own valid RGB profile independently.
 ---
 
 ## 13. Exporting Results
+
+Hover over an output to see its processing details. New fusion results report
+whether their input was processed as a whole or in tiles, plus the actual block
+size, configured grid overlap and number of tile passes. The tooltip shows the
+method settings used for that result.
 
 ### Saving a Single Result
 
@@ -1831,7 +1802,7 @@ name, including names created concurrently. If safe publication is unavailable,
 the export reports failure and keeps existing files. Explicit **Save As** still
 allows replacement when you choose and confirm the target.
 
-In **Settings → Advanced Settings → Output naming**, an optional filename
+In **Settings → Advanced Settings → General → Output naming**, an optional filename
 prefix helps identify newly rendered results. The example updates as you type;
 use up to 40 letters, numbers, underscores or hyphens. Leave it empty for the
 original naming. Confirm with **OK** to remember it, or cancel to discard the
@@ -1901,9 +1872,9 @@ four bytes per pixel of JPEG scratch space in addition to the destination file.
 Its mapped pages remain subject to the operating system's memory management.
 Advanced progressive or optimized JPEG requests require additional image-sized
 codec memory and are admitted only when the resource budget can cover it.
-Other OpenCV JPEG parameters, including restart intervals, sampling factors and
-independent luminance/chrominance quality, retain their requested settings through
-the original codec after admission for its complete image-sized working set.
+Baseline JPEG supports 4:4:4, 4:2:2 and 4:2:0 chroma sampling in row bands.
+Other sampling modes, restart intervals and separate luminance/chrominance
+quality settings use OpenCV after admission for its whole-image working set.
 Cancellation of that native codec call takes effect at its boundaries; an existing
 destination remains intact. BMP, WebP and other legacy encoders also require
 image-sized memory buffers.
@@ -1939,7 +1910,7 @@ openfocus describe                      # JSON: methods, parameters, capabilitie
 openfocus gui [--control] [--socket NAME] [paths…]   # start the desktop app
 openfocus ctl <command> [flags]          # drive a running window (see AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
-openfocus recipe run FILE [--dry-run]    # replay a saved headless recipe
+openfocus recipe run FILE [--dry-run] [--experimental]
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -1952,20 +1923,20 @@ The agent-facing workflow is documented in
 From a Python environment (or next to the packaged executable):
 
 ```bash
-# Fuse a folder with the default method (StackMFF V3)
+# Fuse a folder with the default method (OpenFocus B)
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT with ECC registration, 8 threads
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 forced to CPU with a custom tile size
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Explicit file list; video files are also accepted as input
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Single multi-page TIFF Z-stack with a metadata-calibrated scale bar
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Unattended: align, stack, replace the background, and keep the stacked
 # result and the missing-data map for review
@@ -2002,7 +1973,8 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--output-dir, -d` | Batch mode: fuse every input folder, writing `<folder>.png` per stack |
 | `--resume` | Batch mode: skip a folder only when every currently requested output is a nonempty regular file |
 | `--config FILE` | Batch mode: JSON per-folder overrides, e.g. `{"stackA": {"method": "dct"}}` |
-| `--method, -m` | `stackmffv3` (default), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
+| `--method, -m` | Stable: `openfocus_a`, `openfocus_b` (default), `openfocus_c`. Experimental: `guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2`, `stackmffv3` |
+| `--experimental` | Enable experimental fusion methods for this CLI invocation |
 | `--param KEY=JSON_VALUE` | Set any fusion parameter; repeatable and overrides legacy flags |
 | `--align, -a` | `none` (default), `homography`, `ecc`, `both`, `openfocus` |
 | `--align-param KEY=JSON_VALUE` | Set any registration parameter; repeatable |
@@ -2012,8 +1984,8 @@ an input or another output. Batch, grouped and dry-run modes reject this option.
 | `--base-frame` | Optional post-fusion step: match the output's low frequencies to the `last`/`first` frame (`none` default) |
 | `--sort` | Frame order for `openfocus_a/b/c`: `asc` (default, file order), `desc` (reverse a far-to-near sweep), `off` |
 | `--frame-order` | Folder input: `auto` (default) orders frames near to far by EXIF focus steps when every frame has them (OM SYSTEM focus bracketing starts mid-depth), otherwise by name; `name` always sorts by filename. Explicit file lists keep their order |
-| `--sharpen-output` | Apply mild unsharp masking to the fused output (off by default) |
-| `--dust-map WHITE` | Flat-field (dust map) correction from a defocused white-field shot |
+| `--sharpen-output` | Enable sharpening of the fused output (off by default) |
+| `--sharpen-strength PERCENT` | Set integer strength from 0 to 200 (default 100). Applies with `--sharpen-output`; 0 leaves the result unchanged. |
 | `--defect-mask-path MASK` | Sensor-coordinate defect mask repaired before registration |
 | `--sensor-denoise` | Conservative sensor denoising before registration |
 | `--kernel, -k` | Odd kernel size for methods that declare `kernel_size`; OpenFocus A/B use `--param radius=...` |
@@ -2071,10 +2043,13 @@ replay it:
 
 ```bash
 openfocus recipe create line.json --input ./stack --output ./out/fused.tif \
-  --method dtcwt --align ecc --threads 8
+  --method openfocus_b --align ecc --threads 8
 openfocus recipe run line.json
 openfocus recipe run line.json --dry-run
 ```
+
+Pass `--experimental` each time you run a recipe that selects an experimental
+fusion method. The recipe stores the chosen method.
 
 `recipe create --project project.ofproj --input ./stack --output ./out/fused.tif`
 captures a project's processing settings against explicitly chosen inputs; the
@@ -2199,9 +2174,14 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 | Shortcut | Action |
 |----------|--------|
 | `Up` / `Down` (source list focused) | Previous / next frame |
+| `Ctrl+A` (source list focused) | Highlight all rows |
+| `Ctrl+Shift+I` / `Ctrl+Shift+X` (source list focused) | Check / uncheck every frame for rendering |
+| `Ctrl+Shift+F` (source list focused) | Start / cancel review of the entire stack |
 | `Mouse Wheel` | Zoom the view; while holding the left button, change magnifier zoom |
 | `Ctrl + Wheel` while holding the left button | Resize the magnifier |
 | `Middle-click` | Fit the image to the window |
+
+On macOS, use `Command` in place of `Ctrl` for these source list shortcuts.
 
 ### General
 
@@ -2230,13 +2210,12 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 
 #### AI Unavailable
 
-- Enable experimental features in [Settings](#11-settings-and-configuration) and confirm the settings; AI methods are disabled in the desktop until opted in. This is separate from runtime and model availability.
 - Check that ONNX Runtime and the bundled model are installed.
-- Check via **Help → Environment Info**
+- Check via **Help → Report a Problem → Diagnostics → Environment Info**
 
 #### Out of Memory Errors
 
-- Enable tile processing in **Settings → Advanced Settings → Performance**
+- Enable tile processing in **Settings → Advanced Settings → Fusion**
 - Reduce tile block size
 - Large stacks retain source and aligned images in system RAM; GPU memory does
   not replace those allocations
@@ -2245,30 +2224,23 @@ Exit codes: `0` success, `1` processing error, `2` usage error. Running
 
 #### Registration Fails
 
-- Use **OpenFocus (fast)** for bounded rigid motion, or enable **Stop on
-  rejected frame** to fail early instead of accepting unaligned frames
+- Desktop registration stops the affected stack if a frame is rejected. Read the frame and reason in the error message and inspect that source image before retrying.
 - Reduce the downscale width in **Settings → Advanced Settings → Registration**
 - Ensure images have sufficient contrast and features
-- Enable **Collect alignment diagnostics**, render again, and read
-  **Settings → Advanced Settings → Registration → Alignment diagnostics** for the failing frames
 
 #### Slow Processing
 
-- Leave threads at automatic (`0`); CPU capacity, resource mode and memory
-  headroom already cap concurrency
 - Use Maximum resource mode for an unattended batch, or Guided Filter /
   GFG-FGF instead of an AI method
 - Reduce image resolution or use **Quick preview** while tuning
-- To see which stage takes the time, enable **Settings → Advanced Settings →
-  Diagnostics → Profile rendering performance**, render again and open
-  **Performance report**
+- For a single, non-grouped CLI render, add `--profile-performance FILE` to see which stage takes the most time.
 
 #### Windows SmartScreen Warning on First Launch
 
-Windows code-signing status varies by release; see the release notes. Signing
-is not guaranteed. Download the build from **https://openfocus.top** rather
-than a third-party mirror. If SmartScreen warns, click **More info → Run
-anyway**. The first launch after unzipping may take 30–60 seconds.
+Windows builds are unsigned, so SmartScreen may show a warning. Download from
+**https://openfocus.top** or the project’s GitHub Releases page. You can verify
+the download against the SHA-256 hash in the release manifest. The first launch
+after unzipping may take 30–60 seconds.
 
 #### macOS Says the App "Cannot Be Opened" or "Is Damaged"
 
@@ -2291,7 +2263,7 @@ from source.
 
 ### Getting Help
 
-1. **Environment Info**: Go to **Help → Environment Info** to check your installation
+1. **Environment Info**: Go to **Help → Report a Problem → Diagnostics → Environment Info** to check your installation
 2. **Contact Support**: Go to **Help → Contact Us** for support information
 
 ---

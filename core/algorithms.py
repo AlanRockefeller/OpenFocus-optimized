@@ -22,6 +22,7 @@ class ParameterSpec:
     odd: bool = False
     hint_key: str | None = None
     choice_labels: tuple = ()
+    whole_level_editor: bool = False  # Desktop presentation; decimals describes the accepted value.
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class FusionAlgorithm:
     external_tiling_supported: bool = True
     # The runner consumes sized source descriptors without retaining decoded stacks.
     streaming_sources: bool = False
+    experimental: bool = True
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,9 @@ def _parameters(specs):
             raise ValueError(f'Invalid choice label: {spec.key}')
         if not isinstance(spec.odd, bool) or (spec.hint_key is not None and not isinstance(spec.hint_key, str)):
             raise ValueError(f'Invalid parameter metadata: {spec.key}')
+        if not isinstance(spec.whole_level_editor, bool) or (
+                spec.whole_level_editor and (spec.choices or spec.step != 1)):
+            raise ValueError(f'Invalid whole-level editor: {spec.key}')
         if spec.choices:
             if any(not isinstance(v, (str, int, float, bool)) or isinstance(v, float) and not math.isfinite(v) for v in spec.choices):
                 raise ValueError(f'Invalid choices: {spec.key}')
@@ -221,7 +226,8 @@ def register_fusion(spec):
         raise ValueError('Fusion display name and file tag are required')
     for field in ('parallel_frames', 'ordered_plan', 'neural', 'sort_frames', 'promotes_color',
                   'default_exposure_match', 'default_base_correct', 'order_sensitive',
-                  'external_tiling_default', 'external_tiling_supported', 'streaming_sources'):
+                  'external_tiling_default', 'external_tiling_supported', 'streaming_sources',
+                  'experimental'):
         if not isinstance(getattr(spec, field), bool):
             raise ValueError(f'{field} must be boolean')
     if spec.sort_frames and spec.order_sensitive:
@@ -380,6 +386,15 @@ def resolve_registration_parameters(id, values=None):
     return _resolve(registration_parameter_specs(id), values)
 
 
+def desktop_registration_parameters(method, values=None):
+    """Resolve desktop job and cache parameters, including older saved settings."""
+    specs = registration_parameter_specs(method)
+    parameters = _resolve(specs, values)
+    if _ALIGN_FAILURE in specs:
+        parameters['failure_policy'] = 'fail'
+    return parameters
+
+
 def registration_defaults(id):
     return resolve_registration_parameters(id)
 
@@ -388,9 +403,9 @@ _K_GUIDED = ParameterSpec('kernel_size', 'label_kernel_guided', 31, 1, 51, 2, od
 _K_DCT = ParameterSpec('kernel_size', 'label_kernel_dct', 7, 1, 51, 2, odd=True)
 _K_GFG = ParameterSpec('kernel_size', 'label_kernel_gfg', 7, 1, 51, 2, odd=True)
 _R_OF = ParameterSpec('radius', 'label_of_radius', 8, 1, 50)
-_S_A = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 8, .1, 6, hint_key='label_of_smoothing_a_hint')
-_S_B = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 34, .1, 6)
-_S_C = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 14, .1, 6)
+_S_A = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 8, decimals=6, whole_level_editor=True, hint_key='label_of_smoothing_a_hint')
+_S_B = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 34, decimals=6, whole_level_editor=True)
+_S_C = ParameterSpec('smoothing', 'label_of_smoothing', 4., 0, 14, decimals=6, whole_level_editor=True)
 _FEATHER_B = ParameterSpec('feather', 'label_of_feather', 3, 0, 10)
 _LEVELS = ParameterSpec('N', 'compare_levels', 4, 1, 6)
 _MODE = ParameterSpec('mode', 'label_ai_mode', 'soft', choices=('soft', 'hard'), choice_labels=('radio_ai_soft', 'radio_ai_hard'))
@@ -398,15 +413,18 @@ _ADAPTER = 'core.algorithm_adapters:'
 _ALIGN_FAILURE = ParameterSpec('failure_policy', 'label_align_failure_policy', 'continue', choices=('continue', 'fail'), choice_labels=('align_failure_continue', 'align_failure_fail'))
 _FUSION_CLASS = 'core.multi_focus_fusion:MultiFocusFusion.'
 
+FUSION_DEFAULT = 'openfocus_b'
+
+
 register_fusion(FusionAlgorithm('stackmffv3', 'radio_stackmff', 'StackMFF V3', 'StackMFFV3', _FUSION_CLASS + '_fuse_stackmffv3', (_MODE,), DepthSpec(_ADAPTER + 'depth_neural', (_MODE,)), hint_key='radio_stackmff_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, roi=_ADAPTER + 'roi_neural', promotes_color=True, tile_decider=_ADAPTER + 'neural_needs_tiles', tile_runner=_FUSION_CLASS + '_fuse_tiled_ai_batched', depth_planner='core.depth_map:_plan_neural_depth', weights='weights/stackmff_v3_final.onnx', category='ai', streaming_sources=True))
 register_fusion(FusionAlgorithm('stackmffv2', 'radio_stackmff_v2', 'StackMFF V2', 'StackMFFV2', _FUSION_CLASS + '_fuse_stackmffv2', (), DepthSpec(_ADAPTER + 'depth_stackmffv2', ()), hint_key='radio_stackmff_v2_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, order_sensitive=True, promotes_color=True, tile_decider=_ADAPTER + 'stackmffv2_needs_tiles', depth_planner='core.depth_map:_plan_stackmffv2_depth', weights='weights/stackmff_v2_final.onnx', category='ai', streaming_sources=True))
 register_fusion(FusionAlgorithm('stackmff', 'radio_stackmff_v1', 'StackMFF', 'StackMFF', _FUSION_CLASS + '_fuse_stackmff', (), hint_key='radio_stackmff_v1_hint', environment=_FUSION_CLASS + '_validate_ai_environment', neural=True, promotes_color=True, tile_decider=_ADAPTER + 'neural_needs_tiles', tile_runner=_FUSION_CLASS + '_fuse_tiled_stackmff', weights='weights/stackmff_final.onnx', category='ai', streaming_sources=True))
-register_fusion(FusionAlgorithm('openfocus_a', 'radio_openfocus_a', 'OpenFocus A', 'OpenFocusA', _FUSION_CLASS + '_fuse_openfocus_a', (_R_OF, _S_A), hint_key='radio_openfocus_a_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_a_resources', tile_decider=_ADAPTER + 'openfocus_a_needs_tiles', roi=_ADAPTER + 'roi_openfocus_a', category='spatial', resize_interpolation='area', external_tiling_default=False, streaming_sources=True))
-register_fusion(FusionAlgorithm('openfocus_b', 'radio_openfocus_b', 'OpenFocus B', 'OpenFocusB', _FUSION_CLASS + '_fuse_openfocus_b', (_R_OF, _S_B, _FEATHER_B), DepthSpec(_ADAPTER + 'depth_openfocus_b', (_R_OF, _S_B, _FEATHER_B)), hint_key='radio_openfocus_b_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_b_resources', tile_decider=_ADAPTER + 'openfocus_b_needs_tiles', roi=_ADAPTER + 'roi_openfocus_b', category='spatial', resize_interpolation='area', external_tiling_default=False, streaming_sources=True))
+register_fusion(FusionAlgorithm('openfocus_a', 'radio_openfocus_a', 'OpenFocus A', 'OpenFocusA', _FUSION_CLASS + '_fuse_openfocus_a', (_R_OF, _S_A), hint_key='radio_openfocus_a_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_a_resources', tile_decider=_ADAPTER + 'openfocus_a_needs_tiles', roi=_ADAPTER + 'roi_openfocus_a', category='spatial', resize_interpolation='area', external_tiling_default=False, streaming_sources=True, experimental=False))
+register_fusion(FusionAlgorithm('openfocus_b', 'radio_openfocus_b', 'OpenFocus B', 'OpenFocusB', _FUSION_CLASS + '_fuse_openfocus_b', (_R_OF, _S_B, _FEATHER_B), DepthSpec(_ADAPTER + 'depth_openfocus_b', (_R_OF, _S_B, _FEATHER_B)), hint_key='radio_openfocus_b_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_b_resources', tile_decider=_ADAPTER + 'openfocus_b_needs_tiles', roi=_ADAPTER + 'roi_openfocus_b', category='spatial', resize_interpolation='area', external_tiling_default=False, streaming_sources=True, experimental=False))
 register_fusion(FusionAlgorithm('guided_filter', 'radio_guided_filter', 'Guided Filter', 'GuidedFilter', _FUSION_CLASS + '_fuse_guided_filter', (_K_GUIDED,), hint_key='radio_guided_filter_hint', environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'guided_resources', parallel_frames=True, roi=_ADAPTER + 'roi_guided', promotes_color=True, category='spatial', streaming_sources=True))
 register_fusion(FusionAlgorithm('gfgfgf', 'radio_gfg', 'GFG-FGF', 'GFGFGF', _FUSION_CLASS + '_fuse_gfgfgf', (_K_GFG,), DepthSpec(_ADAPTER + 'depth_gfg', (_K_GFG,)), hint_key='radio_gfg_hint', environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'gfg_resources', parallel_frames=True, roi=_ADAPTER + 'roi_gfg', promotes_color=True, category='spatial', streaming_sources=True))
-register_fusion(FusionAlgorithm('openfocus_c', 'radio_openfocus_c', 'OpenFocus C', 'OpenFocusC', _FUSION_CLASS + '_fuse_openfocus_c', (_S_C,), DepthSpec(_ADAPTER + 'depth_openfocus_c', (_S_C,)), hint_key='radio_openfocus_c_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_c_resources', roi=_ADAPTER + 'roi_openfocus_c', category='transform', resize_interpolation='area', external_tiling_default=False, external_tiling_supported=False, streaming_sources=True))
-register_fusion(FusionAlgorithm('dct', 'radio_dct', 'DCT', 'DCT', _FUSION_CLASS + '_fuse_dct', (_K_DCT,), DepthSpec(_ADAPTER + 'depth_dct', (_K_DCT,)), environment=_FUSION_CLASS + '_validate_dct_environment', resource_estimator=_ADAPTER + 'dct_resources', hint_key='radio_dct_hint', roi=_ADAPTER + 'roi_dct', promotes_color=True, category='transform', streaming_sources=True))
+register_fusion(FusionAlgorithm('openfocus_c', 'radio_openfocus_c', 'OpenFocus C', 'OpenFocusC', _FUSION_CLASS + '_fuse_openfocus_c', (_S_C,), DepthSpec(_ADAPTER + 'depth_openfocus_c', (_S_C,)), hint_key='radio_openfocus_c_hint', sort_frames=True, environment=_FUSION_CLASS + '_validate_spatial_environment', resource_estimator=_ADAPTER + 'openfocus_c_resources', roi=_ADAPTER + 'roi_openfocus_c', category='transform', resize_interpolation='area', external_tiling_default=False, external_tiling_supported=False, streaming_sources=True, experimental=False))
+register_fusion(FusionAlgorithm('dct', 'radio_dct', 'DCT', 'DCT', _FUSION_CLASS + '_fuse_dct', (_K_DCT,), DepthSpec(_ADAPTER + 'depth_dct', (_K_DCT,)), environment=_FUSION_CLASS + '_validate_dct_environment', resource_estimator=_ADAPTER + 'dct_resources', parallel_frames=True, hint_key='radio_dct_hint', roi=_ADAPTER + 'roi_dct', promotes_color=True, category='transform', streaming_sources=True))
 register_fusion(FusionAlgorithm('dtcwt', 'radio_dtcwt', 'DTCWT', 'DTCWT', _FUSION_CLASS + '_fuse_dtcwt', (_LEVELS,), DepthSpec(_ADAPTER + 'depth_dtcwt', (_LEVELS,)), environment=_FUSION_CLASS + '_validate_transform_environment', hint_key='radio_dtcwt_hint', resource_estimator=_ADAPTER + 'dtcwt_resources', parallel_frames=True, ordered_plan=True, roi=_ADAPTER + 'roi_dtcwt', promotes_color=True, tile_decider=_ADAPTER + 'dtcwt_needs_tiles', category='transform', streaming_sources=True))
 register_registration(RegistrationAlgorithm('none', 'check_align_none', '', hint_key='check_align_none_hint'))
 register_registration(RegistrationAlgorithm('homography', 'check_align_homography', 'Homography', _ADAPTER + 'registration_homography', (_ALIGN_FAILURE,), hint_key='check_align_homography_hint'))

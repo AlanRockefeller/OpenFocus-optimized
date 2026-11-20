@@ -22,7 +22,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D7?logo=windows&logoColor=white" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000?logo=apple&logoColor=white" alt="macOS Apple Silicon">
-  <img src="https://img.shields.io/badge/Linux-CLI-FCC624?logo=linux&logoColor=black" alt="Linux CLI">
+  <img src="https://img.shields.io/badge/Linux-x86--64-FCC624?logo=linux&logoColor=black" alt="Linux x86-64 desktop and CLI">
   <a href="https://pypi.org/project/openfocus/"><img src="https://img.shields.io/badge/PyPI-openfocus-3775A9?logo=pypi&logoColor=white" alt="PyPI"></a>
 </p>
 
@@ -55,7 +55,7 @@
 ## 📢 News
 
 > [!NOTE]
-> **[v1.77.0-beta.7 is available](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7)** — This prerelease adds OpenCL GPU acceleration for OpenFocus B on compatible devices, with CPU fallback. It also fixes wipe comparison and adds auto background and restorable retouch sessions. See the [Changelog](./CHANGELOG.md) for the full update and supported inputs.
+> **OpenFocus 2.0.0** adds a Linux desktop build, GPU acceleration for OpenFocus A/B/C on compatible devices, and original-pixel inspection with reusable method comparisons. [Download](https://openfocus.top/#download) · [Changelog](./CHANGELOG.md#200)
 
 Earlier releases are in the [Changelog](./CHANGELOG.md).
 
@@ -215,11 +215,16 @@ Control the desktop app through a token-protected local channel.
 - **Languages** — twelve UI languages with automatic locale detection.
 - **Memory** — bounded frame/tile work, disk-backed intermediates and neural models loaded only when selected.
 
-StackMFF V1/V2/V3 use dynamic ONNX checkpoints and ONNX Runtime; production
-inference does not bundle PyTorch. The current runtime can use DirectML on
-Windows or CoreML on macOS and falls back to CPU when needed. A provider being
-available does not prove GPU execution; support across GPU hardware still needs
-validation. See [GPU support](docs/GPU_SUPPORT.md).
+OpenFocus A, B and C are the stable fusion methods. To use the other fusion
+methods, enable **Experimental features** in Advanced Settings or pass
+`--experimental` to the headless CLI.
+
+StackMFF V1/V2/V3 run with the bundled ONNX Runtime. Supported Windows x64
+NVIDIA systems can install TensorRT and PyTorch CUDA from **Settings → AI
+acceleration components**. With GPU acceleration enabled, OpenFocus tries the
+applicable native engines, then an accelerated ONNX Runtime provider such as
+DirectML or CoreML, then CPU. Diagnostics record the engine used by the model.
+See [GPU support](docs/GPU_SUPPORT.md).
 
 Neural inference adapts spatial tile size to available resources while keeping
 all focal frames in each inference. Imported frames and alignment scratch can
@@ -237,10 +242,10 @@ space for the selected source, processing workspace and full-size result.
 <a id="install"></a>
 ## ⬇️ Install
 
-The [OpenFocus website](https://openfocus.top/#download) and its install scripts offer the latest stable Windows or macOS build. Desktop updates also use the stable channel by default; enable beta updates in Advanced Settings or the welcome dialog to receive newer prereleases. Portable builds, beta releases, and older versions are available on [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). The Linux CLI installed from PyPI remains stable.
+The OpenFocus website offers stable desktop builds for Windows x64, macOS Apple Silicon and Linux x86-64. Extract the Linux archive and run `OpenFocus/OpenFocus`. Desktop updates use the stable channel by default. Enable beta updates in Advanced Settings or the welcome dialog to receive newer prereleases. Linux desktop updates are installed manually from the download page. [Desktop downloads](https://openfocus.top/#download) · [Release history](https://github.com/Xinzhe99/OpenFocus/releases)
 
-On macOS (Apple Silicon) or Linux, install from a terminal. Linux installs the
-headless CLI; macOS installs the app in `~/Applications`.
+On macOS (Apple Silicon) or Linux, install from a terminal. On Linux this
+command installs the headless CLI; on macOS it installs the app in `~/Applications`.
 
 ```bash
 curl -fsSL https://openfocus.top/install.sh | sh
@@ -305,10 +310,10 @@ See the [CLI manual](./docs/USER_MANUAL_EN.md#14-command-line-interface).
 <a id="community"></a>
 ## Community & Support
 
-Questions, ideas or feedback? Join our [Discord community](https://discord.gg/afzmwgPt). We reply as soon as we can; we're based in Beijing (UTC+8), so time differences may affect response times.
+Questions, ideas or feedback? Join our [Discord community](https://discord.gg/Jamr2SR5). We reply as soon as we can; we're based in Beijing (UTC+8), so time differences may affect response times.
 
 - **Docs** — [User Manual](./docs/USER_MANUAL_EN.md) (twelve languages) · [Changelog](./CHANGELOG.md) · [Performance](./docs/PERFORMANCE.md) · [Fusion methods](./docs/FUSION_METHODS.md)
-- <a id="code-signing-policy"></a>[Code signing policy](./docs/CODE_SIGNING_POLICY.md) · [Privacy policy](./docs/PRIVACY.md)
+- [Privacy policy](./docs/PRIVACY.md)
 - **Citation** — [CITATION.cff](./CITATION.cff); every release is archived on Zenodo ([DOI](https://doi.org/10.5281/zenodo.23050823))
 - **Feedback** — open an [issue](https://github.com/Xinzhe99/OpenFocus/issues) for bugs, ideas and algorithm work
 - **Credits** — each fusion/registration algorithm keeps its original research licence; StackMFF V3 lives at [Xinzhe99/StackMFF-V3](https://github.com/Xinzhe99/StackMFF-V3)
@@ -321,7 +326,7 @@ Questions, ideas or feedback? Join our [Discord community](https://discord.gg/af
     <th align="center">Official account</th>
   </tr>
   <tr>
-    <td align="center" valign="top"><img src="assets/readme/wechat-group.jpg" alt="QR code for the OpenFocus WeChat group" width="260"></td>
+    <td align="center" valign="top"><img src="assets/readme/wechat-group.png" alt="QR code for the OpenFocus WeChat group" width="260"></td>
     <td align="center" valign="top"><img src="assets/readme/wechat-official-account.jpg" alt="QR code for the OpenFocus WeChat official account" width="260"></td>
   </tr>
 </table>

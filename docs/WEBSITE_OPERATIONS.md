@@ -74,9 +74,9 @@ flowchart LR
 ```
 
 With `run_worker_first: true` in `site/wrangler.jsonc`, every request reaches
-the Worker. It handles `/`, the website and desktop update APIs and download
-routes, and `www` canonicalisation; other requests go to the static binding.
-Every page and asset request therefore counts as a Worker invocation.
+the Worker. It handles `/`, the website and desktop update APIs, download
+routes, the WeChat QR paths and `www` canonicalisation. Other requests go to
+the static binding. Every page and asset request counts as a Worker invocation.
 
 - `/` — chooses a valid `?lang=en` or `?lang=zh` first, then the `lang`
   cookie, then the highest-priority supported `Accept-Language` entry; English
@@ -264,7 +264,7 @@ python tools/build_site.py
 # With the production origin (canonical, sitemap, OG, installer commands)
 SITE_ORIGIN=https://openfocus.top python tools/build_site.py
 
-# Local preview (static only: no Worker language redirect or /api)
+# Local preview (static only, omits Worker redirects, QR routes and APIs)
 python -m http.server 8788 --directory site/dist
 
 # Deploy Worker + assets with the account-specific analytics binding
@@ -314,10 +314,17 @@ template resolves `{{dotted.key}}` placeholders; missing keys fail the build.
   registries in `core/algorithms.py`; check before changing them.
 - Media is copied from `assets/` (app screenshot, README posters, benchmark
   chart) — do not duplicate binaries under `site/`.
-- The website inserts the selected desktop version from `/api/latest` when
-  JavaScript is available. Static pages do not claim a version that might be
-  newer than the available download. Linux CLI installation through PyPI stays on the stable
-  package channel.
+- Publish or rotate the WeChat group and Official Account QR codes through the
+  account service admin console. The site Worker fetches the current public
+  PNG from `https://account.openfocus.top/v1/qr/wechat-group` or
+  `https://account.openfocus.top/v1/qr/wechat-official-account` for the existing
+  `/wechat-group.png` and `/wechat-official-account.jpg` URLs. Both URLs support
+  GET and HEAD and return `Cache-Control: no-store`. Unpublished codes return
+  `404`, and account service failures return `502`.
+- The website inserts the current stable desktop version from `/api/latest`
+  when JavaScript is available. It shows the Linux x86-64 desktop download and
+  version-specific extraction commands when that release includes the archive.
+  The Linux CLI follows the separate PyPI release channel.
 - The English and Chinese slogans are intentionally different: the English
   line is "Every pixel, its sharpest frame."; the Chinese line is
   "每一像素，皆取自最清晰的一帧。"
@@ -344,8 +351,8 @@ available. The Linux path installs the stable CLI from PyPI and does not use the
   `~/.local/bin/openfocus` when that path is free or already a symlink; an
   existing regular file is left untouched and the direct venv path is printed.
   It never runs `pip --user` or `pip --break-system-packages`; if pipx and
-  `venv` are both unavailable it stops with actionable instructions. There is
-  no Linux GUI build.
+  `venv` are both unavailable it stops with actionable instructions. Install
+  the Linux desktop app from its stable release archive when available.
 - Windows/MSYS: prints the PowerShell command.
 - `--dry-run` prints the plan without downloading or installing anything.
 
@@ -469,20 +476,24 @@ asset exists there as a complete file. A split asset and range requests return
 3. Wait for `r2-mirror` to succeed. It is chained to the release workflow; a
    release published by hand uses the `release: published` trigger. If neither
    path fired, run the manual dispatch above.
-4. Verify:
-   - `https://openfocus.top/api/latest` returns the new tag with
-     `Cache-Control: no-store`;
+4. Build and deploy the site when its code or content changes. Use the
+   production configuration in section 3 and preserve the existing bindings.
+   The download routes select the latest stable release from release metadata.
+5. Verify:
+   - for a stable release, `https://openfocus.top/api/latest` returns the new
+     tag with `Cache-Control: no-store`. A 2.0.0 stable release must also list
+     the `linux-desktop` asset;
+   - for a beta release, `/api/latest` continues to select stable and
+     `/api/updates?channel=beta` offers the newer beta when available;
    - `curl -fsS -r 0-0 -D - -o /dev/null https://openfocus.top/download/latest/windows-setup`
      returns `206`, a `Content-Range: bytes 0-0/<size>` total matching the
      complete asset size in the mirror manifest, and `Cache-Control: no-store`.
-     HEAD does not validate the byte range. A `503` means the R2 object is
-     missing or not ready for ranges; a `302` is the full download's GitHub
-     fallback and does not occur for a range request;
-   - `https://openfocus.top/` shows the new version within 5 minutes per data
-     center.
-5. Rebuild and redeploy the site for changes to its code or content. Its static
-   pages do not claim a desktop version; JavaScript displays the selected
-   version from `/api/latest`, and links resolve through the Worker.
+     Repeat for `linux-desktop` when present. HEAD does not validate the byte
+     range. A `503` means the R2 object is missing or not ready for ranges; a
+     `302` is the full download's GitHub fallback and does not occur for a
+     range request;
+   - the website shows the selected version and, when available, the Linux
+     desktop download within 5 minutes per data center.
 
 ---
 

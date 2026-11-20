@@ -273,13 +273,13 @@ def test_version_three_project_converts_explicit_units_and_feather(tmp_path):
     path = tmp_path / 'legacy.ofproj'
     path.write_text(json.dumps({'openfocus_project': 3, 'sources': [str(source)],
         'settings': {'fusion_method': 'openfocus_b', 'method_parameters': {
-            'openfocus_b': {'kernel_size': 13, 'depth_smoothing': 1.2},
-            'openfocus_c': {'blend_smoothing': 3.6}}}}), encoding='utf-8')
+            'openfocus_b': {'kernel_size': 13, 'depth_smoothing': 1.6},
+            'openfocus_c': {'blend_smoothing': 4.0}}}}), encoding='utf-8')
     ok, error, state = project_file.validate_project(str(path))
     assert ok, error
     values = state['settings']['method_parameters']
-    assert values['openfocus_b'] == {'radius': 6, 'smoothing': 5., 'feather': 0}
-    assert values['openfocus_c']['smoothing'] == pytest.approx(6.)
+    assert values['openfocus_b'] == {'radius': 6, 'smoothing': 1.6 / .24, 'feather': 0}
+    assert values['openfocus_c']['smoothing'] == 4.0 / .6
 
 
 def test_version_two_project_old_smoothing_unit_is_not_new_unit(tmp_path):
@@ -360,6 +360,7 @@ def test_new_method_project_file_roundtrip(tmp_path, extra_methods):
     source = tmp_path / "源图.png"
     source.write_bytes(b"reference")
     saved = project_window([str(source)], str(tmp_path))
+    saved.experimental_features = True
     saved.set_fusion_method("memory_extra")
     saved.set_alignment_method("memory_align")
     saved.set_fusion_parameters("memory_extra", {"gain": 1.75, "selection": "last"})

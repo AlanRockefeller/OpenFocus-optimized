@@ -28,7 +28,7 @@ OpenFocus is een professionele desktoptoepassing voor multifocus-beeldfusie, bed
 ### Belangrijkste functies
 
 - **Multifocus-beeldfusie**: meerdere afbeeldingen met verschillende scherpstelpunten combineren tot één volledig scherp beeld
-- **Tien fusiemethoden**: Guided Filter, DCT, DTCWT, GFG-FGF, StackMFF, StackMFF V2, StackMFF V3 en OpenFocus A, B en C; daarnaast een modus met alleen uitlijning
+- **Beeldfusie** met de stabiele methoden OpenFocus A, B en C, de experimentele methoden Guided Filter, DCT, DTCWT, GFG-FGF en StackMFF V1/V2/V3, en een modus met alleen uitlijning
 - **Beeldregistratie**: verschoven beeldreeksen uitlijnen met ECC, homografie, homografie met daaropvolgende ECC-verfijning of de snelle OpenFocus-uitlijning
 - **Automatische achtergrond**: een onrustige gestapelde achtergrond vervangen door één echt frame, en zien waar geen frame de scène scherp zag
 - **Bronvaste retouche**: pixels schilderen vanuit de frames die het resultaat echt hebben gemaakt, met bron- en herstelpenseel, belichtingspenseel en ongedaan maken per streek
@@ -57,7 +57,7 @@ Transparante PNG-stapels kunnen in de desktopapp, in batchverwerking en op de op
 
 Laad op volledige grootte, kies geen uitlijning, schakel Snel voorbeeld en ROI uit, render en sla op als PNG. Batchverwerking vereist een fusiemethode en PNG-uitvoer zonder een uitgelijnde stapel op te slaan. Uitlijning, formaatwijziging of verkleining, flat-fieldcorrectie, dieptekaarten, methodenvergelijking, retoucheren en schaalbalken zijn niet beschikbaar voor transparante gegevens; labels kunnen niet in een export worden ingebrand. Een fusiemethode die de afmetingen van de rechthoek wijzigt, wordt geweigerd. Afwijkende of zachte maskers, verschillende maskers per frame, transparante TIFF-invoer en niet-PNG-uitvoer, inclusief GIF en meerbladige TIFF, zijn niet mogelijk. De CLI weigert bovendien sensorreiniging en dieptekaarten voor transparante invoer.
 
-Het CLI-equivalent is bijvoorbeeld `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none`.
+Het CLI-equivalent is bijvoorbeeld `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none --experimental`.
 
 ### Ondersteunde uitvoerformaten
 
@@ -75,8 +75,8 @@ Bij **Opslaan als** bewaart gewone TIFF het resultaat als één afbeelding; TIFF
 
 ### Installatie
 
-Download de nieuwste Windows- of macOS-build van de [OpenFocus-website](https://openfocus.top/#download). Dezelfde bestanden en oudere versies staan ook op [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases).
-De website en installatiescripts bieden ook nieuwere bèta’s, momenteel [vooruitgave v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). De desktopupdater biedt ook nieuwere bèta’s; de Linux-CLI van PyPI blijft stabiel.
+Download de nieuwste Windows-, macOS- of Linux-x86-64-desktopbuild van de [OpenFocus-website](https://openfocus.top/#download). De Linux-desktopbuild is beschikbaar vanaf v2.0.0. Oudere versies staan ook op [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases).
+De website biedt standaard stabiele desktopversies. Op Windows en macOS kunt u bèta-updates inschakelen; op Linux werkt u bij door een nieuw desktoparchief te downloaden. De PyPI-CLI wordt afzonderlijk uitgebracht.
 
 | Platform | Bestand | Type |
 |----------|---------|------|
@@ -84,8 +84,9 @@ De website en installatiescripts bieden ook nieuwere bèta’s, momenteel [vooru
 | Windows 10/11 (64-bit) | `OpenFocus-*-windows-x64.zip` | Draagbaar (uitpakken en starten) |
 | macOS Apple Silicon (M1–M4) | `OpenFocus-*-macos.dmg` | Schijfimage (naar Programma's slepen) |
 | macOS Apple Silicon (M1–M4) | `OpenFocus-*-macos-arm64.zip` | Draagbaar (uitpakken) |
+| Linux x86-64 | `OpenFocus-*-linux-x86_64.tar.gz` | Draagbaar (uitpakken en `OpenFocus/OpenFocus` starten) |
 
-Of de Windows-builds ondertekend zijn, hangt af van de specifieke release (zie de releaseopmerkingen); een handtekening is niet gegarandeerd. Bij de eerste start kan daarom een beveiligingsvraag verschijnen: onder **Windows** SmartScreen → 'Meer informatie' → 'Toch uitvoeren' (de eerste start kan 30–60 s duren). De macOS-builds zijn niet genotariseerd; na de DMG-installatie (naar Programma's) voert u indien nodig `xattr -cr /Applications/OpenFocus.app` uit, na de terminalinstallatie (naar `~/Applications`) `xattr -cr ~/Applications/OpenFocus.app`, of u klikt met rechts op de app → **Open**.
+De huidige Windows-builds zijn niet ondertekend. Vergelijk vóór het starten de SHA-256-hash van het gedownloade bestand met de waarde in het releasemanifest. Bij de eerste start kan daarom een beveiligingsvraag verschijnen: onder **Windows** SmartScreen → 'Meer informatie' → 'Toch uitvoeren' (de eerste start kan 30–60 s duren). De macOS-builds zijn niet genotariseerd; na de DMG-installatie (naar Programma's) voert u indien nodig `xattr -cr /Applications/OpenFocus.app` uit, na de terminalinstallatie (naar `~/Applications`) `xattr -cr ~/Applications/OpenFocus.app`, of u klikt met rechts op de app → **Open**.
 
 Bekijk voor installatie vanaf de terminal eerst de opdracht voor macOS of Linux met `--dry-run` en voer die daarna zonder die optie uit. Op Linux installeert dit de headless CLI; macOS-builds vereisen Apple Silicon en worden in `~/Applications` geïnstalleerd.
 
@@ -120,7 +121,7 @@ De eerste start opent het welkomstvenster, waar je het thema kiest en de meegele
 ### Snelstartprocedure
 
 1. Importeer je beeldreeks (Bestand → Map openen of slepen en neerzetten)
-2. Stel de fusie-instellingen in op het rechterpaneel
+2. Stel de fusie-instellingen in op het rechterpaneel. **OpenFocus B** is de standaardmethode.
 3. De registratie start met **ECC**; kies **Geen uitlijning** als de frames al zijn uitgelijnd
 4. Pas de kernelgrootte of methodespecifieke parameters aan als dat nodig is
 5. *(optioneel)* Open **Renderinstellingen** en vink **Snel voorbeeld** aan om de parameters eerst op een verkleind concept te testen
@@ -162,8 +163,8 @@ De menubalk bovenaan biedt toegang tot alle functies:
 - **Bestand**: importeren, projecten, verwerkingssjablonen, opslaan, stapel opslaan en de lijst met recent geopende bestanden
 - **Bewerken**: beeldtransformaties, retoucheren en het bewerken van losse beeldbestanden
 - **Extra**: afbeeldingen samenvoegen, batchverwerking, methodenvergelijking, dieptekaart, stofkaart (flat-field), schaalbalk en labels
-- **Instellingen**: geavanceerde instellingen (registratie en uitlijningsdiagnose), GPU-versnelling, thema en taal
-- **Help**: snelstartgids, omgevingsinfo, feedback, contact, logmap en updatecontrole
+- **Instellingen**: geavanceerde instellingen (Algemeen, Fusie, Registratie, Opstarten en updates), GPU-versnelling, thema en taal
+- **Help**: snelstartgids, Feedback versturen (diagnostiek en logboeken), contact en updatecontrole
 
 **Extra → Afbeeldingen samenvoegen…** opent een aparte werkruimte voor al gefuseerde microscoopgebieden en camerapanorama's; de huidige stapel wordt niet gewijzigd. Het tabblad **Projectassistent** bundelt importeren, uitlijnen en controlepunten, **Bronafbeeldingen** bevat de lijst, het raster en handmatige plaatsing, **Panorama-editor** bevat naad-, meng-, belichtings-/kleur-, uitvoer-, projectie-, camera- en HDR-instellingen plus voorbeeldoverlays. Gebruik **Bestanden toevoegen…**, **Map openen** of **Resultaten toevoegen…** om gekozen resultaten van de huidige sessie te kopiëren, of sleep bestanden of mappen naar de lijst of het canvas. Mapimport bevat alleen ondersteunde bestanden direct in de map, geen submappen. Import volgt de natuurlijke bestandsnaamvolgorde, negeert dubbele paden en voegt elke pagina van een meerdelige TIFF als afzonderlijke afbeelding toe. Selecteer een afbeelding en druk op Delete of Backspace om deze uit de werkruimte te verwijderen zonder het bestand te wissen.
 
@@ -392,20 +393,17 @@ Beeldregistratie corrigeert ruimtelijke misuitlijning tussen frames in je beelds
 - Zoekt begrensde similariteitstransformaties met bemonsterde beeldverschillen en warpt met Lanczos-interpolatie
 - Het zoekgebied voor verschuiving is standaard 3% van de frameafmeting en wordt ingesteld met `--align-shift-limit`. De zoekopdracht gebruikt het vorige uitgelijnde frame en de cumulatieve beweging als uitgangspunt; de totale verschuiving kan groter zijn dan 3%.
 - Kies voor niet-rigide of extreme geometrie in plaats daarvan ECC of homografie
-- Bij een daadwerkelijke schattingsfout behoudt `failure_policy=continue` (standaard) het niet-uitgelijnde frame; `fail` breekt af. Weinig textuur, herhaalde patronen en focusveranderingen kunnen nog steeds onnauwkeurige overeenkomsten veroorzaken.
-- Kies in de CLI hetzelfde beleid met `--align openfocus --align-param 'failure_policy="fail"'` (gebruik shell-passende aanhalingstekens). Batchitems gebruiken het gekozen beleid onafhankelijk. De standaard is `"continue"`.
+- Als de registratie een beeld afwijst, stopt de desktopapp de betreffende stapel. Bekijk het beeld en de reden in de foutmelding en controleer het bronbeeld voordat je het opnieuw probeert. Weinig textuur, herhaalde patronen en focusveranderingen kunnen nog steeds onnauwkeurige overeenkomsten veroorzaken.
+- De CLI gebruikt standaard `continue`. Kies `--align openfocus --align-param 'failure_policy="fail"'` om de stapel bij een afgewezen beeld te stoppen.
 - Stel **Referentiebeeld** in op een 1-gebaseerd nummer in de opgenomen, verwerkte stapelvolgorde om de geometrie op dat frame te verankeren. De framevolgorde blijft behouden; helderheidsvereffening gebruikt zijn eigen referentie. Elke batchstapel moet dat nummer bevatten, anders mislukt het item. CLI-voorbeeld: `--align openfocus --align-param reference_frame=3`. Een referentie kan parallax of een slechte match niet corrigeren; controleer het resultaat.
 
-Uitlijningsrapporten noemen de referentie en de uitkomst per frame. Een terugval betekent dat de methode de uitlijning niet kon vaststellen of afhankelijk is van een eerdere mislukte schatting; de gemelde reden onderscheidt zwakke schattingen en beweging buiten de limieten wanneer bekend. Kwaliteitswaarden zijn methodespecifiek en geen garantie voor nauwkeurigheid. Transformaties mappen broncoördinaten naar het referentiecanvas van de registratiefase vóór de gemeenschappelijke bijsnijding; samengestelde methoden melden hun fasen afzonderlijk. Homografie en ECC accepteren ook de optionele registratieparameter `failure_policy="fail"` om te stoppen wanneer hun algoritme een fout detecteert. De standaard blijft `"continue"`; controleer resultaten ook wanneer de uitlijning slaagt.
-
-Om een rendering te onderzoeken, schakel je **Instellingen → Geavanceerde instellingen… → Registratie → Uitlijningsdiagnose verzamelen** in en rendert opnieuw. Dit berekent de uitlijning opnieuw in plaats van gecachte afbeeldingen te hergebruiken. De voltooiingsstatus markeert terugvallen; **Instellingen → Geavanceerde instellingen… → Registratie → Uitlijningsdiagnose** opent het rapport per frame. Het toont beschikbare foutredenen, methodespecifieke scores, matchaantallen, gerefereerde frames en transformaties. Referentienummers en -namen verwijzen naar de oorspronkelijke bronlijst, ook wanneer frames zijn uitgesloten. Batch- en gegroepeerde renders leveren dit rapport niet.
+Bij één ongegroepeerde CLI-uitvoering met registratie schrijft `--alignment-report FILE` een verslag per beeld. Uitlijningsrapporten noemen de referentie en de uitkomst per frame. Een terugval betekent dat de methode de uitlijning niet kon vaststellen of afhankelijk is van een eerdere mislukte schatting; de gemelde reden onderscheidt zwakke schattingen en beweging buiten de limieten wanneer bekend. Kwaliteitswaarden zijn methodespecifiek en geen garantie voor nauwkeurigheid. Transformaties mappen broncoördinaten naar het referentiecanvas van de registratiefase vóór de gemeenschappelijke bijsnijding; samengestelde methoden melden hun fasen afzonderlijk. Homografie en ECC accepteren ook de optionele registratieparameter `failure_policy="fail"` om te stoppen wanneer hun algoritme een fout detecteert. De standaard blijft `"continue"`; controleer resultaten ook wanneer de uitlijning slaagt.
 
 ### Registratie inschakelen
 
 1. Zoek in het rechterpaneel de groep **Registratie**
 2. Kies een methode in de vervolgkeuzelijst: **Geen uitlijning**, **OpenFocus (snel)**, **ECC**, **Homografie** of **Homografie → ECC**. Zonder opgeslagen keuze start een nieuwe sessie met ECC; de laatst gekozen methode wordt bewaard.
-3. Kies **Afgewezen beelden verwerken** onder **Instellingen → Geavanceerde instellingen… → Registratie**. Wijzigingen gelden voor de methoden; bij OpenFocus (snel) kun je ook het referentieframe instellen.
-4. **Uitlijningsdiagnose verzamelen** staat nu onder **Instellingen → Geavanceerde instellingen… → Registratie** (zie hierboven).
+3. Stel het referentiebeeld en de zoekgrenzen voor OpenFocus in via **Instellingen → Geavanceerde instellingen… → Registratie**.
 
 ### Wanneer registratie zinvol is
 
@@ -421,13 +419,12 @@ Meer instellingen via **Instellingen → Geavanceerde instellingen… → Regist
 - **Verkleiningsbreedte**: resolutie van de voorverwerking (standaard: 1024 px)
 - Kleinere waarden = snellere verwerking, mogelijk lagere nauwkeurigheid
 - Grotere waarden = langzamere verwerking, mogelijk hogere nauwkeurigheid
-- **Uitlijningsdiagnose verzamelen** en **Registratiecache** staan in dezelfde sectie
 
 ---
 
 ## 8. Fusiemethoden
 
-OpenFocus biedt tien fusiealgorithmen plus een modus met alleen uitlijning. Een fris profiel start met **StackMFF V3** en **ECC**; de volgende secties beschrijven elke optie. Elke methode heeft eigen eigenschappen voor verschillende beeldtypen.
+**OpenFocus A, B en C** zijn de stabiele fusiemethoden. Een nieuw desktopprofiel start met **OpenFocus B** en **ECC**. Voor de andere fusiemethoden en experimentele registratiemethoden kies je **Instellingen → Geavanceerde instellingen → Algemeen** en vink je **Experimentele functies inschakelen** aan. Voeg op de CLI bij elke uitvoering met een experimentele fusiemethode `--experimental` toe.
 
 ### Guided Filter
 
@@ -552,7 +549,7 @@ Parameters afstellen op grote stapels is traag op volledige resolutie. Open **Re
 
 ### Draaien
 
-1. Ga naar **Bewerken → Draaien**
+1. Ga naar **Bewerken → Draaien en spiegelen**
 2. Kies het draaitype:
    - **90° rechtsom**: alle afbeeldingen 90 graden naar rechts draaien
    - **90° linksom**: alle afbeeldingen 90 graden naar links draaien
@@ -560,7 +557,7 @@ Parameters afstellen op grote stapels is traag op volledige resolutie. Open **Re
 
 ### Spiegelen
 
-1. Ga naar **Bewerken → Spiegelen**
+1. Ga naar **Bewerken → Draaien en spiegelen**
 2. Kies het spiegelingstype:
    - **Horizontaal spiegelen**: van links naar rechts spiegelen
    - **Verticaal spiegelen**: van boven naar beneden spiegelen
@@ -580,7 +577,7 @@ Transformaties worden op de hele beeldstapel toegepast en behouden de uitlijning
 
 ## 10. Retoucheren, labels en annotaties
 
-### Het resultaat retoucheren (Bewerken → Resultaat retoucheren…, `Ctrl+T`)
+### Het resultaat retoucheren (Bewerken → Resultaat retoucheren → Uitvoer in deze werkruimte…, `Ctrl+T`)
 
 Fusie kan nog steeds een lokaal defect achterlaten — een halo rond een contrastrijke rand, een haartje uit het verkeerde frame, ruis in een vlak gebied. De werkruimte kopieert pixels uit precies de frames die het geselecteerde resultaat hebben geproduceerd:
 
@@ -599,7 +596,7 @@ Voor een lokale toonaanpassing kies je **Belichtingspenseel**, stel je het bedra
 
 Herkomst wordt met de uitvoer opgeslagen: de uitgelijnde frames, ROI-bijsnijdings-/plakoffsets, DCT-randtrimming en bitdiepte worden vastgelegd wanneer het resultaat wordt gerenderd. Batchbestanden, oudere resultaten en items uit alleen-uitlijnen hebben geen vastgelegde bron en worden daarom als niet beschikbaar vermeld in plaats van uit de huidige stapel te worden geraden. Niet-toegepaste streken en de ongedaan-maakgeschiedenis gelden alleen voor de sessie; een project opslaan bewaart ze niet.
 
-Voor een bestaand afbeeldingsbestand kies je **Bewerken → Afbeeldingsbestanden retoucheren…** en selecteer je het resultaat en een of meer bronafbeeldingen. De bronnen moeten al op hetzelfde pixelraster als het resultaat zijn uitgelijnd; gelijke afmetingen alleen bewijzen geen uitlijning. Enkelbladige PNG-, TIFF-, JPEG- en BMP-afbeeldingen met overeenkomende rechtopstaande afmetingen, kanalen en 8- of 16-bitdiepte worden geaccepteerd; EXIF-oriëntatie wordt bij het laden toegepast. Alpha- en meerbladige afbeeldingen worden niet ondersteund. De geselecteerde frames zijn door de gebruiker aangeleverd, geen vastgelegde renderherkomst. **Toepassen** maakt een aparte, niet-geëxporteerde uitvoer; sla die op vanuit de uitvoerlijst. De gekozen bestanden zijn tijdens deze sessie beschermd tegen overschrijven, inclusief export van dieptekaarten en 3D-meshes. Zoals bij andere resultaten bewaren projectbestanden deze pixels of penseelgeschiedenis niet.
+Voor een bestaand afbeeldingsbestand kies je **Bewerken → Resultaat retoucheren → Fusieresultaat uit bestand…** en selecteer je het resultaat en een of meer bronafbeeldingen. De bronnen moeten al op hetzelfde pixelraster als het resultaat zijn uitgelijnd; gelijke afmetingen alleen bewijzen geen uitlijning. Enkelbladige PNG-, TIFF-, JPEG- en BMP-afbeeldingen met overeenkomende rechtopstaande afmetingen, kanalen en 8- of 16-bitdiepte worden geaccepteerd; EXIF-oriëntatie wordt bij het laden toegepast. Alpha- en meerbladige afbeeldingen worden niet ondersteund. De geselecteerde frames zijn door de gebruiker aangeleverd, geen vastgelegde renderherkomst. **Toepassen** maakt een aparte, niet-geëxporteerde uitvoer; sla die op vanuit de uitvoerlijst. De gekozen bestanden zijn tijdens deze sessie beschermd tegen overschrijven, inclusief export van dieptekaarten en 3D-meshes. Zoals bij andere resultaten bewaren projectbestanden deze pixels of penseelgeschiedenis niet.
 
 ### De achtergrond vervangen (Automatische achtergrond)
 
@@ -675,17 +672,22 @@ Het voorbeeld gebruikt het werkelijke doel. Navigeer met **Vorige/Volgende** of 
 
 ## 11. Instellingen en configuratie
 
-**Instellingen → Geavanceerde instellingen…** opent prestatie-, registratie-, sensorreinigings-, uitvoerbenamings-, AI- en opstartinstellingen. Wijzigingen blijven concepten tot je op **OK** drukt; Annuleren, Esc en sluiten verwerpen ze. Een kleinere tegelgrootte werkt de zichtbare overlaplimiet onmiddellijk bij naar een halve tegel. De opgeslagen AI-batchlimiet blijft behouden; de inferentie gebruikt momenteel één tegel per aanroep. De registratiebreedte kan de nauwkeurigheid van de uitlijning veranderen. Het verzamelen van de uitlijningsdiagnose is een selectievakje in de sectie Registratie.
+**Instellingen → Geavanceerde instellingen…**
+
+- **Algemeen** — Experimentele functies, werkmap en voorvoegsel voor uitvoerbestanden. Onder **Privacy** hebben automatische foutmeldingen en gebruiksstatistieken elk een eigen selectievakje. Beide staan aanvankelijk aan. Een expliciet uitgeschakelde optie blijft uit. Releaseversies verzenden een rapport na een sessie met een fout als je de voorwaarden bij het aanmelden hebt aanvaard of de rapportage uitdrukkelijk hebt ingeschakeld. Voor een eerdere native crash is bevestiging nodig.
+- **Fusie** — Kies de resourcemodus en tegelinstellingen. Selecteer **Sensor opschonen** om de instellingen uit te klappen.
+- **Registratie** — Stel de verkleiningsbreedte in. Selecteer **OpenFocus (snel)** om de instellingen voor het referentiebeeld en de zoekgrenzen uit te klappen.
+- **Opstarten en updates** — De vorige stapel herstellen, vragen naar de laadschaal en updates instellen.
+
+Sla wijzigingen op met **OK**. Annuleren, Esc of sluiten verwerpt ze.
 
 Automatische update-downloads lopen tijdens inactiviteit en installeren nooit vanzelf. Een voltooide download blijft klaar tot je uitdrukkelijk **Bijwerken en herstarten** kiest. De herstart beschermt actieve bewerkingen en niet-opgeslagen werk en schrijft daarna herstelgegevens voordat de vervangende versie start. Annuleren van een download of voorbereiding wacht op de huidige veilige grens. Een bestaande volledige, nieuwere klaargezette build kan offline worden geïnstalleerd.
 
 In Windows bereidt de updater een afzonderlijke kandidaat voor en verplaatst bij de omschakeling de draagbare markering en `OpenFocusData`. Bij een mislukte omschakeling herstelt hij de oude installatie; lukt terugzetten niet, dan blijft de back-up behouden en start de app niet automatisch opnieuw. Er kan eenmaal om toestemming worden gevraagd. Annuleren van uitpakken verwijdert onvolledige voorbereidingen en wordt tussen lees- en schrijfbewerkingen van 256 KiB gecontroleerd; een geblokkeerde schijf- of netwerkbewerking kan dit vertragen.
 
-Flat-field-correctie wijzigt de werkpixels van de sessie zonder bronbestanden te overschrijven. Kies via **Extra → Stofkaart (flat-field)** het witbeeld en een voorbeeldframe en genereer het voorbeeld opnieuw na een wijziging van bron of schaal. Referentie- en werk-/basisafbeeldingen moeten hetzelfde coördinatendomein en dezelfde grootte hebben. Toepassen bereidt beide stapels voor voordat wordt vastgelegd; het optionele verwijderen van het referentieframe hoort bij dezelfde ongedaan-maakstap. Exporteer gecorrigeerde bronafbeeldingen wanneer je deze pixels buiten de sessie wilt bewaren.
+De stofkaart, flat-field-correctie bij batchverwerking en het samenvoegen van afbeeldingen zijn in ontwikkeling en nog niet beschikbaar.
 
-Batchverwerking accepteert een optioneel witveldbeeld in de verwerkingsopties. Kies een onscherpe referentie op de oorspronkelijke frameresolutie; die wordt met de invoerstapel geschaald en vóór registratie toegepast met de standaard stofgrootte. Een onleesbare referentie of een grootteverschil laat de betrokken stapel zichtbaar mislukken. De referentie wordt uitgesloten van mapinvoer, ook bij gegroepeerde verwerking; er moeten minstens twee bronframes overblijven voor fusie. Flat-field-correctie kan niet worden gecombineerd met transparante invoer. Laat het veld leeg om zonder correctie te verwerken. De CLI accepteert de referentie met `--dust-map WHITE`.
-
-Sensorreiniging is optioneel en loopt op de oorspronkelijke frames in sensorcoördinaten vóór registratie. In de desktopapp vind je dit onder **Instellingen → Geavanceerde instellingen… → Sensor opschonen**; het batchdialoog biedt dezelfde bediening. Een uitdrukkelijk defectmasker corrigeert bekende hot- of dode pixels; OpenFocus leidt geen masker af uit specimenafbeeldingen. Het masker moet een enkelkanaals 8- of 16-bitafbeelding met dezelfde afmetingen als de bron zijn: nul betekent onaangetast en ofwel 1 of de maximale kanaalwaarde markeert defecten. Controleer de omvang vóór verwerking. Maskers die meer dan 10 % van het frame bedekken, of defecten zonder ongemaskeerde buur, worden geweigerd. Houd het masker op de oorspronkelijke resolutie en selecteer het niet als bronafbeelding. Laad bronframes voor GUI-verwerking op volledige schaal wanneer je een defectmasker gebruikt; het masker wordt nooit geschaald. Sensorreiniging (inclusief ruisonderdrukking) kan niet op een GUI-stapel worden toegepast na een draaiing, spiegeling, flat-field-correctie of andere bronwijziging: laad de oorspronkelijke frames opnieuw of schakel reiniging uit. Dit geldt ook voor herstelde projecten met zulke brongeschiedenissen. Vooraf uitgelijnde ROI-verwerking kan niet met sensorreiniging worden gecombineerd; verlaat de ROI-modus en render de hele stapel. Reinigingsinstellingen horen bij de huidige sessie en het opgeslagen project, niet bij globale toepassingsvoorkeuren. Batch en CLI verwerken hun oorspronkelijke invoer afzonderlijk, met sensorreiniging vóór flat-field-correctie en registratie. Defectmaskers vereisen bronbestanden met neutrale EXIF-oriëntatie. Georiënteerde bestanden, camera-RAW-bestanden en bronnen waarvan de oriëntatie niet kan worden vastgesteld, worden geweigerd omdat hun gedecodeerde pixels mogelijk niet meer overeenkomen met sensorcoördinaten. Gebruik bronframes en een masker in dezelfde bekende pixeloriëntatie, met neutrale oriëntatiemetadata. Alleen ruisonderdrukking vereist geen defectmasker.
+Sensorreiniging is optioneel en loopt op de oorspronkelijke frames in sensorcoördinaten vóór registratie. In de desktopapp vind je dit onder **Instellingen → Geavanceerde instellingen… → Fusie → Sensor opschonen**; het batchdialoog biedt dezelfde bediening. Een uitdrukkelijk defectmasker corrigeert bekende hot- of dode pixels; OpenFocus leidt geen masker af uit specimenafbeeldingen. Het masker moet een enkelkanaals 8- of 16-bitafbeelding met dezelfde afmetingen als de bron zijn: nul betekent onaangetast en ofwel 1 of de maximale kanaalwaarde markeert defecten. Controleer de omvang vóór verwerking. Maskers die meer dan 10 % van het frame bedekken, of defecten zonder ongemaskeerde buur, worden geweigerd. Houd het masker op de oorspronkelijke resolutie en selecteer het niet als bronafbeelding. Laad bronframes voor GUI-verwerking op volledige schaal wanneer je een defectmasker gebruikt; het masker wordt nooit geschaald. Sensorreiniging (inclusief ruisonderdrukking) kan niet op een GUI-stapel worden toegepast na een draaiing, spiegeling, flat-field-correctie of andere bronwijziging: laad de oorspronkelijke frames opnieuw of schakel reiniging uit. Dit geldt ook voor herstelde projecten met zulke brongeschiedenissen. Vooraf uitgelijnde ROI-verwerking kan niet met sensorreiniging worden gecombineerd; verlaat de ROI-modus en render de hele stapel. Reinigingsinstellingen horen bij de huidige sessie en het opgeslagen project, niet bij globale toepassingsvoorkeuren. Batch en CLI verwerken hun oorspronkelijke invoer afzonderlijk, met sensorreiniging vóór flat-field-correctie en registratie. Defectmaskers vereisen bronbestanden met neutrale EXIF-oriëntatie. Georiënteerde bestanden, camera-RAW-bestanden en bronnen waarvan de oriëntatie niet kan worden vastgesteld, worden geweigerd omdat hun gedecodeerde pixels mogelijk niet meer overeenkomen met sensorcoördinaten. Gebruik bronframes en een masker in dezelfde bekende pixeloriëntatie, met neutrale oriëntatiemetadata. Alleen ruisonderdrukking vereist geen defectmasker.
 
 De optionele sensorruisonderdrukking staat los van het defectmasker en is standaard uit. Bekijk het resultaat op volledige grootte om te beslissen of de afvlakking geschikt is voor het specimen. Sensorreiniging behoudt de bronbestanden en de 8- of 16-bitbeelddiepte; het staat los van flat-field-correctie. De CLI accepteert `--defect-mask-path MASK` en `--sensor-denoise`; recepten en de Python-recept-API leggen deze opties vast. Recepten registreren een maskervingerafdruk en weigeren een ontbrekend of gewijzigd masker. CLI-reiniging kan niet met transparante invoer worden gecombineerd. Gegroepeerde verwerking past reiniging toe op oorspronkelijke frames, niet op tussenresultaten van groepen.
 
@@ -693,19 +695,25 @@ Recepten vereisen een uitvoerlocatie buiten elke invoermap en weigeren een uitdr
 
 Wanneer een bestandsreferentie in Extra op de basisschaal van de stapel wordt toegepast, legt een opgeslagen project het absolute pad, de inhoudshash en de stofgrootte vast en past die bij openen één keer toe op de oorspronkelijke bronnen. Houd het referentiebestand ongewijzigd en op zijn plaats: een ontbrekende of gewijzigde referentie verhindert het openen van het project. Een referentie die uit de stapel is gekozen, of correctie op een andere werk-/basisschaal, vereist nog steeds export van de gecorrigeerde bronstapel voordat een project wordt opgeslagen. Verandert de werkschaal na correctie, zet die dan vóór opslaan terug naar de correctieschaal of exporteer de gecorrigeerde stapel.
 
-**Help → Feedback versturen…** opent lokale logboeken. Kopiëren kopieert het zichtbare sessielogboek; de feedback-ZIP bevat sessie- en volledige applicatielogboeken en omgevingsinformatie. Controleer het pakket voordat je het zelf indient. GitHub openen opent alleen de tracker. Annuleren van een export laat bestanden ongewijzigd; bij een fout blijft het vorige doelbestand behouden en wordt het mislukte pad getoond.
+**Help → Feedback versturen** opent het tabblad **Feedbackkanalen**, met toegang tot het accountcentrum en GitHub. Onder **Diagnostiek** vind je **Sessielogboek** en **Omgevingsinfo**. De knop **Logmap openen** staat onderaan naast Sluiten. Kopiëren kopieert het zichtbare sessielogboek; de feedback-ZIP bevat sessie- en volledige applicatielogboeken en omgevingsinformatie. Controleer het pakket voordat je het zelf indient. GitHub openen opent alleen de tracker. Annuleren van een export laat bestanden ongewijzigd; bij een fout blijft het vorige doelbestand behouden en wordt het mislukte pad getoond.
 
-Elke start schrijft zijn eigen roterende logboek, zodat gelijktijdige GUI-/CLI-taken gescheiden registraties houden. Taak-ID's koppelen parameters, verstreken tijd en uitkomsten (voltooid/geannuleerd/mislukt); onverwachte fouten bevatten een volledige traceback. De feedback-ZIP bevat ook het huidige crashrapport en afhankelijkheidsversies. Gebruik **Help → Logmap openen** of het pad op de feedbackpagina om de bestanden te vinden. Logboeken roteren bij 1 MB met drie back-ups per proces; inactieve sessielogboeken ouder dan 14 dagen worden verwijderd. Stel voor uitgebreide supportlogboeken `OPENFOCUS_LOG_LEVEL=DEBUG` in vóór de start; `OPENFOCUS_LOG_DIR` kiest optioneel een andere logmap.
+Elke start schrijft zijn eigen roterende logboek, zodat gelijktijdige GUI-/CLI-taken gescheiden registraties houden. Taak-ID's koppelen parameters, verstreken tijd en uitkomsten (voltooid/geannuleerd/mislukt); onverwachte fouten bevatten een volledige traceback. De feedback-ZIP bevat ook het huidige crashrapport en afhankelijkheidsversies. Gebruik **Help → Feedback versturen → Logmap openen** of het pad op de feedbackpagina om de bestanden te vinden. Logboeken roteren bij 1 MB met drie back-ups per proces; inactieve sessielogboeken ouder dan 14 dagen worden verwijderd. Stel voor uitgebreide supportlogboeken `OPENFOCUS_LOG_LEVEL=DEBUG` in vóór de start; `OPENFOCUS_LOG_DIR` kiest optioneel een andere logmap.
 
 ### Tegelinstellingen (geheugenoptimalisatie)
 
-Voor grote afbeeldingen gebruikt OpenFocus tegelgebaseerde verwerking om geheugenproblemen te vermijden.
+Tegelverwerking staat standaard aan. De status onder de velden beschrijft hoe de gekozen methode het beeld verwerkt. OpenFocus A, B en C verwerken op de desktop het hele beeld. Alleen uitlijnen slaat de fusie over. Ook in deze modi kun je de tegelgrootte, overlap en drempel instellen voor de volgende compatibele methode. DTCWT beslist op basis van het geschatte geheugenverbruik. Je kunt de grootte en overlap aanpassen, terwijl het drempelveld uitgeschakeld is. Bij diepe stapels kunnen neurale methoden ook onder de drempel tegels gebruiken. Als je tegelverwerking uitschakelt, worden de drie getalvelden inactief en blijven hun waarden bewaard.
 
-Toegang via **Instellingen → Geavanceerde instellingen… → Prestaties**:
+Toegang via **Instellingen → Geavanceerde instellingen… → Fusie**:
 
 - **Tegelgrootte (px)**: grootte van elke verwerkingstegel (standaard: 1024 px)
 - **Tegeloverlap (px)**: overlap tussen tegels voor naadloze samenvoeging (standaard: 256 px)
 - **Tegels boven (px)**: beeldgrootte waarboven tegels worden gebruikt (standaard: 2048 px)
+
+Grenzen in pixels
+
+- Tegelgrootte (px) — 64–16384
+- Tegeloverlap (px) — 0–min(4096, de halve tegelgrootte)
+- Tegels boven (px) — 256–131072
 
 **Aanbevelingen**:
 
@@ -729,19 +737,9 @@ Zie [PERFORMANCE.md](./PERFORMANCE.md) voor gemeten doorvoer en geheugengebruik 
 
 Het statuspaneel toont gebruikt en totaal fysiek geheugen wanneer het besturingssysteem beide waarden kan leveren; anders toont het `N/A`.
 
-### Threadinstellingen
-
-Regelt parallelle CPU-verwerking:
-
-Toegang via **Instellingen → Geavanceerde instellingen… → Prestaties**:
-
-- `0` kiest automatische planning en is de standaard voor nieuwe instellingen.
-- Positieve waarden zijn bovenlimieten; opgeslagen limieten overleven upgrades.
-- CPU-capaciteit, resourcemodus en vrije geheugenruimte kunnen de gelijktijdigheid verlagen. Meer threads maken een render niet noodzakelijk sneller.
-
 ### Resourcemodus
 
-**Instellingen → Geavanceerde instellingen… → Prestaties → Resourcemodus** bepaalt hoeveel van de machine een render mag gebruiken. Het verandert nooit het gefuseerde beeld.
+**Instellingen → Geavanceerde instellingen… → Fusie → Resourcemodus** bepaalt hoeveel van de machine een render mag gebruiken. Het verandert nooit het gefuseerde beeld.
 
 | Modus | Gedrag |
 |---|---|
@@ -755,23 +753,16 @@ De planner houdt rekening met fysieke cores, CPU-affiniteit en quota en voert é
 
 StackMFF V1/V2/V3 gebruiken ONNX Runtime. DirectML op Windows en CoreML op macOS kunnen inferentie versnellen; anders wordt de CPU gebruikt. Beschikbaarheid van een provider bewijst geen GPU-uitvoering. Ondersteuning voor andere GPU’s vereist validatie.
 
-OpenFocus B kan diepteverwerking en bronfusie versnellen op een geschikte OpenCL-GPU; afhankelijk van het geheugenbudget zijn begrensde GPU-stappen of terugval op de CPU mogelijk. Als GPU-versnelling is ingeschakeld, kan OpenFocus C piramidefusie van het volledige beeld op een geschikte OpenCL-GPU uitvoeren; bij onvoldoende geheugen of problemen met het apparaat of stuurprogramma valt het terug op de CPU. De export van C's dieptekaart gebruikt de CPU. OpenFocus A en uitlijning gebruiken de CPU. Zie [GPU-ondersteuning](GPU_SUPPORT.md).
+OpenFocus B kan diepteverwerking en bronfusie versnellen op een geschikte OpenCL-GPU; afhankelijk van het geheugenbudget zijn begrensde GPU-stappen of terugval op de CPU mogelijk. Als GPU-versnelling is ingeschakeld, kunnen OpenFocus A, OpenFocus C, Geleide filter, GFG-FGF, DCT en DTCWT fusie van het volledige beeld op een geschikte OpenCL-GPU uitvoeren; bij onvoldoende geheugen of problemen met het apparaat of stuurprogramma vallen ze terug op de CPU. De export van C's dieptekaart en uitlijning gebruiken de CPU. Zie [GPU-ondersteuning](GPU_SUPPORT.md).
 
 - Schakel via **Instellingen → GPU-versnelling**
 - Uitschakelen dwingt ondersteunde fusiemethoden naar de CPU — nuttig bij problemen met GPU-stuurprogramma's
 - Het statuspaneel toont `N/A` wanneer geen versneller wordt gebruikt of beschikbaar is, en `CPU*` wanneer er een versneller is maar de gekozen methode alleen op de CPU draait
 - De keuze werkt bij de volgende render en wordt onthouden
 
-### AI-batchgrootte
-
-Toegang via **Instellingen → Geavanceerde instellingen… → AI**:
-
-- De opgeslagen batchlimiet is standaard 2; het huidige uitvoeringsbeleid beperkt de werkelijke inferentie op elk apparaat tot één tegel per aanroep.
-- Een hogere limiet schakelt geen ongevalideerde GPU-batching in en verkleint de ruimtelijke tegelgrootte niet.
-
 ### Thema's
 
-Er zijn twee interfacethema's: **Licht (standaard)** en **Donker**. Wissel via **Instellingen → Thema**; de keuze wordt onmiddellijk toegepast (de Windows-titelbalk volgt) en onthouden. Bij de eerste start kies je een thema in het welkomstvenster; een opgeslagen keuze heeft voorrang.
+Kies uit **Licht (standaard)**, **Donker** en **Neutraal grijs**. Neutraal grijs gebruikt een middengrijze achtergrond om beelden te bekijken, te vergelijken en te retoucheren. Wissel via **Instellingen → Thema**; de keuze wordt onmiddellijk toegepast (de Windows-titelbalk volgt) en onthouden. Bij de eerste start kies je een thema in het welkomstvenster; een opgeslagen keuze heeft voorrang.
 
 ### Draagbare modus
 
@@ -791,11 +782,11 @@ iPhone-foto's laden rechtstreeks. Vereist `pillow-heif`; `pip install openfocus`
 
 ### Registratiecache
 
-OpenFocus kan registratieresultaten opslaan in een map `.openfocus_cache` naast de bronstapel. Dezelfde stapel opnieuw openen (bestanden ongewijzigd) slaat de uitlijning dan volledig over. Schakel via **Instellingen → Geavanceerde instellingen… → Registratie → Registratiecache**; verouderde items worden automatisch vervangen. De schakelaar staat standaard aan.
+OpenFocus bewaart registratieresultaten in de cachemap van de gebruiker. Als je een ongewijzigde stapel met dezelfde instellingen heropent, gebruikt OpenFocus het opgeslagen resultaat opnieuw. Alle stapels delen een limiet van 2 GiB. Als er ruimte nodig is, worden de langst ongebruikte items verwijderd. Oude `.openfocus_cache`-mappen naast de bronstapels blijven behouden.
 
 ### Bewaarde instellingen
 
-Alles hieronder overleeft automatisch een herstart van de toepassing: threadlimiet, resourcemodus, tegelparameters, verkleiningsbreedte voor registratie, AI-batchgrootte (StackMFF V3), GPU-versnelling, registratiecache, uitlijningsdiagnose, interfacetaal, venstergrootte/paneelindeling, sleepformaat, de helderheidsopties per methode, afvlakkings- en straalwaarden en je recent geopende stapels. Instellingsdialogen slaan op zodra je bevestigt; alles wordt ook bij het afsluiten van de toepassing opgeslagen. Voorkeuren worden per gebruiker opgeslagen in `OpenFocus/OpenFocus.ini` (QSettings INI-formaat).
+Alles hieronder overleeft automatisch een herstart van de toepassing: resourcemodus, tegelparameters, verkleiningsbreedte voor registratie, GPU-versnelling, interfacetaal, venstergrootte/paneelindeling, sleepformaat, de helderheidsopties per methode, afvlakkings- en straalwaarden en je recent geopende stapels. Instellingsdialogen slaan op zodra je bevestigt; alles wordt ook bij het afsluiten van de toepassing opgeslagen. Voorkeuren worden per gebruiker opgeslagen in `OpenFocus/OpenFocus.ini` (QSettings INI-formaat).
 
 ### Interfacetaal
 
@@ -839,6 +830,12 @@ Het batchdialoog toont voortgang in realtime. Je kunt de verwerking op elk momen
 - PNG/TIFF behouden 16-bitgegevens; expliciet JPG/BMP kiezen zet ze om naar 8 bit.
 - Annuleren wacht tot de worker stopt. Vastgelegde bestanden blijven beschikbaar; gedeeltelijke, mislukte, geannuleerde en niet-gestarte taken worden afzonderlijk geteld.
 
+### Afbeeldingen in batches converteren
+
+Open de afbeeldingsconverter in het menu Gereedschap en voeg bestanden toe. Standaard verschijnt naast elke bronmap een uitvoermap met het achtervoegsel `_converted`. Pas het achtervoegsel aan of kies een benoemde submap, de bronmap of een gemeenschappelijke doelmap. Het voorbeeld toont het pad voor de geselecteerde rij.
+
+Behoud de oorspronkelijke grootte, begrens de langste zijde op 2048, 4096 of 8192 pixels of kies een verkleiningspercentage. Kleine afbeeldingen worden niet vergroot. DNG behoudt de sensorafmetingen. Bestanden in het gekozen formaat die niet kleiner hoeven te worden, tellen als overgeslagen. Verwijder geselecteerde rijen uit de wachtrij met het contextmenu, Delete of Backspace.
+
 ---
 
 ## 13. Resultaten exporteren
@@ -850,7 +847,7 @@ Het batchdialoog toont voortgang in realtime. Je kunt de verwerking op elk momen
 3. Kies formaat en locatie
 4. Klik op Opslaan
 
-Onder **Instellingen → Geavanceerde instellingen… → Uitvoerbenaming** helpt een optioneel bestandsnaamvoorvoegsel om nieuw gerenderde resultaten te herkennen. Het voorbeeld werkt bij terwijl je typt; gebruik maximaal 40 letters, cijfers, underscores of koppeltekens. Laat het leeg voor de oorspronkelijke benaming. Bevestig met **OK** om het te bewaren, of annuleer om de wijziging te verwerpen. Het voorvoegsel wordt onderdeel van nieuwe namen in de uitvoerlijst en hun voorgestelde exportnamen; bestaande resultaten behouden hun namen. Je kunt een naam in het opslaandialoog nog steeds bewerken. Deze voorkeur hernoemt geen bronbestanden en wijzigt geen batchnamen.
+Onder **Instellingen → Geavanceerde instellingen… → Algemeen → Uitvoerbenaming** helpt een optioneel bestandsnaamvoorvoegsel om nieuw gerenderde resultaten te herkennen. Het voorbeeld werkt bij terwijl je typt; gebruik maximaal 40 letters, cijfers, underscores of koppeltekens. Laat het leeg voor de oorspronkelijke benaming. Bevestig met **OK** om het te bewaren, of annuleer om de wijziging te verwerpen. Het voorvoegsel wordt onderdeel van nieuwe namen in de uitvoerlijst en hun voorgestelde exportnamen; bestaande resultaten behouden hun namen. Je kunt een naam in het opslaandialoog nog steeds bewerken. Deze voorkeur hernoemt geen bronbestanden en wijzigt geen batchnamen.
 
 ### Een resultaat delen
 
@@ -897,7 +894,7 @@ openfocus describe                      # JSON: methoden, parameters, mogelijkhe
 openfocus gui [--control] [--socket NAAM] [paden…]   # desktopapp starten
 openfocus ctl <command> [flags]          # een draaiend venster besturen (zie AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [verwerkingsopties]
-openfocus recipe run FILE [--dry-run]    # een opgeslagen headless recept afspelen
+openfocus recipe run FILE [--dry-run] [--experimental]  # een opgeslagen headless recept afspelen
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -906,20 +903,20 @@ openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 Vanuit een Python-omgeving (of naast het gepakte uitvoerbare bestand):
 
 ```bash
-# Een map fuseren met de standaard AI-methode
+# Een map fuseren met de standaardmethode (OpenFocus B)
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT met ECC-registratie, 8 threads
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 geforceerd op CPU, met aangepaste tegelgrootte
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Expliciete bestandslijst; videobestanden worden ook als invoer geaccepteerd
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Eén meerbladige TIFF-Z-stapel met een uit metadata gekalibreerde schaalbalk
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Aangrenzende vergelijkbare frames bekijken zonder te fuseren of de invoer te wijzigen
 python main.py -i ./stack_folder --suggest-duplicates
@@ -934,7 +931,8 @@ Voeg voor één rendering bijvoorbeeld `--align openfocus --alignment-report ali
 | `--input, -i` | Beeldmap of -mappen, videobestand, een of meer beeldbestanden of een meerbladige TIFF |
 | `--output, -o` | Pad van het uitvoerbeeld (de extensie bepaalt het formaat) |
 | `--output-dir, -d` | Batchmodus: elke invoermap fuseren en per stapel `<map>.png` schrijven |
-| `--method, -m` | `stackmffv3` (standaard), `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2` |
+| `--method, -m` | Stabiele methoden zijn `openfocus_a`, `openfocus_b` (standaard) en `openfocus_c`. Experimentele methoden zijn `guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2` en `stackmffv3` |
+| `--experimental` | Experimentele fusiemethoden toestaan voor deze CLI-uitvoering |
 | `--align, -a` | `none` (standaard), `homography`, `ecc`, `both`, `openfocus` |
 | `--param KEY=JSON_VALUE` | Fusieparameter; herhaal voor meerdere sleutels; overschrijft oudere flags |
 | `--align-param KEY=JSON_VALUE` | Registratieparameter; herhaal voor meerdere sleutels |
@@ -944,7 +942,6 @@ Voeg voor één rendering bijvoorbeeld `--align openfocus --alignment-report ali
 | `--base-frame` | Optionele stap na fusie: de laagfrequentie van de uitvoer op het `last`/`first`-frame afstemmen (standaard `none`) |
 | `--sort` | Framevolgorde voor `openfocus_a/b/c`: `asc` (standaard, bestandsvolgorde), `desc` (keert een ver-naar-dichtbij-reeks om), `off` |
 | `--frame-order` | Map als invoer: `auto` (standaard) sorteert de beelden van dichtbij naar veraf op EXIF-focusstappen als alle beelden die hebben (OM SYSTEM-focusbracketing begint halverwege de diepte), anders op naam; `name` altijd op bestandsnaam. Expliciet opgegeven bestanden behouden hun volgorde |
-| `--dust-map WHITE` | Flat-field-correctie (stofkaart) uit een onscherpe witveldsopname |
 | `--defect-mask-path MASK` | Sensordefectmasker; waarden die niet nul zijn worden vóór registratie gerepareerd |
 | `--sensor-denoise` | Voorzichtige sensorruisonderdrukking vóór registratie |
 | `--kernel, -k` | Alleen voor methoden die `kernel_size` declareren |
@@ -974,7 +971,7 @@ Voeg voor één rendering bijvoorbeeld `--align openfocus --alignment-report ali
 | `--resume` | Sla een map alleen over als alle nu gevraagde resultaten niet-lege gewone bestanden zijn; inhoud en parameters worden niet gecontroleerd |
 | `--json FILE` | Een machineleesbare resultaatsamenvatting naar FILE schrijven |
 | `--json-progress` | Eén JSON-voortgangsobject per stap naar stdout schrijven (NDJSON); proza gaat naar stderr |
-| `--config FILE` | Batchmodus: JSON-bestand met overschrijvingen per map, bijvoorbeeld `{"stackA": {"method": "dct", "kernel": 9}}` |
+| `--config FILE` | Batchmodus: JSON-bestand met overschrijvingen per map, bijvoorbeeld `{"stackA": {"method": "dct", "kernel": 9}}`. Voeg voor dit voorbeeld bij de uitvoering `--experimental` toe. |
 | `--suggest-duplicates` | Bijna identieke aangrenzende frames voor handmatige controle melden; fuseert of sluit ze niet uit |
 
 Er is geen `--method none`-waarde: de CLI fuseert altijd. Gebruik de desktopapp voor uitvoer met alleen uitlijning.
@@ -984,10 +981,12 @@ Er is geen `--method none`-waarde: de CLI fuseert altijd. Gebruik de desktopapp 
 Recepten leggen headless verwerkingsinstellingen vast voor hergebruik en verplaatsing:
 
 ```bash
-openfocus recipe create workflow.json -i ./stack_folder -o ./result/fused.png -m dct --cpu
+openfocus recipe create workflow.json -i ./stack_folder -o ./result/fused.png -m openfocus_b --cpu
 openfocus recipe run workflow.json --dry-run
 openfocus recipe run workflow.json
 ```
+
+Het recept bewaart de gekozen fusiemethode. Geef `--experimental` mee aan elke `openfocus recipe run` die een experimentele fusiemethode gebruikt, ook bij een proefrun met `--dry-run`.
 
 Het JSON-formaat van versie 1 bevat `version`, een `input`-array, ofwel `output` of `output_dir`, en een `options`-object. Paden zijn relatief ten opzichte van het receptbestand; verplaats het recept samen met zijn invoerbestanden. Bij het maken worden de CLI-instellingen en opgeloste algoritmeparameters vastgelegd. Onbekende velden, ongeldige waarden en niet-ondersteunde versies worden geweigerd. Een proefrun controleert de invoer zonder resultaatbestanden te schrijven. Bestaande projectbestanden blijven ongewijzigd.
 
@@ -1008,7 +1007,7 @@ Dezelfde headless API is beschikbaar zonder PyQt te importeren:
 ```python
 from core.recipes import capture_project_recipe, capture_recipe, load_recipe, save_recipe, run_recipe
 
-capture_recipe("workflow.json", ["-i", "stack_folder", "-o", "result/fused.png", "-m", "dct"])
+capture_recipe("workflow.json", ["-i", "stack_folder", "-o", "result/fused.png", "-m", "openfocus_b"])
 capture_project_recipe("from-project.json", "session.ofproj",
                        ["-i", "new_stack", "-o", "result/fused.png"])
 recipe = load_recipe("workflow.json")  # gevalideerd dictionary met relatieve paden
@@ -1098,31 +1097,29 @@ Exitcodes: `0` succes, `1` verwerkingsfout, `2` gebruiksfout. `python main.py --
 
 - Schakel experimentele functies in de geavanceerde instellingen in en bevestig; AI-methoden zijn op de desktop anders uitgeschakeld. Runtime en model zijn afzonderlijke vereisten.
 - Controleer ONNX Runtime en het meegeleverde model.
-- Controleer via **Help → Omgevingsinfo**
+- Controleer via **Help → Feedback versturen → Diagnostiek → Omgevingsinfo**
 
 #### Fouten door te weinig geheugen
 
-- Schakel tegelverwerking in via **Instellingen → Geavanceerde instellingen… → Prestaties**
+- Schakel tegelverwerking in via **Instellingen → Geavanceerde instellingen… → Fusie**
 - Verklein de tegelblokgrootte
 - Gebruik kleinere kernelgroottes
 - Schaal de afbeeldingen naar kleinere afmetingen
 
 #### Registratie mislukt
 
-- Kies **OpenFocus (snel)** voor begrensde starre beweging, of schakel **Stoppen bij afgewezen beeld** in om vroeg te falen in plaats van onuitgelijnde frames te accepteren
+- Als de registratie een beeld afwijst, stopt de desktopapp de betreffende stapel. Bekijk het beeld en de reden in de foutmelding en controleer het bronbeeld voordat je het opnieuw probeert.
 - Verklein de verkleiningsbreedte in **Instellingen → Geavanceerde instellingen… → Registratie**
 - Zorg dat de afbeeldingen voldoende contrast en kenmerken hebben
-- Schakel onder **Instellingen → Geavanceerde instellingen… → Registratie** de optie **Uitlijningsdiagnose verzamelen** in, render opnieuw en lees **Instellingen → Geavanceerde instellingen… → Registratie → Uitlijningsdiagnose** voor de betrokken frames
 
 #### Trage verwerking
 
-- Laat threads op automatisch (`0`); CPU-capaciteit, resourcemodus en geheugenreserve beperken de gelijktijdigheid al
 - Gebruik voor een onbeheerde batch de modus **Maximaal**, of Guided Filter / GFG-FGF in plaats van een AI-methode
 - Verlaag de beeldresolutie of gebruik **Snel voorbeeld** tijdens het afstellen
 
 #### Windows SmartScreen-waarschuwing bij de eerste start
 
-Of de Windows-binaries ondertekend zijn, hangt af van de specifieke release (zie de releaseopmerkingen); een handtekening is niet gegarandeerd. Download ze van **https://openfocus.top** in plaats van een externe mirror. Als SmartScreen waarschuwt, klik op **Meer informatie → Toch uitvoeren**. De eerste start na uitpakken kan 30–60 seconden duren.
+De huidige Windows-builds zijn niet ondertekend. Download de bestanden van de officiële OpenFocus-website (**https://openfocus.top**). Vergelijk vóór het starten de SHA-256-hash van het gedownloade bestand met de waarde in het releasemanifest. Als SmartScreen waarschuwt, klik op **Meer informatie → Toch uitvoeren**. De eerste start na uitpakken kan 30–60 seconden duren.
 
 #### macOS meldt dat de app „niet kan worden geopend” of „beschadigd is”
 
@@ -1138,9 +1135,9 @@ of klik met rechts op de app en kies **Open**. De vrijgegeven macOS-builds zijn 
 
 ### Hulp krijgen
 
-1. **Omgevingsinfo**: controleer je installatie via **Help → Omgevingsinfo**
+1. **Omgevingsinfo**: controleer je installatie via **Help → Feedback versturen → Diagnostiek → Omgevingsinfo**
 2. **Contact opnemen**: ga naar **Help → Contact opnemen** voor supportinformatie
-3. **Feedback versturen**: via **Help → Feedback versturen…** kopieer je logboeken of exporteer je een pakket om handmatig in te dienen
+3. **Feedback versturen**: via **Help → Feedback versturen → Diagnostiek** kopieer je logboeken of exporteer je een pakket om handmatig in te dienen
 
 ---
 

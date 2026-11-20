@@ -7,7 +7,7 @@ from PyQt6 import sip
 from PyQt6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QWheelEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 from conftest import make_two_focus_stack
 from core.algorithms import get_fusion
@@ -52,8 +52,7 @@ def dialog(qapp):
     yield instance
     if not sip.isdeleted(instance):
         instance.reject()
-    _until(qapp, lambda: instance._worker is None and not instance._source_preview_workers
-           and not instance._display_workers)
+    _until(qapp, lambda: not instance._has_workers())
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     window.close()
     window.deleteLater()
@@ -61,8 +60,23 @@ def dialog(qapp):
 
 
 def _finished(dialog):
-    return (dialog._worker is None and not dialog._display_workers
+    return (dialog._worker is None and not dialog._source_preview_workers and not dialog._display_workers
             and not dialog._preview_timer.isActive())
+
+
+def test_comparison_result_key_tracks_effective_sharpen_strength(dialog):
+    method = 'openfocus_a'
+    unsharpened = dialog._result_key(method)
+    dialog._shared['sharpen_strength'] = 160
+    assert dialog._result_key(method) == unsharpened
+    dialog._shared['sharpen_output'] = True
+    sharpened = dialog._result_key(method)
+    assert sharpened != unsharpened
+    dialog._shared['sharpen_strength'] = 100
+    assert dialog._result_key(method) != sharpened
+    dialog._shared['sharpen_strength'] = 0
+    assert dialog._result_key(method) == unsharpened
+
 
 def test_parameter_cards_stack_headers_and_wrap(dialog, qapp):
     for check in dialog._checks.values():
@@ -81,10 +95,10 @@ def test_parameter_cards_stack_headers_and_wrap(dialog, qapp):
         assert title.font().bold()
         assert title.geometry().bottom() < panel.geometry().top()
         assert title.width() >= title.fontMetrics().horizontalAdvance(title.text())
-        form = panel.layout()
+        labels = {label.text(): label for label in panel.findChildren(QLabel)}
         editors = list(panel.editors.values())
         for editor in editors:
-            label = form.labelForField(editor)
+            label = labels[editor.accessibleName()]
             assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
             assert label.geometry().right() < editor.geometry().left()
         assert len({editor.geometry().left() for editor in editors}) == 1
@@ -144,6 +158,46 @@ def test_full_fusion_continues_when_only_inspection_region_moves(
     _until(qapp, lambda: _finished(dialog))
     assert dialog._results["openfocus_a"]['image'] is result
     assert dialog._canvases["openfocus_a"].has_region()
+
+
+def test_roi_keeps_previous_pixels_until_new_coverage_or_parameter_edit(dialog, qapp, monkeypatch):
+    dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(True))
+    dialog.ref_canvas.set_magnification(4)
+    dialog._preview_timer.stop()
+    dialog._start_request()
+    _until(qapp, lambda: _finished(dialog))
+    method = 'openfocus_a'
+    canvas = dialog._canvases[method]
+    old_pixmap = canvas._pixmap
+    assert old_pixmap is not None and canvas.has_region()
+    dialog._select_method(method)
+    assert dialog.btn_adopt_params.isEnabled()
+    entered, release = Event(), Event()
+    original = PreviewWorker._fuse
+
+    def hold_fusion(worker, method):
+        entered.set()
+        assert release.wait(5)
+        return original(worker, method)
+
+    monkeypatch.setattr(PreviewWorker, '_fuse', hold_fusion)
+    try:
+        dialog.ref_canvas.set_region_centre(QPointF(100, 80))
+        assert canvas._pixmap is old_pixmap and canvas._pending and not canvas.has_region()
+        assert not dialog.btn_adopt_params.isEnabled()
+        _until(qapp, entered.is_set)
+        worker = dialog._worker
+        dialog.ref_canvas.set_region_centre(QPointF(450, 80))
+        assert not worker._should_cancel()
+        assert canvas._pixmap is old_pixmap and canvas._pending
+        dialog.param_widgets[method]['radius'].setValue(9)
+        assert worker._should_cancel()
+        assert canvas._pixmap is None and not dialog.btn_adopt_params.isEnabled()
+    finally:
+        release.set()
+    _until(qapp, lambda: _finished(dialog))
+    assert canvas.has_region()
+    assert dialog._results[method]['bounds'] == dialog.ref_canvas.region()
 
 
 def test_close_waits_for_native_work_without_publishing(
@@ -271,13 +325,158 @@ def test_resizing_all_previews_reuses_full_results(dialog, qapp):
 
     dialog.preview_size_spin.setValue(240)
     qapp.processEvents()
-    assert dialog.ref_canvas.region() == (250, 50, 60, 60)
+    side = round(240 * dialog.ref_canvas.devicePixelRatioF() / 4)
+    assert dialog.ref_canvas.region() == (round(280 - side / 2), round(80 - side / 2), side, side)
     assert dialog.preview_size_slider.value() == 240
     _until(qapp, lambda: _finished(dialog))
     for method, image in results.items():
         assert dialog._canvases[method].width() == 240
         assert dialog._canvases[method].has_region()
         assert dialog._results[method]['image'] is image
+
+
+@pytest.mark.parametrize('roi_mode', [None, 'crop', 'paste'])
+def test_comparison_uses_saved_render_until_settings_change(qapp, roi_mode):
+    import numpy as np
+    from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+    from controllers.output_manager import OutputManager, OutputRecord, OUTPUT_RECORD_ROLE
+    from core.algorithms import resolve_fusion_parameters
+    from core.render_context import build_render_context
+
+    host = QWidget()
+    host.experimental_features = True
+    host.raw_images = make_two_focus_stack((160, 560))
+    host.source_revision = 8
+    host.current_fusion_method = lambda: 'openfocus_a'
+    host.current_alignment_method = lambda: 'none'
+    host.brightness_option_for = lambda *_: False
+    host.thread_count = 1
+    host.output_list = QListWidget(host)
+    host.output_manager = OutputManager(host)
+    saved = resolve_fusion_parameters('openfocus_a', {'radius': 11})
+    roi = (160, 0, 240, 160) if roi_mode is not None else None
+    shape = (160, 240, 3) if roi_mode == 'crop' else (160, 560, 3)
+    output = np.zeros(shape, dtype=np.uint8)
+    region = output if roi_mode != 'paste' else output[:, 160:400]
+    region[:] = (0, 207, 30)
+    for revision in (7, 8):
+        pixels = output if revision == 8 else np.zeros_like(output)
+        context = build_render_context(host.raw_images, pixels, algorithm='openfocus_a',
+            source_revision=revision, roi_rect=roi, roi_mode=roi_mode,
+            parameters={'fusion_parameters': saved})
+        record = OutputRecord.create(pixels, f'Saved {revision}', context=context)
+        item = QListWidgetItem(record.label, host.output_list)
+        item.setData(OUTPUT_RECORD_ROLE, record)
+
+    dialog = CompareDialog(host)
+    try:
+        dialog.show()
+        dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(roi is not None))
+        _until(qapp, lambda: _finished(dialog))
+        canvas = dialog._canvases['openfocus_a']
+        assert canvas.has_region()
+        assert canvas._pixmap.toImage().pixelColor(0, 0).green() == 207
+        assert dialog.param_widgets['openfocus_a']['radius'].value() == 11
+        assert 'Saved 8' in dialog._card_status['openfocus_a'].text()
+
+        if roi is not None:
+            dialog.ref_canvas.set_region_centre(QPointF(80, 80))
+        else:
+            dialog.param_widgets['openfocus_a']['radius'].setValue(13)
+        _until(qapp, lambda: _finished(dialog))
+        assert canvas.has_region()
+        assert 'Saved 8' not in dialog._card_status['openfocus_a'].text()
+    finally:
+        dialog.reject()
+        _until(qapp, lambda: not dialog._has_workers())
+        host.deleteLater()
+
+
+def test_saved_ecc_grid_and_crop_stay_live_during_another_fusion(qapp, monkeypatch):
+    import numpy as np
+    from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+    from controllers.output_manager import OutputManager, OutputRecord, OUTPUT_RECORD_ROLE
+    from core.algorithms import resolve_fusion_parameters
+    from core.render_context import build_render_context
+
+    host = QWidget()
+    host.raw_images = make_two_focus_stack((160, 560))
+    host.source_revision = 12
+    host.current_fusion_method = lambda: 'dct'
+    host.current_alignment_method = lambda: 'ecc'
+    host.registration_parameters_for = lambda _: {'failure_policy': 'fail'}
+    host.brightness_option_for = lambda *_: False
+    host.output_list = QListWidget(host)
+    host.output_manager = OutputManager(host)
+    aligned = [frame[8:-8, 10:-10].copy() for frame in host.raw_images]
+    image = np.zeros_like(aligned[0])
+    image[:, :180, 1] = 120
+    image[:, 180:360, 1] = 200
+    image[:, 360:, 1] = 240
+
+    def add_record(method, label, radius=None, aligned_flag=True, **options):
+        params = resolve_fusion_parameters(method, {'radius': radius} if radius is not None else {})
+        context = build_render_context(aligned, image, algorithm=method, aligned=aligned_flag,
+            source_revision=host.source_revision, alignment_options=('ecc',),
+            parameters={'fusion_parameters': params, 'reg_downscale_width': 1024,
+                        'registration_parameters': {'failure_policy': 'fail'}, **options})
+        record = OutputRecord.create(image, label, context=context)
+        QListWidgetItem(label, host.output_list).setData(OUTPUT_RECORD_ROLE, record)
+        return record
+
+    add_record('openfocus_b', 'Unaligned', 15, aligned_flag=False)
+    add_record('openfocus_b', 'Different exposure', 15, exposure_match=True)
+    add_record('openfocus_b', 'Different base', 15, base_frame='first')
+    add_record('openfocus_b', 'Sharpened', 15, sharpen_output=True, sharpen_strength=80)
+    saved_b = add_record('openfocus_b', 'Newest B', 11, sharpen_output=True, sharpen_strength=0)
+    add_record('openfocus_c', 'Saved C')
+    add_record('openfocus_b', 'Older B', 9)
+    fusion_entered, release_fusion = Event(), Event()
+    original = PreviewWorker._fuse
+
+    def hold_a(worker, method):
+        assert method == 'openfocus_a'
+        assert worker.images[0] is aligned[0]
+        fusion_entered.set()
+        assert release_fusion.wait(10)
+        return original(worker, method)
+
+    monkeypatch.setattr(PreviewWorker, '_fuse', hold_a)
+    dialog = CompareDialog(host)
+    try:
+        dialog.show()
+        assert dialog._selected_methods() == ['openfocus_b', 'openfocus_c']
+        assert dialog.mode_combo.currentData() is False
+        assert dialog.view_combo.currentData() == 'full'
+        assert dialog._results['openfocus_b']['record'] is saved_b
+        assert dialog.param_widgets['openfocus_b']['radius'].value() == 11
+        assert dialog.ref_canvas._source_size == (540, 144)
+        canvas = dialog._canvases['openfocus_b']
+        _until(qapp, lambda: canvas.can_show_full())
+
+        dialog._checks['openfocus_a'].setChecked(True)
+        _until(qapp, fusion_entered.is_set)
+        dialog.ref_canvas.set_magnification(8)
+        dialog.view_combo.setCurrentIndex(dialog.view_combo.findData('detail'))
+
+        def has_current_crop():
+            return canvas._bounds == dialog.ref_canvas.region() and not canvas._pending
+
+        for centre, size, green in ((100, 260, 120), (270, 320, 200), (450, 380, 240)):
+            point = dialog.ref_canvas.image_to_widget(QPointF(centre, 72)).toPoint()
+            QTest.mousePress(dialog.ref_canvas, Qt.MouseButton.LeftButton, pos=point)
+            QTest.mouseRelease(dialog.ref_canvas, Qt.MouseButton.LeftButton, pos=point)
+            dialog.preview_size_slider.setValue(size)
+            assert canvas._pixmap is not None
+            _until(qapp, has_current_crop, timeout=2)
+            assert canvas._pixmap.toImage().pixelColor(0, 0).green() == green
+            assert not release_fusion.is_set() and dialog._worker.isRunning()
+        assert dialog._results['openfocus_b']['record'] is saved_b
+    finally:
+        release_fusion.set()
+        dialog.reject()
+        _until(qapp, lambda: not dialog._has_workers())
+        host.deleteLater()
 
 
 def test_excluded_frames_are_not_compared(qapp):
@@ -319,10 +518,12 @@ def test_view_mode_does_not_recompute(dialog, qapp):
     dialog._preview_timer.stop()
     dialog._start_request()
     _until(qapp, lambda: _finished(dialog) and dialog._results)
-    before = dict(dialog._results)
+    before = dialog._results['openfocus_a']['image']
+    dialog.view_combo.setCurrentIndex(dialog.view_combo.findData('detail'))
+    _until(qapp, lambda: _finished(dialog))
     dialog.view_combo.setCurrentIndex(dialog.view_combo.findData("full"))
     qapp.processEvents()
-    assert dict(dialog._results) == before
+    assert dialog._results['openfocus_a']['image'] is before
     assert dialog._canvases["openfocus_a"].view_mode() == "full"
 
 
@@ -602,6 +803,11 @@ def test_mixed_methods_share_registration_and_invalidate_on_order_change(dialog,
     dialog._adopt_output()
     assert len(records) == 1
     assert records[0].context.source_indices == (0, 2, 4)
+    details = records[0].context.fusion_details
+    assert details.algorithm == 'openfocus_a'
+    assert details.tile_grid is None
+    assert dict(details.parameters) == dialog._method_params['openfocus_a']
+    assert dict(details.options)['reverse_order'] is True
     np.testing.assert_array_equal(resolve_frame(records[0].context.frames[-1].image), anchor)
 
 
@@ -817,7 +1023,7 @@ def test_registered_parameters_cross_dialogs_and_adoption(qapp, extra_algorithms
         window.close()
 
 
-def test_source_preview_reframe_rejects_old_generation_and_identity(dialog, tmp_path, monkeypatch):
+def test_source_preview_reframe_rejects_old_generation_and_identity(dialog, qapp, tmp_path, monkeypatch):
     import cv2
     import numpy as np
     from PyQt6.QtCore import QObject, pyqtSignal
@@ -846,7 +1052,7 @@ def test_source_preview_reframe_rejects_old_generation_and_identity(dialog, tmp_
     try:
         dialog._show_frame(0)
         old = next(reversed(dialog._source_preview_workers))
-        assert not dialog.ref_canvas.has_image()
+        assert dialog.ref_canvas._pixmap is None
         dialog._show_frame(1)
         middle = next(reversed(dialog._source_preview_workers))
         assert old.cancelled
@@ -858,10 +1064,10 @@ def test_source_preview_reframe_rejects_old_generation_and_identity(dialog, tmp_
         object.__setattr__(first, "preview", pixels)
         old.ready.emit(old.request, 0, id(first), pixels)
         old.failed.emit(old.request, "obsolete failure")
-        assert not dialog.ref_canvas.has_image()
+        assert dialog.ref_canvas._pixmap is None
         assert not dialog.ref_canvas.toolTip()
         current.ready.emit(current.request, 0, id(second), pixels)
-        assert not dialog.ref_canvas.has_image()
+        assert dialog.ref_canvas._pixmap is None
         current.ready.emit(current.request, 0, id(first), pixels)
         assert dialog.ref_canvas.has_image()
         assert dialog.ref_canvas._pixmap.size().width() == 8
@@ -874,10 +1080,11 @@ def test_source_preview_reframe_rejects_old_generation_and_identity(dialog, tmp_
         assert dialog.isVisible() and not dialog.isEnabled()
         object.__setattr__(second, "preview", pixels)
         closing.ready.emit(closing.request, 1, id(second), pixels)
-        assert not dialog.ref_canvas.has_image()
+        assert dialog.ref_canvas._pixmap is None
     finally:
         for worker in tuple(dialog._source_preview_workers):
             worker.finished.emit()
+    _until(qapp, lambda: not dialog._has_workers())
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert sip.isdeleted(dialog)
 
@@ -909,7 +1116,7 @@ def test_missing_source_preview_decodes_off_gui_and_close_cancels(dialog, qapp, 
     try:
         assert entered.wait(5)
         assert threads == [False]
-        assert not dialog.ref_canvas.has_image()
+        assert dialog.ref_canvas._pixmap is None
         worker = next(iter(dialog._source_preview_workers))
         dialog.reject()
         assert worker.cancelled
@@ -938,3 +1145,134 @@ def test_full_candidate_display_is_bounded_and_deselection_releases_it(dialog, q
     assert 'openfocus_a' not in dialog._results
     assert 'openfocus_a' not in dialog._full_results
     assert canvas._pixmap is None
+
+
+def test_reference_zoom_reads_oriented_page_and_aligned_crop(dialog, qapp, tmp_path, monkeypatch):
+    import numpy as np
+    import tifffile
+    from PyQt6.QtCore import QThread
+    from core.source_frames import SourceFrame, crop_frame, scan_source
+
+    # Deliberately unrelated flat reduced IFD. Every native pixel is identifiable.
+    path = tmp_path / 'reference.tif'
+    y, x = np.indices((720, 960), dtype=np.uint16)
+    rgb = np.stack((x % 251, y % 239, (x + y) % 233), axis=-1).astype(np.uint8)
+    with tifffile.TiffWriter(path) as writer:
+        writer.write(rgb, photometric='rgb', extratags=[(274, 'H', 1, 6, False)])
+        writer.write(np.zeros((180, 240, 3), np.uint8), photometric='rgb', subfiletype=1)
+    source, = scan_source(str(path))
+    aligned = crop_frame(source, 83, 121, 540, 740)
+    expected = np.rot90(rgb, k=3)[121:861, 83:623]
+    calls = []
+    original = SourceFrame.full_resolution
+
+    def resolve(frame, **kwargs):
+        calls.append((frame.page, QThread.currentThread() is qapp.thread()))
+        return original(frame, **kwargs)
+
+    monkeypatch.setattr(SourceFrame, 'full_resolution', resolve)
+    dialog._auto_enabled = False
+    dialog._frames = [aligned, source]
+    canvas = dialog.ref_canvas
+    monkeypatch.setattr(canvas, 'devicePixelRatioF', lambda: 1.)
+    canvas.setFixedSize(188, 144)
+    dialog._show_frame(0)
+    _until(qapp, lambda: not dialog._source_preview_workers)
+    assert canvas._source_size == (540, 740)
+    assert canvas._pixmap.toImage().pixelColor(10, 10).getRgb()[:3] == (0, 0, 0)
+    assert calls == [] and dialog._reference_worker is None
+
+    anchor = QPointF(canvas.width() / 2, canvas.height() / 2)
+    anchor_image = canvas.widget_to_image(anchor)
+    dialog.actual_button.click()
+    assert canvas._zoom * canvas.devicePixelRatioF() == pytest.approx(1.0)
+    _until(qapp, lambda: bool(canvas._tiles) and dialog._viewport_request is None)
+    assert calls == [(0, False)]
+    assert (canvas.widget_to_image(anchor) - anchor_image).manhattanLength() <= 1.0
+    bounds, pixmap = canvas._tiles[0]
+    assert pixmap.width() == bounds.width() and pixmap.height() == bounds.height()
+    pixels = pixmap.toImage()
+    for x, y in ((0, 0), (13, 19), (pixels.width() - 1, pixels.height() - 1)):
+        assert pixels.pixelColor(x, y).getRgb()[:3] == tuple(expected[int(bounds.y()) + y, int(bounds.x()) + x])
+    painted = canvas.grab().toImage()
+    sample = QPointF(17.5, 42.5)
+    original_point = canvas.widget_to_image(sample)
+    color = painted.pixelColor(int(sample.x() * painted.devicePixelRatio()),
+                               int(sample.y() * painted.devicePixelRatio()))
+    assert color.getRgb()[:3] == tuple(expected[int(original_point.y()), int(original_point.x())])
+
+    canvas.set_region_centre(anchor_image)
+    region = canvas.region()
+    assert region[0] + region[2] // 2 == pytest.approx(anchor_image.x(), abs=1)
+    dialog._show_frame(1)
+    assert not canvas._tiles
+    _until(qapp, lambda: dialog._reference_worker is None)
+    assert calls == [(0, False)]
+
+
+@pytest.mark.parametrize('roi_only', [False, True])
+def test_candidate_detail_pixels_match_fusion_at_nonzero_origin(dialog, qapp, roi_only):
+    dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(roi_only))
+    dialog.view_combo.setCurrentIndex(dialog.view_combo.findData('detail'))
+    dialog.ref_canvas.set_magnification(8)
+    dialog.ref_canvas.set_region_centre(QPointF(410, 99))
+    dialog._preview_timer.stop()
+    dialog._start_request()
+    _until(qapp, lambda: _finished(dialog) and 'openfocus_a' in dialog._results)
+    entry = dialog._results['openfocus_a']
+    bx, by, _, _ = entry['bounds']
+    canvas = dialog._canvases['openfocus_a']
+    x, y, width, height = dialog.ref_canvas.region()
+    assert x > 0 and y > 0
+    assert canvas._bounds == (x, y, width, height)
+    assert canvas._pixmap.width() == width and canvas._pixmap.height() == height
+    image = canvas._pixmap.toImage()
+    for dx, dy in ((0, 0), (width // 2, height // 2), (width - 1, height - 1)):
+        assert image.pixelColor(dx, dy).getRgb()[:3] == tuple(entry['image'][y - by + dy, x - bx + dx, ::-1])
+
+
+def test_native_frame_switch_and_shutdown_wait_for_retirement(dialog, tmp_path, monkeypatch):
+    import cv2
+    import numpy as np
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from core.source_frames import scan_source
+    from dialogs import compare
+
+    class HeldRegion(QObject):
+        ready = pyqtSignal(object, object, object, object)
+        failed = pyqtSignal(object, str)
+        finished = pyqtSignal()
+
+        def __init__(self, frame, key, *, metadata=None):
+            super().__init__()
+            self.frame, self.key, self.cancelled = frame, key, False
+
+        def start(self): pass
+        def request_cancel(self): self.cancelled = True
+        def submit(self, request): self.request = request
+
+    path = str(tmp_path / 'source.png')
+    pixels = np.full((80, 120, 3), 111, np.uint8)
+    assert cv2.imwrite(path, pixels)
+    first, second = (scan_source(path)[0] for _ in range(2))
+    monkeypatch.setattr(compare, 'SourceRegionWorker', HeldRegion)
+    dialog._auto_enabled = False
+    dialog._frames = [first, second]
+    dialog._show_frame(0)
+    dialog.actual_button.click()
+    old = dialog._reference_worker
+    assert old.frame is first
+    dialog._show_frame(1)
+    assert old.cancelled and dialog._reference_worker is old
+    old.ready.emit(old.key, old.request, pixels, old.request[2])
+    assert not dialog.ref_canvas._tiles
+    old.finished.emit()
+    current = dialog._reference_worker
+    assert current.frame is second
+    assert dialog.shutdown_running()
+    assert current.cancelled and not dialog.isEnabled()
+    current.ready.emit(current.key, current.request, pixels, current.request[2])
+    assert not dialog.ref_canvas._tiles
+    current.finished.emit()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert sip.isdeleted(dialog)

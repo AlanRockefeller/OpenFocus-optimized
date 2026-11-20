@@ -2,8 +2,10 @@
 import os
 import sys
 from pathlib import Path
+from typing import Iterator
 
 _PORTABLE_MARKER = "OpenFocus.portable"
+_WINDOWS_PREVIEW_DIR = "OpenFocus Preview"
 
 
 def is_portable_mode() -> bool:
@@ -47,6 +49,36 @@ def portable_data_dir() -> str:
     return d
 
 
+def _windows_roaming_data_dir() -> Path:
+    return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "OpenFocus"
+
+
+def shared_account_device_dir() -> Path | None:
+    """Return the per-user Windows device root, independent of the session profile."""
+    if sys.platform != "win32":
+        return None
+    local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    return local / "OpenFocus"
+
+
+def legacy_windows_account_dirs(profile: Path, shared_dir: Path) -> Iterator[Path]:
+    """Find the active, normal and preview profiles that may hold former IDs."""
+    yield profile
+    roaming = _windows_roaming_data_dir()
+    if roaming != profile:
+        yield roaming
+    # A release can be the first upgraded app to start after a preview was used.
+    try:
+        previews = sorted((shared_dir.parent / _WINDOWS_PREVIEW_DIR).iterdir(),
+                          key=lambda path: path.name.casefold())
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    for preview in previews:
+        candidate = preview / "profile"
+        if candidate != profile and candidate.is_dir():
+            yield candidate
+
+
 def user_data_dir() -> Path:
     """Application data root, with an explicit override for isolated processes.
 
@@ -59,7 +91,7 @@ def user_data_dir() -> Path:
     if is_portable_mode():
         return Path(portable_data_dir())
     if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        return _windows_roaming_data_dir()
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support"
     else:

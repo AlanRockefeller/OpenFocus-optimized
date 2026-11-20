@@ -4,8 +4,6 @@
     "assets/*.svg",
     "assets/OpenFocus.ico",
     "assets/OpenFocus.png",
-    "assets/readme/alipay-coffee.jpg",
-    "assets/readme/paypal-coffee.png",
     "assets/demo_stack/demo_01.jpg",
     "assets/demo_stack/demo_02.jpg",
     "assets/demo_stack/demo_03.jpg",
@@ -33,6 +31,14 @@
     "docs/WEBSITE_OPERATIONS.md",
     "LICENSE",
     "packaging/runtime_resources.json",
+    "core/accelerator_win64.json",
+    "core/inference_worker.py",
+    "core/inference_tensorrt.py",
+    "core/__init__.py",
+    "core/models/**/*.py",
+    "weights/stackmff_final.pth",
+    "weights/stackmff_v2_final.pth",
+    "weights/stackmff_v3_final.pth",
     "weights/stackmff_final.onnx",
     "weights/stackmff_v2_final.onnx",
     "weights/stackmff_v3_final.onnx"
@@ -51,8 +57,6 @@
     "ui/*.py"
   ],
   "exclude_exceptions": [
-    "assets/readme/alipay-coffee.jpg",
-    "assets/readme/paypal-coffee.png",
     "docs/AGENT_CONTROL_SPEC.md"
   ]
 }

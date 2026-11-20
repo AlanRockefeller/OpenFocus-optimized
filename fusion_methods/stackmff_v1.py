@@ -3,7 +3,6 @@
 The network fuses stack luma; colour is reconstructed from the closest source.
 The model has no user-tunable parameters.
 """
-from contextlib import nullcontext
 
 import numpy as np
 
@@ -21,7 +20,7 @@ def _prepare_inference(frames, model_path, use_gpu, thread_count=None,
                        result_count=1, fixed_bytes=0):
     """Admit the retrained model and its attention workspace."""
     from fusion_methods import neural_runtime
-    device = neural_runtime.resolve_device(use_gpu)
+    device = neural_runtime.resolve_job_device(use_gpu)
     return common.plan_attention_inference(
         _ALGORITHM, frames, model_path, device,
         thread_count=thread_count, resource_preference=resource_preference,
@@ -33,9 +32,6 @@ def _fuse_tile(frames, model_path, use_gpu, should_cancel=None,
                execution_plan=None, thread_count=None,
                resource_preference='balanced', **_kwargs):
     """Fuse one tile; returns 0-255 pixels in the caller's dtype."""
-    if execution_plan is None:
-        from fusion_methods.neural_runtime import start_inference_job
-        start_inference_job()
     common.cancel(should_cancel)
     out_dtype = np.float32 if any(f.dtype == np.uint16 for f in frames) else fuse_output_dtype(frames)
     model, device, plan = _prepare_inference(
@@ -47,9 +43,13 @@ def _fuse_tile(frames, model_path, use_gpu, should_cancel=None,
     from fusion_methods import neural_runtime
     probs = neural_runtime.probabilities(planes, model, device, plan.native_threads,
                                          INFER_SIGMA, should_cancel)
-    h, w = frames[0].shape[:2]
-    luma = np.clip((probs * planes).sum(axis=1)[0], 0, 1)[:h, :w] * 255.0
-    del probs, planes
+    # The staged planes belong to this tile and inference has finished reading them.
+    np.multiply(probs, planes, out=planes)
+    del probs
+    luma = planes.sum(axis=1)[0]
+    del planes
+    np.clip(luma, 0, 1, out=luma)
+    luma *= 255.0
     fused = common.tensor_to_bgr(luma, frames, should_cancel)
     if out_dtype is np.uint8:
         np.clip(np.round(fused), 0, 255, out=fused)
@@ -62,10 +62,7 @@ def stackmff_impl(input_source, img_resize, model_path, use_gpu,
                   thread_count=None, resource_preference='balanced',
                   execution_plan=None, **kwargs):
     """Whole-stack fusion used by both the direct and tiled paths."""
-    from core.resource_policy import heavy_job
-
-    lease = heavy_job(should_cancel) if execution_plan is None else nullcontext()
-    with lease:
+    with common.neural_lease(execution_plan, should_cancel):
         common.cancel(should_cancel)
         frames = common.read_stack(input_source, img_resize, should_cancel,
                                    execution_plan)

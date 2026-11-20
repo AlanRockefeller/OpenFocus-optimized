@@ -1,13 +1,13 @@
 import cv2
 
-from PyQt6.QtCore import QEvent, QObject
-from PyQt6.QtGui import QAction, QActionGroup
-from PyQt6.QtWidgets import QMainWindow, QToolTip
+from PyQt6.QtCore import QEvent, QObject, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices
+from PyQt6.QtWidgets import QMainWindow, QMenu, QToolTip
 from locales import trans
-from core.experimental import experimental_enabled
+from utils.design_tokens import PALETTES
 
 
-class _LockedExperimentalHint(QObject):
+class _UnavailableToolHint(QObject):
     def __init__(self, menu, action):
         super().__init__(menu)
         self.menu = menu
@@ -22,20 +22,27 @@ class _LockedExperimentalHint(QObject):
         return super().eventFilter(watched, event)
 
 
-def update_experimental_actions(window: QMainWindow) -> None:
-    """Refresh experimental tool actions after settings or language changes."""
-    enabled = experimental_enabled(window)
+def update_development_actions(window: QMainWindow) -> None:
+    """Retranslate the unavailable tools after the standard menu sweep."""
     for key in ('mosaic_title', 'menu_dust_map'):
         action = getattr(window, 'ui_objs', {}).get(key)
         if action is not None:
-            action.setText(f"{trans.t(key)} ({trans.t('experimental_label')})")
-            action.setEnabled(enabled)
-            action.setToolTip('' if enabled else trans.t('experimental_locked_hint'))
+            action.setText(f"{trans.t(key)} ({trans.t('development_label')})")
+            action.setEnabled(False)
+            action.setToolTip(trans.t('development_unavailable_hint'))
 
 
 def _show_support_dialog(window):
-    from dialogs.about import SupportUsDialog
-    SupportUsDialog(window).exec()
+    from dialogs._community_layout import show_community_dialog
+    from dialogs.support import SupportUsDialog
+    show_community_dialog(window, SupportUsDialog)
+
+
+def _open_github_manual() -> None:
+    # Community language packs may have no published manual.
+    language = trans.current_lang if trans.current_lang in trans.PACK_ORDER else 'en'
+    QDesktopServices.openUrl(QUrl(
+        f'https://github.com/Xinzhe99/OpenFocus/blob/main/docs/USER_MANUAL_{language.upper()}.md'))
 
 
 def setup_menus(window: QMainWindow) -> None:
@@ -210,35 +217,34 @@ def setup_menus(window: QMainWindow) -> None:
 
     edit_menu.addSeparator()
 
-    rotate_menu = edit_menu.addMenu(trans.t('menu_rotate'))
-    window.ui_objs['menu_rotate'] = rotate_menu
+    orientation_menu = edit_menu.addMenu(trans.t('menu_rotate_flip'))
+    window.ui_objs['menu_rotate_flip'] = orientation_menu
 
     rotate_90_cw_action = QAction(trans.t('action_rotate_90_cw'), window)
     rotate_90_cw_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_90_CLOCKWISE))
-    rotate_menu.addAction(rotate_90_cw_action)
+    orientation_menu.addAction(rotate_90_cw_action)
     window.ui_objs['action_rotate_90_cw'] = rotate_90_cw_action
 
     rotate_90_ccw_action = QAction(trans.t('action_rotate_90_ccw'), window)
     rotate_90_ccw_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_90_COUNTERCLOCKWISE))
-    rotate_menu.addAction(rotate_90_ccw_action)
+    orientation_menu.addAction(rotate_90_ccw_action)
     window.ui_objs['action_rotate_90_ccw'] = rotate_90_ccw_action
 
     rotate_180_action = QAction(trans.t('action_rotate_180'), window)
     rotate_180_action.triggered.connect(lambda: window.rotate_stack(cv2.ROTATE_180))
-    rotate_menu.addAction(rotate_180_action)
+    orientation_menu.addAction(rotate_180_action)
     window.ui_objs['action_rotate_180'] = rotate_180_action
 
-    flip_menu = edit_menu.addMenu(trans.t('menu_flip'))
-    window.ui_objs['menu_flip'] = flip_menu
+    orientation_menu.addSeparator()
 
     flip_horizontal_action = QAction(trans.t('action_flip_h'), window)
     flip_horizontal_action.triggered.connect(lambda: window.flip_stack(1))
-    flip_menu.addAction(flip_horizontal_action)
+    orientation_menu.addAction(flip_horizontal_action)
     window.ui_objs['action_flip_h'] = flip_horizontal_action
 
     flip_vertical_action = QAction(trans.t('action_flip_v'), window)
     flip_vertical_action.triggered.connect(lambda: window.flip_stack(0))
-    flip_menu.addAction(flip_vertical_action)
+    orientation_menu.addAction(flip_vertical_action)
     window.ui_objs['action_flip_v'] = flip_vertical_action
 
     window.resize_action = QAction(trans.t('action_resize'), window)
@@ -247,19 +253,21 @@ def setup_menus(window: QMainWindow) -> None:
     edit_menu.addAction(window.resize_action)
     window.ui_objs['action_resize'] = window.resize_action
 
-    # Retouch brush: paint pixels from a source frame onto the result
-    retouch_action = QAction(trans.t('action_retouch'), window)
+    retouch_menu = edit_menu.addMenu(trans.t('menu_retouch'))
+    window.ui_objs['menu_retouch'] = retouch_menu
+
+    retouch_action = QAction(trans.t('retouch_from_workspace'), window)
     retouch_action.setShortcut("Ctrl+T")
     retouch_action.setToolTip(trans.t('action_retouch_hint'))
     retouch_action.triggered.connect(window.show_retouch_dialog)
-    edit_menu.addAction(retouch_action)
+    retouch_menu.addAction(retouch_action)
     window.ui_objs['action_retouch'] = retouch_action
-    retouch_action.setProperty("trans_key", 'action_retouch')
+    retouch_action.setProperty('trans_key', 'retouch_from_workspace')
 
-    standalone_retouch = QAction(trans.t('standalone_retouch_action'), window)
-    standalone_retouch.setProperty('trans_key', 'standalone_retouch_action')
+    standalone_retouch = QAction(trans.t('retouch_from_file'), window)
+    standalone_retouch.setProperty('trans_key', 'retouch_from_file')
     standalone_retouch.triggered.connect(window.show_standalone_retouch)
-    edit_menu.addAction(standalone_retouch)
+    retouch_menu.addAction(standalone_retouch)
     window.ui_objs['standalone_retouch_action'] = standalone_retouch
 
     # Labels live under Tools: adding and removing are two halves of one
@@ -284,12 +292,10 @@ def setup_menus(window: QMainWindow) -> None:
 
     mosaic_action = QAction(trans.t('mosaic_title'), window)
     mosaic_action.setProperty('trans_key', 'mosaic_title')
-    mosaic_action.triggered.connect(window.show_mosaic_dialog)
     batch_menu.addAction(mosaic_action)
     window.ui_objs['mosaic_title'] = mosaic_action
-    batch_menu._locked_mosaic_hint = _LockedExperimentalHint(batch_menu, mosaic_action)
+    batch_menu._locked_mosaic_hint = _UnavailableToolHint(batch_menu, mosaic_action)
     batch_menu.installEventFilter(batch_menu._locked_mosaic_hint)
-    update_experimental_actions(window)
 
     def open_converter():
         from dialogs.batch_converter import BatchConverterDialog
@@ -311,13 +317,12 @@ def setup_menus(window: QMainWindow) -> None:
     window.ui_objs['menu_depth_map'] = depth_action
 
     dust_action = QAction(trans.t('menu_dust_map'), window)
-    dust_action.triggered.connect(window.show_dust_map_dialog)
     dust_action.setProperty("trans_key", 'menu_dust_map')
     batch_menu.addAction(dust_action)
     window.ui_objs['menu_dust_map'] = dust_action
-    batch_menu._locked_dust_hint = _LockedExperimentalHint(batch_menu, dust_action)
+    batch_menu._locked_dust_hint = _UnavailableToolHint(batch_menu, dust_action)
     batch_menu.installEventFilter(batch_menu._locked_dust_hint)
-    update_experimental_actions(window)
+    update_development_actions(window)
 
     batch_menu.addSeparator()
 
@@ -466,6 +471,11 @@ def setup_menus(window: QMainWindow) -> None:
     gpu_action.triggered.connect(window.set_use_gpu)
     settings_menu.addAction(gpu_action)
     window.ui_objs['action_gpu_accel'] = gpu_action
+    pack_action = QAction(trans.t('ai_pack_title'), window)
+    pack_action.setProperty('trans_key', 'ai_pack_title')
+    pack_action.triggered.connect(lambda: window.accelerator_banner.open_settings())
+    settings_menu.addAction(pack_action)
+    window.ui_objs['action_ai_pack'] = pack_action
     # Resolve the backend in the background when the user opens Settings.
     # Device probing must never delay menu construction.
     if (_opencl is None or (_gpu_kind is None and _runtime_installed)) and hasattr(
@@ -479,20 +489,35 @@ def setup_menus(window: QMainWindow) -> None:
     theme_menu = settings_menu.addMenu(trans.t('menu_theme'))
     theme_group_theme = QActionGroup(window)
     theme_group_theme.setExclusive(True)
-    for theme_code, trans_key in (("light", 'theme_light'),
-                                  ("dark", 'theme_dark')):
+    for theme_code in (*PALETTES, 'system'):
+        trans_key = f'theme_{theme_code}'
         act = QAction(trans.t(trans_key), window)
         act.setCheckable(True)
-        act.setChecked(getattr(window, 'ui_theme', 'light') == theme_code)
+        act.setChecked(getattr(window, 'theme_mode', 'light') == theme_code)
         act.setData(theme_code)
         act.setProperty("trans_key", trans_key)
         act.triggered.connect(
             lambda _checked, code=theme_code: window.apply_theme(code))
         theme_group_theme.addAction(act)
         theme_menu.addAction(act)
-        window.ui_objs[f'theme_{theme_code}'] = act
+        window.ui_objs[trans_key] = act
     window.ui_objs['menu_theme'] = theme_menu
     window.ui_objs['menu_theme'].setProperty("trans_key", 'menu_theme')
+
+    font_menu = settings_menu.addMenu(trans.t('menu_ui_font'))
+    font_group = QActionGroup(window)
+    font_group.setExclusive(True)
+    for mode in ('large', 'medium', 'small', 'custom'):
+        key = f'ui_font_{mode}'
+        action = font_menu.addAction(trans.t(key))
+        action.setCheckable(True)
+        action.setChecked(getattr(window, 'font_size_mode', 'medium') == mode)
+        action.setData(mode)
+        action.triggered.connect(lambda _checked, choice=mode: window.set_ui_font_size(choice))
+        font_group.addAction(action)
+        window.ui_objs[key] = action
+    window.ui_objs['menu_ui_font'] = font_menu
+
 
     # Language Submenu
     lang_menu = settings_menu.addMenu(trans.t('menu_language'))
@@ -533,12 +558,6 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.aboutToShow.connect(
         lambda: getattr(window, '_refresh_account_action', lambda: None)())
 
-
-    env_action = QAction(trans.t('action_env_info'), window)
-    env_action.triggered.connect(window.show_environment_info)
-    help_menu.addAction(env_action)
-    window.ui_objs['action_env_info'] = env_action
-
     feedback_action = QAction(trans.t('action_send_feedback'), window)
     feedback_action.setToolTip(trans.t('action_send_feedback_hint'))
     feedback_action.triggered.connect(window.show_feedback_dialog)
@@ -563,6 +582,11 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.addAction(quickstart_action)
     window.ui_objs['menu_quick_start'] = quickstart_action
 
+    manual_action = QAction(trans.t('menu_github_manual'), window)
+    manual_action.triggered.connect(_open_github_manual)
+    help_menu.addAction(manual_action)
+    window.ui_objs['menu_github_manual'] = manual_action
+
     update_action = QAction(trans.t('menu_check_updates'), window)
     update_action.triggered.connect(window.check_for_updates)
     help_menu.addAction(update_action)
@@ -577,7 +601,11 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.addAction(install_action)
     window.ui_objs['action_install_update'] = install_action
 
-    logs_action = QAction(trans.t('menu_open_logs'), window)
-    logs_action.triggered.connect(window.open_logs_folder)
-    help_menu.addAction(logs_action)
-    window.ui_objs['menu_open_logs'] = logs_action
+    extensions_menu = QMenu(trans.t('menu_extensions'), menubar)
+    extensions_menu.setEnabled(False)
+    # Qt's native macOS menu bar hides empty menus.
+    unavailable_action = extensions_menu.addAction(trans.t('development_unavailable_hint'))
+    unavailable_action.setEnabled(False)
+    menubar.addMenu(extensions_menu)
+    window.ui_objs['menu_extensions'] = extensions_menu
+    window.ui_objs['development_unavailable_hint'] = unavailable_action

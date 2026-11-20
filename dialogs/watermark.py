@@ -6,7 +6,6 @@ always render the watermark at the image's own size and bit depth.
 """
 from __future__ import annotations
 
-import cv2
 import numpy as np
 
 from PyQt6.QtCore import QSignalBlocker, Qt, QTimer
@@ -15,8 +14,10 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFontComboBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,13 +31,15 @@ from PyQt6.QtWidgets import (
 )
 
 from locales import trans
+from ui.styles import tokens
+from utils.design_tokens import SPACE
 from utils import watermark
+from utils.frame_pixels import BoundedPreviewWorker, PREVIEW_MAX_SIDE
 from utils.image_utils import cv2_to_pixmap, to_display_uint8
-from utils.ui_utils import size_dialog_to_content
 from widgets.magnifier_label import MagnifierLabel
 from widgets.stepper import StepperSpinBox, hide_spin_buttons
+from widgets.workspace import WorkspaceSplitter
 
-PREVIEW_MAX_SIDE = 1200
 PREVIEW_DEBOUNCE_MS = 25
 
 
@@ -47,9 +50,17 @@ class WatermarkDialog(QDialog):
         super().__init__(parent)
         window = parent
         self.setWindowTitle(trans.t("dialog_watermark_title"))
-        self.setStyleSheet("")
         self._window = window
         self._preview_cache = None
+        self._pixel_worker = None
+        self._pixel_key = None
+        self._region_worker = None
+        self._region_pending = {}
+        self._region_source = None
+        self._preview_revision = 0
+        self._actual_view = False
+        self._closing = False
+        self._close_result = QDialog.DialogCode.Rejected
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(PREVIEW_DEBOUNCE_MS)
@@ -58,39 +69,22 @@ class WatermarkDialog(QDialog):
         self._initializing = True
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(SPACE["md"], SPACE["md"], SPACE["md"], SPACE["sm"])
+        root.setSpacing(SPACE["sm"])
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        content = QWidget()
-        content_col = QVBoxLayout(content)
-        content_col.setContentsMargins(0, 0, 0, 0)
-        content_col.setSpacing(8)
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
-
-        self.header = QLabel(self._header_text())
-        self.header.setObjectName("mutedLabel")
-        self.header.setWordWrap(True)
-        content_col.addWidget(self.header)
-
-        body = QHBoxLayout()
-        body.setSpacing(14)
-        content_col.addLayout(body, 1)
-
-        # ---- left: form -------------------------------------------------
         form_host = QWidget()
         form_col = QVBoxLayout(form_host)
-        form_col.setContentsMargins(0, 0, 8, 0)
-        form_col.setSpacing(8)
+        form_col.setContentsMargins(0, 0, SPACE["xs"], 0)
+        form_col.setSpacing(SPACE["sm"])
+        scroll.setWidget(form_host)
+        workspace = WorkspaceSplitter()
+        workspace.addWidget(scroll)
+        root.addWidget(workspace, 1)
 
-        form_col.addWidget(self._section(trans.t("watermark_section_text")))
-        text_form = QFormLayout()
-        text_form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        text_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        form_col.addLayout(text_form)
+        self._text_form = text_form = self._group(form_col, "watermark_section_text")
 
         self.text_edit = QLineEdit()
         # QLineEdit counts UTF-16 units; the validator counts code points.
@@ -113,21 +107,32 @@ class WatermarkDialog(QDialog):
         self.copyright_position_combo.setToolTip(trans.t("watermark_copyright_position_hint"))
         text_form.addRow(trans.t("watermark_copyright_position"), self.copyright_position_combo)
 
-        form_col.addWidget(self._section(trans.t("watermark_section_appearance")))
-        appearance = QFormLayout()
-        appearance.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        appearance.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        form_col.addLayout(appearance)
+        targets = self._group(form_col, "watermark_section_targets")
+        self.target_checks = {}
+        for target, key in (("source", "watermark_target_source"),
+                            ("registered", "watermark_target_registered"),
+                            ("output", "watermark_target_output")):
+            check = QCheckBox(trans.t(key))
+            check.setAccessibleName(trans.t(key))
+            check.toggled.connect(self._schedule_preview)
+            self.target_checks[target] = check
+            targets.addRow(check)
+        hint = QLabel(trans.t("watermark_target_hint"))
+        hint.setObjectName("mutedLabel")
+        hint.setWordWrap(True)
+        targets.addRow(hint)
+        self.export_hint = QLabel(trans.t("watermark_export_hint"))
+        self.export_hint.setObjectName("mutedLabel")
+        self.export_hint.setWordWrap(True)
+        targets.addRow(self.export_hint)
 
-        self.font_combo = QFontComboBox()
-        self.font_combo.setAccessibleName(trans.t("watermark_font"))
-        self.font_combo.setToolTip(trans.t("watermark_font_hint"))
-        appearance.addRow(trans.t("watermark_font"), self.font_combo)
+        appearance = self._group(form_col, "watermark_section_appearance")
 
         self.size_row, self.size_slider, self.size_spin = self._slider_row(
             watermark.MIN_SIZE_PERCENT, watermark.MAX_SIZE_PERCENT,
             watermark.DEFAULT_SIZE_PERCENT, scale=10, decimals=1, suffix="%")
         self.size_slider.setAccessibleName(trans.t("watermark_size"))
+        self.size_spin.setAccessibleName(trans.t("watermark_size"))
         appearance.addRow(trans.t("watermark_size"), self.size_row)
 
         self.opacity_row, self.opacity_slider, self.opacity_spin = self._slider_row(
@@ -135,6 +140,7 @@ class WatermarkDialog(QDialog):
             int(round(watermark.DEFAULT_OPACITY * 100)), scale=1, decimals=0,
             suffix="%")
         self.opacity_slider.setAccessibleName(trans.t("watermark_opacity"))
+        self.opacity_spin.setAccessibleName(trans.t("watermark_opacity"))
         self.opacity_spin.setToolTip(trans.t("watermark_opacity_hint"))
         appearance.addRow(trans.t("watermark_opacity"), self.opacity_row)
 
@@ -143,6 +149,13 @@ class WatermarkDialog(QDialog):
         self.color_combo.addItem(trans.t("watermark_color_black"), "black")
         self.color_combo.setAccessibleName(trans.t("watermark_color"))
         appearance.addRow(trans.t("watermark_color"), self.color_combo)
+
+        self.font_combo = QFontComboBox()
+        self.font_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.font_combo.setMinimumContentsLength(14)
+        self.font_combo.setAccessibleName(trans.t("watermark_font"))
+        self.font_combo.setToolTip(trans.t("watermark_font_hint"))
+        appearance.addRow(trans.t("watermark_font"), self.font_combo)
 
         self.angle_row, self.angle_slider, self.angle_spin = self._slider_row(
             int(watermark.MIN_ANGLE), int(watermark.MAX_ANGLE),
@@ -161,81 +174,81 @@ class WatermarkDialog(QDialog):
         appearance.addRow(trans.t("watermark_density"), self.density_combo)
 
         self.reset_button = QPushButton(trans.t("watermark_reset_defaults"))
+        self.reset_button.setAutoDefault(False)
         self.reset_button.clicked.connect(self._reset_defaults)
-        form_col.addWidget(self.reset_button)
+        appearance.addRow(self.reset_button)
 
-        form_col.addWidget(self._section(trans.t("watermark_section_targets")))
-        self.target_checks = {}
-        target_col = QVBoxLayout()
-        target_col.setContentsMargins(0, 0, 0, 0)
-        target_col.setSpacing(4)
-        for target, key in (("source", "watermark_target_source"),
-                            ("registered", "watermark_target_registered"),
-                            ("output", "watermark_target_output")):
-            check = QCheckBox(trans.t(key))
-            check.setAccessibleName(trans.t(key))
-            check.toggled.connect(self._schedule_preview)
-            self.target_checks[target] = check
-            target_col.addWidget(check)
-        hint = QLabel(trans.t("watermark_target_hint"))
-        hint.setObjectName("mutedLabel")
-        hint.setWordWrap(True)
-        target_col.addWidget(hint)
-        self.export_hint = QLabel(trans.t("watermark_export_hint"))
-        self.export_hint.setObjectName("mutedLabel")
-        self.export_hint.setWordWrap(True)
-        target_col.addWidget(self.export_hint)
-        form_col.addLayout(target_col)
         form_col.addStretch()
-        body.addWidget(form_host, 1)
 
         # ---- right: preview ---------------------------------------------
-        preview_col = QVBoxLayout()
-        preview_col.setSpacing(6)
-        title = QLabel(trans.t("watermark_preview"))
-        bold = title.font()
-        bold.setBold(True)
-        title.setFont(bold)
-        preview_col.addWidget(title)
+        preview_scroll = QScrollArea()
+        preview_scroll.setWidgetResizable(True)
+        preview_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        preview_box = QGroupBox(trans.t("watermark_preview"))
+        preview_col = QVBoxLayout(preview_box)
+        preview_col.setSpacing(SPACE["xs"])
+        preview_scroll.setWidget(preview_box)
+        workspace.addWidget(preview_scroll)
+
+        picker = QFormLayout()
+        picker.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        picker.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        preview_col.addLayout(picker)
 
         self.preview_target_combo = QComboBox()
         self.preview_target_combo.setAccessibleName(trans.t("watermark_preview_target"))
         self.preview_target_combo.addItem(trans.t("watermark_target_source"), "source")
         self.preview_target_combo.addItem(trans.t("watermark_target_registered"), "registered")
         self.preview_target_combo.addItem(trans.t("watermark_target_output"), "output")
-        preview_col.addWidget(self.preview_target_combo)
+        picker.addRow(trans.t("watermark_preview_target"), self.preview_target_combo)
 
         self.output_combo = QComboBox()
         self.output_combo.setAccessibleName(trans.t("watermark_target_output"))
-        preview_col.addWidget(self.output_combo)
-
-        self.preview_lbl = MagnifierLabel(parent=self)
-        self.preview_lbl.setMinimumSize(280, 240)
-        self.preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
-                                       QSizePolicy.Policy.Ignored)
-        self.preview_lbl.setObjectName("labelPreview")
-        preview_col.addWidget(self.preview_lbl, 1)
+        self.output_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.output_combo.setMinimumContentsLength(14)
+        picker.addRow(self.output_combo)
 
         navigation = QHBoxLayout()
         self.frame_index = QSpinBox()
         hide_spin_buttons(self.frame_index)
+        self.frame_index.setAccessibleName(trans.t("dust_preview_frame").rstrip(":"))
         self.frame_index.setRange(1, 1)
         self.prev_button = QPushButton("‹")
         self.prev_button.setToolTip(trans.t("label_preview_prev"))
+        self.prev_button.setAccessibleName(self.prev_button.toolTip())
+        self.prev_button.setAutoDefault(False)
         self.next_button = QPushButton("›")
         self.next_button.setToolTip(trans.t("label_preview_next"))
+        self.next_button.setAccessibleName(self.next_button.toolTip())
+        self.next_button.setAutoDefault(False)
         self.prev_button.clicked.connect(lambda: self.frame_index.stepBy(-1))
         self.next_button.clicked.connect(lambda: self.frame_index.stepBy(1))
         navigation.addWidget(self.prev_button)
         navigation.addWidget(self.frame_index)
         navigation.addWidget(self.next_button)
+        navigation.addStretch()
         fit = QPushButton(trans.t("retouch_fit_short").replace(" (F)", "").replace("（F）", ""))
-        fit.clicked.connect(self.preview_lbl.reset_view)
+        fit.setAutoDefault(False)
+        fit.clicked.connect(self._fit_size)
         actual = QPushButton(trans.t("retouch_zoom_100"))
+        actual.setAutoDefault(False)
         actual.clicked.connect(self._actual_size)
         navigation.addWidget(fit)
         navigation.addWidget(actual)
         preview_col.addLayout(navigation)
+
+        self.preview_lbl = MagnifierLabel(parent=self)
+        self.preview_lbl.sourceRegionRequested.connect(self._request_region)
+        self.preview_lbl.sourceRegionsReleased.connect(self._release_regions)
+        self.preview_lbl.setMinimumSize(200, 144)
+        self.preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.preview_lbl.setObjectName("labelPreview")
+        preview_col.addWidget(self.preview_lbl, 1)
+
+        self.header = QLabel(self._header_text())
+        self.header.setObjectName("mutedLabel")
+        self.header.setWordWrap(True)
+        preview_col.addWidget(self.header)
 
         self.preview_meta = QLabel("")
         self.preview_meta.setObjectName("mutedLabel")
@@ -249,25 +262,24 @@ class WatermarkDialog(QDialog):
         self.baked_note.setObjectName("mutedLabel")
         self.baked_note.setWordWrap(True)
         preview_col.addWidget(self.baked_note)
-        body.addLayout(preview_col, 1)
 
         # ---- fixed bottom actions ---------------------------------------
         self._error = QLabel("")
         self._error.setWordWrap(True)
-        self._error.setStyleSheet("color:#c0392b;")
+        self._error.setObjectName("errorLabel")
         root.addWidget(self._error)
 
-        row = QHBoxLayout()
-        row.addStretch()
-        self._ok_button = QPushButton(trans.t("label_apply_close"))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.setObjectName("dialogButtonBar")
+        self._ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self._ok_button.setText(trans.t("label_apply_close"))
         self._ok_button.setObjectName("primaryButton")
         self._ok_button.setDefault(True)
-        self._ok_button.clicked.connect(self._save_and_accept)
-        cancel_btn = QPushButton(trans.t("btn_cancel"))
-        cancel_btn.clicked.connect(self.reject)
-        row.addWidget(self._ok_button)
-        row.addWidget(cancel_btn)
-        root.addLayout(row)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(trans.t("btn_cancel"))
+        buttons.accepted.connect(self._save_and_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
 
         # Fill output choices before choosing the initial preview target.
         self._rebuild_output_combo()
@@ -286,7 +298,7 @@ class WatermarkDialog(QDialog):
                        self.angle_slider.valueChanged):
             signal.connect(self._schedule_preview)
         self.text_edit.textChanged.connect(self._schedule_preview)
-        self.copyright_check.toggled.connect(self.copyright_position_combo.setEnabled)
+        self.copyright_check.toggled.connect(self._sync_copyright_position)
         self.copyright_check.toggled.connect(self._schedule_preview)
         self.copyright_position_combo.currentIndexChanged.connect(self._schedule_preview)
         self.font_combo.currentFontChanged.connect(self._schedule_preview)
@@ -296,19 +308,27 @@ class WatermarkDialog(QDialog):
         self.output_combo.currentIndexChanged.connect(self._preview_target_changed)
         self.frame_index.valueChanged.connect(self._schedule_preview)
 
-        size_dialog_to_content(self, scroll)
+        self.text_edit.setFocus()
+        workspace.fit_dialog(880, 670)
         self._initializing = False
         self._preview_target_changed()
 
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
-    def _section(self, text: str) -> QLabel:
-        label = QLabel(text)
-        font = label.font()
-        font.setBold(True)
-        label.setFont(font)
-        return label
+
+    @staticmethod
+    def _group(column, title_key):
+        box = QGroupBox(trans.t(title_key))
+        form = QFormLayout(box)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        column.addWidget(box)
+        return form
+
+    def _sync_copyright_position(self, checked):
+        self.copyright_position_combo.setEnabled(checked)
+        self._text_form.setRowVisible(self.copyright_position_combo, checked)
 
     def _slider_row(self, minimum, maximum, value, *, scale, decimals, suffix):
         row = QWidget()
@@ -384,7 +404,7 @@ class WatermarkDialog(QDialog):
         self.copyright_check.setChecked(cfg.copyright_enabled)
         self.copyright_position_combo.setCurrentIndex(
             max(0, self.copyright_position_combo.findData(cfg.copyright_position)))
-        self.copyright_position_combo.setEnabled(cfg.copyright_enabled)
+        self._sync_copyright_position(cfg.copyright_enabled)
         self.font_combo.setCurrentFont(QFont(cfg.font_family or default_family))
         self.size_slider.setValue(int(round(cfg.size_percent * 10)))
         self.size_spin.setValue(cfg.size_percent)
@@ -441,13 +461,9 @@ class WatermarkDialog(QDialog):
         # Prefer the current source frame, then a result, then registered
         # frames.  Switching the preview never changes the apply scope.
         order = ("source", "output", "registered")
-        if not outputs:
-            order = tuple(code for code in order if code != "output")
-        if not getattr(window, "raw_images", ()):
-            order = tuple(code for code in order if code != "source")
-        if not registration:
-            order = tuple(code for code in order if code != "registered")
-        chosen = order[0] if order else "source"
+        available = {"source": bool(getattr(window, "raw_images", ())),
+                     "registered": bool(registration), "output": bool(outputs)}
+        chosen = next((code for code in order if available[code]), "source")
         index = self.preview_target_combo.findData(chosen)
         self.preview_target_combo.setCurrentIndex(max(0, index))
         if chosen == "output" and self.output_combo.currentIndex() < 0:
@@ -496,11 +512,15 @@ class WatermarkDialog(QDialog):
     # Preview
     # ------------------------------------------------------------------
     def _schedule_preview(self, *_args) -> None:
-        if self._initializing:
+        if self._initializing or self._closing:
             return
+        self._invalidate_regions()
         self._preview_timer.start()
 
     def _preview_target_changed(self, *_args) -> None:
+        if self._closing:
+            return
+        self._invalidate_regions()
         self._preview_cache = None
         if self.preview_target_combo.currentData() == "output":
             if self.output_combo.currentIndex() < 0 and self.output_combo.count():
@@ -522,76 +542,136 @@ class WatermarkDialog(QDialog):
         record = self.output_combo.currentData()
         return record if record is not None else None
 
-    def _preview_image_and_canvas(self):
+    def _preview_target(self):
         code = self.preview_target_combo.currentData()
-        window = self._window
-        record = self._preview_record()
-        metadata = None
-        name = ""
-        frame_label = ""
-        if record is not None:
+        if code == "output":
+            record = self._preview_record()
             image = getattr(record, "image", None)
             if image is None:
                 return None
-            key = ("output", record.output_id, id(image))
-            if self._preview_cache is not None and self._preview_cache[0] == key:
-                return self._preview_cache[1]
             metadata = getattr(record, "linear_dng_metadata", None)
-            name = getattr(record, "label", "")
-            depth = image.dtype.itemsize * 8
-            canvas = tuple(image.shape[:2])
-        elif code == "registered":
-            frames = getattr(window, "registration_results", ()) or ()
-            index = self.frame_index.value() - 1
-            if not 0 <= index < len(frames):
-                return None
-            image = frames[index]
-            key = ("registered", index, id(image))
-            if self._preview_cache is not None and self._preview_cache[0] == key:
-                return self._preview_cache[1]
-            metadata = getattr(window, "linear_dng_metadata", None)
-            name = trans.t("watermark_target_registered")
-            frame_label = trans.t("watermark_frame_label").format(
-                index=index + 1, total=len(frames))
-            depth = image.dtype.itemsize * 8
-            canvas = tuple(image.shape[:2])
-        else:
-            frames = getattr(window, "raw_images", ()) or ()
-            index = self.frame_index.value() - 1
-            if not 0 <= index < len(frames):
-                return None
-            image = frames[index]
-            key = ("source", index, id(image))
-            if self._preview_cache is not None and self._preview_cache[0] == key:
-                return self._preview_cache[1]
-            metadata = getattr(image, "linear_metadata", None) or getattr(
-                window, "linear_dng_metadata", None)
-            name = trans.t("watermark_target_source")
-            frame_label = trans.t("watermark_frame_label").format(
-                index=index + 1, total=len(frames))
-            depth = image.dtype.itemsize * 8
-            canvas = tuple(image.shape[:2])
+            key = (code, record.output_id, id(image), id(metadata))
+            return key, image, metadata, record.label, ""
+        attr = "registration_results" if code == "registered" else "raw_images"
+        frames = getattr(self._window, attr, ()) or ()
+        index = self.frame_index.value() - 1
+        if not 0 <= index < len(frames):
+            return None
+        image = frames[index]
+        metadata = getattr(image, "linear_metadata", None) or getattr(
+            self._window, "linear_dng_metadata", None)
+        name = trans.t("watermark_target_registered" if code == "registered" else "watermark_target_source")
+        frame_label = trans.t("watermark_frame_label").format(index=index + 1, total=len(frames))
+        return (code, index, id(image), id(metadata)), image, metadata, name, frame_label
 
-        if metadata is not None and not getattr(image, "preview_is_display", False):
-            from utils.frame_pixels import preview_pixels
-            display = preview_pixels(image, parent=self)
-            from utils.linear_dng import develop_linear
-            display = develop_linear(display, metadata)
+    def _fit_pixels(self, key, image, metadata):
+        self._pixel_key = key
+        if self._pixel_worker is not None and self._pixel_worker.key != key:
+            self._pixel_worker.requestInterruption()
+        if self._preview_cache is not None and self._preview_cache[0] == key:
+            _, pixels, error = self._preview_cache
+            if error:
+                self._error.setText(error)
+            return pixels
+        if isinstance(image, np.ndarray) and max(image.shape[:2]) <= PREVIEW_MAX_SIDE:
+            if metadata is not None:
+                from utils.linear_dng import develop_linear
+                image = develop_linear(image, metadata)
+            pixels = to_display_uint8(image)
+            self._preview_cache = (key, pixels, None)
+            return pixels
+        if self._pixel_worker is None:
+            worker = BoundedPreviewWorker(image, metadata, key, preserve_alpha=True)
+            self._pixel_worker = worker
+            worker.finished.connect(self._fit_finished)
+            worker.start()
+        return None
+
+    def _fit_finished(self):
+        worker, self._pixel_worker = self._pixel_worker, None
+        if (not self._closing and worker.key == self._pixel_key
+                and (worker.error or worker.pixels is not None)):
+            self._preview_cache = (worker.key, worker.pixels, worker.error)
+        worker.deleteLater()
+        if self._closing:
+            self._finish_close()
         else:
-            from utils.frame_pixels import preview_pixels
-            display = preview_pixels(image, parent=self)
-        display = np.array(to_display_uint8(display), copy=True)
-        if display.ndim == 2:
-            display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
-        h, w = display.shape[:2]
-        factor = min(1.0, PREVIEW_MAX_SIDE / max(h, w))
-        if factor < 1.0:
-            display = cv2.resize(display, (max(1, int(round(w * factor))),
-                                           max(1, int(round(h * factor)))),
-                                 interpolation=cv2.INTER_AREA)
-        result = (display, canvas, depth, name, frame_label)
-        self._preview_cache = (key, result)
-        return result
+            self._refresh_preview()
+
+    def _invalidate_regions(self):
+        self._preview_revision += 1
+        self._region_source = None
+        self._region_pending.clear()
+        if self._region_worker is not None:
+            self._region_worker.request_cancel()
+
+    def _release_regions(self, key):
+        if self._region_worker is not None and self._region_worker.key == key:
+            self._region_worker.request_cancel()
+
+    def _request_region(self, key, request):
+        if self._closing or self._region_source is None or key != self._region_source[0]:
+            return
+        if request[0] == "view" and self.preview_lbl._zoom_factor == 1 and not self._actual_view:
+            # A small embedded thumbnail remains sufficient for the idle Fit view.
+            return
+        if self._region_worker is not None:
+            if self._region_worker.key == key and not self._region_worker.cancelled:
+                self._region_worker.submit(request)
+            else:
+                self._region_pending[request[0]] = (key, request)
+            return
+        from core.source_previews import SourceRegionWorker
+        _, image, metadata, cfg = self._region_source
+        worker = SourceRegionWorker(image, key, metadata=metadata, watermark_cfg=cfg)
+        self._region_worker = worker
+        worker.ready.connect(self._region_ready)
+        worker.failed.connect(self._region_failed)
+        worker.finished.connect(self._region_finished)
+        worker.submit(request)
+        worker.start()
+
+    def _region_ready(self, key, request, pixels, rect):
+        if (self._region_source is not None and key == self._region_source[0]
+                and self.preview_lbl._region_requests.get(request[0]) == request and pixels is not None):
+            self.preview_lbl.set_source_region(cv2_to_pixmap(pixels), rect, source_key=key, request=request)
+
+    def _region_failed(self, key, message):
+        if self._region_source is not None and key == self._region_source[0]:
+            self._error.setText(message)
+
+    def _region_finished(self):
+        worker, self._region_worker = self._region_worker, None
+        worker.deleteLater()
+        if self._closing:
+            self._finish_close()
+            return
+        pending, self._region_pending = self._region_pending, {}
+        for key, request in pending.values():
+            self._request_region(key, request)
+
+    def shutdown_running(self):
+        self._closing = True
+        self._preview_timer.stop()
+        self._invalidate_regions()
+        if self._pixel_worker is not None:
+            self._pixel_worker.requestInterruption()
+        return self._region_worker is not None or self._pixel_worker is not None
+
+    def _finish_close(self):
+        if self._region_worker is None and self._pixel_worker is None:
+            super().done(self._close_result)
+
+    def done(self, result):
+        self._close_result = result
+        if not self.shutdown_running():
+            self._finish_close()
+
+    def closeEvent(self, event):
+        if self.shutdown_running():
+            event.ignore()
+        else:
+            super().closeEvent(event)
 
     def _draft_config(self) -> watermark.WatermarkConfig:
         family = self.font_combo.currentFont().family()
@@ -610,7 +690,7 @@ class WatermarkDialog(QDialog):
         })
 
     def _scope_sizes(self):
-        """Real (width, height) of every selected target; shape-only."""
+        """Working (height, width) of every selected target, without loading pixels."""
         window = self._window
         sizes = []
         if self.target_checks["source"].isChecked():
@@ -638,24 +718,40 @@ class WatermarkDialog(QDialog):
         return sizes
 
     def _refresh_preview(self, *_args) -> None:
+        if self._closing:
+            return
+        self._preview_timer.stop()
         self._sync_target_availability()
         self._sync_preview_navigation()
         self._ok_button.setEnabled(False)
         self.font_note.clear()
         self._error.clear()
+        target = self._preview_target()
+        if target is None:
+            self._pixel_key = None
+            if self._pixel_worker is not None:
+                self._pixel_worker.requestInterruption()
+            self.preview_lbl.set_display_pixmap(None)
+            self._error.setText(trans.t("watermark_preview_no_target"))
+            return
+        key, image, metadata, name, frame_label = target
+        display = self._fit_pixels(key, image, metadata)
+        if display is None:
+            label = self.preview_lbl
+            held = label._magnifier_active
+            label.set_display_pixmap(None)
+            if self._pixel_worker is not None:
+                # Release/move events still update a held loupe while the fit loads.
+                label._magnifier_active = held
+                label.setText(trans.t("native_detail_loading"))
+            return
+        canvas_h, canvas_w = image.shape[:2]
+        self.header.setText(" · ".join(part for part in (
+            name, frame_label, trans.t("watermark_preview_meta").format(
+                width=canvas_w, height=canvas_h, depth=image.dtype.itemsize * 8)) if part))
+        self.preview_meta.clear()
         if not self.text_edit.text().strip():
-            preview = self._preview_image_and_canvas()
-            if preview is not None:
-                display, canvas, depth, name, frame_label = preview
-                self.preview_lbl.set_display_pixmap(cv2_to_pixmap(display))
-                self.header.setText(" · ".join(part for part in (
-                    name, frame_label,
-                    trans.t("watermark_preview_meta").format(
-                        width=canvas[1], height=canvas[0], depth=depth)) if part))
-                self.preview_meta.clear()
-            else:
-                self.preview_lbl.clear()
-                self._error.setText(trans.t("watermark_preview_no_target"))
+            self._show_preview(key, image, metadata, display, None)
             return
         try:
             cfg = self._draft_config()
@@ -663,34 +759,21 @@ class WatermarkDialog(QDialog):
             self.preview_lbl.clear()
             self._error.setText(trans.t(exc.message_key))
             return
-        preview = self._preview_image_and_canvas()
-        if preview is None:
-            self.preview_lbl.clear()
-            self._error.setText(trans.t("watermark_preview_no_target"))
-            return
-        display, canvas, depth, name, frame_label = preview
-        canvas_w, canvas_h = int(canvas[1]), int(canvas[0])
         info = watermark.analyze(cfg, canvas_w, canvas_h)
         if not info["ok"]:
             self.preview_lbl.clear()
             self._error.setText(trans.t(info["message_key"]))
             return
-        for width, height in self._scope_sizes():
+        for height, width in self._scope_sizes():
             scope_info = watermark.analyze(cfg, int(width), int(height))
             if not scope_info["ok"]:
                 self.preview_lbl.clear()
                 self._error.setText(trans.t(scope_info["message_key"]))
                 return
         preview_record = self._preview_record()
-        drawn = (display if (preview_record is not None
-                             and getattr(preview_record, "watermark_baked", False))
-                 else watermark.burn(display, cfg, canvas_size=(canvas_w, canvas_h)))
-        pixmap = cv2_to_pixmap(drawn)
-        self.preview_lbl.set_display_pixmap(pixmap)
-        self.header.setText(" · ".join(part for part in (
-            name, frame_label,
-            trans.t("watermark_preview_meta").format(
-                width=canvas_w, height=canvas_h, depth=depth)) if part))
+        if preview_record is not None and preview_record.watermark_baked:
+            cfg = None
+        self._show_preview(key, image, metadata, display, cfg)
         layout = info["layout"]
         self.preview_meta.setText(trans.t("watermark_preview_layout").format(
             font=layout.font_px, cells=len(layout.cells)))
@@ -701,17 +784,35 @@ class WatermarkDialog(QDialog):
         if not any(check.isChecked() for check in self.target_checks.values()):
             self._error.setText(trans.t("watermark_target_required"))
 
+    def _show_preview(self, key, image, metadata, display, cfg):
+        height, width = image.shape[:2]
+        drawn = watermark.burn(display, cfg, canvas_size=(width, height))
+        pixmap = cv2_to_pixmap(drawn)
+        source_key = (key, self._preview_revision, cfg)
+        self._region_source = (source_key, image, metadata, cfg)
+        label = self.preview_lbl
+        if self._actual_view and (label._source_size.width(), label._source_size.height()) != (width, height):
+            fit = min(max(1, label.width()) / width, max(1, label.height()) / height)
+            label._zoom_factor = 1.0 / (fit * label.devicePixelRatioF())
+        full_display = isinstance(image, np.ndarray) and display.shape[:2] == (height, width)
+        label.set_display_pixmap(pixmap, source_size=(width, height), source_key=source_key,
+                                 source_pixmap=pixmap if full_display else None)
+
     def _apply_allowed(self) -> bool:
         return any(check.isChecked() for check in self.target_checks.values())
 
+    def _fit_size(self):
+        self._actual_view = False
+        self.preview_lbl.reset_view()
+
     def _actual_size(self):
-        pixmap = self.preview_lbl._base_pixmap
-        if pixmap is None:
+        label = self.preview_lbl
+        self._actual_view = True
+        if label._source_size.isEmpty():
             return
-        fit = min(self.preview_lbl.width() / pixmap.width(),
-                  self.preview_lbl.height() / pixmap.height())
-        self.preview_lbl._zoom_factor = 1.0 / max(fit, 1e-9)
-        self.preview_lbl.refresh_display()
+        label._region_requests.pop("view", None)
+        label._zoom_factor = 1.0 / (label._fit_scale() * label.devicePixelRatioF())
+        label.refresh_display()
 
     def _reset_defaults(self) -> None:
         blockers = [QSignalBlocker(widget) for widget in (

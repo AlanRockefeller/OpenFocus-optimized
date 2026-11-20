@@ -4,8 +4,12 @@ from __future__ import annotations
 import multiprocessing
 import os
 import signal
+import sys
 import threading
 import time
+import traceback
+from hashlib import sha256
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
 
@@ -13,21 +17,50 @@ from core import frame_storage as storage
 from core.algorithms import (fusion_algorithms, registration_algorithms,
                              get_fusion, get_registration,
                              register_fusion, register_registration)
-from core.frame_transport import FrameDecoder, FrameEncoder
-from core.resource_policy import heavy_job, make_process_budget, process_budget
+from core.frame_transport import (FrameDecoder, FrameEncoder, LEGACY_SOURCE_REQUEST_ERROR,
+                                  unwrap_source_request, wrap_source_request)
+from core.resource_policy import (ResourceLimitError, _ADMISSION_BYTES_LIMIT,
+                                  _ADMISSION_BYTE_FIELDS, heavy_job,
+                                  make_process_budget, process_budget)
 from core.registration import RegistrationCancelled
 from core.workers import RenderWorker, _render_error_category
 from locales import trans
-from utils.logging_setup import debug_enabled, get_logger, log_action
+from utils.logging_setup import get_logger, log_action
+from utils.report_bundle import _MAX_FRAMES, safe_exception
 
 logger = get_logger(__name__)
 _CANCEL_GRACE_SECONDS = 3.0
 _ERROR_STATE_FIELDS = ('alignment_reused', 'alignment_computed', 'alignment_report',
                        'alignment_report_provenance', 'performance_report')
-_SUCCESS_STATE_FIELDS = (*_ERROR_STATE_FIELDS, 'prepared_cache')
+_SUCCESS_STATE_FIELDS = (*_ERROR_STATE_FIELDS, 'prepared_cache', 'rendered_depth', 'fusion_details')
 _RENDER_STAGES = ('prepare', 'align', 'fuse', 'finish')
 _ERROR_CATEGORIES = ('resource_limit', 'memory', 'os', 'value', 'runtime', 'other')
 _ERROR_ORIGINS = ('child_worker', 'child_setup_or_transfer')
+_CHILD_EXIT_ORIGIN = 'child_exit'
+_RENDER_SOURCE_FILES = tuple(Path(__file__).with_name(f'{name}.py') for name in (
+    'render_process', 'frame_transport', 'source_frames', 'frame_storage',
+    'frame_resolution_cache', 'workers', 'registration', 'resource_policy',
+    'algorithms', 'multi_focus_fusion', 'render_context',
+))
+
+
+def _windows_source_run():
+    return sys.platform == 'win32' and not getattr(sys, 'frozen', False)
+
+
+def _render_source_revision():
+    digest = sha256()
+    try:
+        for path in _RENDER_SOURCE_FILES:
+            digest.update(sha256(path.read_bytes()).digest())
+    except OSError:
+        return None
+    return digest.digest()
+
+
+# Capture the transport and pipeline boundary files when this process loads them.
+# Reading only at dispatch would give an old GUI the revision of the new files.
+_LOADED_SOURCE_REVISION = _render_source_revision() if _windows_source_run() else None
 
 
 def _exit_reason(code):
@@ -43,10 +76,77 @@ def _exit_reason(code):
     return f'exit code {code}'
 
 
+def _bounded_exit_code(code):
+    if type(code) is not int or code < -(2**31):
+        return None
+    if os.name == 'nt':
+        return code & 0xffffffff if code < 2**32 else None
+    return code if code < 2**31 else None
+
+
+def _capture_error_details(exc):
+    details = {}
+    if isinstance(exc, ResourceLimitError):
+        admission = _validated_admission(exc.admission)
+        if admission is not None:
+            details['admission'] = admission
+    try:
+        frames = ((frame.f_code.co_filename, line, frame.f_code.co_name)
+                  for frame, line in traceback.walk_tb(exc.__traceback__))
+        error = safe_exception(type(exc).__name__, frames)
+        if error['stack_lines']:
+            details['error'] = error
+    except Exception:
+        # Optional diagnostics must not replace the original error signal.
+        pass
+    return details
+
+
+def _validated_error(error):
+    if type(error) is not dict:
+        return None
+    kind, lines, stack = error.get('kind'), error.get('stack_lines'), error.get('stack', [])
+    if (type(kind) is not str or len(kind) > 64 or type(lines) is not list
+            or not 0 < len(lines) <= _MAX_FRAMES
+            or any(type(line) is not int or not 0 < line < 10**9 for line in lines)
+            or type(stack) is not list or len(stack) > len(lines)):
+        return None
+    frames = []
+    remaining_lines = iter(lines)
+    for frame in stack:
+        if type(frame) is not dict:
+            return None
+        file, line, function = frame.get('file'), frame.get('line'), frame.get('function')
+        if (type(file) is not str or len(file) > 64 or type(function) is not str
+                or len(function) > 64 or type(line) is not int or line not in remaining_lines):
+            return None
+        frames.append((file, line, function))
+    safe = safe_exception(kind, frames)
+    if safe['kind'] != kind or safe.get('stack', []) != stack:
+        return None
+    safe['stack_lines'] = list(lines)
+    return safe
+
+
+def _validated_admission(admission):
+    if type(admission) is not dict:
+        return None
+    status = admission.get('resource_status')
+    if type(status) is not str or status not in ('unknown', 'insufficient'):
+        return None
+    safe = {'resource_status': status}
+    for name in _ADMISSION_BYTE_FIELDS:
+        value = admission.get(name)
+        if type(value) is int and 0 <= value <= _ADMISSION_BYTES_LIMIT:
+            safe[name] = value
+    return safe
+
+
 class _ChildRenderWorker(RenderWorker):
     def __init__(self, cancel_event, *args, **kwargs):
         self._cancel_event = cancel_event
         self._local_cancelled = False
+        self._error_details = None
         super().__init__(*args, **kwargs)
 
     @property
@@ -56,6 +156,10 @@ class _ChildRenderWorker(RenderWorker):
     @is_cancelled.setter
     def is_cancelled(self, value):
         self._local_cancelled = bool(value)
+
+    def _record_render_error(self, exc):
+        super()._record_render_error(exc)
+        self._error_details = _capture_error_details(exc)
 
 
 class _Relay:
@@ -114,19 +218,21 @@ def _restore_algorithms(fusions, registrations):
 
 def _render_child(connection, cancel_event, request, budget, directory, language):
     """Top-level spawn target; image computation never runs in the GUI process."""
-    from utils.logging_setup import set_debug_logging, setup_logging
+    from utils.logging_setup import set_log_level, setup_logging
     from utils.diagnostics import install_exception_hooks
     setup_logging()
     install_exception_hooks()
-    storage.restore_storage_directory(directory)
     trans.current_lang = language
     relay = _Relay(connection, cancel_event)
     try:
+        if _windows_source_run() and multiprocessing.parent_process() is not None:
+            request = unwrap_source_request(request, _LOADED_SOURCE_REVISION)
+            if request is None:
+                raise RuntimeError(trans.t('render_source_changed'))
+        storage.restore_storage_directory(directory)
         with process_budget(budget), storage.observe_temp_files(relay.temporary_file):
             inputs = FrameDecoder(should_cancel=cancel_event.is_set).decode(request)
-            if inputs.get('detailed_logging'):
-                # Record the same detail as the window that started this render.
-                set_debug_logging(True)
+            set_log_level(inputs['log_level'])
             _restore_algorithms(inputs['fusions'], inputs['registrations'])
             worker = _ChildRenderWorker(cancel_event, *inputs['args'], **inputs['kwargs'])
             results, errors = [], []
@@ -141,7 +247,11 @@ def _render_child(connection, cancel_event, request, budget, directory, language
                 encoder = FrameEncoder()
                 metadata = ((worker._render_error_category, 'child_worker', relay.last_stage)
                             if worker._render_error_category is not None else None)
-                relay.send(('error', errors[-1], encoder.encode(state), metadata))
+                message = ('error', errors[-1], encoder.encode(state), metadata)
+                # Keep the metadata triple readable by older source-run parents.
+                if metadata is not None and worker._error_details:
+                    message += (worker._error_details,)
+                relay.send(message)
                 return
             if not results:
                 raise RuntimeError('Render worker produced neither a result nor an error')
@@ -164,7 +274,8 @@ def _render_child(connection, cancel_event, request, budget, directory, language
     except Exception as exc:
         logger.exception('isolated render failed')
         relay.send(('error', str(exc), None,
-                    (_render_error_category(exc), 'child_setup_or_transfer', relay.last_stage)))
+                    (_render_error_category(exc), 'child_setup_or_transfer', relay.last_stage),
+                    _capture_error_details(exc)))
     finally:
         connection.close()
 
@@ -195,6 +306,7 @@ class _RenderExchange:
         self.decoder = None
         self.error = None
         self.error_metadata = None
+        self.last_stage = 'prepare'
 
     def restore_state(self, state, fields=_SUCCESS_STATE_FIELDS):
         for name in fields:
@@ -213,15 +325,31 @@ class _RenderExchange:
         elif kind == 'progress':
             self.worker.progress_signal.emit(*message[1:])
         elif kind == 'stage':
+            stage = message[1]
+            self.last_stage = stage if type(stage) is str and stage in _RENDER_STAGES else 'unknown'
             self.worker.stage_signal.emit(message[1])
         elif kind == 'error':
+            self.error_metadata = None
             self.error = message[1]
-            if len(message) > 3 and message[3] is not None:
-                category, origin, stage = message[3]
-                self.error_metadata = (
-                    category if category in _ERROR_CATEGORIES else 'other',
-                    origin if origin in _ERROR_ORIGINS else 'child_setup_or_transfer',
-                    stage if stage in _RENDER_STAGES else 'unknown')
+            metadata = message[3] if len(message) > 3 else None
+            if type(metadata) is tuple and len(metadata) == 3:
+                category, origin, stage = metadata
+                self.error_metadata = {
+                    'error_category': (category if type(category) is str and category in _ERROR_CATEGORIES
+                                       else 'other'),
+                    'error_origin': (origin if type(origin) is str and origin in _ERROR_ORIGINS
+                                     else 'child_setup_or_transfer'),
+                    'render_stage': (stage if type(stage) is str and stage in _RENDER_STAGES
+                                     else 'unknown'),
+                }
+                details = message[4] if len(message) > 4 else None
+                if type(details) is dict:
+                    error = _validated_error(details.get('error'))
+                    if error is not None:
+                        self.error_metadata['error'] = error
+                    admission = _validated_admission(details.get('admission'))
+                    if admission is not None:
+                        self.error_metadata['admission'] = admission
             if message[2] is not None:
                 self.restore_state(FrameDecoder().decode(message[2]), _ERROR_STATE_FIELDS)
         elif kind == 'completed':
@@ -249,6 +377,8 @@ class RenderProcessWorker(RenderWorker):
         self._process = None
         self._cancel_event = None
         self.child_pid = None
+        self.failure_category = None
+        self._child_error_evidence = None
 
     def cancel(self):
         super().cancel()
@@ -262,6 +392,9 @@ class RenderProcessWorker(RenderWorker):
         return self.is_cancelled
 
     def run(self):
+        self.failure_category = None
+        self.fusion_details = None
+        self._child_error_evidence = None
         result = None
         error = None
         try:
@@ -276,17 +409,41 @@ class RenderProcessWorker(RenderWorker):
         except RegistrationCancelled:
             error = 'CANCELLED: render cancelled'
         except Exception as exc:
-            logger.exception('could not complete isolated render')
+            evidence = self._child_error_evidence
+            if evidence is not None:
+                if not self.is_cancelled:
+                    self.failure_category = evidence['error_category']
+                    try:
+                        log_action('render_child_error', **evidence)
+                    except Exception:
+                        pass
+                    logger.exception('could not complete isolated render', extra={
+                        'report_child_evidence': evidence,
+                        'report_workload': {'method': self.algorithm, 'registration': self.alignment,
+                                            'frame_count': len(self.raw_images), 'preview': self.preview},
+                    })
+            else:
+                if isinstance(exc, MemoryError):
+                    self.failure_category = _render_error_category(exc)
+                logger.exception('could not complete isolated render')
             error = str(exc)
         if self.is_cancelled:
+            self.failure_category = None
             result = None
             error = 'CANCELLED: render cancelled'
         if error is not None:
+            self.fusion_details = None
             self.error_signal.emit(error)
         elif result is not None:
             self.finished_signal.emit(*result)
+        self._child_error_evidence = None
 
     def _run_process(self):
+        source_revision = None
+        if _windows_source_run():
+            source_revision = _LOADED_SOURCE_REVISION
+            if source_revision is None or _render_source_revision() != source_revision:
+                raise RuntimeError(trans.t('render_source_changed'))
         context = multiprocessing.get_context('spawn')
         self._cancel_event = context.Event()
         parent, child = context.Pipe()
@@ -299,7 +456,9 @@ class RenderProcessWorker(RenderWorker):
             encoder = FrameEncoder(self._check_current)
             request = encoder.encode({'args': self._render_args, 'kwargs': self._render_kwargs,
                 'fusions': fusion_algorithms(), 'registrations': registration_algorithms(),
-                'detailed_logging': debug_enabled()})
+                'log_level': logger.getEffectiveLevel()})
+            if source_revision is not None:
+                request = wrap_source_request(request, source_revision)
             log_action('render_dispatch.request_encoded')
             budget = make_process_budget(storage.ram_snapshot_bytes())
             scratch = storage.capture_scratch()
@@ -342,16 +501,18 @@ class RenderProcessWorker(RenderWorker):
             if self.is_cancelled:
                 raise RegistrationCancelled()
             if process.exitcode != 0 or (exchange.packet is None and exchange.error is None):
+                evidence = dict(exchange.error_metadata or {'error_category': 'runtime'})
+                evidence.update(error_origin=_CHILD_EXIT_ORIGIN, render_stage=exchange.last_stage)
+                exit_code = _bounded_exit_code(process.exitcode)
+                if exit_code is not None:
+                    evidence['exit_code'] = exit_code
+                self._child_error_evidence = evidence
                 raise RuntimeError(trans.t('render_worker_crashed').format(
                     reason=_exit_reason(process.exitcode)))
             if exchange.error is not None:
-                if exchange.error_metadata is not None:
-                    category, origin, stage = exchange.error_metadata
-                    try:
-                        log_action('render_child_error', error_category=category,
-                                   error_origin=origin, render_stage=stage)
-                    except Exception:
-                        pass
+                self._child_error_evidence = exchange.error_metadata
+                if source_revision is not None and exchange.error == LEGACY_SOURCE_REQUEST_ERROR:
+                    raise RuntimeError(trans.t('render_source_changed'))
                 raise RuntimeError(exchange.error)
             exchange.restore_state(exchange.packet['state'])
             adopted = exchange.decoder.adopted_paths
