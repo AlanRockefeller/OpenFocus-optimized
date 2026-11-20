@@ -28,7 +28,7 @@ OpenFocus è un'applicazione desktop professionale per la fusione di immagini mu
 ### Funzionalità principali
 
 - **Fusione di immagini multifocus**: combina più immagini con punti di fuoco diversi in un'unica immagine completamente a fuoco
-- **Dieci algoritmi di fusione**: filtro guidato, DCT, DTCWT, GFG-FGF, StackMFF V1/V2/V3, OpenFocus A/B/C, più la modalità solo allineamento
+- **Dieci algoritmi di fusione**. OpenFocus A/B/C sono stabili. Filtro guidato, DCT, DTCWT, GFG-FGF e StackMFF V1/V2/V3 sono sperimentali. È disponibile anche la modalità solo allineamento.
 - **Registrazione delle immagini**: allinea sequenze disallineate con OpenFocus (veloce), ECC, omografia o la catena omografia → ECC
 - **Sfondo automatico**: sostituire uno sfondo impilato irregolare con un fotogramma reale e vedere dove nessun fotogramma ha ripreso chiaramente la scena
 - **Vista di confronto Wipe (a tendina)**: controlla l'allineamento e confronta i risultati con un divisore A/B
@@ -56,7 +56,7 @@ Gli stack PNG trasparenti possono essere fusi nell'app desktop, nell'elaborazion
 
 Carica a dimensione piena, scegli nessun allineamento, disattiva l'anteprima rapida e la ROI, quindi renderizza e salva come PNG. La modalità batch richiede un metodo di fusione e un output PNG senza salvare uno stack allineato. Allineamento, ridimensionamento o riduzione, correzione di campo piatto, mappe di profondità, confronto metodi, ritocco e barre di scala non sono supportati per i dati trasparenti, e le etichette non possono essere incise in un'esportazione. Un metodo di fusione che cambia le dimensioni del rettangolo viene rifiutato. Maschere variabili o con bordi sfumati, maschere diverse tra fotogrammi, input TIFF trasparente e output non PNG, inclusi GIF e TIFF multipagina, non sono supportati. La CLI rifiuta anche la pulizia del sensore e le mappe di profondità per input trasparenti.
 
-Ad esempio, l'equivalente CLI è `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none`.
+Ad esempio, l'equivalente CLI è `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none --experimental`.
 
 ### Formati di output supportati
 
@@ -74,7 +74,9 @@ In **Salva con nome**, il TIFF normale salva il risultato come immagine singola;
 ### Avvio dell'applicazione
 
 Il modo preferito per installare una build pacchettizzata è il sito del progetto, **https://openfocus.top**: collega l'installer Windows, la build macOS e il pacchetto Linux, con script di installazione per il terminale. Preferiscilo alla ricompilazione: quegli artefatti sono l'output esatto della pipeline di rilascio. `pip install openfocus` installa solo l'interfaccia a riga di comando headless (la wheel non dipende deliberatamente da PyQt6); usa una build desktop o una copia del codice sorgente per la GUI.
-Il sito e gli script di installazione offrono anche beta più recenti, attualmente [versione preliminare v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Gli aggiornamenti automatici desktop offrono anche beta più recenti; la CLI Linux da PyPI rimane stabile. La beta è disponibile anche su GitHub.
+Il sito offre per impostazione predefinita le versioni desktop stabili. L’app desktop per Linux x86-64 è disponibile dalla versione 2.0.0. Su Windows e macOS puoi attivare gli aggiornamenti beta. Su Linux, aggiorna scaricando un nuovo archivio desktop. La CLI di PyPI è distribuita separatamente.
+
+Le versioni attuali per Windows non sono firmate. Prima di avviare il file scaricato, confronta il suo hash SHA-256 con quello indicato nel manifesto della versione.
 
 Per installare da terminale, visualizza prima l'anteprima del comando e poi eseguilo senza `--dry-run`: su macOS o Linux, `curl -fsSL https://openfocus.top/install.sh | sh -s -- --dry-run` e poi `curl -fsSL https://openfocus.top/install.sh | sh` (su Linux installa la CLI); su Windows, `irm https://openfocus.top/install.ps1 | iex` da PowerShell.
 
@@ -82,7 +84,8 @@ Dopo l'installazione, avvia OpenFocus in uno dei seguenti modi:
 
 1. **Windows (eseguibile)**: fai doppio clic sul collegamento o sull'eseguibile di OpenFocus
 2. **macOS**: trascina `OpenFocus.app` in Applicazioni e aprilo da lì
-3. **Sorgente Python**: esegui `pip install -r requirements.txt`, poi `python main.py` nell'ambiente attivato
+3. **Linux (x86-64)**: estrai l'archivio desktop ed esegui `OpenFocus/OpenFocus` nella cartella estratta
+4. **Sorgente Python**: esegui `pip install -r requirements.txt`, poi `python main.py` nell'ambiente attivato
 
 Il primo avvio apre la finestra di benvenuto, dove puoi scegliere il tema e caricare lo stack demo incluso. Un profilo nuovo usa il tema chiaro per impostazione predefinita; la scelta viene ricordata.
 
@@ -119,7 +122,7 @@ Il pannello destro raccoglie tutte le opzioni di configurazione, dall'alto verso
 
 1. **Impostazioni di fusione**: selezione dell'algoritmo e dei relativi parametri
 2. **Impostazioni di registrazione**: attivazione o disattivazione dei metodi di allineamento
-3. **Pulsanti di azione**: Avvia render e le azioni secondarie Reimposta, Impostazioni di rendering e rendering di tutti i metodi. La finestra delle impostazioni raccoglie anteprima rapida, ordine dei fotogrammi, abbinamento dell'esposizione, rimozione della deriva di luminosità e nitidezza dell'output
+3. I **pulsanti di azione** servono ad avviare il rendering, ripristinare le impostazioni, aprire le impostazioni di rendering o eseguire il rendering con tutti i metodi disponibili. La finestra delle impostazioni raccoglie anteprima rapida, ordine dei fotogrammi, abbinamento dell'esposizione, rimozione della deriva di luminosità e nitidezza dell'output
 4. **Elenco immagini sorgente**: tutte le immagini caricate con i nomi dei file
 5. **Elenco output**: i risultati generati
 
@@ -130,8 +133,8 @@ La barra dei menu superiore dà accesso a tutte le funzioni:
 - **File**: operazioni di importazione ed esportazione, progetti, modelli di elaborazione ed elenco file recenti
 - **Modifica**: trasformazioni delle immagini, ritocco ed etichette
 - **Strumenti**: unione di immagini, elaborazione batch, confronto metodi, mappa di profondità, correzione di campo piatto, barra di scala ed etichette
-- **Impostazioni**: impostazioni avanzate (prestazioni, registrazione e diagnostica di allineamento, pulizia del sensore, nomi output, IA e avvio), accelerazione GPU, tema e lingua
-- **Aiuto**: informazioni sull'ambiente, contatto, controllo aggiornamenti e cartella dei log
+- **Impostazioni**: impostazioni avanzate (Generali, Fusione, Registrazione, Avvio e aggiornamenti), accelerazione GPU, tema e lingua
+- **Aiuto**: Invia feedback (diagnostica e log), contatto e controllo aggiornamenti
 
 **Strumenti → Unisci immagini…** apre uno spazio di lavoro separato per regioni di microscopio già fuse e panorami fotografici; non modifica lo stack corrente. La scheda **Assistente progetto** raccoglie importazione, allineamento e punti di controllo; **Immagini sorgente** contiene elenco, griglia e posizionamento manuale; **Editor panoramico** contiene impostazioni di giunzioni, fusione, esposizione/colore, uscita, proiezione, fotocamera e HDR oltre alle sovrapposizioni dell’anteprima. Usa **Aggiungi file…**, **Apri cartella** o **Aggiungi risultati…** per copiare risultati scelti della sessione corrente, oppure trascina file o cartelle nell’elenco o sulla tela. L’importazione di una cartella include solo i file supportati direttamente al suo interno, non le sottocartelle. Gli import seguono l’ordine naturale dei nomi, ignorano percorsi duplicati e aggiungono ogni pagina di un TIFF multipagina come immagine separata. Seleziona un’immagine e premi Canc o Backspace per rimuoverla dallo spazio di lavoro senza eliminare il file.
 
@@ -158,7 +161,7 @@ L’**Editor panoramico** controlla la fusione effettiva. In **Trova giunzioni o
 3. Compare una finestra per la scala di caricamento: scegli la scala (100% = risoluzione piena)
 4. Fai clic su OK per caricare le immagini
 
-Seleziona **Non chiedere più** in quella finestra per caricare sempre alla scala scelta senza richiesta; **Impostazioni → Impostazioni avanzate → Chiedi la scala di caricamento all'importazione** riattiva la richiesta. Uno stack già caricato può essere ridotto in seguito con **Modifica → Ridimensiona**.
+Seleziona **Non chiedere più** in quella finestra per caricare sempre alla scala scelta senza richiesta; **Impostazioni → Impostazioni avanzate → Avvio e aggiornamenti → Chiedi la scala di caricamento all'importazione** riattiva la richiesta. Uno stack già caricato può essere ridotto in seguito con **Modifica → Ridimensiona**.
 
 Il software esegue automaticamente queste operazioni:
 
@@ -355,20 +358,17 @@ La registrazione corregge il disallineamento spaziale tra i fotogrammi dello sta
 - Cerca trasformazioni di similarità limitate usando differenze di immagine campionate e applica warp con interpolazione Lanczos
 - Il dominio di ricerca dello spostamento è pari per impostazione predefinita al 3% della dimensione del fotogramma e si modifica con `--align-shift-limit`. La ricerca usa il fotogramma precedente allineato e parte dal movimento cumulativo; lo spostamento totale può superare il 3%.
 - Per geometrie non rigide o estreme, scegli ECC o omografia
-- In caso di errore effettivo di stima, `failure_policy=continue` (predefinito) mantiene il fotogramma non allineato; `fail` interrompe il processo. Scarsa trama, motivi ripetuti e variazioni di fuoco possono comunque causare corrispondenze imprecise.
-- Nella CLI, seleziona la stessa politica con `--align openfocus --align-param 'failure_policy="fail"'` (usa le virgolette adatte alla shell). Gli elementi batch usano la politica scelta in modo indipendente. Il valore predefinito è `"continue"`.
+- Se la registrazione rifiuta un fotogramma, l’applicazione desktop interrompe lo stack interessato. Controlla il fotogramma e il motivo nel messaggio di errore ed esamina l’immagine prima di riprovare. Scarsa trama, motivi ripetuti e variazioni di fuoco possono comunque causare corrispondenze imprecise.
+- La CLI usa `continue` per impostazione predefinita. Usa `--align openfocus --align-param 'failure_policy="fail"'` per fermare lo stack se un fotogramma viene rifiutato.
 - Imposta **Fotogramma di riferimento** su un numero basato su 1 nell'ordine dello stack incluso ed elaborato per ancorare la geometria a quel fotogramma. L'ordine viene conservato; l'equalizzazione della luminosità usa un proprio riferimento. Ogni stack batch deve contenere quel numero, altrimenti l'elemento fallisce. Esempio CLI: `--align openfocus --align-param reference_frame=3`. Scegliere un riferimento non corregge la parallasse né una corrispondenza scadente; ispeziona il risultato.
 
-I report di allineamento identificano il riferimento e l'esito di ogni fotogramma. Un ripiego significa che il metodo non è riuscito a stabilire l'allineamento o dipende da una stima precedente fallita; la ragione riportata distingue stime deboli e movimento fuori dai limiti quando noto. I valori di qualità sono specifici del metodo, non una garanzia di accuratezza. Le trasformazioni mappano le coordinate sorgente sulla tela di riferimento della fase di registrazione prima del ritaglio comune; i metodi compositi riportano le loro fasi separatamente. Anche omografia ed ECC accettano il parametro facoltativo `failure_policy="fail"` per fermarsi quando i loro algoritmi rilevano un errore. Il valore predefinito resta `"continue"`; ispeziona i risultati anche quando l'allineamento riesce.
-
-Per ispezionare un rendering, attiva **Impostazioni → Impostazioni avanzate → Registrazione → Raccogli diagnostica di allineamento** e renderizza di nuovo. L'allineamento viene ricalcolato invece di riutilizzare le immagini in cache. Lo stato di completamento evidenzia i ripieghi; apri **Impostazioni → Impostazioni avanzate → Registrazione → Diagnostica di allineamento** per il report per fotogramma. Mostra le ragioni di errore disponibili, i punteggi specifici del metodo, i conteggi delle corrispondenze, i fotogrammi di riferimento e le trasformazioni. Numeri e nomi di riferimento si riferiscono all'elenco sorgente originale, anche quando i fotogrammi sono esclusi. I rendering batch e raggruppati non forniscono questo report.
+Per una singola esecuzione CLI con registrazione e senza gruppi, `--alignment-report FILE` salva un rapporto per fotogramma. I report di allineamento identificano il riferimento e l'esito di ogni fotogramma. Un ripiego significa che il metodo non è riuscito a stabilire l'allineamento o dipende da una stima precedente fallita; la ragione riportata distingue stime deboli e movimento fuori dai limiti quando noto. I valori di qualità sono specifici del metodo, non una garanzia di accuratezza. Le trasformazioni mappano le coordinate sorgente sulla tela di riferimento della fase di registrazione prima del ritaglio comune; i metodi compositi riportano le loro fasi separatamente. Anche omografia ed ECC accettano il parametro facoltativo `failure_policy="fail"` per fermarsi quando i loro algoritmi rilevano un errore. Il valore predefinito resta `"continue"`; ispeziona i risultati anche quando l'allineamento riesce.
 
 ### Attivazione della registrazione
 
 1. Nel pannello destro, individua il gruppo **Registrazione**
-2. Scegli un metodo dall'elenco: **Nessun allineamento**, **OpenFocus (veloce)**, **Allinea (ECC)**, **Allinea (omografia)** o **Omografia → ECC** (concatenato)
-3. Per OpenFocus (veloce), scegli un fotogramma di riferimento. In **Impostazioni → Impostazioni avanzate → Registrazione**, scegli **Gestione fotogrammi rifiutati**; la modifica viene applicata ai metodi di registrazione
-4. **Raccogli diagnostica di allineamento** ora si trova in Impostazioni avanzate (vedi sopra)
+2. Scegli **Nessun allineamento** o **Allinea (ECC)**. Se attivi le funzioni sperimentali, puoi scegliere anche **OpenFocus (veloce)**, **Allinea (omografia)** o **Omografia → ECC** (concatenato)
+3. Regola il fotogramma di riferimento e i limiti di ricerca di OpenFocus in **Impostazioni → Impostazioni avanzate → Registrazione**.
 
 ### Quando usare la registrazione
 
@@ -384,13 +384,12 @@ Le impostazioni aggiuntive si trovano in **Impostazioni → Impostazioni avanzat
 - **Larghezza di riduzione**: risoluzione di pre-elaborazione per la registrazione (1024 px predefiniti)
 - Valori più bassi = elaborazione più veloce, precisione eventualmente inferiore
 - Valori più alti = elaborazione più lenta, precisione eventualmente superiore
-- **Raccogli diagnostica di allineamento** e **Cache di registrazione** si trovano nella stessa sezione
 
 ---
 
 ## 8. Metodi di fusione delle immagini
 
-OpenFocus offre dieci algoritmi di fusione (più una modalità solo allineamento). Un profilo nuovo parte su **StackMFF V3** con registrazione **ECC**; gli elenchi seguenti descrivono tutte le scelte. Ognuno ha caratteristiche diverse adatte a vari tipi di immagine.
+Un nuovo profilo desktop usa **OpenFocus B** con registrazione **ECC**. I metodi di fusione stabili sono OpenFocus A, B e C. Per usare gli altri metodi di fusione nell’app desktop, seleziona **Attiva funzioni sperimentali** in **Impostazioni → Impostazioni avanzate → Generali** e conferma. Nella CLI aggiungi `--experimental` a ogni comando che usa un metodo di fusione sperimentale.
 
 ### Filtro guidato
 
@@ -439,8 +438,6 @@ OpenFocus offre dieci algoritmi di fusione (più una modalità solo allineamento
 
 ### StackMFF V3 (apprendimento profondo)
 
-È il metodo preselezionato in una nuova installazione.
-
 - **Algoritmo**: classificazione della sorgente pixel per pixel (ONNX Runtime). La rete predice, per ogni pixel, da quale immagine di input proviene, poi miscela le immagini in base a quelle probabilità o ne sceglie una
 - **Modalità di output IA** (pannello destro, solo per questo metodo):
   - **Miscelazione soft (pesata)** — predefinito; ogni pixel è una miscela delle immagini ponderata per probabilità. Transizioni morbide, senza cuciture nette; corrisponde alla configurazione riportata nell'articolo
@@ -464,7 +461,7 @@ CLI: `--method openfocus_b --param radius=8 --param smoothing=4 --param feather=
 
 Nell’interfaccia, l’abbinamento esposizione è attivo per A/B/C per impostazione predefinita e usa il primo fotogramma elaborato; per gli altri metodi è disattivato e usa l’ultimo. Le scelte salvate esplicitamente sono mantenute; quando A/B/C è attivo si usa il primo. La correzione della deriva di luminosità resta disattivata per impostazione predefinita. Reimposta ripristina i valori di ogni metodo. Nella CLI è attivo per impostazione predefinita per tutti i metodi; `--no-exposure-match` lo disattiva.
 
-Selezionando A/B/C si usa l’allineamento OpenFocus, salvo scelta esplicita di un allineamento o ripristino di un progetto. I valori predefiniti sono spostamento 0,03 e ingrandimento 5%.
+ECC resta la registrazione predefinita per A/B/C anche quando le funzioni sperimentali sono attive. Per usare l’allineamento OpenFocus, selezionalo esplicitamente. I valori predefiniti sono uno spostamento di 0,03 e un ingrandimento del 5%.
 
 **Nitidezza dell'output fuso** applica una leggera maschera di contrasto dopo la fusione, prima che il risultato venga convertito nella profondità di output. È disattivata per impostazione predefinita e può essere attivata in **Impostazioni di rendering** o nelle opzioni batch; il flag CLI equivalente è `--sharpen-output`. Influisce sull'immagine fusa, non sui fotogrammi registrati né sulle mappe di profondità. Può rendere i bordi più distinti, ma può amplificare rumore e aloni. Viene salvata con il progetto e ricordata tra le sessioni.
 
@@ -497,6 +494,8 @@ Seleziona **Solo allineamento (nessuna fusione)** per registrare lo stack e aggi
 Apri **Strumenti → Confronto metodi** per regolare più metodi in modo indipendente. Nome, etichette dei parametri e controlli di ogni metodo restano insieme quando la finestra si restringe. Le modifiche aggiornano automaticamente l'anteprima. **Anteprima ROI (veloce)** fonde l'area selezionata con il contesto circostante; **Fusione immagine intera** verifica il risultato sull'intera immagine e permette di ispezionare un'altra area senza renderizzare di nuovo. I risultati ROI possono differire da quelli a immagine intera perché le statistiche di esposizione e alcuni algoritmi dipendono dall'estensione dell'immagine.
 La **fusione immagine intera** è selezionata per impostazione predefinita.
 
+Per includere i metodi sperimentali nel confronto, attiva le funzioni sperimentali.
+
 Un suggerimento visibile spiega come selezionare o deselezionare un risultato: fai clic su di esso oppure raggiungilo con `Tab` e premi `Invio` o `Spazio`.
 
 Usa **Dimensione anteprima (px)** sopra i riquadri di destra per scegliere una dimensione quadrata da 160 a 960 pixel, trascinando il cursore o inserendo un numero. Tutti i metodi usano la stessa dimensione e si adattano alla larghezza disponibile. La dimensione viene ricordata per la prossima apertura. Cambiarla mantiene l'ingrandimento corrente e regola il quadrato di ispezione intorno al centro, limitandolo ai bordi dell'immagine.
@@ -515,7 +514,7 @@ Regolare i parametri su stack grandi è lento a risoluzione piena. Apri **Impost
 
 ### Rotazione
 
-1. Vai su **Modifica → Ruota**
+1. Vai su **Modifica → Ruota e capovolgi**
 2. Scegli il tipo di rotazione:
    - **90° orario**: ruota tutte le immagini di 90 gradi a destra
    - **90° antiorario**: ruota tutte le immagini di 90 gradi a sinistra
@@ -523,7 +522,7 @@ Regolare i parametri su stack grandi è lento a risoluzione piena. Apri **Impost
 
 ### Capovolgimento
 
-1. Vai su **Modifica → Capovolgi**
+1. Vai su **Modifica → Ruota e capovolgi**
 2. Scegli il tipo di capovolgimento:
    - **Capovolgimento orizzontale**: specchia da sinistra a destra
    - **Capovolgimento verticale**: specchia dall'alto in basso
@@ -543,7 +542,7 @@ Le trasformazioni si applicano all'intero stack di immagini, mantenendo l'alline
 
 ## 10. Ritocco, etichette e annotazioni
 
-### Ritocco del risultato (Modifica → Ritocca risultato…, `Ctrl+T`)
+### Ritocco del risultato (Modifica → Ritocca risultato → Risultato in questa area di lavoro…, `Ctrl+T`)
 
 La fusione può ancora lasciare un difetto locale — un alone attorno a un bordo ad alto contrasto, una setola presa dal fotogramma sbagliato, rumore in un'area piatta. Lo spazio di lavoro copia i pixel dai fotogrammi esatti che hanno prodotto il risultato selezionato:
 
@@ -562,7 +561,7 @@ Per una correzione tonale locale, seleziona **Pennello esposizione**, imposta la
 
 La provenienza viaggia con l'output: i fotogrammi allineati, gli offset di ritaglio/incolla ROI, il taglio dei bordi DCT e la profondità di bit vengono registrati quando il risultato viene renderizzato. File batch, risultati legacy e voci di cartella di solo allineamento non hanno una sorgente registrata, quindi sono elencati come non disponibili invece di essere dedotti dallo stack corrente. Tratti non applicati e cronologia annulla sono solo di sessione; salvare un progetto non li memorizza.
 
-Per un file immagine esistente, scegli **Modifica → Ritocca file immagine…**, poi seleziona il risultato e una o più immagini sorgente. Le sorgenti devono essere già allineate al risultato sulla stessa griglia di pixel; dimensioni identiche non dimostrano l'allineamento. Sono accettate immagini PNG, TIFF, JPEG e BMP a pagina singola con dimensioni verticali, canali e profondità a 8 o 16 bit corrispondenti; l'orientamento EXIF viene applicato al caricamento. Immagini con alfa e multipagina non sono supportate. I fotogrammi selezionati sono forniti dall'utente, non sono provenienza di rendering registrata. Applica crea un output separato non esportato; salvalo dall'elenco output. I file scelti sono protetti dalla sovrascrittura durante questa sessione, incluse le esportazioni di mappe di profondità e mesh 3D. Come per altri risultati, i file di progetto non memorizzano questi pixel né la cronologia del pennello.
+Per un file immagine esistente, scegli **Modifica → Ritocca risultato → Risultato della fusione da file…**, poi seleziona il risultato e una o più immagini sorgente. Le sorgenti devono essere già allineate al risultato sulla stessa griglia di pixel; dimensioni identiche non dimostrano l'allineamento. Sono accettate immagini PNG, TIFF, JPEG e BMP a pagina singola con dimensioni verticali, canali e profondità a 8 o 16 bit corrispondenti; l'orientamento EXIF viene applicato al caricamento. Immagini con alfa e multipagina non sono supportate. I fotogrammi selezionati sono forniti dall'utente, non sono provenienza di rendering registrata. Applica crea un output separato non esportato; salvalo dall'elenco output. I file scelti sono protetti dalla sovrascrittura durante questa sessione, incluse le esportazioni di mappe di profondità e mesh 3D. Come per altri risultati, i file di progetto non memorizzano questi pixel né la cronologia del pennello.
 
 ### Sostituire lo sfondo (Sfondo automatico)
 
@@ -636,13 +635,18 @@ L'anteprima usa il bersaglio reale. Naviga con Precedente/Successivo o digita il
 
 ## 11. Impostazioni e configurazione
 
-Apri **Impostazioni → Impostazioni avanzate** per le preferenze di prestazioni, registrazione, pulizia del sensore, nomi output, IA StackMFF e avvio. Le modifiche restano bozze fino a **OK**; Annulla, Esc e la chiusura le scartano. Ridurre la dimensione dei tasselli aggiorna subito il limite di sovrapposizione visibile a metà tassello. Il limite batch salvato della sezione IA viene mantenuto, ma l'inferenza attuale invia un tassello per chiamata; la larghezza di registrazione può cambiare l'accuratezza dell'allineamento. La raccolta dei diagnostici di allineamento è una casella della sezione Registrazione.
+**Impostazioni → Impostazioni avanzate**
+
+- **Generali** — Funzioni sperimentali, directory di lavoro e prefisso del nome di output. In **Privacy** i rapporti automatici sugli errori e le statistiche di utilizzo hanno caselle indipendenti. All’inizio sono entrambe selezionate. Una disattivazione esplicita viene conservata per ciascuna. Le versioni distribuite inviano un rapporto dopo una sessione con un errore se hai accettato le condizioni all’accesso o attivato esplicitamente l’invio. Un arresto anomalo nativo precedente richiede conferma.
+- **Fusione** — Scegli la modalità risorse e le impostazioni dei tasselli. Seleziona **Pulizia del sensore** per espandere i relativi controlli.
+- **Registrazione** — Imposta la larghezza di riduzione. Seleziona **OpenFocus (veloce)** per espandere le impostazioni del fotogramma di riferimento e dei limiti di ricerca.
+- **Avvio e aggiornamenti** — Ripristino dell’ultimo stack, richiesta della scala all’importazione e aggiornamenti.
+
+Conferma con **OK**. Annulla, Esc o la chiusura della finestra scartano le modifiche.
 
 I download automatici degli aggiornamenti avvengono mentre l'applicazione è inattiva e non si installano mai da soli. Un download completato resta pronto finché non scegli esplicitamente **Riavvia e aggiorna**. Il riavvio protegge le modifiche attive e il lavoro non salvato, poi scrive i dati di recupero prima di avviare la sostituzione. Annullare un download o una preparazione attende il limite di sicurezza corrente. Una build preparata completa e più recente può essere installata offline.
 
-La correzione di campo piatto cambia i pixel di lavoro della sessione senza sovrascrivere i file sorgente. Seleziona il riferimento bianco e un fotogramma di anteprima, poi rigenera l'anteprima dopo aver cambiato sorgente o scala. Le immagini di riferimento e di lavoro/base devono condividere dominio di coordinate e dimensioni. Applica prepara entrambi gli stack prima della conferma; la rimozione facoltativa del fotogramma di riferimento fa parte dello stesso passo di annullamento. Esporta le immagini sorgente corrette quando devi conservare questi pixel fuori dalla sessione.
-
-L'elaborazione batch accetta un'immagine di campo bianco facoltativa nelle sue opzioni. Scegli un riferimento sfocato alla risoluzione originale dei fotogrammi; viene scalato con lo stack di input e applicato prima della registrazione, usando la dimensione polvere predefinita. Un riferimento illeggibile o di dimensioni incompatibili fa fallire visibilmente lo stack interessato. Il riferimento è escluso dagli input di cartella, inclusa l'elaborazione raggruppata; devono restare almeno due fotogrammi sorgente per la fusione. La correzione di campo piatto non può essere combinata con input trasparente. Lascia il campo vuoto per elaborare senza correzione. La CLI accetta il riferimento anche con `--dust-map WHITE`.
+La mappa polvere, la correzione di campo piatto in batch e l’unione delle immagini sono in sviluppo e al momento non disponibili.
 
 La pulizia del sensore è facoltativa e viene eseguita sui fotogrammi originali in coordinate sensore prima della registrazione. Seleziona una maschera difetti esplicita per correggere pixel caldi o morti noti; OpenFocus non deduce una maschera dalle immagini del campione. La maschera deve essere un'immagine monocanale a 8 o 16 bit con le stesse dimensioni della sorgente: zero significa non interessato, mentre 1 o il valore massimo del canale marcano i difetti. Controlla la sua estensione prima di elaborare. Maschere che coprono più del 10% del fotogramma, o difetti senza un vicino non mascherato, vengono rifiutate. Mantieni la maschera alla risoluzione originale e non selezionarla come immagine sorgente. Per l'elaborazione nella GUI, carica i fotogrammi sorgente a scala piena quando usi una maschera difetti; la maschera non viene mai ridimensionata. La pulizia del sensore (inclusa la riduzione del rumore) non può essere applicata a uno stack GUI dopo rotazione, capovolgimento, correzione di campo piatto o altra modifica della sorgente: ricarica i fotogrammi originali o disattiva la pulizia. Questo vale anche per i progetti ripristinati con tali cronologie. L'elaborazione ROI preallineata non può essere combinata con la pulizia del sensore; esci dalla modalità ROI e renderizza lo stack completo. Le impostazioni di pulizia appartengono alla sessione e al progetto salvato, non alle preferenze globali. Batch e CLI elaborano i loro input originali separatamente, con la pulizia del sensore prima della correzione di campo piatto e della registrazione. Le maschere difetti richiedono file sorgente con orientamento EXIF neutro. File orientati, RAW di fotocamera e sorgenti con orientamento non determinabile vengono rifiutati perché i pixel decodificati potrebbero non corrispondere più alle coordinate del sensore. Usa immagini sorgente e maschera nello stesso orientamento di pixel noto, con metadati di orientamento neutri. La sola riduzione del rumore non richiede una maschera difetti.
 
@@ -652,19 +656,25 @@ Le ricette richiedono che la posizione di output sia fuori da tutte le cartelle 
 
 Quando un riferimento file viene applicato in Strumenti alla scala base dello stack, un progetto salvato registra il percorso assoluto, l'hash del contenuto e la dimensione polvere, e lo riapplica una volta alle sorgenti originali all'apertura. Mantieni il file di riferimento invariato e al suo posto: un riferimento mancante o modificato impedisce l'apertura del progetto. Un riferimento selezionato dallo stack, o una correzione a una scala di lavoro/base diversa, richiede comunque di esportare lo stack sorgente corretto prima di salvare un progetto. Se la scala di lavoro cambia dopo la correzione, ripristinala alla scala di correzione prima di salvare o esporta lo stack corretto.
 
-**Aiuto → Invia feedback** apre i log locali. Il pulsante Copia copia il log visibile della sessione; lo ZIP di feedback contiene i log di sessione e dell'applicazione completa e le informazioni sull'ambiente. Controlla il pacchetto prima di inviarlo tu stesso. Aprire GitHub apre solo il tracker. Annullare un'esportazione lascia i file invariati; un errore conserva il file di destinazione precedente e mostra il percorso fallito.
+**Aiuto → Invia feedback** apre la scheda **Canali di feedback**, con accesso al centro account e a GitHub. In **Diagnostica** trovi **Log della sessione** e **Informazioni sull'ambiente**. Il pulsante **Apri cartella dei log** si trova in basso accanto a Chiudi. Il pulsante Copia copia il log visibile della sessione; lo ZIP di feedback contiene i log di sessione e dell'applicazione completa e le informazioni sull'ambiente. Controlla il pacchetto prima di inviarlo tu stesso. Aprire GitHub apre solo il tracker. Annullare un'esportazione lascia i file invariati; un errore conserva il file di destinazione precedente e mostra il percorso fallito.
 
-Ogni avvio scrive il proprio log rotante, così i lavori GUI/CLI concorrenti mantengono registrazioni separate. Gli ID attività collegano parametri, tempo trascorso ed esiti completati/annullati/falliti; gli errori inattesi includono una traccia completa. Lo ZIP di feedback include anche il report di crash corrente e le versioni delle dipendenze. Usa **Aiuto → Apri cartella log** o il percorso mostrato nella pagina di feedback per trovare i file. I log ruotano a 1 MB con tre backup per processo; i log di sessioni inattive più vecchi di 14 giorni vengono rimossi. Per log di supporto dettagliati, imposta `OPENFOCUS_LOG_LEVEL=DEBUG` prima dell'avvio; `OPENFOCUS_LOG_DIR` seleziona una cartella diversa.
+Ogni avvio scrive il proprio log rotante, così i lavori GUI/CLI concorrenti mantengono registrazioni separate. Gli ID attività collegano parametri, tempo trascorso ed esiti completati/annullati/falliti; gli errori inattesi includono una traccia completa. Lo ZIP di feedback include anche il report di crash corrente e le versioni delle dipendenze. Usa **Aiuto → Invia feedback → Apri cartella dei log** o il percorso mostrato nella pagina di feedback per trovare i file. I log ruotano a 1 MB con tre backup per processo; i log di sessioni inattive più vecchi di 14 giorni vengono rimossi. Per log di supporto dettagliati, imposta `OPENFOCUS_LOG_LEVEL=DEBUG` prima dell'avvio; `OPENFOCUS_LOG_DIR` seleziona una cartella diversa.
 
 ### Impostazioni dei tasselli (ottimizzazione della memoria)
 
-Per immagini grandi, OpenFocus usa l'elaborazione a tasselli per evitare problemi di memoria.
+L’elaborazione a tasselli è attiva per impostazione predefinita. Il messaggio sotto i campi indica come il metodo selezionato elabora l’immagine. Sul desktop OpenFocus A, B e C elaborano l’intera immagine. La modalità di solo allineamento salta la fusione. Anche in queste modalità puoi impostare dimensione, sovrapposizione e soglia per il prossimo metodo compatibile. DTCWT decide in base alla memoria stimata. Puoi regolare dimensione e sovrapposizione, mentre il campo della soglia è disabilitato. I metodi neurali possono usare tasselli sotto la soglia per stack profondi. Disattivando i tasselli, tutti e tre i campi numerici vengono disabilitati e mantengono i loro valori.
 
-Accesso: **Impostazioni → Impostazioni avanzate → Prestazioni**:
+Accesso: **Impostazioni → Impostazioni avanzate → Fusione**:
 
 - **Dimensione blocco tassello**: dimensione di ogni tassello di elaborazione (1024 px predefiniti)
 - **Sovrapposizione tasselli**: sovrapposizione tra tasselli per una miscelazione senza cuciture (256 px predefiniti)
 - **Soglia tasselli**: dimensione immagine oltre la quale si usano i tasselli (2048 px predefiniti)
+
+Limiti in pixel
+
+- Dimensione blocco tassello — 64–16384
+- Sovrapposizione tasselli — 0–min(4096, metà tassello)
+- Soglia tasselli — 256–131072
 
 **Consigli**:
 
@@ -679,7 +689,6 @@ Accesso: **Impostazioni → Impostazioni avanzate → Registrazione**:
 - **Larghezza di riduzione**: risoluzione di pre-elaborazione per la registrazione
   - Predefinito: 1024 px
   - Più bassa per la velocità, più alta per l'accuratezza
-- **Raccogli diagnostica di allineamento**: ricalcola l'allineamento al prossimo rendering e abilita **Impostazioni → Impostazioni avanzate → Registrazione → Diagnostica di allineamento**
 
 ### Riferimenti sulle prestazioni
 
@@ -687,19 +696,9 @@ Vedi [PERFORMANCE.md](./PERFORMANCE.md) per velocità e memoria misurate su gran
 
 Il pannello di stato mostra la memoria fisica usata e totale quando il sistema operativo fornisce entrambe le letture; altrimenti mostra `N/D`.
 
-### Impostazioni del numero di thread
-
-Controlla l'elaborazione parallela della CPU:
-
-Accesso: **Impostazioni → Impostazioni avanzate → Prestazioni**:
-
-- `0` seleziona la pianificazione automatica ed è il valore predefinito per le nuove impostazioni.
-- I valori positivi sono limiti superiori; i limiti salvati sopravvivono agli aggiornamenti.
-- Capacità CPU, modalità risorse e margine di memoria possono ridurre la concorrenza. Più thread non rendono necessariamente più veloce un rendering.
-
 ### Modalità risorse
 
-**Impostazioni → Impostazioni avanzate → Prestazioni → Modalità risorse** decide quanta parte della macchina può usare un rendering. Non cambia mai l'immagine fusa.
+**Impostazioni → Impostazioni avanzate → Fusione → Modalità risorse** decide quanta parte della macchina può usare un rendering. Non cambia mai l'immagine fusa.
 
 | Modalità | Comportamento |
 |---|---|
@@ -713,23 +712,16 @@ Il pianificatore considera core fisici, affinità e quote CPU, ed esegue un solo
 
 StackMFF V1/V2/V3 usano ONNX Runtime. DirectML su Windows e CoreML su macOS possono accelerare l’inferenza; altrimenti si usa la CPU. La disponibilità del provider non dimostra l’esecuzione sulla GPU. Il supporto di altre GPU richiede verifica.
 
-OpenFocus B può accelerare l’elaborazione della profondità e l’unione delle sorgenti su una GPU OpenCL compatibile; secondo la memoria disponibile può usare fasi GPU limitate o ripiegare sulla CPU. Con l'accelerazione GPU attiva, OpenFocus C può eseguire la fusione piramidale dell'immagine intera su una GPU OpenCL compatibile; se la memoria è insufficiente o il dispositivo o il driver presenta problemi, ripiega sulla CPU. L'esportazione della mappa di profondità di C usa la CPU. OpenFocus A e l’allineamento usano la CPU. Vedi [supporto GPU](GPU_SUPPORT.md).
+OpenFocus B può accelerare l’elaborazione della profondità e l’unione delle sorgenti su una GPU OpenCL compatibile; secondo la memoria disponibile può usare fasi GPU limitate o ripiegare sulla CPU. Con l'accelerazione GPU attiva, OpenFocus A, OpenFocus C, Filtro guidato, GFG-FGF, DCT e DTCWT possono eseguire la fusione dell'immagine intera su una GPU OpenCL compatibile; se la memoria è insufficiente o il dispositivo o il driver presenta problemi, ripiegano sulla CPU. L'esportazione della mappa di profondità di C e l’allineamento usano la CPU. Vedi [supporto GPU](GPU_SUPPORT.md).
 
 - Attiva o disattiva in **Impostazioni → Accelerazione GPU**
 - Deselezionandola si forzano sulla CPU i metodi di fusione compatibili — utile se i driver GPU danno problemi
 - Il pannello di stato mostra `N/D` quando nessun acceleratore è usato o disponibile, e `CPU*` quando un acceleratore esiste ma il metodo selezionato è solo CPU
 - La scelta si applica al rendering successivo e viene ricordata
 
-### Dimensione batch IA
-
-Accesso: **Impostazioni → Impostazioni avanzate → IA**:
-
-- Il limite batch salvato è 2 per impostazione predefinita; la politica di esecuzione corrente limita l'inferenza reale a un tassello per chiamata su ogni dispositivo.
-- Aumentare questo limite non abilita batch GPU non validati né riduce la dimensione spaziale dei tasselli.
-
 ### Temi
 
-Sono disponibili due temi dell'interfaccia: **Chiaro (predefinito)** e **Scuro**. Cambia in **Impostazioni → Tema**; la scelta si applica subito (anche la barra del titolo di Windows) e viene ricordata. Al primo avvio l'utente sceglie un tema nella finestra di benvenuto; una scelta salvata prevale sempre.
+Puoi scegliere tra **Chiaro (predefinito)**, **Scuro** e **Grigio neutro**. Grigio neutro usa uno sfondo grigio medio per osservare, confrontare e ritoccare le immagini. Cambia in **Impostazioni → Tema**; la scelta si applica subito (anche la barra del titolo di Windows) e viene ricordata. Al primo avvio l'utente sceglie un tema nella finestra di benvenuto; una scelta salvata prevale sempre.
 
 ### Modalità portatile
 
@@ -751,11 +743,11 @@ Su Windows l'aggiornamento prepara una versione candidata separata e sposta il m
 
 ### Cache di registrazione
 
-OpenFocus può memorizzare i risultati di registrazione in una cartella `.openfocus_cache` accanto allo stack sorgente. Riaprendo lo stesso stack (file invariati) l'allineamento viene saltato del tutto. Attiva o disattiva in **Impostazioni → Impostazioni avanzate → Registrazione → Cache di registrazione**; le voci obsolete vengono sostituite automaticamente.
+OpenFocus salva i risultati di registrazione nella cache dell’utente. Riaprendo uno stack invariato con le stesse impostazioni, OpenFocus riutilizza il risultato salvato. Tutti gli stack condividono un limite di 2 GiB. Quando serve spazio, vengono rimosse le voci utilizzate meno di recente. Le vecchie cartelle `.openfocus_cache` accanto agli stack sorgente vengono mantenute.
 
 ### Impostazioni persistenti
 
-Tutto quanto segue sopravvive automaticamente al riavvio: numero di thread, modalità risorse, parametri dei tasselli, larghezza di riduzione della registrazione, dimensione batch della fusione IA (StackMFF V3), accelerazione GPU, cache di registrazione e interruttori dei diagnostici di allineamento, lingua dell'interfaccia, dimensioni della finestra e disposizione dei pannelli, formato di esportazione per trascinamento, opzioni di luminosità per metodo, valori di levigatura e raggio, e stack aperti di recente. Le finestre delle impostazioni salvano al momento della conferma; tutto viene salvato anche alla chiusura. Le preferenze sono memorizzate per utente in `OpenFocus/OpenFocus.ini` (formato INI di QSettings).
+Tutto quanto segue sopravvive automaticamente al riavvio: modalità risorse, parametri dei tasselli, larghezza di riduzione della registrazione, accelerazione GPU, lingua dell'interfaccia, dimensioni della finestra e disposizione dei pannelli, formato di esportazione per trascinamento, opzioni di luminosità per metodo, valori di levigatura e raggio, e stack aperti di recente. Le finestre delle impostazioni salvano al momento della conferma; tutto viene salvato anche alla chiusura. Le preferenze sono memorizzate per utente in `OpenFocus/OpenFocus.ini` (formato INI di QSettings).
 
 ### Lingua dell'interfaccia
 
@@ -799,6 +791,12 @@ La finestra batch mostra l'avanzamento in tempo reale. Puoi annullare l'elaboraz
 - PNG/TIFF conservano i dati a 16 bit; scegliere esplicitamente JPG/BMP converte a 8 bit.
 - L'annullamento attende l'arresto del worker. I file confermati restano disponibili; attività parziali, fallite, annullate e non avviate vengono conteggiate separatamente.
 
+### Conversione di immagini in serie
+
+Apri il convertitore di immagini dal menu Strumenti e aggiungi i file. Per impostazione predefinita, accanto a ogni cartella di origine viene creata una cartella con il suffisso `_converted`. Puoi modificare il suffisso o scegliere una sottocartella con nome, la cartella di origine o una destinazione comune. L’esempio mostra il percorso per la riga selezionata.
+
+Mantieni le dimensioni originali, limita il lato lungo a 2048, 4096 o 8192 pixel oppure imposta una percentuale di riduzione. Le immagini piccole non vengono ingrandite. Il DNG conserva le dimensioni del sensore. I file già nel formato scelto che non richiedono riduzione vengono conteggiati come saltati. Per rimuovere le righe selezionate dalla coda usa il menu contestuale, Canc o Backspace.
+
 ---
 
 ## 13. Esportazione dei risultati
@@ -810,7 +808,7 @@ La finestra batch mostra l'avanzamento in tempo reale. Puoi annullare l'elaboraz
 3. Scegli formato e posizione
 4. Fai clic su Salva
 
-In **Impostazioni → Impostazioni avanzate → Nomi dei risultati**, un prefisso facoltativo del nome file aiuta a identificare i risultati appena renderizzati. L'esempio si aggiorna mentre digiti; usa fino a 40 lettere, numeri, underscore o trattini. Lascialo vuoto per la denominazione originale. Conferma con **OK** per ricordarlo, o annulla per scartare la modifica. Il prefisso entra nei nuovi nomi dell'elenco output e nei nomi di esportazione suggeriti; i risultati esistenti mantengono i loro nomi. Puoi comunque modificare un nome nella finestra di salvataggio. Questa preferenza non rinomina i file sorgente né cambia i nomi di output batch.
+In **Impostazioni → Impostazioni avanzate → Generali → Nomi dei risultati**, un prefisso facoltativo del nome file aiuta a identificare i risultati appena renderizzati. L'esempio si aggiorna mentre digiti; usa fino a 40 lettere, numeri, underscore o trattini. Lascialo vuoto per la denominazione originale. Conferma con **OK** per ricordarlo, o annulla per scartare la modifica. Il prefisso entra nei nuovi nomi dell'elenco output e nei nomi di esportazione suggeriti; i risultati esistenti mantengono i loro nomi. Puoi comunque modificare un nome nella finestra di salvataggio. Questa preferenza non rinomina i file sorgente né cambia i nomi di output batch.
 
 ### Condividere un risultato
 
@@ -856,7 +854,7 @@ openfocus describe                      # JSON: metodi, parametri, capacità, co
 openfocus gui [--control] [--socket NAME] [paths…]   # avvia l'app desktop
 openfocus ctl <command> [flags]          # controlla una finestra in esecuzione (vedi AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
-openfocus recipe run FILE [--dry-run]    # riproduce una ricetta headless salvata
+openfocus recipe run FILE [--dry-run] [--experimental]
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -865,20 +863,20 @@ openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 Da un ambiente Python (o accanto all'eseguibile pacchettizzato):
 
 ```bash
-# Fonde una cartella con il metodo IA predefinito
+# Fonde una cartella con il metodo predefinito (OpenFocus B)
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT con registrazione ECC, 8 thread
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 forzato su CPU con una dimensione tassello personalizzata
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Elenco file esplicito; anche i file video sono accettati come input
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Un singolo stack Z TIFF multipagina con barra di scala calibrata dai metadati
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Esamina fotogrammi adiacenti simili senza fondere né modificare l'input
 python main.py -i ./stack_folder --suggest-duplicates
@@ -896,7 +894,8 @@ Ad esempio, aggiungi `--align openfocus --alignment-report alignment.json` a un 
 | `--output-dir, -d` | Modalità batch: fonde ogni cartella di input scrivendo `<cartella>.png` per stack |
 | `--resume` | Salta la cartella solo se tutti i risultati richiesti sono file regolari non vuoti; non verifica contenuto o parametri |
 | `--config FILE` | Modalità batch: override JSON per cartella, ad es. `{"stackA": {"method": "dct"}}` |
-| `--method, -m` | `stackmffv3` (predefinito), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
+| `--method, -m` | Metodi stabili (`openfocus_a`, `openfocus_b` predefinito, `openfocus_c`) e sperimentali (`guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2`, `stackmffv3`) |
+| `--experimental` | Consente di usare i metodi di fusione sperimentali in questa esecuzione, anche se scelti con `--config` |
 | `--param KEY=JSON_VALUE` | Imposta qualsiasi parametro di fusione; ripetibile e prevale sulle opzioni legacy |
 | `--align, -a` | `none` (predefinito), `homography`, `ecc`, `both`, `openfocus` |
 | `--align-param KEY=JSON_VALUE` | Imposta qualsiasi parametro di registrazione; ripetibile |
@@ -907,7 +906,6 @@ Ad esempio, aggiungi `--align openfocus --alignment-report alignment.json` a un 
 | `--sort` | Ordine fotogrammi per `openfocus_a/b/c`: `asc` (predefinito, ordine file), `desc` (inverte una scansione da lontano a vicino), `off` |
 | `--frame-order` | Cartella in ingresso: `auto` (predefinito) ordina i fotogrammi da vicino a lontano secondo i passi di messa a fuoco EXIF quando tutti li hanno (il bracketing di fuoco OM SYSTEM parte da metà profondità), altrimenti per nome; `name` ordina sempre per nome file. I file elencati esplicitamente mantengono il loro ordine |
 | `--sharpen-output` | Applica una leggera maschera di contrasto all'output fuso (disattivata per impostazione predefinita) |
-| `--dust-map WHITE` | Correzione di campo piatto (mappa polvere) da uno scatto di campo bianco sfocato |
 | `--defect-mask-path MASK` | Maschera difetti in coordinate sensore riparata prima della registrazione |
 | `--sensor-denoise` | Riduzione prudente del rumore del sensore prima della registrazione |
 | `--kernel, -k` | Solo per metodi che dichiarano `kernel_size` |
@@ -944,10 +942,12 @@ Una ricetta è un file JSON portatile di opzioni di elaborazione CLI con percors
 
 ```bash
 openfocus recipe create line.json --input ./stack --output ./out/fused.tif \
-  --method dtcwt --align ecc --threads 8
+  --method openfocus_b --align ecc --threads 8
 openfocus recipe run line.json
 openfocus recipe run line.json --dry-run
 ```
+
+Se la ricetta usa un metodo di fusione sperimentale, aggiungi `--experimental` ogni volta che la esegui, anche in una prova con `--dry-run`. La ricetta memorizza il metodo scelto.
 
 `recipe create --project project.ofproj --input ./stack --output ./out/fused.tif` cattura le impostazioni di elaborazione di un progetto su input scelti esplicitamente; le sorgenti del progetto possono essere state spostate. Le ricette rifiutano controlli transitori come `--dry-run`, `--resume`, `--json` e `--config`, e richiedono che l'output sia fuori da tutte le cartelle di input (e diverso da un input selezionato esplicitamente). Una maschera difetti viene memorizzata per percorso relativo con un'impronta SHA-256, quindi una maschera mancante o modificata fa fallire l'esecuzione. Le modifiche alla sorgente del progetto (rotazione, capovolgimento, campo piatto) non possono essere catturate; esporta prima lo stack corretto.
 
@@ -1007,7 +1007,7 @@ Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `p
 | `Ctrl+W` | Svuota stack |
 | `Ctrl+Q` | Esci |
 | `Ctrl+R` | Avvia render |
-| `Ctrl+Shift+R` | Confronta tutti i metodi |
+| `Ctrl+Shift+R` | Confronta i metodi disponibili |
 | `Ctrl+T` | Ritocca risultato |
 | `Ctrl+M` | Mappa di profondità |
 | `Ctrl+E` | Attiva/disattiva confronto Wipe |
@@ -1052,31 +1052,29 @@ Codici di uscita: `0` successo, `1` errore di elaborazione, `2` errore d'uso. `p
 
 - Attiva e conferma le funzioni sperimentali nelle impostazioni avanzate; senza questa scelta i metodi IA desktop sono disabilitati. Runtime e modello sono requisiti separati.
 - Controlla ONNX Runtime e il modello incluso.
-- Controlla in **Aiuto → Informazioni sull'ambiente**
+- Controlla in **Aiuto → Invia feedback → Diagnostica → Informazioni sull'ambiente**
 
 #### Errori di memoria esaurita
 
-- Attiva l'elaborazione a tasselli in **Impostazioni → Impostazioni avanzate → Prestazioni**
+- Attiva l'elaborazione a tasselli in **Impostazioni → Impostazioni avanzate → Fusione**
 - Riduci la dimensione del blocco tassello
 - Usa kernel più piccoli
 - Ridimensiona le immagini
 
 #### La registrazione non riesce
 
-- Usa **OpenFocus (veloce)** per movimento rigido limitato, oppure attiva **Interrompi su fotogramma rifiutato** per fallire presto invece di accettare fotogrammi non allineati
+- Se la registrazione rifiuta un fotogramma, l’applicazione desktop interrompe lo stack interessato. Controlla il fotogramma e il motivo nel messaggio di errore ed esamina l’immagine prima di riprovare.
 - Riduci la larghezza di riduzione in **Impostazioni → Impostazioni avanzate → Registrazione**
 - Assicurati che le immagini abbiano contrasto e caratteristiche sufficienti
-- Attiva **Raccogli diagnostica di allineamento**, renderizza di nuovo e leggi **Impostazioni → Impostazioni avanzate → Registrazione → Diagnostica di allineamento** per i fotogrammi in errore
 
 #### Elaborazione lenta
 
-- Lascia i thread su automatico (`0`); capacità CPU, modalità risorse e margine di memoria limitano già la concorrenza
 - Usa la modalità risorse Massima per un batch non presidiato, oppure filtro guidato / GFG-FGF invece di un metodo IA
 - Riduci la risoluzione delle immagini o usa **Anteprima rapida** durante la regolazione
 
 #### Avviso di Windows SmartScreen al primo avvio
 
-La firma dei binari Windows dipende dalla release specifica (vedi le note di rilascio); la firma non è garantita. Scaricali da **https://openfocus.top** invece che da un mirror di terze parti. Se SmartScreen avvisa, fai clic su **Ulteriori informazioni → Esegui comunque**. Il primo avvio dopo la decompressione può richiedere 30–60 secondi.
+Le versioni attuali per Windows non sono firmate. Scarica il file dal sito ufficiale di OpenFocus (**https://openfocus.top**). Prima di avviare il file scaricato, confronta il suo hash SHA-256 con quello indicato nel manifesto della versione. Se SmartScreen avvisa, fai clic su **Ulteriori informazioni → Esegui comunque**. Il primo avvio dopo la decompressione può richiedere 30–60 secondi.
 
 #### macOS segnala che l'app «non può essere aperta» o «è danneggiata»
 
@@ -1092,7 +1090,7 @@ oppure fai clic destro sull'app e scegli **Apri**. Le build macOS pubblicate son
 
 ### Come ottenere aiuto
 
-1. **Informazioni sull'ambiente**: vai su **Aiuto → Informazioni sull'ambiente** per controllare l'installazione
+1. **Informazioni sull'ambiente**: vai su **Aiuto → Invia feedback → Diagnostica → Informazioni sull'ambiente** per controllare l'installazione
 2. **Contatta il supporto**: vai su **Aiuto → Contattaci** per le informazioni di supporto
 
 ---

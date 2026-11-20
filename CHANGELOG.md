@@ -10,24 +10,138 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a versioned manifest, a verified download cache, a packer with a metadata
   check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
+
+## [2.0.0]
+
+This stable release includes the features introduced in the 1.77.0 beta series.
+
+### Added
+- Show the actual whole-input or tiled processing mode, tile geometry, and
+  fusion settings for each result in the output list.
+- Add Follow System to the theme menu and offer small, medium, large and custom interface font sizes. The custom editor previews the proposed size beside the default.
+- Add a Neutral Gray desktop theme with a mid-gray canvas for the workspace, image comparisons, retouching, depth previews, and the label, watermark and scale bar editors.
+- Offer a hardware-matched TensorRT and PyTorch CUDA pack for StackMFF on supported Windows NVIDIA systems. Install it from Setup or Settings, including after a desktop upgrade. Neural renders try supported engines within the memory budget and report the actual execution device and fallback reasons.
+- Offer a PyTorch download mirror and installation from verified local archives. Show byte counts during download and unpacking, then show GPU verification separately.
+- Show the Windows taskbar and notification area icons while the initial sign-in window is open. Clicking the notification area icon brings the current dialog or workspace forward.
+- Batch Image Converter now defaults to a sibling `_converted` folder and previews the destination for the selected file. Choose a source-relative or custom folder, cap the long edge at 2K/4K/8K, or shrink by percentage. DNG keeps sensor dimensions. Unchanged same-format images are counted as skipped. Right-click queue rows to remove the selection.
+- Add an opt-in OpenCL GPU path for OpenFocus A fusion (`use_gpu=True`),
+  porting the Burt-pyramid focus response, winner-take-all selection with
+  low-response background accumulation, low-response blending and output
+  conversion to device kernels. Verified bit-exact against the CPU path
+  (`ndiff=0`, ~2.0x faster end-to-end on a 60-frame 2048x1366 stack on RTX 4060
+  Laptop); falls back to CPU when the device budget or build fails.
+- Prepare Linux x86-64 desktop release archives and website downloads, alongside
+  the separate headless CLI distributed through PyPI.
+- Add an opt-in OpenCL GPU path and compiled CPU kernels for Guided Filter fusion
+  (`use_gpu=True`), porting saliency (channel sum, Laplacian, Gaussian, online
+  argmax), base/detail decomposition, two-scale guided-filter weight refinement
+  (`r=45` base and local-memory mean-shifted `r=7` detail), and weighted
+  reconstruction to pure OpenCL 1.2 FP32 kernels with single-frame streaming
+  and automatic CPU fallback. CPU optimization is bit-exact (`ndiff=0`,
+  3.2x–5.3x faster on single thread); GPU achieves `max_diff=1` (`>=99.96%` exact
+  on real/synthetic scenes, identical PSNR 39.54 / SSIM 0.9968 on
+  `tools/synthetic_benchmark.py`) and up to 18.8x–35.6x warm speedup vs
+  baseline CPU (t=1) / 4.4x–11.1x vs optimized CPU (t=1) on RTX 4060 Laptop.
+- Add an opt-in OpenCL GPU path and compiled CPU kernels for DCT fusion
+  (`use_gpu=True`), streaming single frames through OpenCL 1.2 fixed-point `uint8`
+  / FP32 block-variance computation, online block argmax, and selected-block
+  reconstruction with automatic CPU fallback, achieving 100.0000% bit-exact
+  output (`ndiff=0`, `max_diff=0`, identical PSNR 40.13 / SSIM 0.9965 on
+  `tools/synthetic_benchmark.py`), 1.6x–2.6x CPU speedups across thread counts,
+  and 10.3x–22.1x warm GPU speedup vs baseline CPU (t=1) on RTX 4060 Laptop.
+- Add an opt-in OpenCL GPU path and compiled CPU Numba kernels for GFG-FGF
+  fusion (`use_gpu=True`), porting dominant channel selection, Scharr frame
+  focus scoring, Gaussian-like four-neighbourhood gradient with mean-difference
+  focus mapping, fast guided-filter refinement (`s=4, r=5, eps=0.3`),
+  Sobel-tie-broken streaming selection, and weighted reconstruction to pure
+  OpenCL 1.2 FP32 kernels with single-frame streaming and automatic CPU
+  fallback. CPU optimization is bit-exact (`ndiff=0`, 3.7x–8.4x faster on
+  single thread for 640x360 / 1024x768 stacks); GPU preserves `PSNR=40.85,
+  SSIM=0.9970, ghost%=1.31` on `tools/synthetic_benchmark.py` (`99.23%`–`99.91%`
+  exact, `max_diff=1` on real/synthetic scenes) with up to 19.1x–61.3x warm
+  speedup vs baseline CPU (t=1) / 5.7x–36.6x vs optimized CPU (t=1) on
+  RTX 4060 Laptop.
+- Add opt-in OpenCL acceleration for DTCWT fusion (`use_gpu=True`), with
+  single-frame uploads, host and device memory checks, and automatic CPU
+  fallback. The CPU path uses compiled 3×3 majority voting while retaining
+  the upstream wavelet transform and its established output.
 - Add an opt-in OpenCL GPU path for OpenFocus C pyramid fusion
   (`use_gpu=True`), porting the full weighted-pyramid chain — normalize,
   Gaussian down/up, detail+weight, IIR weight filter, merge, collapse and
   output — to device kernels. Verified bit-exact against the CPU path
   (92-frame 2048x1366 stack: ndiff=0, ~3.8x faster on RTX 4060 Laptop);
   falls back to CPU when the device budget or build fails.
+- Accelerate large fractional image reductions during ECC registration on supported Windows OpenCL GPUs. The CPU solver and Lanczos warp produce the same alignment, and the job log records completed GPU resizes.
+- Show estimated RAM and GPU memory in Render Settings, including expected CPU
+  fallback when the selected neural render does not fit the device budget.
+- Reuse saved OpenFocus B/C and StackMFF V2/V3 depth across compatible workspace results. Switching measures updates the map and the saved parameters automatically. Show the 2D preview before building a requested 3D surface.
+- Open Method Comparison in whole-image view, with compatible workspace fusion
+  results automatically selected and shown using their original settings and
+  aligned coordinates.
+- Add the Discord invite and the WeChat Official Account QR code to both website languages.
+- Group GitHub and Discord under Community links in Contact Us. Scan the branded
+  Discord QR code to open the current invitation published by OpenFocus.
+- Keep progress, cancel controls, and timed notices on the left of the desktop
+  status bar and a sponsor invitation that opens Contact Us on the right.
+- Open the user manual on GitHub in the current interface language from Help.
+- Show the current public sponsor acknowledgments in Support Us, with equal-size Alipay and PayPal payment codes.
 
 ### Changed
-- Include allowlisted error categories, render stages, and memory admission
-  figures in sanitized reports, without adding exception messages or paths.
+- Display a disabled Extensions (In development) entry after Help.
+- Load the current WeChat group and Official Account codes in Contact Us and
+  the Alipay and PayPal codes in Support Us from the OpenFocus service.
+- Show the GPU and available engines in AI Acceleration Components. Keep
+  installation controls reachable when the window is narrow.
+- Default to the SJTU PyTorch mirror when the Windows region is China mainland. Use the official source directly in other regions.
+- Collapse workspace algorithm parameters by default. Open them as needed and reclaim space for the source and output lists on collapse.
+- Keep the stable-release note on the beta updates checkbox in Advanced Settings.
+- Enable OpenFocus A, B and C by default. The other fusion methods require
+  **Enable experimental features** in Advanced Settings or `--experimental`
+  in the headless CLI. Saved projects and recipes retain their chosen method.
+- Group render settings by workflow, brightness and color, and output. Adjust fusion sharpening from 0% to 200% in desktop renders, batch jobs, and the CLI. The 100% default preserves the previous sharpening amount.
+- Keep the batch queue visible beside Method, Output and Options tabs. Group depth-map source, appearance and export controls beside the preview.
+- Reorganize Labels, Watermark and Scale Bar around live previews and fixed Apply and Cancel controls. Drag a label in Fit view to set its position.
+- Choose the default font size for new labels and automatic scale bar captions from the target image resolution.
+- Open workspaces at their intended size when the screen has room. Use scrollable panes on smaller displays and restore the side-by-side divider position when space returns.
+- Mark Image Stitching and Dust Map as in development. Batch and command-line flat-field correction are currently unavailable.
+- Load the published email addresses, institution name and website links each time Contact Us opens.
+- Move frame review and cancellation to the source frame context menu. With the list focused, Ctrl+Shift+I includes all frames, Ctrl+Shift+X excludes all frames and Ctrl+Shift+F starts or cancels review. On macOS use Command. The cancellation notice clears after five seconds.
+- Edit OpenFocus A/B/C smoothing in whole levels, one per click. Fractional values
+  from existing projects and recipes keep their original precision until edited.
+- Retouch’s Auto background dialog explains when to replace the background and when to use the Source Brush. It groups source and edge options, reports progress through preparation and replacement, and supports cancellation and retry.
+- Speed up Auto background’s registration mask checks and edge cleaning. Large stacks can use an OpenCL GPU for focus statistics with an exact CPU fallback.
+- Publish unsigned Windows builds with SHA-256 hashes for the installer and portable archive.
+- Save consented error reports as failures occur so the next launch can retry
+  pending uploads. Preserve the original render error, stage and memory
+  measurements when available. Offer uncaught Python exits for review on the
+  next launch alongside native crashes.
+- Use each indexed TIFF page's color map for previews, full-resolution fusion and conversion.
+  Preserve 16-bit palette colors, orientation and embedded RGB profiles.
+- Read original working-image pixels in the loupe, Method Compare, Wipe, watermark and scalebar previews.
+  Method Compare's 100% view maps one image pixel to one physical display pixel, including on high-DPI screens.
 - Apply exposure matching in OpenFocus fusion through a per-frame lookup table
   of every 8- or 16-bit code, computed by the existing per-sample arithmetic
   and applied in parallel row bands, instead of float strips on one thread.
   Output pixels are unchanged.
+- Group rotation and flip in one Edit submenu. Retouch Result offers workspace outputs and existing image files.
+- Open feedback channels or local diagnostics from Help → Report a Problem. The log folder is accessible beside Close on both tabs.
+- The browser now shows a localized receipt when a desktop sign-in request arrives,
+  when the browser has no active session, or when the user needs to try again.
 - Require an account to enter the desktop application; a saved sign-in can be
   used offline. Signing out returns to the sign-in screen.
+- Reuse one account device slot across installed, portable, and source builds
+  for the same Windows user, even with different settings directories.
+- Group advanced desktop settings into General, Fusion, Registration, and Startup and Updates.
+  Keep the tile size and overlap visible and write detailed session logs by default.
+  Automatic error reports and usage statistics start checked and preserve saved opt-outs.
 - Smooth OpenFocus B detail scores with per-row column sums, reflecting rows
   once per row and columns only at the edges. Output pixels are unchanged.
+- Resample OpenFocus gray reductions and depth expansion one vertical tap at a
+  time across a whole row, so the column loop vectorises; each pixel keeps its
+  order of float32 operations. Output pixels are unchanged.
+- Resample the columns that an OpenFocus gray reduction repeats two horizontal
+  taps at a time across a whole row, so that loop vectorises as well; each
+  pixel keeps its order of float32 operations. Output pixels are unchanged.
 - Expose the active render stage through the local control channel.
 - Stop writing aligned frames to the render's frame cache when only their
   exposure-matched frames are read again and the stack is too large for the
@@ -39,6 +153,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   128-row calls, so row workers no longer wait on each other to start the
   next call. Output pixels are unchanged.
 - Record Windows memory commitment and process usage when neural sessions fail.
+- Blend StackMFF V3 soft-mode colors in smaller row bands on wide images to
+  reduce temporary host memory during color reconstruction.
 - Convert OpenFocus source frames to gray codes in parallel row bands instead
   of on one thread. Output pixels are unchanged.
 - Mark Dust Map and batch flat-field correction as experimental desktop tools.
@@ -46,25 +162,54 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of NumPy slices. Output pixels are unchanged.
 - Default desktop updates and public downloads to stable releases. Users can
   opt in to beta updates through Advanced Settings or the welcome dialog.
+- Download and verify supported desktop updates while the app is idle. Keep
+  release notes with the staged version and apply it from Restart and Update.
+- Place Japanese last in the desktop language menu.
+- Store registration results in the user cache with a shared 2 GiB budget and
+  a Clear Registration Cache action in Advanced Settings.
 - Prepare ECC source frames concurrently within the alignment stage's CPU and
   memory budgets. Preparation and pair estimation share one bounded worker
   pool; RAW decoder OpenMP work stays serial inside each worker. Alignment
   transforms, cropping and output pixels are unchanged.
-- Reduce the tile overlap of neural tiled fusion in proportion when the tile is
-  made smaller to fit memory, instead of keeping the overlap requested for the
-  larger tile, but never below 128 pixels. A default 1024-pixel tile halved to
-  512 computes about half as many tiles; its blend bands are narrower, so
-  pixels can differ slightly from earlier versions.
-- Decode Bayer camera RAW at half size when the loading scale is 50% or less,
-  as camera-linear import already does. Loading and rendering such stacks is
-  faster; pixels can differ slightly from a full-size decode followed by
-  downsampling, and frame dimensions are unchanged.
-
 ### Fixed
+- Open Linux desktop menu entries from bundle paths that contain percent signs.
+- Show embedded TIFF thumbnails stored after the main image in the batch converter, including their display orientation.
+- Keep existing Method Comparison previews visible and update their crop or
+  size during another method's fusion.
+- Match exposure, base correction, and effective sharpening when reusing
+  workspace results in Method Comparison.
+- Keep queued batch rows fully visible when long folder paths add a horizontal scrollbar.
+- Name each Render All result and its suggested export file after the fusion method that produced it.
+- Keep the workspace responsive when opening or closing Support Us while its
+  network requests are pending.
+- Keep Labels, Scale Bar and Watermark previews editable during fusion. At
+  100%, use available original pixels and keep the Fit image visible while
+  any required decode waits.
+- Reuse matching registered frames in Alignment only without starting a
+  render worker. Carry the current exposure matching choice into the mode
+  unless it already has an explicit choice.
+- Show the matching download icon on the Linux desktop button on the website.
+- Let StackMFF accelerator workers exit normally after inference. A slow GPU shutdown no longer discards completed output.
+- Keep TIFFs with tiny embedded thumbnails visible in Scale Bar. Draw the bar on the thumbnail and show its caption at readable zoom levels.
+- Reuse the last alignment across fusion methods when the original frame selection and registration settings are restored.
+- Report project restore completion after the desktop has applied the frames and settings, including after an update restart.
+- Stop desktop renders and affected batch stacks when registration rejects a frame.
+  The error identifies the frame and the reason. Older projects use the same behavior.
+- Include the Qt XCB shape dependency in Linux desktop builds and use the
+  OpenCV wheel without its own Qt libraries.
+- Release the heavy-job lock if a wait diagnostic fails, so later renders and
+  stack loads can continue.
 - Bound Windows memory admission by reported commit headroom as well as
   available physical RAM, avoiding plans above the reported commit limit.
+- Stream baseline 4:4:4 JPEGs in Batch Image Converter, including 16-bit
+  sources. Failed source rows now retain the codec or filesystem error.
 - Include the immediate Windows job object's per-process commit limit in
   admission when that limit is present.
+- Budget native Fujifilm RAF-to-DNG conversion for the full sensor mosaic,
+  strip writer and embedded preview. Large GFX files can now convert under
+  memory limits that still protect the desktop.
+- Keep OpenFocus A on the GPU when a streamed source and the fusion workspace fit
+  in memory. Long stacks can reuse cached frames without filling the decoded RAM cache.
 - Close the isolated language audit without project confirmation, including
   when an audit error interrupts the run.
 - Remove temporary launch-film frames when full video generation fails or is
@@ -72,6 +217,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Keep sign-in methods available while a browser or email sign-in is pending;
   choosing another method or retrying cancels the previous attempt and ignores
   its late callbacks.
+- Restore the saved desktop workspace after an update without showing a failure
+  dialog while its source images are still loading.
 - Wait for asynchronous image progress dialogs in the menu action sweep.
 - Keep private control sockets within Unix path length limits.
 - Honor cancellation after the final linear RAW header is read, before memory
@@ -80,6 +227,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   separate when both targets are selected.
 - Close finished batch progress dialogs before showing their summaries, and
   report retouch source loading as busy to the local control channel.
+- Show the selected captured source immediately in Retouch Result when its preview
+  is available. Scrubbing coalesces full-resolution loads and keeps brush settings
+  available while the selected source pixels and validity mask are prepared.
+- Report a stack load as finished only after the desktop releases its loader,
+  so control clients can render as soon as their load completes.
 - Handle Windows lock contention when opening the report queue and depth cache.
 - Run deferred ECC and homography resampling on the render's planned threads
   with the published OpenCV packages. Their Python bindings do not expose the
@@ -88,6 +240,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Release an older retained aligned mapping when a frame derived from it is
   retained again. The new mapping's provenance kept the older one alive
   beside it, outside the 2 GiB retention limit.
+- Size the right panel on first launch so Render, Render Settings and Compare
+  stay visible when the window has room for the configuration and lists.
+- Show the selected fusion method's GPU model or CPU in the right panel. The
+  tooltip identifies the backend and whether a device ran the last render.
+- Guard against render process mismatches after a Windows source checkout changes
+  while OpenFocus is running.
+- Keep the sharpness curve and navigation in source order after a drag reorder,
+  and prevent an unmodified scroll wheel from changing settings controls.
 
 
 ## [1.77.0] - 2026-11-11

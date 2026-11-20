@@ -1,7 +1,8 @@
 # OpenFocus fusion methods
 
-OpenFocus offers several focus-stacking methods. The A, B and C methods use
-these approaches:
+OpenFocus A, B and C are the stable focus-stacking methods. Other methods
+require **Enable experimental features** in Advanced Settings or
+`--experimental` in the command-line interface. A, B and C use these approaches:
 
 | Method | Approach | Main controls |
 |---|---|---|
@@ -15,6 +16,13 @@ command line with, for example, `--method openfocus_b --param radius=8
 `kernel_size = 2*radius+1`; B and C map smoothing to their internal units by
 multiplying it by 0.24 and 0.6 respectively. Saved explicit settings migrate
 to the new units; older B settings retain F0.
+
+Desktop smoothing controls show whole levels from 0–8 for A, 0–34 for B and
+0–14 for C. Each plus or minus click moves one level from the displayed value.
+When a project, recipe or saved setting contains a fractional level, the field
+shows the nearest whole level. Its tooltip gives the exact saved value, which
+OpenFocus keeps for rendering and saving until you edit smoothing itself.
+The CLI and Python API still accept fractional levels in these ranges.
 
 Exposure matching adjusts frame brightness before fusion. It defaults off in
 the desktop interface and on in the CLI. OpenFocus A/B/C use the first frame in
@@ -77,10 +85,10 @@ depth processing requires sufficient host and verified device memory; otherwise
 bounded GPU activity and merging can still run. A compatible GPU driver and
 compiler are required. Unavailable devices and device failures fall back to CPU.
 See [GPU support](GPU_SUPPORT.md).
-With GPU acceleration enabled, OpenFocus C can run full-image pyramid fusion on
-a compatible OpenCL GPU; insufficient memory, an unavailable device or a device
-failure can cause CPU fallback. C's depth-map export uses the CPU. OpenFocus A
-and application alignment use the CPU.
+With GPU acceleration enabled, OpenFocus A, OpenFocus C, Guided Filter,
+GFG-FGF, DCT and DTCWT can run full-image fusion on a compatible OpenCL GPU.
+Insufficient memory, an unavailable device or a device failure can cause CPU
+fallback. OpenFocus C, GFG-FGF, DCT and DTCWT export depth maps on the CPU.
 
 
 StackMFF V1 and V2 use retrained single-scale attention networks, each with

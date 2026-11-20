@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import QEvent, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut, QFont
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStyle,
     QStyleOptionButton,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -31,7 +32,7 @@ from ui.styles import (
     SOURCE_LIST_STYLE,
 )
 from locales import trans
-from core.algorithms import fusion_algorithms, registration_algorithms, get_fusion
+from core.algorithms import FUSION_DEFAULT, fusion_algorithms, registration_algorithms, get_fusion
 from ui.algorithm_parameters import AlgorithmParameterPanel
 
 # Widest text column that fits a 375 px panel. This is an upper bound: the
@@ -252,7 +253,6 @@ def alignment_items():
     return tuple((spec.id, spec.label_key, spec.hint_key)
                  for spec in registration_algorithms())
 
-FUSION_DEFAULT = "openfocus_b"
 ALIGN_DEFAULT = "ecc"
 
 def refresh_experimental_selectors(window):
@@ -272,10 +272,92 @@ def label_recommended(combo: QComboBox, method: str) -> None:
         combo.setItemText(index, f"{combo.itemText(index)} ({trans.t('recommended')})")
 
 
+class _SourceListWidget(QListWidget):
+    order_changed = pyqtSignal()
+
+    def dropEvent(self, event) -> None:
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+        # Qt may change the current row before the final permutation exists.
+        blocked = self.blockSignals(True)
+        try:
+            super().dropEvent(event)
+        finally:
+            self.blockSignals(blocked)
+        self.order_changed.emit()
+
+
+class _DeviceStatusLabel(QLabel):
+    def __init__(self, text):
+        super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full_text = text
+        self._refit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refit()
+
+    def _refit(self):
+        available = self.contentsRect().width() - 2 * self.margin()
+        # Keep the distinguishing model suffix visible at narrow widths.
+        super().setText(self.fontMetrics().elidedText(
+            self._full_text, Qt.TextElideMode.ElideLeft, max(0, available)))
+
+
+class _ConfigurationContents(QWidget):
+    layoutChanged = pyqtSignal()
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            self.layoutChanged.emit()
+        return handled
+
+
+class _WorkspaceParameterPanel(AlgorithmParameterPanel):
+    def __init__(self, layout, control_id, *, hidden_parameters=()):
+        super().__init__(layout.parentWidget(), hidden_parameters=hidden_parameters)
+        self.disclosure = QToolButton(self.parentWidget())
+        self.disclosure.setProperty('controlId', control_id)
+        self.disclosure.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.disclosure.setCheckable(True)
+        self.disclosure.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.disclosure.hide()
+        self.hide()
+        layout.addWidget(self.disclosure, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self)
+        self.disclosure.toggled.connect(self._show_parameters)
+
+    def set_parameters(self, specs, values=None, *, inline=True):
+        super().set_parameters(specs, values)
+        title = trans.t('batch_section_params')
+        self.disclosure.setText(title)
+        group = self.parentWidget()
+        self.disclosure.setAccessibleName(f'{group.title()} · {title}')
+        available = inline and bool(self.editors)
+        self.disclosure.setVisible(available)
+        if not available and self.disclosure.isChecked():
+            self.disclosure.setChecked(False)
+        else:
+            self._show_parameters(self.disclosure.isChecked())
+
+    def _show_parameters(self, expanded):
+        self.disclosure.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.setVisible(expanded and not self.disclosure.isHidden())
+
+
 @dataclass
 class RightPanelComponents:
     widget: QFrame
     splitter: QSplitter
+    config_scroll: QScrollArea
     btn_reset: QPushButton
     btn_render: QPushButton
     btn_compare: QPushButton
@@ -289,17 +371,14 @@ class RightPanelComponents:
     chk_exposure_match: QCheckBox
     chk_sharpen_output: QCheckBox
     chk_reverse_order: QCheckBox
-    fusion_parameter_panel: AlgorithmParameterPanel
-    registration_parameter_panel: AlgorithmParameterPanel
+    fusion_parameter_panel: _WorkspaceParameterPanel
+    registration_parameter_panel: _WorkspaceParameterPanel
 
     # Groups
     method_group: QGroupBox
     registration_group: QGroupBox
 
     source_images_label: QLabel
-    btn_select_all: QPushButton
-    btn_select_none: QPushButton
-    btn_review_stack: QPushButton
     file_list: QListWidget
     output_label: QLabel
     output_list: QListWidget
@@ -309,6 +388,35 @@ class RightPanelComponents:
     lbl_status_resolution: QLabel
     lbl_status_gpu: QLabel
     lbl_status_memory: QLabel
+
+    def fit_configuration(self, *, restored: bool | None = None) -> None:
+        if not self.widget.isVisible():
+            return
+        config = self.config_scroll.widget()
+        config.layout().activate()
+        preferred = config.sizeHint().height()
+        if restored is None and preferred == self.config_scroll.maximumHeight():
+            return
+
+        sizes = self.splitter.sizes()
+        self.config_scroll.setMaximumHeight(preferred)
+        if restored and sizes[0] <= preferred:
+            return
+
+        source_min = self.splitter.widget(1).minimumSizeHint().height()
+        output_min = self.splitter.widget(2).minimumSizeHint().height()
+        available = max(0, sum(sizes) - source_min - output_min)
+        config_height = min(preferred, available)
+        extra = available - config_height
+        # Reclaim unused config space without resetting the user's list split.
+        source_extra = max(0, sizes[1] - source_min)
+        output_extra = max(0, sizes[2] - output_min)
+        if restored is False or not (source_extra or output_extra):
+            source_share = 3 * extra // 5
+        else:
+            source_share = extra * source_extra // (source_extra + output_extra)
+        self.splitter.setSizes([config_height, source_min + source_share,
+                                output_min + extra - source_share])
 
 
 
@@ -332,11 +440,9 @@ def create_right_panel() -> RightPanelComponents:
     right_layout.addWidget(right_splitter)
 
     # Configuration group ----------------------------------
-    config_widget = QWidget()
+    config_widget = _ConfigurationContents()
     config_layout = QVBoxLayout(config_widget)
     config_layout.setContentsMargins(10, 10, 10, 10)
-
-    method_registration_layout = QHBoxLayout()
 
     method_group = QGroupBox(trans.t('group_fusion'))
     method_layout = QVBoxLayout(method_group)
@@ -361,8 +467,7 @@ def create_right_panel() -> RightPanelComponents:
     method_help_layout.addWidget(btn_method_help)
     method_layout.addLayout(method_help_layout)
 
-    fusion_parameter_panel = AlgorithmParameterPanel(parent=method_group)
-    method_layout.addWidget(fusion_parameter_panel)
+    fusion_parameter_panel = _WorkspaceParameterPanel(method_layout, 'fusion_parameters_toggle')
 
     registration_group = QGroupBox(trans.t('group_registration'))
     registration_layout = QVBoxLayout(registration_group)
@@ -384,9 +489,8 @@ def create_right_panel() -> RightPanelComponents:
     btn_reg_help.setObjectName("helpButton")
     reg_help_layout.addWidget(btn_reg_help)
     registration_layout.addLayout(reg_help_layout)
-    registration_parameter_panel = AlgorithmParameterPanel(
-        parent=registration_group, hidden_parameters=('failure_policy',))
-    registration_layout.addWidget(registration_parameter_panel)
+    registration_parameter_panel = _WorkspaceParameterPanel(
+        registration_layout, 'registration_parameters_toggle', hidden_parameters=('failure_policy',))
 
     # 融合/对齐并排时面板宽 375px，两个下拉各只剩 ~114px —— 比
     # "Alignment only (no fusion)" 需要的 ~190px 窄得多，文字被截成
@@ -457,33 +561,11 @@ def create_right_panel() -> RightPanelComponents:
     source_list_layout = QVBoxLayout(source_list_widget)
     source_list_layout.setContentsMargins(10, 10, 10, 10)
     source_images_label = QLabel(trans.t('label_source_images').format(0))
-    # Header row with select-all / clear-all: the per-frame checkboxes decide
-    # which frames join the render, and unticking 20 of them by hand was the
-    # only way to drop a bad tail.
-    source_header = QHBoxLayout()
-    source_header.addWidget(source_images_label)
-    source_header.addStretch()
-    btn_all = QPushButton(trans.t('btn_select_all'))
-    btn_all.setObjectName("secondaryButton")
-    btn_all.setFixedHeight(24)
-    btn_all.setToolTip(trans.t('btn_select_all_hint'))
-    btn_none = QPushButton(trans.t('btn_select_none'))
-    btn_none.setObjectName("secondaryButton")
-    btn_none.setFixedHeight(24)
-    btn_none.setToolTip(trans.t('btn_select_none_hint'))
-    btn_review_stack = ElidingButton(trans.t('stack_review_button'))
-    btn_review_stack.setObjectName("secondaryButton")
-    btn_review_stack.setToolTip(
-        trans.t('stack_review_button') + "\n" + trans.t('stack_review_hint'))
-    btn_review_stack.setEnabled(False)
-    btn_review_stack.setFixedHeight(24)
-    source_header.addWidget(btn_review_stack)
-    source_header.addWidget(btn_all)
-    source_header.addWidget(btn_none)
-    source_list_layout.addLayout(source_header)
+    source_list_layout.addWidget(source_images_label)
 
-    file_list = QListWidget()
+    file_list = _SourceListWidget()
     file_list.setIconSize(QSize(40, 40))
+    file_list.setMinimumHeight(file_list.iconSize().height() + 8)
     file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     file_list.setObjectName("sourceList")
@@ -509,6 +591,7 @@ def create_right_panel() -> RightPanelComponents:
     output_list_layout.addLayout(output_header)
     output_list = OutputListWidget()
     output_list.setIconSize(QSize(40, 40))
+    output_list.setMinimumHeight(output_list.iconSize().height() + 8)
     output_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     output_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     output_list.setDragEnabled(True)
@@ -527,10 +610,6 @@ def create_right_panel() -> RightPanelComponents:
     right_splitter.setStretchFactor(0, 0)
     right_splitter.setStretchFactor(1, 3)
     right_splitter.setStretchFactor(2, 3)
-    # Start with the config block fully readable and give the lists the rest.
-    # The user can drag it smaller now (it is inside a scroll area), which was
-    # impossible while its minimum height was the sum of every control.
-    right_splitter.setSizes([335, 345, 345])
 
     # Status Panel -----------------------------------------
     status_widget = QFrame()
@@ -541,21 +620,18 @@ def create_right_panel() -> RightPanelComponents:
     status_layout.setVerticalSpacing(6)
 
     lbl_status_loaded = QLabel(trans.t('status_loaded').format(0))
-    lbl_status_gpu = QLabel(trans.t('status_gpu').format('-'))
+    lbl_status_gpu = _DeviceStatusLabel(trans.t('status_gpu').format('-'))
     lbl_status_resolution = QLabel(trans.t('status_res').format('-'))
     lbl_status_memory = QLabel(trans.t('status_ram').format('-'))
 
-    # Two rows of two. Measured against every shipped language: the widest
-    # single statistic is 132 px (French "Memoire: 15.5 GB / 32 GB"), so a
-    # half of the 400 px panel leaves ~60 px of slack. Four rows were used
-    # briefly - they also fit, but the block grew from 56 to 107 px tall and
-    # ate the space of the source list above it for no gain.
+    # Keep two rows to leave room for the lists. Give the device label the
+    # wider column and keep the full report in its tooltip.
     status_layout.addWidget(lbl_status_loaded, 0, 0)
     status_layout.addWidget(lbl_status_gpu, 0, 1)
     status_layout.addWidget(lbl_status_resolution, 1, 0)
     status_layout.addWidget(lbl_status_memory, 1, 1)
     status_layout.setColumnStretch(0, 1)
-    status_layout.setColumnStretch(1, 1)
+    status_layout.setColumnStretch(1, 2)
 
     right_layout.addWidget(status_widget)
 
@@ -569,9 +645,10 @@ def create_right_panel() -> RightPanelComponents:
         if _widget is not None:
             _widget.setProperty("controlId", _control)
 
-    return RightPanelComponents(
+    components = RightPanelComponents(
         widget=right_panel,
         splitter=right_splitter,
+        config_scroll=config_scroll,
         btn_reset=btn_reset,
         btn_render=btn_render,
         btn_compare=btn_compare,
@@ -592,9 +669,6 @@ def create_right_panel() -> RightPanelComponents:
         registration_group=registration_group,
 
         source_images_label=source_images_label,
-        btn_select_all=btn_all,
-        btn_select_none=btn_none,
-        btn_review_stack=btn_review_stack,
         file_list=file_list,
         output_label=output_label,
         output_list=output_list,
@@ -603,6 +677,8 @@ def create_right_panel() -> RightPanelComponents:
         lbl_status_gpu=lbl_status_gpu,
         lbl_status_memory=lbl_status_memory,
     )
+    config_widget.layoutChanged.connect(components.fit_configuration)
+    return components
 
 
 def bind_right_panel(window, components: RightPanelComponents) -> None:
@@ -610,21 +686,6 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
 
     if hasattr(components.output_list, "set_window"):
         components.output_list.set_window(window)
-
-    def _set_all_source_checks(checked: bool) -> None:
-        excluded = set() if checked else set(range(len(window.raw_images)))
-        if excluded == window.excluded_frames:
-            return
-        window.push_undo()
-        window.excluded_frames = excluded
-        window.source_manager.decorate_source_items()
-        window.source_manager.processing_selection_changed()
-
-    components.btn_select_all.clicked.connect(
-        lambda: _set_all_source_checks(True))
-    components.btn_select_none.clicked.connect(
-        lambda: _set_all_source_checks(False))
-    components.btn_review_stack.clicked.connect(window.source_manager.toggle_stack_review)
 
     components.combo_fusion.currentIndexChanged.connect(
         window.refresh_algorithm_parameters)
@@ -642,12 +703,7 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
         lambda values: window.set_fusion_parameters(window.current_fusion_method(), values))
     components.registration_parameter_panel.valuesChanged.connect(
         lambda values: window.set_registration_parameters(window.current_alignment_method(), values))
-    # Provider validation runs a small inference, so probe off the UI thread
-    # only when a neural method is selected.
-    components.combo_fusion.currentIndexChanged.connect(
-        lambda: components.combo_fusion.currentData() != "none"
-        and get_fusion(components.combo_fusion.currentData()).neural
-        and window._probe_device_kind_async())
+    components.combo_fusion.currentIndexChanged.connect(window._update_dynamic_status)
 
     # 基底校正开关（消除亮度漂移）：立即持久化，渲染时读取
     components.chk_base_correct.toggled.connect(window.set_base_correct)
@@ -684,6 +740,7 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     components.btn_render_settings.clicked.connect(_show_render_settings)
 
 
+    window.source_manager.bind_source_actions(components.file_list)
     components.file_list.customContextMenuRequested.connect(window.source_manager.show_source_context_menu)
     components.file_list.currentRowChanged.connect(window.source_manager.sync_slider_from_list)
     components.file_list.itemChanged.connect(window.source_manager.on_item_changed)
@@ -691,8 +748,7 @@ def bind_right_panel(window, components: RightPanelComponents) -> None:
     # maps it back onto the data arrays.
     components.file_list.setDragDropMode(
         QAbstractItemView.DragDropMode.InternalMove)
-    components.file_list.model().rowsInserted.connect(
-        window.source_manager.apply_list_order)
+    components.file_list.order_changed.connect(window.source_manager.apply_list_order)
     components.output_list.customContextMenuRequested.connect(window.output_manager.show_output_context_menu)
     components.output_list.currentRowChanged.connect(window.output_manager.sync_output_slider_from_list)
     # Selection changes cover mouse, keyboard and programmatic navigation;

@@ -32,6 +32,7 @@ ASSETS = DIST / "assets"
 
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SITE))
+from constants import DISCORD_INVITE_URL  # noqa: E402
 from site_content import LOCALES, ORIGIN, RELEASE, REPO, MANUAL  # noqa: E402
 
 BENCH_LINK = f"{REPO}/blob/main/tools/synthetic_benchmark.py"
@@ -160,13 +161,14 @@ def context_for(locale: dict) -> dict:
             "origin": ORIGIN,
             "skip": locale["skip"],
             "repo": REPO,
-            "releases": f"{REPO}/releases",
+            "stable_release": RELEASE["page"],
             "manual": MANUAL[locale["code"]],
             "bench_link": BENCH_LINK,
             "cli_link": CLI_LINKS[locale["code"]],
+            "community_discord_url": DISCORD_INVITE_URL,
             "dl_windows": RELEASE["windows_setup"],
             "dl_macos": RELEASE["macos_dmg"],
-            "dl_linux": RELEASE["pypi"],
+            "dl_linux": "#download",
             "chips": render_chips(locale["hero"]["chips"]),
             "features": render_features(locale["why"]["features"]),
             "workflow_bullets": render_bullets(locale["workflow"]["bullets"]),

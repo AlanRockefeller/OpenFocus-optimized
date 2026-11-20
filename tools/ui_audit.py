@@ -3,7 +3,7 @@
 Run it after any UI change and compare the PNGs: the point is to look at the
 screens, not to assert on them.
 
-    python tools/ui_audit.py [--theme dark|light] [--out DIR]
+    python tools/ui_audit.py [--theme dark|light|gray] [--out DIR]
 
 Each surface is grabbed on the native Windows platform (the offscreen plugin
 skips styling that depends on the real window manager, so defects such as the
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtCore import Qt, QTimer  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
+from utils.design_tokens import PALETTES  # noqa: E402
 
 
 def _wait_for_gpu_probe(win, app, timeout_ms=15000):
@@ -96,7 +97,7 @@ def _main_window(app, windows, out_dir):
         algorithm="ui_audit_fixture", parameters={"synthetic": True})
     if context is None:
         raise RuntimeError("Could not build synthetic output context")
-    win.output_manager.update_output_list_for_fusion(context=context)
+    win.output_manager.update_output_list_for_fusion("Synthetic output", context=context)
     if not win.output_manager.display_specific_fusion_result(win.fusion_result):
         raise RuntimeError("Could not display synthetic output")
     record = win.output_manager.record_for_row(win.output_list.currentRow())
@@ -178,7 +179,7 @@ def _dialogs(app, win, out_dir, made):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--theme", default="dark", choices=["dark", "light"])
+    ap.add_argument("--theme", default="dark", choices=PALETTES)
     ap.add_argument("--lang", default="", help="UI language code (en, de, ko, …)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()

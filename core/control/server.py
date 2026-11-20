@@ -29,10 +29,11 @@ from core.control.protocol import (
 )
 from core.algorithms import (
     fusion_algorithms, get_fusion, get_registration, registration_algorithms,
-    resolve_fusion_parameters, resolve_registration_parameters,
+    resolve_fusion_parameters, desktop_registration_parameters,
 )
 from locales import trans
 from utils.logging_setup import get_logger
+from utils.output_sharpen import DEFAULT_SHARPEN_STRENGTH
 
 _log = get_logger(__name__)
 MAX_MOUSE_STEPS = 1024
@@ -243,8 +244,8 @@ class ControlServer(QObject):
             # macOS limits sockaddr_un paths to 103 bytes, including the
             # private staging directory used to publish the socket safely.
             stage_path = os.path.join(temp_dir, '.of-12345678', 's')
-            endpoint = os.path.join(temp_dir, self.socket_name)
-            if max(len(os.fsencode(stage_path)), len(os.fsencode(endpoint))) >= 104:
+            self.socket_name = os.path.join(temp_dir, self.socket_name)
+            if max(len(os.fsencode(stage_path)), len(os.fsencode(self.socket_name))) >= 104:
                 self.socket_name = os.path.join('/tmp', f'ofc-{os.getpid()}')
         self._buffers = {}
         self._pending_replies = {}
@@ -396,44 +397,17 @@ class ControlServer(QObject):
             renderer.start_render = self._original_start_render
 
     def _tracked_start_load(self, *args, **kwargs):
+        if getattr(self.window.source_manager, "_load_worker", None) is not None:
+            # A refused GUI request leaves the active generation in place.
+            return self._original_start_load(*args, **kwargs)
         load_id = self._begin_load()
-        success = kwargs.get("on_success")
-        failure = kwargs.get("on_error")
-
-        def on_success():
-            try:
-                if success is not None:
-                    success()
-            finally:
-                self._finish_load(load_id)
-
-        def on_error(message):
-            try:
-                if failure is not None:
-                    failure(message)
-            finally:
-                self._finish_load(load_id, message)
-
-        kwargs["on_success"] = on_success
-        kwargs["on_error"] = on_error
+        kwargs["on_finished"] = lambda error: self._finish_load(load_id, error)
         try:
             self._original_start_load(*args, **kwargs)
-        except Exception:
-            self._finish_load(load_id, "Load failed to start")
+        except Exception as exc:
+            self._finish_load(load_id, str(exc) or "Load failed to start")
             raise
-        self._watch_load(load_id)
         return load_id
-
-    def _watch_load(self, load_id):
-        """Finish the generation even when no callback fires (superseded load)."""
-        worker = getattr(self.window.source_manager, "_load_worker", None)
-        if worker is None:
-            self._finish_load(load_id, self._load_error or "Load did not start")
-            return
-        worker.finished_load.connect(
-            lambda ok, message, images, names, lid=load_id:
-            self._finish_load(lid, None if ok else (message or "Load failed")))
-        worker.finished.connect(lambda lid=load_id: self._finish_load(lid))
 
     def _tracked_start_render(self, *args, **kwargs):
         status = self._original_start_render(*args, **kwargs)
@@ -461,13 +435,14 @@ class ControlServer(QObject):
 
     def _load_info(self) -> dict:
         manager = self.window.source_manager
-        active = (getattr(manager, "_load_worker", None) is not None
-                  and not self._load_finished)
+        # Frames can be applied one event-loop turn before the loader is released.
+        active = getattr(manager, "_load_worker", None) is not None
+        finished = self._load_finished and not active
         return {
             "id": self._load_id,
             "active": active,
-            "finished": bool(self._load_finished),
-            "error": self._load_error if self._load_finished else None,
+            "finished": finished,
+            "error": self._load_error if finished else None,
             "baseline_count": self._load_baseline,
         }
 
@@ -712,13 +687,18 @@ class ControlServer(QObject):
         import platform
         import sys
         from importlib.util import find_spec
+        from ui.algorithm_combo import desktop_fusion_lock_reason, fusion_label
 
         methods = []
         for spec in fusion_algorithms():
+            reason = desktop_fusion_lock_reason(self.window, spec.id)
             methods.append({
                 "id": spec.id,
-                "label": trans.t(spec.label_key),
+                "label": fusion_label(spec),
                 "category": spec.category,
+                "experimental": spec.experimental,
+                "available": not reason,
+                "unavailable_reason": reason or None,
                 "neural": spec.neural,
                 "order_sensitive": spec.order_sensitive,
                 "depth_map": spec.depth is not None,
@@ -751,13 +731,15 @@ class ControlServer(QObject):
 
     def _cmd_app_state(self, args):
         window = self.window
+        from utils.logging_setup import debug_enabled
+        from ui.algorithm_combo import desktop_fusion_lock_reason, fusion_label
         method = window.current_fusion_method()
         alignment = window.current_alignment_method()
         return {
             "stack": _stack_info(window),
             "method": {"id": method,
-                       "label": trans.t(get_fusion(method).label_key)
-                       if method != "none" else "none",
+                       "label": fusion_label(get_fusion(method)) if method != "none" else "none",
+                       "unavailable_reason": desktop_fusion_lock_reason(window, method) or None,
                        "parameters": window.fusion_parameters_for(method)},
             "alignment": {"id": alignment,
                           "parameters": window.registration_parameters_for(alignment)},
@@ -765,6 +747,8 @@ class ControlServer(QObject):
                 "base_correct": bool(window.chk_base_correct.isChecked()),
                 "exposure_match": bool(window.chk_exposure_match.isChecked()),
                 "reverse_order": bool(getattr(window, "stack_reverse_order", False)),
+                "sharpen_output": bool(getattr(window, "sharpen_output", False)),
+                "sharpen_strength": getattr(window, "sharpen_strength", DEFAULT_SHARPEN_STRENGTH),
                 "preview": bool(window.chk_quick_preview.isChecked()),
                 "thread_count": int(getattr(window, "thread_count", 0)),
                 "use_gpu": bool(getattr(window, "use_gpu", False)),
@@ -777,7 +761,7 @@ class ControlServer(QObject):
                 "reg_downscale_width": int(getattr(window, "reg_downscale_width", 1024)),
                 "storage_directory": getattr(window, "storage_directory", "") or "",
                 "profile_performance": bool(getattr(window, "profile_performance", False)),
-                "debug_logging": bool(getattr(window, "debug_logging", False)),
+                "debug_logging": debug_enabled(),
             },
             "render": _render_state(window),
             "outputs": {"count": window.output_list.count(),
@@ -820,15 +804,15 @@ class ControlServer(QObject):
         load_id = None
         if folder:
             load_id = manager._start_load_worker(
-                folder=folder, scale=scale, append=append, linear_raw=linear_raw)
+                folder=folder, scale=scale, append=append, linear_raw=linear_raw, on_error=_log.warning)
             source = folder
         elif video:
             load_id = manager._start_load_worker(
-                video=video, scale=scale, append=append)
+                video=video, scale=scale, append=append, on_error=_log.warning)
             source = video
         else:
             load_id = manager._start_load_worker(
-                filepaths=list(files), scale=scale, append=append, linear_raw=linear_raw)
+                filepaths=list(files), scale=scale, append=append, linear_raw=linear_raw, on_error=_log.warning)
             source = list(files)
         return {"loading": True, "source": source, "load_id": load_id,
                 "baseline_count": self._load_baseline}
@@ -905,15 +889,19 @@ class ControlServer(QObject):
                 "parameters": self.window.registration_parameters_for(method)}
 
     def _validate_method_selection(self, method, args, *, fusion):
-        from core.experimental import (alignment_is_experimental, experimental_enabled,
-                                       fusion_is_experimental)
+        from core.experimental import alignment_is_experimental, experimental_enabled
+        from ui.algorithm_combo import desktop_fusion_lock_reason
         window = self.window
-        experimental = fusion_is_experimental if fusion else alignment_is_experimental
-        if (hasattr(window, 'experimental_features') and not experimental_enabled(window)
-                and experimental(method) and not getattr(window, '_restore_depth', 0)):
+        if (not fusion and hasattr(window, 'experimental_features')
+                and not experimental_enabled(window) and alignment_is_experimental(method)
+                and not getattr(window, '_restore_depth', 0)):
             raise ValueError(trans.t('experimental_locked_hint'))
-        if method != "none":
-            (get_fusion if fusion else get_registration)(method)
+        if fusion:
+            reason = desktop_fusion_lock_reason(window, method)
+            if reason:
+                raise ValueError(reason)
+        elif method != 'none':
+            get_registration(method)
         combo = window.combo_fusion if fusion else window.combo_align
         if combo.findData(method) < 0:
             kind = "Fusion" if fusion else "Registration"
@@ -930,14 +918,17 @@ class ControlServer(QObject):
             return
         current = (window.fusion_parameters_for(method) if fusion
                    else window.registration_parameters_for(method))
-        resolver = resolve_fusion_parameters if fusion else resolve_registration_parameters
-        resolver(method, {**current, **values})
+        resolver = resolve_fusion_parameters if fusion else desktop_registration_parameters
+        resolved = resolver(method, {**current, **values})
+        if not fusion and 'failure_policy' in values and values['failure_policy'] != resolved['failure_policy']:
+            raise ValueError('Desktop registration requires failure_policy="fail"')
 
     def _cmd_option_set(self, args):
         name = _string(args, "name")
         window = self.window
         boolean_options = {"base_correct", "exposure_match", "reverse_order", "use_gpu",
-                           "tile_enabled", "preview", "profile_performance", "debug_logging"}
+                           "sharpen_output", "tile_enabled", "preview", "profile_performance",
+                           "debug_logging"}
         integer_options = {"thread_count": 0, "tile_block_size": 64, "tile_overlap": 0,
                            "tile_threshold": 1, "ai_batch_size": 1, "reg_downscale_width": 64}
         if "value" not in args:
@@ -946,6 +937,9 @@ class ControlServer(QObject):
             value = _boolean(args, "value", required=True)
         elif name in integer_options:
             value = _integer(args, "value", required=True, minimum=integer_options[name])
+        elif name == "sharpen_strength":
+            window.set_sharpen_strength(args["value"])
+            return {"name": name, "value": window.sharpen_strength}
         elif name == "resource_preference":
             value = _string(args, "value", choices=("balanced", "responsive", "maximum"))
         elif name == "storage_directory":
@@ -972,6 +966,9 @@ class ControlServer(QObject):
                 checkbox.setChecked(value)
                 checkbox.blockSignals(blocked)
             value = window.stack_reverse_order
+        elif name == "sharpen_output":
+            window.chk_sharpen_output.setChecked(value)
+            return {"name": name, "value": window.sharpen_output}
         elif name == "use_gpu":
             window.set_use_gpu(value)
             value = window.use_gpu
@@ -988,10 +985,8 @@ class ControlServer(QObject):
             window.storage_directory = value
             value = window.storage_directory
         elif name == "debug_logging":
-            from utils.logging_setup import set_debug_logging
-            window.debug_logging = value
-            set_debug_logging(value)
-            value = window.debug_logging
+            from utils.logging_setup import set_log_level
+            set_log_level("DEBUG" if value else "INFO")
         else:
             setattr(window, name, value)
             value = getattr(window, name)
@@ -1082,6 +1077,9 @@ class ControlServer(QObject):
             raise ControlError("busy", "A render is already running",
                                "Wait for render.state to leave 'rendering' or "
                                "call render.cancel.")
+        if status == "loading":
+            raise ControlError("busy", "A stack is still loading",
+                               "Wait for stack.frames load.finished, then retry.")
         if status == "confirm_ai":
             raise ControlError(
                 "confirm_required",
@@ -1300,7 +1298,7 @@ class ControlServer(QObject):
             window.add_recent_project(path)
 
         try:
-            apply_project(window, state, on_loaded=loaded)
+            apply_project(window, state, on_loaded=loaded, on_error=_log.warning)
         except Exception as error:  # noqa: BLE001 - reported to the client
             raise ControlError("invalid_argument", str(error)) from error
         return {"loading": True, "path": path, "load_id": self._load_id,
@@ -1428,12 +1426,8 @@ class ControlServer(QObject):
         elif name == "scalebar":
             from dialogs.scalebar import ScaleBarDialog
             dialog = ScaleBarDialog(window)
-        elif name == "dust":
-            from core.experimental import experimental_enabled
-            if not experimental_enabled(window):
-                raise ControlError('invalid_argument', trans.t('experimental_locked_hint'))
-            from dialogs.dustmap import DustMapDialog
-            dialog = DustMapDialog(window)
+        elif name in ('dust', 'mosaic'):
+            raise ControlError('invalid_argument', trans.t('development_unavailable_hint'))
         elif name == "retouch":
             dialog = self._retouch_dialog()
         elif name == "welcome":

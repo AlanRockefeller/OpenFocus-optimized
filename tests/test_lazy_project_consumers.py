@@ -21,14 +21,19 @@ def _source(tmp_path, name="source.png", shape=(48, 80, 3)):
 
 
 def test_label_preview_never_resolves_original(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtTest import QSignalSpy
+    from utils.image_utils import to_display_uint8
     from widgets.label_preview import LabelPreview
     frame, _ = _source(tmp_path, shape=(1500, 2000, 3))
     monkeypatch.setattr(SourceFrame, "full_resolution", lambda self: pytest.fail("GUI decoded original"))
     preview = LabelPreview()
+    ready = QSignalSpy(preview.fit_changed)
     preview.set_preview(frame, {"enabled": False}, 0)
-    assert preview._frame is display_image(frame)
+    assert ready.wait(3000)
+    np.testing.assert_array_equal(preview._frame, to_display_uint8(display_image(frame)))
     assert preview._source_shape == frame.shape
     assert max(preview._frame.shape[:2]) <= 1024
+    preview.close_preview()
     preview.deleteLater()
 
 
@@ -290,10 +295,12 @@ def test_retouch_whole_stack_operations_resolve_sources_when_requested(tmp_path,
 
     calls.clear()
     other = retouch.prepare_retouch_document(pixels, context)
-    def stop_after_resolution(*_args, **_kwargs):
+    def stop_after_resolution(images, *_args, **_kwargs):
         assert calls == [1, 1]
+        for image in images:
+            np.testing.assert_array_equal(image, pixels)
         raise RuntimeError("analysis reached")
-    monkeypatch.setattr(retouch, "compute_auto_background", stop_after_resolution)
+    monkeypatch.setattr('core.background_fill.replace_background', stop_after_resolution)
     with pytest.raises(RuntimeError, match="analysis reached"):
         other.auto_background()
 

@@ -77,11 +77,18 @@ def test_roi_base_preview_uses_included_snapshot_and_actual_dimensions(qapp):
     frames = [np.zeros((12, 18, 3), np.uint8), np.full((24, 32, 3), 255, np.uint8)]
     dialog = ROIRenderOptionsDialog(2, frame_names=["first.png", "fourth.png"],
                                     frame_indices=[0, 3], frames=frames, roi_size=(5, 6))
+    dialog.show()
+    qapp.processEvents()
+    crop_height = dialog.height()
     assert dialog.frame_container.isHidden()
     dialog.rb_paste.setChecked(True)
+    qapp.processEvents()
+    assert dialog.height() > crop_height
     dialog.combo_frames.setCurrentIndex(1)
     assert not dialog.frame_container.isHidden()
     dialog.rb_crop.setChecked(True)
+    qapp.processEvents()
+    assert dialog.height() == crop_height
     assert dialog.frame_container.isHidden()
     dialog.rb_paste.setChecked(True)
     assert dialog.combo_frames.currentIndex() == 1
@@ -204,6 +211,20 @@ def test_project_roundtrips_per_method_parameters(tmp_path):
     assert restored.registration_parameters_for("openfocus") == {"max_shift_ratio": .12, "rotation": 0., "magnification": 5., "failure_policy": "fail", "reference_frame": 2}
 
 
+def test_project_with_permissive_alignment_reopens_strictly(tmp_path):
+    from main import OpenFocus
+    paths = _make_stack(str(tmp_path / 'source'), 2)
+    state = project_file._collect_state(_window(paths, str(tmp_path)))
+    state['settings']['registration_parameters']['openfocus'].update(
+        failure_policy='continue', reference_frame=2)
+    restored = _window(paths, str(tmp_path))
+    restored.registration_parameters_for = OpenFocus.registration_parameters_for.__get__(restored)
+    project_file._apply_after_load(restored, state)
+    parameters = restored.registration_parameters_for('openfocus')
+    assert parameters['failure_policy'] == 'fail' and parameters['reference_frame'] == 2
+    assert project_file._collect_state(restored)['settings']['registration_parameters']['openfocus'] == parameters
+
+
 def test_project_does_not_rebind_missing_absolute_source_to_same_basename(tmp_path):
     paths = _make_stack(str(tmp_path), 1)
     state = {"sources": [str(tmp_path / "missing" / "f0.png")]}
@@ -250,6 +271,39 @@ def test_render_with_exclusions_publishes_matching_names(qapp, monkeypatch):
     assert window.registration_filenames == ["f0.png", "f2.png"]
     assert window.registered_source_indices == [0, 2]
     assert saved == []
+
+
+def test_restoring_checked_frames_reuses_ecc_across_fusion_methods(qapp, monkeypatch):
+    from PyQt6.QtCore import Qt
+    from main import OpenFocus
+    from tests.test_gui_units import _render_window, _patched_render_manager, _finish_alignment
+
+    window = _render_window([np.full((12, 18, 3), i, np.uint8) for i in range(3)])
+    window.effective_stack = OpenFocus.effective_stack.__get__(window)
+    window.set_alignment_method('ecc')
+    manager, _ = _patched_render_manager(monkeypatch, window, ai_available=True)
+    sources = SourceManager(window)
+    sources.decorate_source_items()
+    window.file_list.itemChanged.connect(sources.on_item_changed)
+    manager._publish_aligned_stack = lambda *_: None
+    manager.start_render()
+    first_context = manager._render_context
+    aligned = _finish_alignment(manager, window, manager.worker.args[0])
+
+    item = window.file_list.item(1)
+    item.setCheckState(Qt.CheckState.Unchecked)
+    window.set_fusion_method('stackmffv2')
+    manager.start_render(force_algorithm='stackmffv2')
+    assert manager.worker.args[2] is False
+    assert [int(frame[0, 0, 0]) for frame in manager.worker.args[0]] == [0, 2]
+    manager.on_render_error('CANCELLED: test')
+
+    item.setCheckState(Qt.CheckState.Checked)
+    assert manager._stack_changed_since(first_context)
+    manager.start_render(force_algorithm='stackmffv2')
+    assert manager.worker.args[2] is True
+    assert manager.worker.args[1] is aligned
+    assert [int(frame[0, 0, 0]) for frame in manager.worker.args[1]] == [7, 8, 9]
 
 
 def test_preview_reuses_only_matching_alignment_pixels(qapp, monkeypatch):
@@ -564,6 +618,7 @@ def test_roi_startup_rejects_stale_results(qapp, monkeypatch, changed):
     window = SimpleNamespace(
         raw_images=original, image_filenames=['first.tif', 'second.tif'],
         source_revision=0, roi_aligned_images=[], roi_mode_active=False,
+        use_gpu=False,
         reg_downscale_width=1024, thread_count=1, resource_preference='balanced',
         result_slider=QSlider(), result_control_bar=QWidget(),
         btn_preview_roi=QPushButton(), label_manager=SimpleNamespace(

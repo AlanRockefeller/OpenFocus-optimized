@@ -69,7 +69,7 @@ class _Host:
         self._restore_depth = 0
         self.titles = []
         self.combo_fusion = _Combo(["stackmffv3", "dct", "openfocus_b"])
-        self.combo_align = _Combo(["none", "ecc"])
+        self.combo_align = _Combo(["none", "ecc", "openfocus"])
         self._fusion_parameters_by_method = {}
         self._registration_parameters_by_method = {}
         self._brightness_by_method = {}
@@ -85,6 +85,7 @@ class _Host:
         self.exposure_match = False
         self.stack_reverse_order = False
         self.sharpen_output = False
+        self.sharpen_strength = 100
         self.stack_images = []
         self.lbl_source_img = _Label()
         self.lbl_result_img = _Label()
@@ -107,10 +108,7 @@ class _Host:
         return resolve_fusion_parameters(
             method, self._fusion_parameters_by_method.get(method), depth=depth)
 
-    def registration_parameters_for(self, method):
-        from core.algorithms import resolve_registration_parameters
-        return resolve_registration_parameters(
-            method, self._registration_parameters_by_method.get(method))
+    registration_parameters_for = main.OpenFocus.registration_parameters_for
 
     def refresh_algorithm_parameters(self):
         pass
@@ -127,6 +125,7 @@ def _bind(host, *names):
 
 def _host():
     host = _Host()
+    host.experimental_features = True
     return _bind(
         host,
         "_update_project_title", "_mark_project_dirty", "_clear_project_dirty",
@@ -134,7 +133,7 @@ def _host():
         "set_fusion_method", "set_alignment_method", "set_fusion_parameters",
         "set_registration_parameters", "set_brightness_option",
         "brightness_option_for", "_set_brightness_option",
-        "set_reverse_order", "set_sharpen_output",
+        "set_reverse_order", "set_sharpen_output", "set_sharpen_strength",
         "_capture_parameter_state", "_restore_parameter_state",
         "_restore_stack_state", "reset_parameter_memories", "reset_to_default",
     )
@@ -148,8 +147,9 @@ def test_each_project_setting_marks_the_project_dirty():
         lambda: host.set_brightness_option("exposure_match", "dct", False),
         lambda: host.set_reverse_order(True),
         lambda: host.set_sharpen_output(True),
-        lambda: host.set_alignment_method("ecc"),
-        lambda: host.set_registration_parameters("ecc", {"failure_policy": "fail"}),
+        lambda: host.set_sharpen_strength(130),
+        lambda: host.set_alignment_method("openfocus"),
+        lambda: host.set_registration_parameters("openfocus", {"reference_frame": 2}),
     ]
     for index, step in enumerate(steps):
         host._project_dirty = False
@@ -164,6 +164,7 @@ def test_project_load_restore_scope_does_not_dirty():
         host.set_alignment_method("ecc")
         host.set_reverse_order(True)
         host.set_sharpen_output(True)
+        host.set_sharpen_strength(130)
         host.set_brightness_option("exposure_match", "dct", True)
         host.set_fusion_parameters("dct", {"kernel_size": 9})
     assert not host._project_dirty, "restoring a saved project must stay clean"
@@ -181,9 +182,11 @@ def test_apply_after_load_uses_the_restore_scope(monkeypatch):
 
 def test_reset_to_default_marks_the_project_dirty(qapp):
     host = _host()
+    host.sharpen_strength = 175
     host._project_dirty = False
     host.reset_to_default()
     assert host._project_dirty, "Reset must leave the project marked unsaved"
+    assert host.sharpen_strength == 100
 
 
 def test_failed_project_open_preserves_dirty(qapp, monkeypatch):
@@ -271,6 +274,7 @@ def test_unchanged_settings_do_not_mark_dirty():
     host.set_fusion_parameters("dct", {})
     host.set_reverse_order(False)
     host.set_sharpen_output(False)
+    host.set_sharpen_strength(100)
     assert not host._project_dirty, "writing the current values is not an edit"
 
 

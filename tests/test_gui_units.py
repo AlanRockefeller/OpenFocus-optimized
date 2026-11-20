@@ -19,7 +19,8 @@ def clean_settings(tmp_path, monkeypatch):
 
 
 def test_settings_round_trip(qapp, clean_settings):
-    from utils.settings_store import load_window_settings, save_window_settings, add_recent_file
+    from utils.settings_store import (add_recent_file, load_window_settings,
+                                      reset_settings_singleton, save_window_settings)
 
     class FakeWindow:
         thread_count = 4
@@ -36,19 +37,20 @@ def test_settings_round_trip(qapp, clean_settings):
     load_window_settings(w)  # defaults on empty store
     assert w.thread_count == 4 and w.use_gpu is True
     assert w.sharpen_output is False
-    assert w.collect_alignment_report is False
+    assert w.sharpen_strength == 100
     assert w.output_name_prefix == ""
 
     w.thread_count = 11
     w.use_gpu = False
     w.tile_block_size = 640
     w.sharpen_output = True
+    w.sharpen_strength = 0
     w.output_name_prefix = "sample_12"
-    w.collect_alignment_report = True
     demo = r"C:\stacks\demo"
     add_recent_file(w, demo)
     add_recent_file(w, demo)  # dedupe
     save_window_settings(w)
+    reset_settings_singleton()
 
     w2 = FakeWindow()
     load_window_settings(w2)
@@ -56,10 +58,21 @@ def test_settings_round_trip(qapp, clean_settings):
     assert w2.use_gpu is False
     assert w2.tile_block_size == 640
     assert w2.sharpen_output is True
+    assert w2.sharpen_strength == 0
     assert w2.output_name_prefix == "sample_12"
-    assert w2.collect_alignment_report is True
     # add_recent_file stores the abspath (form differs across platforms)
     assert w2.recent_files == [os.path.abspath(demo)]
+
+
+@pytest.mark.parametrize('raw', ['201', '75.5', True])
+def test_invalid_sharpen_strength_preference_uses_default(qapp, clean_settings, raw):
+    from types import SimpleNamespace
+    from utils.settings_store import get_settings, load_window_settings
+
+    get_settings().setValue('fusion/sharpen_strength', raw)
+    window = SimpleNamespace()
+    load_window_settings(window)
+    assert window.sharpen_strength == 100
 
 
 @pytest.mark.parametrize("saved_threads", [None, 4, 11, 0])
@@ -191,7 +204,7 @@ class _StubOutputManager:
         return True
 
 
-    def update_output_list_for_fusion(self):
+    def update_output_list_for_fusion(self, label, **metadata):
         pass
 
     def update_output_count(self):
@@ -528,6 +541,22 @@ def test_quick_preview_render_does_not_publish_its_draft(qapp, monkeypatch):
     assert rm._preview_mode is False
 
 
+def test_render_request_captures_sharpening_settings(qapp, monkeypatch):
+    frames = [np.zeros((30, 40, 3), np.uint8) for _ in range(2)]
+    window = _render_window(frames)
+    window.sharpen_output = True
+    window.sharpen_strength = 150
+    manager, _ = _patched_render_manager(monkeypatch, window)
+    assert manager.start_render() == 'started'
+    assert manager.worker.kwargs['sharpen_output'] is True
+    assert manager.worker.kwargs['sharpen_strength'] == 150
+    context = manager._render_context
+    assert context['parameters']['sharpen_strength'] == 150
+    window.sharpen_strength = 65
+    assert manager._stack_changed_since(context)
+    manager.on_render_error('CANCELLED: test')
+
+
 def test_reused_alignment_preview_displays_and_owns_draft(qapp, monkeypatch):
     frames = [np.full((60, 140, 3), i, np.uint8) for i in range(2)]
     window = _render_window(frames)
@@ -663,18 +692,34 @@ def test_cancelled_render_clears_preview_mode(qapp, monkeypatch):
     assert w.status.messages[-1] == trans.t("msg_render_cancelled")
 
 
+def test_render_all_queues_only_stable_methods_without_opt_in(qapp, monkeypatch):
+    frames = [np.zeros((30, 40, 3), dtype=np.uint8) for _ in range(3)]
+    window = _render_window(frames)
+    window.experimental_features = False
+    window.set_alignment_method('ecc')
+    manager, _ = _patched_render_manager(monkeypatch, window, ai_available=True)
+    started = []
+    monkeypatch.setattr(manager, 'start_render', lambda *, force_algorithm: started.append(force_algorithm))
+    manager.start_compare_all()
+    assert started == ['openfocus_a']
+    assert manager._compare_queue == ['openfocus_b', 'openfocus_c']
+
+
 def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
     """The compare button stayed enabled while btn_render (the only cancel
     affordance) was disabled, so a compare-all could not be stopped."""
+    from ui.status_bar import WorkspaceStatusBar
+    from ui import algorithm_combo
+
+    monkeypatch.setattr(algorithm_combo, '_package_available', lambda name: name != 'dtcwt')
     frames = [np.zeros((30, 40, 3), dtype=np.uint8) for _ in range(3)]
     w = _render_window(frames)
+    w.status = WorkspaceStatusBar()
     rm, _saved = _patched_render_manager(monkeypatch, w)
 
     rm.start_compare_all()
     assert rm._compare_mode is True
-    # The queue follows the dropdown order: AI, OpenFocus A/B/C, then the
-    # classical methods. AI is filtered out here (ai_available=False).
-    assert len(rm._compare_queue) == 6
+    assert rm._compare_queue == ['openfocus_b', 'guided_filter', 'gfgfgf', 'openfocus_c', 'dct']
     assert rm._compare_current == "openfocus_a"
     assert not w.btn_render.isEnabled()
     assert not w.combo_align.isEnabled()
@@ -686,7 +731,9 @@ def test_compare_all_second_click_cancels_the_run(qapp, monkeypatch):
     assert rm._compare_queue == []
     assert rm._compare_current is None
     assert running.is_cancelled is True
-    assert w.status.messages[-1] == trans.t("depth_cancelling")
+    assert rm._status_bar_label.text() == trans.t('depth_cancelling')
+    assert w.status.currentMessage() != trans.t('depth_cancelling')
+    w.status.deleteLater()
 
 
 def test_compare_all_cancel_between_renders_unlocks_the_ui(qapp, monkeypatch):
@@ -1174,15 +1221,9 @@ def test_new_output_is_the_only_selected_item(qapp):
     w.fusion_results = []
     w.fusion_result = None
 
-    class E:
-        @staticmethod
-        def generate_default_filename():
-            return "out"
-
-    w.export_manager = E()
     mgr = OutputManager(w)
-    mgr.update_output_list_for_fusion()
-    mgr.update_output_list_for_fusion()
+    mgr.update_output_list_for_fusion("first")
+    mgr.update_output_list_for_fusion("second")
     assert len(w.output_list.selectedItems()) == 1
     assert w.output_list.currentRow() == 0
 
@@ -1234,17 +1275,11 @@ def test_output_history_is_capped(qapp):
     w.fusion_results = []
     w.fusion_result = None
 
-    class E:
-        @staticmethod
-        def generate_default_filename():
-            return "out"
-
-    w.export_manager = E()
     mgr = OutputManager(w)
     mgr.MAX_HISTORY = 3
     for i in range(6):
         w.fusion_result = np.full((4, 4, 3), i, np.uint8)
-        mgr.update_output_list_for_fusion()
+        mgr.update_output_list_for_fusion(f"output {i}")
 
     assert len(w.fusion_results) == 3
     assert w.output_list.count() == 3
@@ -1292,12 +1327,6 @@ def test_keyboard_output_navigation_shows_the_selected_result(qapp):
     w.wipe_active = False
     w.refresh_annotation_views = lambda: None
 
-    class E:
-        @staticmethod
-        def generate_default_filename():
-            return "out"
-
-    w.export_manager = E()
     mgr = OutputManager(w)
     w.output_manager = mgr
 
@@ -1309,7 +1338,7 @@ def test_keyboard_output_navigation_shows_the_selected_result(qapp):
     w.output_list.currentRowChanged.connect(mgr.display_current_output_row)
     for value in (10, 20, 30):
         w.fusion_result = np.full((4, 4, 3), value, np.uint8)
-        mgr.update_output_list_for_fusion()
+        mgr.update_output_list_for_fusion(f"output {value}")
     w.output_list.setCurrentRow(0)
     shown.clear()
     w.output_list.setFocus()
@@ -1802,10 +1831,12 @@ def test_directory_export_does_not_overwrite_existing_files(tmp_path):
 
 
 def test_stack_load_progress_status_and_cancel(qapp, monkeypatch):
-    from PyQt6.QtCore import QObject, pyqtSignal
-    from PyQt6.QtWidgets import QMainWindow
+    from PyQt6.QtCore import QObject, Qt, pyqtSignal
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QLabel, QMainWindow
     from controllers import source_manager
     from locales import trans
+    from ui.status_bar import WorkspaceStatusBar
 
     class Worker(QObject):
         progress = pyqtSignal(int, int)
@@ -1828,6 +1859,10 @@ def test_stack_load_progress_status_and_cancel(qapp, monkeypatch):
 
     monkeypatch.setattr(source_manager, 'StackLoadWorker', Worker)
     window = QMainWindow()
+    status = WorkspaceStatusBar(window)
+    window.setStatusBar(status)
+    window.resize(960, 300)
+    window.show()
     window.image_loader = object()
     manager = source_manager.SourceManager(window)
     manager._start_load_worker(filepaths=['a', 'b', 'c'])
@@ -1837,14 +1872,23 @@ def test_stack_load_progress_status_and_cancel(qapp, monkeypatch):
     worker.progress.emit(1, 3)
     assert (bar.maximum(), bar.value()) == (3, 1)
     assert manager._load_status_label.text() == f"{trans.t('msg_loading_stack')} (1/3)"
+    qapp.processEvents()
+    assert [label for label in status.findChildren(QLabel)
+            if '(1/3)' in label.text() and label.isVisible()] == [manager._load_status_label]
+    status.showMessage('Background notice', 5000)
     worker.progress.emit(2, 0)
     assert (bar.minimum(), bar.maximum()) == (0, 0)
     assert manager._load_status_label.text().endswith('(2)')
-    manager.cancel_load()
+    assert manager._load_cancel_button.isVisible()
+    QTest.mouseClick(manager._load_cancel_button, Qt.MouseButton.LeftButton)
+    assert worker.is_cancelled
     worker.progress.emit(3, 3)
     assert manager._load_status_label.text() == trans.t('depth_cancelling')
     assert not manager._load_cancel_button.isEnabled()
+    worker.finished_load.emit(False, 'CANCELLED', [], [])
     worker.finished.emit()
+    assert not bar.isVisible()
+    assert status.currentMessage() == 'Background notice'
     manager._start_load_worker(video='clip.mp4')
     video_worker = manager._load_worker
     assert (bar.minimum(), bar.maximum()) == (0, 0)
@@ -1855,7 +1899,11 @@ def test_stack_load_progress_status_and_cancel(qapp, monkeypatch):
     assert manager._load_status_label.text() == trans.t('msg_loading_stack')
     worker.progress.emit(3, 3)
     assert (bar.minimum(), bar.maximum()) == (0, 0)
+    QTest.mouseClick(manager._load_cancel_button, Qt.MouseButton.LeftButton)
+    video_worker.finished_load.emit(False, 'CANCELLED', [], [])
     video_worker.finished.emit()
+    assert not bar.isVisible()
+    window.close()
 
 
 def test_compare_failure_after_a_stack_change_stops_the_run(qapp, monkeypatch):
