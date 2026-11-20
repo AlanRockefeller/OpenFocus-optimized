@@ -307,3 +307,38 @@ def test_skipping_aligned_storage_keeps_matched_pixels(tmp_path, monkeypatch):
                 results.append([np.array(sources.resolve_frame(frame)) for frame in matched])
     for skipped, stored in zip(*results):
         np.testing.assert_array_equal(skipped, stored)
+
+
+@pytest.mark.parametrize('limit', [0, cache.RETAINED_FRAME_LIMIT_BYTES])
+def test_matched_frames_are_read_from_memory_and_stored_behind(tmp_path, monkeypatch, limit):
+    import threading
+    monkeypatch.setattr(cache, 'RETAINED_FRAME_LIMIT_BYTES', limit)
+    calls = []
+    descriptors, aligned = _aligned_pair(tmp_path, monkeypatch, calls)
+    threads = []
+    real = storage.store_frame
+
+    def store(image, **kwargs):
+        threads.append(threading.current_thread().name)
+        return real(image, **kwargs)
+    monkeypatch.setattr(storage, 'store_frame', store)
+    with cache.render_scope(descriptors) as scope:
+        matched = sources.match_exposure_frames(aligned, reference_index=0)
+        first = sources.resolve_frame(matched[1])
+        # The matcher's own output, readable before its copy reaches scratch.
+        assert not storage.is_mapped_frame(first) and first.flags.writeable is False
+        again = sources.resolve_frame(matched[1])
+        assert storage.is_mapped_frame(again)
+        np.testing.assert_array_equal(first, again)
+        assert len(calls) == 2               # read back, not recomputed
+        # At a gain of one the reference's matched frame is its aligned frame:
+        # both share the copy stored when the target was measured.
+        reference = sources.resolve_frame(matched[0])
+        assert np.shares_memory(reference, scope.get(aligned[0]))
+        retained = cache.retain_aligned_frames(aligned, limit_bytes=limit)
+    behind = [name for name in threads if name.startswith('openfocus-frame-cache')]
+    assert len(behind) == 1                  # only the matched, non-reference frame
+    # Two sources and the reference's aligned frame, plus the second aligned
+    # frame when the stack is small enough to be retained.
+    assert len(threads) - len(behind) == (4 if limit else 3)
+    assert [isinstance(frame, sources.RetainedFrame) for frame in retained] == [bool(limit)] * 2

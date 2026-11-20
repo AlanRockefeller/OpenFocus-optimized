@@ -715,6 +715,9 @@ class ProcessedFrame:
     # False when this frame's own cached result is the only later reader of
     # its processed source: the source is then looked up but never stored.
     store_source: bool = True
+    # True when the result is read at once and is never an alignment source:
+    # the render's cache may return it from memory and store it afterwards.
+    write_behind: bool = False
 
     @property
     def ndim(self):
@@ -784,7 +787,8 @@ class ProcessedFrame:
             if image.shape != self.shape or image.dtype != self.dtype:
                 raise ValueError('Processed frame does not match its declared shape/dtype')
             if cache is not None and store_result:
-                stored = cache.put(self, image, should_cancel=cancelled)
+                stored = cache.put(self, image, should_cancel=cancelled,
+                                   behind=self.write_behind)
                 if stored is not None:
                     _check_resolution_cancel(cancelled)
                     return stored
@@ -842,18 +846,20 @@ def without_retained_pixels(frame):
 
 
 def process_frame(frame, processor, *, shape=None, dtype=None, should_cancel=None,
-                  scratch_bytes=None, store_source=True):
+                  scratch_bytes=None, store_source=True, write_behind=False):
     """Describe processing and its additional peak workspace without decoding.
 
     ``store_source=False`` keeps a processed source out of the render's cache
     when this frame's cached result is that source's only later reader.
+    ``write_behind=True`` lets that cache return the result from memory and
+    store it afterwards, for a result that is read at once.
     """
     shape = tuple(frame.shape if shape is None else shape)
     dtype = np.dtype(frame.dtype if dtype is None else dtype)
     scratch = (math.prod(shape) * dtype.itemsize * 2 if scratch_bytes is None
                else max(0, int(scratch_bytes)))
     return ProcessedFrame(frame, processor, shape, dtype, should_cancel, scratch,
-                          store_source)
+                          store_source, write_behind)
 
 
 def _crop_pixels(image, *, x, y, width, height, channels):
@@ -1048,6 +1054,7 @@ def match_exposure_frames(frames, should_cancel=None, *, reference_index=-1):
     # Native u16 restoration peaks at three float32 strips; outputs stay bounded.
     return [process_frame(frame, matcher(1.0 if frame is reference else None),
                           store_source=store_sources,
+                          write_behind=True,
                           should_cancel=should_cancel,
                           scratch_bytes=frame.nbytes + _exposure_workspace_bytes(frame))
             for frame in frames]

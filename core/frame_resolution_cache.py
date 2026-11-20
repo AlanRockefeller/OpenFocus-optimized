@@ -12,7 +12,10 @@ returns a read-only view for every later consumer.  It is strictly best-effort:
   when that volume can hold the whole distinct frame working set **and** the
   caller's mandatory staging estimate; otherwise it stays disabled;
 * planning happens lazily at the first lookup, so installing the scope never
-  changes where the job's own scratch selection would place files.
+  changes where the job's own scratch selection would place files;
+* a frame put with ``behind=True`` is returned from the caller's memory at once
+  and copied to disk by one writer thread; later lookups wait for that copy
+  and return the stored pixels, like any other entry.
 
 The active scope is process-scoped (not context-local) so producer threads see
 the same store without every call site copying a context.  Renders are
@@ -23,6 +26,8 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -134,6 +139,20 @@ def _buffer_identity(image):
         return None
     return (image.__array_interface__['data'][0], image.shape, image.strides,
             image.dtype.str)
+
+
+def _owner(image):
+    """The array that owns an image's memory: the end of its base chain."""
+    while isinstance(image.base, np.ndarray):
+        image = image.base
+    return image
+
+
+def _store_behind(scratch, image):
+    """Copy a frame into the job's scratch directory on the writer thread."""
+    from core import frame_storage
+    return frame_storage.run_with_scratch(scratch, frame_storage.store_frame, image,
+                                          prefer_ram=False)
 
 
 def _source_paths(frames):
@@ -267,10 +286,14 @@ class ResolutionCache:
         self.floor = max(0, int(floor_bytes or 0))
         self.directory = directory
         self.should_cancel = should_cancel
+        # Stored pixels, or (write, size) while the writer thread stores them.
         self._entries = {}
         # Buffer identity of every stored entry -> its digest once computed.
         self._digests = {}
         self._used = 0
+        self._writer = None
+        # The memory of the last frame returned before it was stored.
+        self._lent = None
         self._degraded = False
         self._closed = False
         self._lock = threading.RLock()
@@ -317,7 +340,7 @@ class ResolutionCache:
             return None
         with self._lock:
             self._check_cancel(should_cancel)
-            image = self._entries.get(frame)
+            image = self._stored(frame)
         profile = _profile()
         if profile.enabled:
             profile.cache_event(entry_kind(frame), 'miss' if image is None else 'hit')
@@ -344,8 +367,55 @@ class ResolutionCache:
             require_disk_space(size + self.mandatory + self.floor, self.directory)
         return True
 
-    def put(self, frame, image, *, should_cancel=None):
-        """Store one resolved frame; returns a read-only view or None on failure."""
+    def _stored(self, frame):
+        """A frame's stored pixels or None, waiting for a write still in flight."""
+        entry = self._entries.get(frame)
+        if not isinstance(entry, tuple):
+            return entry
+        write, size = entry
+        try:
+            stored = write.result()
+        except OSError as exc:
+            # Its reader already has the pixels; only their reuse is lost.
+            del self._entries[frame]
+            self._used -= size
+            self._degraded = True
+            _profile().cache_state(degraded=True)
+            logger.info('frame resolution cache degraded: %s', exc)
+            return None
+        self._publish(frame, stored)
+        return stored
+
+    def _publish(self, frame, stored):
+        self._entries[frame] = stored
+        identity = _buffer_identity(stored)
+        if identity is not None:
+            self._digests[identity] = None
+
+    def _lend(self, image):
+        """Whether a frame may be returned from memory before it is stored.
+
+        Only while no earlier such frame is alive, in a reader's hands or the
+        writer's. At most one frame's pixels then exist outside the stored
+        entries, as they do during the copy that this defers.
+        """
+        if self._lent is not None and self._lent() is not None:
+            return False
+        if self._writer is None:
+            self._writer = ThreadPoolExecutor(max_workers=1,
+                                              thread_name_prefix='openfocus-frame-cache')
+        self._lent = weakref.ref(_owner(image))
+        return True
+
+    def put(self, frame, image, *, should_cancel=None, behind=False):
+        """Store one resolved frame; returns a read-only view or None on failure.
+
+        ``behind=True`` is for pixels that nothing else can modify and that
+        are read at once: the view returned is of ``image`` itself, and the
+        writer thread stores the copy that later lookups return. While an
+        earlier frame returned that way is still in use, the frame is stored
+        before returning, as without the flag.
+        """
         self._check_cancel(should_cancel)
         if self._closed or self._degraded or image is None:
             return None
@@ -354,8 +424,16 @@ class ResolutionCache:
         started = time.perf_counter_ns() if profile.enabled else 0
         with self._lock:
             self._check_cancel(should_cancel)
+            if self._closed:
+                return None
             if frame in self._entries:
-                stored = self._entries[frame]
+                stored = self._stored(frame)
+                if stored is None:
+                    return None
+            elif _buffer_identity(image) in self._digests:
+                # The processor returned pixels this cache already holds, like
+                # the exposure reference at a gain of one: share that copy.
+                stored = self._entries[frame] = image
             else:
                 try:
                     admitted = self._admit(size)
@@ -376,25 +454,28 @@ class ResolutionCache:
                     logger.info('frame resolution cache degraded: used=%d need=%d max=%d',
                                 self._used, size, self.max_bytes)
                     return None
-                try:
-                    from core import frame_storage
-                    stored = frame_storage.store_frame(image, prefer_ram=False)
-                except OSError as exc:  # ScratchSpaceError and disk/permission failures
-                    self._degraded = True
-                    profile.cache_state(degraded=True)
-                    logger.info('frame resolution cache degraded: %s', exc)
-                    return None
-                try:
-                    self._check_cancel(should_cancel)
-                except BaseException:
-                    # The new mapping has not been published; dropping its
-                    # owner lets frame_storage's finalizer reclaim it now.
-                    del stored
-                    raise
-                self._entries[frame] = stored
-                identity = _buffer_identity(stored)
-                if identity is not None:
-                    self._digests[identity] = None
+                if behind and self._lend(image):
+                    from core.frame_storage import capture_scratch
+                    stored = image
+                    self._entries[frame] = (
+                        self._writer.submit(_store_behind, capture_scratch(), image), size)
+                else:
+                    try:
+                        from core import frame_storage
+                        stored = frame_storage.store_frame(image, prefer_ram=False)
+                    except OSError as exc:  # ScratchSpaceError and disk/permission failures
+                        self._degraded = True
+                        profile.cache_state(degraded=True)
+                        logger.info('frame resolution cache degraded: %s', exc)
+                        return None
+                    try:
+                        self._check_cancel(should_cancel)
+                    except BaseException:
+                        # The new mapping has not been published; dropping its
+                        # owner lets frame_storage's finalizer reclaim it now.
+                        del stored
+                        raise
+                    self._publish(frame, stored)
                 self._used += size
                 if profile.enabled:
                     profile.cache_event(entry_kind(frame), 'put', size,
@@ -420,6 +501,11 @@ class ResolutionCache:
             self._entries.clear()
             self._digests.clear()
             self._used = 0
+            writer, self._writer = self._writer, None
+        if writer is not None:
+            # A write in flight has no owner left: its file goes with its
+            # mapping, before the job releases its scratch directory.
+            writer.shutdown(wait=True)
 
 
 class ScopedCache:
@@ -507,11 +593,12 @@ class ScopedCache:
         self._check_cancel(should_cancel)
         return None if cache is None else cache.get(frame, should_cancel=should_cancel)
 
-    def put(self, frame, image, *, should_cancel=None):
+    def put(self, frame, image, *, should_cancel=None, behind=False):
         self._check_cancel(should_cancel)
         cache = self._plan()
         self._check_cancel(should_cancel)
-        return None if cache is None else cache.put(frame, image, should_cancel=should_cancel)
+        return None if cache is None else cache.put(frame, image, should_cancel=should_cancel,
+                                                    behind=behind)
 
     def pixel_digest(self, image, compute):
         # Never plans: hashing must not choose the job's scratch volume.

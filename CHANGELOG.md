@@ -33,6 +33,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exposure-matched frames are read again and the stack is too large for the
   desktop to retain aligned pixels, halving that scratch traffic for large
   OpenFocus stacks. Output pixels are unchanged.
+- Hand each exposure-matched frame to its first reader from memory and copy
+  it into the render's frame cache on a writer thread, instead of holding the
+  fusion thread for the copy. A frame that matching leaves unchanged shares
+  the cached copy of its source. Output pixels are unchanged.
 - Record render dispatch and stack-load admission milestones in local logs to
   help diagnose stalled work.
 - Advance OpenFocus depth IIR filters in 2048-row native calls instead of
