@@ -32,6 +32,37 @@ def _stack(count=5, size=(64, 80)):
     return frames
 
 
+def test_v3_pooled_inter_layer_attention_equals_its_two_axis_layout():
+    """Moving one axis per transpose carries the same values as the layout it replaced."""
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+    from core.models.stackmff_v3.network import InterLayerAttention
+
+    torch.manual_seed(11)
+    block = InterLayerAttention(dim=12, num_heads=3, pool=2).eval()
+    x = torch.randn(2, 5, 8, 12, 12)                                 # B, N, h, w, C
+
+    def previous(x):
+        B, N, h, w, C = x.shape
+        xs = F.avg_pool2d(x.permute(0, 1, 4, 2, 3).reshape(B * N, C, h, w), block.pool)
+        hp, wp = xs.shape[-2], xs.shape[-1]
+        xs = xs.reshape(B, N, C, hp, wp).permute(0, 1, 3, 4, 2)
+        M = B * hp * wp
+        t = xs.permute(0, 2, 3, 1, 4).reshape(M, N, C)
+        qkv = block.qkv(block.norm1(t)).reshape(M, N, 3, block.heads, block.head_dim)
+        q, k, v = (qkv.select(2, i).permute(0, 2, 1, 3) for i in range(3))
+        o = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(M, N, C)
+        t = t + block.proj(o)
+        t = t + block.mlp(block.norm2(t))
+        y = t.reshape(B, hp, wp, N, C).permute(0, 3, 1, 2, 4)
+        delta = (y - xs).permute(0, 1, 4, 2, 3).reshape(B * N, C, hp, wp)
+        delta = F.interpolate(delta, size=(h, w), mode='bilinear', align_corners=False)
+        return x + delta.reshape(B, N, C, h, w).permute(0, 1, 3, 4, 2)
+
+    with torch.no_grad():
+        assert torch.equal(block(x), previous(x))
+
+
 def _upstream_v1(frames):
     torch = pytest.importorskip("torch")
     from core.models.stackmff_v1.network import StackMFF

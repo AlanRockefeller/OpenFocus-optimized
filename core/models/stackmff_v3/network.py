@@ -165,7 +165,10 @@ class InterLayerAttention(nn.Module):
         if self.pool > 1:
             xs = F.avg_pool2d(x.permute(0, 1, 4, 2, 3).reshape(B * N, C, h, w), self.pool)
             hp, wp = xs.shape[-2], xs.shape[-1]
-            xs = xs.reshape(B, N, C, hp, wp).permute(0, 1, 3, 4, 2)
+            # Channels last before B and N are split, and (below) B and N
+            # merged before channels first: each transpose in the exported
+            # graph then moves one axis, which the CPU copies in blocks.
+            xs = xs.permute(0, 2, 3, 1).reshape(B, N, hp, wp, C)
         else:
             xs = x
             hp, wp = h, w
@@ -182,7 +185,7 @@ class InterLayerAttention(nn.Module):
 
         y = t.reshape(B, hp, wp, N, C).permute(0, 3, 1, 2, 4)        # B, N, hp, wp, C
         if self.pool > 1:
-            delta = (y - xs).permute(0, 1, 4, 2, 3).reshape(B * N, C, hp, wp)
+            delta = (y - xs).reshape(B * N, hp, wp, C).permute(0, 3, 1, 2)
             delta = F.interpolate(delta, size=(h, w), mode='bilinear', align_corners=False)
             delta = delta.reshape(B, N, C, h, w).permute(0, 1, 3, 4, 2)
             return x + delta
