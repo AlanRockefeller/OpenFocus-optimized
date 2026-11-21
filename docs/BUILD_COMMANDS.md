@@ -18,6 +18,12 @@ Package presence alone does not verify GPU execution.
 
 Stable desktop builds and GPU variants share [runtime_resources.json](../packaging/runtime_resources.json), collected by the PyInstaller hook. It lists runtime icons and SVGs, the support dialog's Alipay and PayPal images, the six demo frames, the twelve user manuals and linked documentation, licenses, and three ONNX models. Update the manifest when runtime resources change; keep paths relative to the bundle root. The release jobs verify bundled resource hashes against the source and upload packaging reports for all three desktop builds.
 
+## macOS desktop package
+
+After building `OpenFocus.app`, run
+`python packaging/configure_macos_bundle.py dist/OpenFocus.app` before signing
+it. The metadata lets Finder and Dock send project and source files to the app.
+
 ## Linux desktop package
 
 Use a clean Python environment for Linux builds. `requirements.txt` selects
@@ -52,8 +58,9 @@ the extracted directory in its intended location and run
 optional integration. It creates `openfocus.desktop` under
 `$XDG_DATA_HOME/applications` (or `~/.local/share/applications`) without
 overwriting an existing entry. Remove that file to uninstall the entry; after
-moving the bundle, remove the old entry and run the helper again. The entry
-starts the GUI and does not register file associations. The independent PyPI
+moving or updating the bundle, remove the old entry and run the helper again.
+The entry passes local file paths to the GUI without registering associations.
+The independent PyPI
 `openfocus` command is a headless CLI, not this desktop application.
 
 The Linux release job extracts the archive, checks the bundled models,
@@ -144,4 +151,8 @@ CLI and first-run desktop smoke checks enabled after pruning. The release job
 also downloads the v1.76.0 Windows ZIP, checks its pinned SHA-256, and runs
 `tools/frozen_upgrade_smoke.py` against it before packaging.
 
-The original PyTorch checkpoints and export tooling are development artifacts and are excluded from desktop bundles. The wheel's package data includes the dynamic `.onnx` checkpoints. Local builds and releases should be verified on their target platforms, including the intended accelerators.
+The wheel and desktop bundles include the ONNX graphs, verified PyTorch
+checkpoints, worker sources and per-platform accelerator manifests. The
+export tooling stays in the source repository. The optional pack supplies
+its own interpreter and dependencies after installation. Verify model
+execution using each target platform's intended accelerator.
