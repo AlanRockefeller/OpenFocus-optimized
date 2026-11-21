@@ -105,9 +105,10 @@ def test_two_tiles_in_flight_give_the_pixels_of_one(monkeypatch, mode, focus, dt
     main = threading.get_ident()
     assert one_runs['threads'] == [main] * tiles
     assert (one_runs['intra_op'], one_runs['peak']) == ({2}, 1)
-    assert len(two_runs['threads']) == tiles and main not in two_runs['threads']
-    assert len(set(two_runs['threads'])) <= 2
-    assert two_runs['intra_op'] == {1} and two_runs['peak'] <= 2
+    # Eight tiles ran two at a time on the workers; the ninth alone, here.
+    assert len(two_runs['threads']) == tiles and two_runs['threads'][-1] == main
+    assert main not in two_runs['threads'][:-1] and len(set(two_runs['threads'])) <= 3
+    assert two_runs['intra_op'] == {1, 2} and two_runs['peak'] <= 2
 
     assert two.dtype == one.dtype
     np.testing.assert_array_equal(two, one)
@@ -185,6 +186,29 @@ def test_only_v3_asks_for_a_second_tile(monkeypatch):
     _tiled(runner, monkeypatch)
     _tiled(runner, monkeypatch, algorithm='stackmff')
     assert asked == [2, 1]
+
+
+def test_a_last_tile_without_a_partner_runs_alone_on_the_whole_budget(monkeypatch):
+    _force(monkeypatch, 2)
+    lock = threading.Lock()
+    seen, progress = {}, []
+
+    def runner(_fusion, crops, _resize, *, tile_plan, **_kwargs):
+        with lock:
+            seen[_tile_index(crops)] = (threading.get_ident() == main, tile_plan.max_in_flight,
+                                        tile_plan.native_threads, progress[-1])
+        return crops[1]
+
+    main = threading.get_ident()
+    # One row of the grid: three tiles.
+    _tiled(runner, monkeypatch, frames=[frame[:12] for frame in FRAMES],
+           progress_callback=lambda done, total: progress.append(done))
+    assert {index: entry[:3] for index, entry in seen.items()} == {
+        0: (False, 2, 1), 1: (False, 2, 1), 2: (True, 1, 2)}
+    # It started only after both tiles before it were accumulated and reported.
+    assert seen[2][3] == 2
+    assert progress == [0, 1, 2, 3]
+    assert _no_tile_threads()
 
 
 def test_a_lone_tile_runs_on_the_caller_with_the_whole_budget(monkeypatch):

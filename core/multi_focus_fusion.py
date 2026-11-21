@@ -1866,9 +1866,10 @@ class MultiFocusFusion:
                            thread_count=None, focus_callback=None, **kwargs):
         """Admit and fuse complete-stack tiles, accumulating them in grid order.
 
-        One tile runs at a time unless the plan grants two in flight. Then a
-        second tile's runner works ahead on another thread with half the
-        thread budget each, and the results are still accumulated in order.
+        One tile runs at a time unless the plan grants two in flight. Then
+        two runners work on their own threads with half the thread budget
+        each, and the results are still accumulated in order. A last tile
+        with nothing to run beside it runs alone on the whole budget.
         """
         from core.image_loader import admit_image_decode, decode_image
         from core.registration import RegistrationCancelled
@@ -1937,12 +1938,15 @@ class MultiFocusFusion:
         block_size, _, tile_coords = _ai_effective_tiling(
             count, block_size, h, w, overlap, self.ai_batch_size)
         overlap = max(0, min(int(overlap), block_size // 2))
-        if tile_plan.max_in_flight > 1 and len(tile_coords) < 2:
-            # A lone tile has nothing to run beside it: it takes the whole budget.
-            from dataclasses import replace
-            tile_plan = replace(tile_plan, workers=1, max_in_flight=1,
-                                native_threads=tile_plan.native_threads * tile_plan.max_in_flight)
+        from dataclasses import replace
         in_flight = max(1, int(tile_plan.max_in_flight))
+        # A tile with nothing to run beside it takes the whole thread budget.
+        alone_plan = replace(tile_plan, workers=1, max_in_flight=1,
+                             native_threads=tile_plan.native_threads * in_flight)
+        # Tiles before this index run in_flight at a time; the rest run alone.
+        paired = len(tile_coords) - len(tile_coords) % in_flight
+        if in_flight == 1 or paired == 0:
+            tile_plan, in_flight, paired = alone_plan, 1, 0
         self._record_tile_grid(block_size, overlap, len(tile_coords))
         log_debug('fusion_tiling', method=self.algorithm, frames=count, shape=(h, w, channels),
                   block_requested=self.tile_block_size, block_after_image_clamp=clamped_block,
@@ -1953,6 +1957,8 @@ class MultiFocusFusion:
         if profile.enabled:
             profile.add('threads', 'tiles_in_flight', in_flight)
             profile.add('threads', 'plan_neural_tiles', tile_plan.native_threads)
+            if paired < len(tile_coords):
+                profile.add('threads', 'plan_neural_tiles', alone_plan.native_threads)
             profile.add('threads', 'plan_attention_inference', tile_plan.native_threads)
             profile.tiling(height=h, width=w, coords=tile_coords,
                            overlap_requested=self.tile_overlap, overlap_effective=overlap,
@@ -2000,7 +2006,7 @@ class MultiFocusFusion:
         def stopped():
             return stop.is_set() or (should_cancel is not None and should_cancel())
 
-        def run_tile(crops, cancelled):
+        def run_tile(crops, cancelled, plan):
             """Fuse one tile's crops; return it with the focus positions it reported."""
             found = [None]
 
@@ -2008,7 +2014,7 @@ class MultiFocusFusion:
                 found[0] = positions
             runner_parameters = dict(kwargs)
             runner_parameters.update(model_path=model_path,
-                should_cancel=cancelled, tile_plan=tile_plan)
+                should_cancel=cancelled, tile_plan=plan)
             if focus is not None:
                 runner_parameters['focus_callback'] = capture
             with profile.stage('runner'):
@@ -2023,7 +2029,7 @@ class MultiFocusFusion:
         if progress_callback is not None:
             progress_callback(0, total)
         pool = None
-        if in_flight > 1:
+        if paired:
             from collections import deque
             from contextvars import copy_context
             pool = concurrent.futures.ThreadPoolExecutor(
@@ -2034,20 +2040,22 @@ class MultiFocusFusion:
                 check_cancel()
                 tile_started = time.perf_counter()
                 with profile.tile(index, coords, count):
-                    if pool is None:
+                    if index >= paired:
+                        # Every earlier tile is accumulated: no runner is working.
                         with profile.stage('resolve_region'):
                             crops = crop_frames(coords)
-                        fused_tile, tile_focus = run_tile(crops, should_cancel)
+                        fused_tile, tile_focus = run_tile(crops, should_cancel, alone_plan)
                     else:
                         # Crops are read here, in order. A tile's runner starts
                         # once the tile in_flight places before it has been
                         # accumulated, so at most in_flight tiles hold a working set.
-                        while submitted < min(total, index + in_flight):
+                        while submitted < min(paired, index + in_flight):
                             with profile.stage('resolve_region'):
                                 crops = crop_frames(tile_coords[submitted])
                             # The job's scratch directory and log context
                             # are context variables: carry them to the worker.
-                            ahead.append(pool.submit(copy_context().run, run_tile, crops, stopped))
+                            ahead.append(pool.submit(copy_context().run, run_tile, crops,
+                                                     stopped, tile_plan))
                             submitted += 1
                         crops = None
                         result = ahead.popleft()
