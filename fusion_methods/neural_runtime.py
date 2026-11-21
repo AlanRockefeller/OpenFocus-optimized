@@ -271,7 +271,7 @@ class _ProfiledSession:
 
 
 class _CpuSession:
-    """A CPU session that returns its arena's memory to the system after each run.
+    """A CPU session that releases its arena's unused memory after each run.
 
     The arena would otherwise keep the working set of both inference scales
     between tiles and after the render.
@@ -498,7 +498,7 @@ def _session(path, shape, device, threads):
             # times the memory it holds without reuse, and took longer.
             # Without reuse, the first run of a shape allocates each tensor
             # separately. The arena keeps that run fast, and _CpuSession
-            # returns the arena's memory to the system when every run ends.
+            # asks it to release its unused memory when every run ends.
             options.enable_mem_reuse = False
         else:
             options.enable_cpu_mem_arena = False
