@@ -475,3 +475,263 @@ def test_cache_discards_unpublished_store_on_cancellation(monkeypatch):
     with pytest.raises(RegistrationCancelled):
         cache.put(object(), np.zeros((2, 2), np.uint8), should_cancel=lambda: bool(cancelled))
     assert cache._used == 0 and not cache._entries
+
+
+def _stores(monkeypatch, tmp_path, before=None):
+    """Bind scratch to tmp_path and record the thread of every frame store."""
+    monkeypatch.setattr(frame_storage, '_storage_directory', str(tmp_path))
+    threads = []
+    real = frame_storage.store_frame
+
+    def store(image, **kwargs):
+        threads.append(threading.current_thread().name)
+        if before is not None:
+            before()
+        return real(image, **kwargs)
+    monkeypatch.setattr(frame_storage, 'store_frame', store)
+    return threads
+
+
+def _pixels(seed=0):
+    return np.arange(seed, seed + 48, dtype=np.uint16).reshape(4, 4, 3)
+
+
+def _released(cache):
+    """Wait until the frame last returned from memory has been released."""
+    import gc
+    import time
+    deadline = time.monotonic() + 5
+    while cache._lent() is not None and time.monotonic() < deadline:
+        gc.collect()
+        time.sleep(0.01)
+    return cache._lent() is None
+
+
+def test_write_behind_returns_the_callers_pixels_and_stores_a_copy(tmp_path, monkeypatch):
+    threads = _stores(monkeypatch, tmp_path)
+    cache = cache_module.ResolutionCache(1 << 20)
+    key, image = object(), _pixels()
+    lent = cache.put(key, image, behind=True)
+    assert np.shares_memory(lent, image) and lent.flags.writeable is False
+    stored = cache.get(key)                  # waits for the writer
+    assert frame_storage.is_mapped_frame(stored) and not np.shares_memory(stored, image)
+    assert stored.flags.writeable is False
+    np.testing.assert_array_equal(stored, image)
+    assert threads == ['openfocus-frame-cache_0']
+    assert cache._used == image.nbytes
+    # Putting the same frame again returns the stored copy, as before.
+    assert np.shares_memory(cache.put(key, image, behind=True), stored)
+    assert len(threads) == 1
+    cache.close()
+
+
+def test_write_behind_lends_one_frame_at_a_time(tmp_path, monkeypatch):
+    threads = _stores(monkeypatch, tmp_path)
+    cache = cache_module.ResolutionCache(1 << 20)
+    first_image, second_image, third_image = _pixels(), _pixels(100), _pixels(200)
+    first = cache.put('first', first_image, behind=True)
+    # The first frame is still in its reader's hands: store this one now.
+    second = cache.put('second', second_image, behind=True)
+    assert np.shares_memory(first, first_image)
+    assert frame_storage.is_mapped_frame(second)
+    assert threading.current_thread().name in threads
+    del first, first_image
+    assert _released(cache)
+    third = cache.put('third', third_image, behind=True)
+    assert np.shares_memory(third, third_image)
+    for key, image in (('first', _pixels()), ('second', second_image), ('third', third_image)):
+        np.testing.assert_array_equal(cache.get(key), image)
+    assert cache._used == 3 * third_image.nbytes
+    cache.close()
+
+
+def test_write_behind_does_not_remember_a_digest_until_the_copy_is_stored(tmp_path, monkeypatch):
+    _stores(monkeypatch, tmp_path)
+    cache = cache_module.ResolutionCache(1 << 20)
+    hashes = []
+
+    def compute():
+        hashes.append(1)
+        return 'digest'
+    lent = cache.put('frame', _pixels(), behind=True)
+    assert cache.pixel_digest(lent, compute) == cache.pixel_digest(lent, compute) == 'digest'
+    assert len(hashes) == 2                  # memory outside the cache: hashed each time
+    stored = cache.get('frame')
+    assert cache.pixel_digest(stored, compute) == cache.pixel_digest(stored, compute) == 'digest'
+    assert len(hashes) == 3
+    cache.close()
+
+
+def test_write_behind_store_failure_degrades_without_raising(tmp_path, monkeypatch):
+    counter = []
+    source = _source(tmp_path)
+
+    def processor(image):
+        counter.append(threading.current_thread().name)
+        return np.array(image, copy=True)
+    processed = process_frame(source, processor, write_behind=True)
+    real = frame_storage.store_frame
+
+    def refuse(image, **kwargs):
+        if threading.current_thread().name.startswith('openfocus-frame-cache'):
+            raise OSError('scratch unavailable')
+        return real(image, **kwargs)
+
+    monkeypatch.setattr(frame_storage, 'store_frame', refuse)
+    with cache_module.render_scope([processed]) as cache:
+        first = processed.full_resolution()          # served from memory
+        assert first.flags.writeable is False and not frame_storage.is_mapped_frame(first)
+        second = processed.full_resolution()         # the copy never arrived: recomputed
+        assert cache.degraded is True
+        assert cache.get(processed) is None
+        np.testing.assert_array_equal(first, second)
+        # The source stored before the failure is still served.
+        assert cache.get(source) is not None
+    assert len(counter) == 2
+
+
+def test_write_behind_stores_pixels_a_processor_passed_through_before_returning(tmp_path):
+    """A processor that returns its input did not create the pixels: their
+    owner can still change them, so they are not lent to the writer thread."""
+    source = np.full((8, 10, 3), 32, np.uint8)
+    processed = process_frame(source, lambda image: image, write_behind=True)
+    with cache_module.render_scope([processed]):
+        result = processed.full_resolution()
+        # Stored before returning, not served from the source's memory.
+        assert frame_storage.is_mapped_frame(result) and not np.shares_memory(result, source)
+        source[...] = 99                             # the owner changes its array
+        np.testing.assert_array_equal(result, 32)
+        np.testing.assert_array_equal(processed.full_resolution(), 32)
+    # A processor that makes its own pixels is still served from memory.
+    made = process_frame(source, lambda image: image + 1, write_behind=True)
+    with cache_module.render_scope([made]):
+        result = made.full_resolution()
+        assert not frame_storage.is_mapped_frame(result)
+        np.testing.assert_array_equal(result, 100)
+        del result
+
+
+def test_write_behind_programming_error_is_not_swallowed(tmp_path, monkeypatch):
+    _stores(monkeypatch, tmp_path, before=lambda: (_ for _ in ()).throw(TypeError('bug')))
+    cache = cache_module.ResolutionCache(1 << 20)
+    cache.put('frame', _pixels(), behind=True)
+    with pytest.raises(TypeError, match='bug'):
+        cache.get('frame')
+    cache.close()
+
+
+def test_closing_waits_for_a_write_in_flight_and_removes_its_file(tmp_path, monkeypatch):
+    import gc
+    started, release = threading.Event(), threading.Event()
+
+    def hold():
+        started.set()
+        assert release.wait(10)
+    _stores(monkeypatch, tmp_path, before=hold)
+    cache = cache_module.ResolutionCache(1 << 20)
+    lent = cache.put('frame', _pixels(), behind=True)
+    assert started.wait(10)
+    closer = threading.Thread(target=cache.close)
+    closer.start()
+    closer.join(0.2)
+    assert closer.is_alive()                 # close() waits for the writer
+    assert cache.get('frame') is None and cache.put('other', _pixels()) is None
+    release.set()
+    closer.join(10)
+    assert not closer.is_alive()
+    gc.collect()
+    assert not list(tmp_path.glob('openfocus-frame-*'))
+    assert not [thread for thread in threading.enumerate()
+                if thread.name.startswith('openfocus-frame-cache')]
+    np.testing.assert_array_equal(lent, _pixels())      # the reader keeps its pixels
+
+
+def test_write_behind_cancellation_leaves_no_file(tmp_path, monkeypatch):
+    import gc
+    from core.registration import RegistrationCancelled
+    threads = _stores(monkeypatch, tmp_path)
+    cache = cache_module.ResolutionCache(1 << 20)
+    checks = []
+
+    def cancel():
+        checks.append(1)
+        return len(checks) > 2               # after the frame is handed to the writer
+    with pytest.raises(RegistrationCancelled):
+        cache.put('frame', _pixels(), behind=True, should_cancel=cancel)
+    cache.close()
+    gc.collect()
+    assert len(threads) <= 1
+    assert not list(tmp_path.glob('openfocus-frame-*'))
+
+
+def test_put_shares_pixels_the_cache_already_holds(tmp_path, monkeypatch):
+    threads = _stores(monkeypatch, tmp_path)
+    cache = cache_module.ResolutionCache(1 << 20)
+    image = _pixels()
+    stored = cache.put('source', image)
+    # A processor returned its cached input unchanged, as a gain of one does.
+    for behind in (False, True):
+        shared = cache.put(('same', behind), stored, behind=behind)
+        assert np.shares_memory(shared, stored) and shared.flags.writeable is False
+        assert np.shares_memory(cache.get(('same', behind)), stored)
+    assert len(threads) == 1 and cache._used == image.nbytes
+    # Equal pixels elsewhere in memory, or part of a stored frame, are other frames.
+    copy = cache.put('copy', np.array(stored))
+    part = cache.put('part', stored[1:])
+    assert not np.shares_memory(copy, stored) and not np.shares_memory(part, stored)
+    assert len(threads) == 3
+    assert cache._used == 2 * image.nbytes + stored[1:].nbytes
+    cache.close()
+
+
+def test_write_behind_keeps_an_owned_scratch_directory_until_the_copy_is_stored(
+        tmp_path, monkeypatch):
+    import gc
+    started, release = threading.Event(), threading.Event()
+
+    def hold():
+        started.set()
+        assert release.wait(10)
+    _stores(monkeypatch, tmp_path, before=hold)
+    cache = cache_module.ResolutionCache(1 << 20)
+    owned = tmp_path / 'owned'
+    owned.mkdir()
+    # A resolving call with no job scope around it owns its scratch directory
+    # and removes it on return, unless a mapping or a pending write holds it.
+    with frame_storage.scratch_directory(separate=True) as state:
+        state.directory, state.owned = str(owned), True
+        lent = cache.put('frame', _pixels(), behind=True)
+        assert started.wait(10)
+    assert owned.exists()
+    release.set()
+    stored = cache.get('frame')
+    assert cache.degraded is False
+    assert os.path.samefile(os.path.dirname(frame_storage._mapped_base(stored).filename), owned)
+    np.testing.assert_array_equal(stored, lent)
+    cache.close()
+    del stored
+    gc.collect()
+    assert not owned.exists()                # gone with its last mapping
+
+
+def test_write_behind_from_a_producer_thread_without_a_scratch_scope(tmp_path):
+    counter = []
+
+    def processor(image):
+        counter.append(1)
+        return np.array(image, copy=True)
+    processed = process_frame(_source(tmp_path), processor, write_behind=True)
+    with cache_module.render_scope([processed]) as cache:
+        results = []
+
+        def work():
+            results.append(processed.full_resolution())
+
+        thread = threading.Thread(target=work)
+        thread.start()
+        thread.join()
+        main = processed.full_resolution()
+        assert cache.degraded is False
+        assert frame_storage.is_mapped_frame(main)
+    assert len(counter) == 1
+    assert np.array_equal(np.asarray(main), np.asarray(results[0]))
