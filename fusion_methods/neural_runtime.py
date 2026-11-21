@@ -39,6 +39,8 @@ _DEVICE = None
 _DIRECTML_ADAPTER_INDEX = 0
 _ADAPTER_NAME = ''
 _LOCK = threading.RLock()
+# Two CPU tiles in flight share the session cache and this job's reporting.
+_STATE_LOCK = threading.RLock()
 _ACTUAL_DEVICE = None
 _JOB_ACCELERATOR = None
 _FALLBACK_CPU = False
@@ -469,6 +471,12 @@ def _clear_sessions():
 
 
 def _session(path, shape, device, threads):
+    # Callers on two threads ask for the same sessions: build each one once.
+    with _STATE_LOCK:
+        return _cached_session(path, shape, device, threads)
+
+
+def _cached_session(path, shape, device, threads):
     import onnxruntime as ort
     global _SESSIONS
     path = os.path.abspath(path)
@@ -786,21 +794,23 @@ def logits(planes, path, device, threads, should_cancel=None):
         if device in _NATIVE_ORDER and _WORKER is not None:
             # Release native allocations before admission on another engine.
             finish_inference_job()
-    _FALLBACK_CPU = _FALLBACK_CPU or (requested != 'CPU' and device == 'CPU')
-    if device not in _JOB_DEVICES:
-        _JOB_DEVICES.append(device)
-    _ACTUAL_DEVICE = device
-    if is_accelerator(device):
-        _JOB_ACCELERATOR = device
-    _ACTUAL_CHECKPOINT = os.path.basename(model)
+    checkpoint = os.path.basename(model)
+    with _STATE_LOCK:
+        _FALLBACK_CPU = fallback = _FALLBACK_CPU or (requested != 'CPU' and device == 'CPU')
+        if device not in _JOB_DEVICES:
+            _JOB_DEVICES.append(device)
+        _ACTUAL_DEVICE = device
+        if is_accelerator(device):
+            _JOB_ACCELERATOR = device
+        _ACTUAL_CHECKPOINT = checkpoint
     if profile.enabled:
-        profile.session_run((_ACTUAL_CHECKPOINT, tuple(int(v) for v in shape), device,
+        profile.session_run((checkpoint, tuple(int(v) for v in shape), device,
                              int(threads or 1)))
         profile.add('threads', 'session_intra_op', max(1, int(threads or 1)))
         profile.add('render', 'actual_provider', _PROVIDER.get(device, device))
     _LOG.debug('Neural inference checkpoint=%s provider=%s adapter=%s shape=%s output=%s fallback=%s',
-               _ACTUAL_CHECKPOINT, _PROVIDER.get(device, device), display_name(device), shape,
-               result.shape, _FALLBACK_CPU)
+               checkpoint, _PROVIDER.get(device, device), display_name(device), shape,
+               result.shape, fallback)
     cancel(should_cancel)
     return result[..., :h, :w]
 

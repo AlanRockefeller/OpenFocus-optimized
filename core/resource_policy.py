@@ -776,20 +776,25 @@ def plan_execution(workload: Workload, snapshot: Optional[ResourceSnapshot] = No
     return plan
 
 
-def neural_tile_bytes(frames, height, width, channels, block, kind,
-                      estimate_inference, source_bytes=0, *, output_bytes=None):
-    """Host and device working sets for one complete-stack spatial tile."""
+def _neural_tile_terms(frames, channels, block, kind, estimate_inference):
+    """What each tile in flight holds: its crops, and its staging, inference and reduction."""
     padded = ((block + 63) // 64) * 64
     tile_pixels = padded * padded
-    from fusion_methods.neural_runtime import native_startup_bytes
-    if output_bytes is None:
-        output_bytes = height * width * ((channels + 1) * 4 + channels * 4)
     # Matched/normalized crops may coexist with their predecessors.
     crops = frames * block * block * channels * 8
     staging = frames * tile_pixels * 4 * (2 * channels + 3)
     reduction = tile_pixels * (channels * 4 * 3 + 8)
     inference = estimate_inference(frames, block, block, kind)
-    device = inference + staging + reduction
+    return crops, inference + staging + reduction
+
+
+def neural_tile_bytes(frames, height, width, channels, block, kind,
+                      estimate_inference, source_bytes=0, *, output_bytes=None):
+    """Host and device working sets for one complete-stack spatial tile."""
+    from fusion_methods.neural_runtime import native_startup_bytes
+    if output_bytes is None:
+        output_bytes = height * width * ((channels + 1) * 4 + channels * 4)
+    crops, device = _neural_tile_terms(frames, channels, block, kind, estimate_inference)
     return output_bytes + source_bytes + crops + device + native_startup_bytes(kind), device
 
 
@@ -800,12 +805,18 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                       output_bytes: Optional[int] = None, resident_output_bytes: int = 0,
                       snapshot: Optional[ResourceSnapshot] = None,
                       preference: str = PREFERENCE_BALANCED,
-                      user_threads: Optional[int] = None):
+                      user_threads: Optional[int] = None, in_flight: int = 1):
     """Choose the largest viable spatial tile for the first viable device.
 
     Include future output, source crops, staging, inference and reduction.
     Already initialized maps are accounted for by the live reading, so debit
     them only from the isolated process envelope when there is one.
+
+    ``in_flight`` is how many tiles the caller can run at once. The plan
+    grants two on the CPU when the thread budget splits evenly and a second
+    tile's working set fits beside the first at the chosen tile size. The tile
+    is never made smaller to fit a second one, and the threads are divided
+    between the tiles, so the caller's thread budget is unchanged.
     """
     if min(source_resolution_bytes, source_cache_bytes, resident_output_bytes) < 0:
         raise ValueError('Source workspace and resident output sizes must be nonnegative')
@@ -848,8 +859,20 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
             device_fits = not dedicated or fits_in_budget(device_required, device_budget)
             if required <= ceiling and ceiling > 0 and device_fits:
                 capacity = cpu_capacity(snapshot, preference)
-                threads = (min(capacity, int(user_threads))
-                           if user_threads is not None and user_threads > 0 else capacity)
+                threads = max(1, min(capacity, int(user_threads))
+                              if user_threads is not None and user_threads > 0 else capacity)
+                tiles = 1
+                reasons = [f'neural tile {block}px, {kind}']
+                if in_flight >= 2 and kind == 'CPU' and threads >= 2 and threads % 2 == 0:
+                    # The output and the source workspace are shared; a second
+                    # tile adds its own crops, staging, inference and reduction.
+                    second = sum(_neural_tile_terms(frames, channels, block, kind,
+                                                    estimate_inference))
+                    if required + second <= ceiling:
+                        tiles, required, threads = 2, required + second, threads // 2
+                        reasons.append(f'two tiles in flight, {threads} thread(s) each')
+                    else:
+                        reasons.append('one tile in flight: a second working set does not fit')
                 # Why a tile is smaller than requested: the first size whose
                 # working set fits the ceiling, halving from the image clamp.
                 log_debug('neural_tile_plan', frames=frames, shape=(height, width, channels),
@@ -859,9 +882,9 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                           available_ram=snapshot.available_ram, resident_output_bytes=resident_output_bytes,
                           preference=preference,
                           user_threads=user_threads, cpu_capacity=capacity,
-                          native_threads=max(1, threads))
+                          native_threads=threads, tiles_in_flight=tiles)
                 return block, ExecutionPlan(
-                    workers=1, native_threads=max(1, threads), max_in_flight=1,
+                    workers=tiles, native_threads=threads, max_in_flight=tiles,
                     ram_budget=ceiling,
                     vram_budget=device_budget,
                     device_kind=kind,
@@ -869,7 +892,7 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                     required_vram=device_required if dedicated else 0,
                     device_fallback=(None if kind == requested else
                                      f'{requested} did not fit the available memory budget'),
-                    reasons=(f'neural tile {block}px, {kind}',))
+                    reasons=tuple(reasons))
             if block <= minimum:
                 break
             block = max(minimum, block // 2)
