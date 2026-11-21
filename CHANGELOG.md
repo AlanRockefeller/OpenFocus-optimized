@@ -28,6 +28,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Convert streamed 16-bit sources to float32 in the same strips that apply
   their exposure-matching gain, instead of storing a normalized copy of the
   stack first. Color output pixels are unchanged.
+- Hand each exposure-matched frame to its first reader from memory and copy
+  it into the render's frame cache on a writer thread, instead of holding the
+  fusion thread for the copy. A frame that matching leaves unchanged shares
+  the cached copy of its source. Output pixels are unchanged.
 - Reduce StackMFF V3's three-quarter-scale inference input four rows at a
   time and one plane at a time. Output pixels are unchanged.
 - Rotate images whose EXIF orientation is a quarter turn with OpenCV instead
@@ -249,10 +253,6 @@ This stable release includes the features introduced in the 1.77.0 beta series.
   exposure-matched frames are read again and the stack is too large for the
   desktop to retain aligned pixels, halving that scratch traffic for large
   OpenFocus stacks. Output pixels are unchanged.
-- Hand each exposure-matched frame to its first reader from memory and copy
-  it into the render's frame cache on a writer thread, instead of holding the
-  fusion thread for the copy. A frame that matching leaves unchanged shares
-  the cached copy of its source. Output pixels are unchanged.
 - Record render dispatch and stack-load admission milestones in local logs to
   help diagnose stalled work.
 - Advance OpenFocus depth IIR filters in 2048-row native calls instead of
