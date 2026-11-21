@@ -19,6 +19,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   of copying every prepared frame into the render's frame cache a second time.
   This about halves the scratch storage those renders hold. Output pixels are
   unchanged.
+- Run StackMFF V1, V2 and V3 on the CPU without ONNX Runtime's buffer reuse,
+  which kept each reusable buffer allocated until the end of an inference
+  call, and ask the runtime to release its unused arena memory after each
+  call. On Linux with 2 threads, a 15-frame 512-pixel V3 tile at both
+  inference scales raises resident memory by 572 MiB at its peak instead of
+  1,799 MiB, and takes about 12% less time. Output pixels are unchanged.
 - Convert streamed 16-bit sources to float32 in the same strips that apply
   their exposure-matching gain, instead of storing a normalized copy of the
   stack first. Color output pixels are unchanged.
