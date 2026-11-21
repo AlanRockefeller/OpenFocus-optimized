@@ -23,8 +23,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   which kept each reusable buffer allocated until the end of an inference
   call, and ask the runtime to release its unused arena memory after each
   call. On Linux with 2 threads, a 15-frame 512-pixel V3 tile at both
-  inference scales raises resident memory by 572 MiB at its peak instead of
-  1,799 MiB, and takes about 12% less time. Output pixels are unchanged.
+  inference scales raises resident memory by 707 MiB at its peak instead of
+  1,743 MiB, and takes about 9% less time. Output pixels are unchanged.
 - Convert streamed 16-bit sources to float32 in the same strips that apply
   their exposure-matching gain, instead of storing a normalized copy of the
   stack first. Color output pixels are unchanged.
@@ -39,6 +39,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Select StackMFF V3's query, key and value projections before transposing
   their attention heads, in the network and in the packaged ONNX graph. The
   graph's weights and its logits are unchanged.
+- Move one axis per transpose around StackMFF V3's pooled inter-layer
+  attention, in the network and in the packaged ONNX graph, instead of two
+  axes at once. CPU inference of a tile takes 8 to 13% less time. The graph's
+  weights and its logits are unchanged.
 - Keep the 16-bit frames of an exposure-matched tiled StackMFF V3 render at
   their native depth and apply each frame's gain to its tile crops, instead of
   preparing a float32 copy of the stack. This halves the prepared frames such

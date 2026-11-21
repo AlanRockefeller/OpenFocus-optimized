@@ -196,11 +196,13 @@ OTHER DEALINGS IN THE SOFTWARE.
 - **ONNX identity**: the V1 graph SHA-256 is
   `f7ba388afcefb988f38707b349d5609b4a56770d81c8405d881e50f605b18a19`;
   the V3 graph SHA-256 is
-  `ebf28996d80bd9f7ba6dfca3177ab0e0997ab39075c7341beac0bcf8919081f5`.
+  `187a02757a888b3e6dfef927e75e5f329d9e2a8d647c38e15bafc97397b29edf`.
   The V3 graph is the earlier export
   (`7b92bf31c984eac2b93d6000158b4802b7d62c23140d52e28a47676f58d5c4f7`) with
-  the same query, key and value reordering applied to its attention nodes; its
-  initializers and logits are unchanged.
+  two reorderings of reshapes and transposes applied: query, key and value
+  are selected before their attention heads are transposed, and the pooled
+  inter-layer attention moves one axis per transpose. Its initializers and
+  logits are unchanged.
   The V1 and V3 graphs contain distinct learned initializers. V1's checkpoint
   records a 0.7 weight soup of the released V3 model and its retraining
   checkpoint; sharing the backbone can produce visually similar results on
