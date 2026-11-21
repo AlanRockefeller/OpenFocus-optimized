@@ -590,6 +590,27 @@ def test_write_behind_store_failure_degrades_without_raising(tmp_path, monkeypat
     assert len(counter) == 2
 
 
+def test_write_behind_stores_pixels_a_processor_passed_through_before_returning(tmp_path):
+    """A processor that returns its input did not create the pixels: their
+    owner can still change them, so they are not lent to the writer thread."""
+    source = np.full((8, 10, 3), 32, np.uint8)
+    processed = process_frame(source, lambda image: image, write_behind=True)
+    with cache_module.render_scope([processed]):
+        result = processed.full_resolution()
+        # Stored before returning, not served from the source's memory.
+        assert frame_storage.is_mapped_frame(result) and not np.shares_memory(result, source)
+        source[...] = 99                             # the owner changes its array
+        np.testing.assert_array_equal(result, 32)
+        np.testing.assert_array_equal(processed.full_resolution(), 32)
+    # A processor that makes its own pixels is still served from memory.
+    made = process_frame(source, lambda image: image + 1, write_behind=True)
+    with cache_module.render_scope([made]):
+        result = made.full_resolution()
+        assert not frame_storage.is_mapped_frame(result)
+        np.testing.assert_array_equal(result, 100)
+        del result
+
+
 def test_write_behind_programming_error_is_not_swallowed(tmp_path, monkeypatch):
     _stores(monkeypatch, tmp_path, before=lambda: (_ for _ in ()).throw(TypeError('bug')))
     cache = cache_module.ResolutionCache(1 << 20)

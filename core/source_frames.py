@@ -824,14 +824,19 @@ class ProcessedFrame:
                 image = resolve_frame(self.source, should_cancel=cancelled)
             if cancelled():
                 raise RegistrationCancelled()
+            resolved = image
             image = self.processor(image)
             if cancelled():
                 raise RegistrationCancelled()
             if image.shape != self.shape or image.dtype != self.dtype:
                 raise ValueError('Processed frame does not match its declared shape/dtype')
             if cache is not None and store_result:
-                stored = cache.put(self, image, should_cancel=cancelled,
-                                   behind=self.write_behind)
+                # A processor that returned its input, like exposure matching
+                # at a gain of one, did not create these pixels. Whoever else
+                # holds the source could change them while a copy is pending,
+                # so they are stored before returning.
+                behind = self.write_behind and not np.may_share_memory(image, resolved)
+                stored = cache.put(self, image, should_cancel=cancelled, behind=behind)
                 if stored is not None:
                     _check_resolution_cancel(cancelled)
                     return stored
