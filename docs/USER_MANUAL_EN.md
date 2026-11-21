@@ -140,10 +140,14 @@ online again. To use an existing browser account, choose the browser sign-in
 button on the account screen. Browser and desktop sessions are separate, so
 signing out here does not sign out the browser.
 
-Windows builds run by the same Windows user share one account device slot,
-including source builds with a separate settings directory. To release a slot
-occupied by an older registration, remove that entry in the account center.
-Removing a registration also signs out any session using it.
+Current Windows builds reuse one account device slot for the same Windows
+installation. The account service can consolidate older registrations when
+OpenFocus still has their device IDs. Before switching from an older portable
+copy to the installer, update the portable copy in its original folder, keep
+`OpenFocusData`, and open it once with its saved session. If a device limit
+message still appears, choose **Manage devices** to remove a registration
+you no longer use and try again. Removing a registration signs out any session
+using it.
 
 For email sign-in, open the link on your phone or computer and confirm it;
 the waiting desktop app signs in automatically. If the account service has
@@ -386,6 +390,8 @@ files require saving a new input stack first.
 File → Open Project rebuilds the recorded frames before replacing the current
 stack. If sources moved, choose the new source root and confirm the complete
 old/new path mapping. Save the project again to retain the relocated references.
+You can also drop one `.ofproj` file into the desktop window or pass its path
+to `openfocus gui`. On macOS, OpenFocus also handles files sent to its Dock icon.
 
 The title bar shows a named project's file name with a `*` while it has unsaved
 changes. An unnamed workspace displays **OpenFocus**. Closing the app or opening
@@ -1527,7 +1533,7 @@ unchanged; choosing smaller tiles yourself can change output pixels.
 
 OpenFocus B can use an OpenCL GPU for depth resampling, filtering, activity and selection, guided smoothing and source merging when a compatible GPU driver and compiler are available. Full GPU depth processing requires sufficient host and verified device memory. Bounded GPU activity and merging can still run when full depth processing is unavailable. Device failures fall back to CPU.
 
-For StackMFF V1/V2/V3, open **Settings → AI acceleration components** to check the GPU and install the optional Windows NVIDIA pack. OpenFocus tries TensorRT, PyTorch CUDA, an accelerated ONNX Runtime provider, and CPU as applicable. Windows includes DirectML and macOS can use CoreML. The first TensorRT run for a model and tile shape includes compilation. Feedback diagnostics report the engine that ran the model and the reasons for fallback. See [GPU support](GPU_SUPPORT.md).
+For StackMFF V1/V2/V3, open **Settings → AI acceleration components** to check the GPU and install the optional pack for this computer. Supported Windows NVIDIA systems can use TensorRT or PyTorch CUDA, Linux NVIDIA systems can use PyTorch CUDA, and Apple Silicon Macs can use PyTorch MPS. OpenFocus tries compatible native engines, an available ONNX Runtime accelerator and CPU in that order. TensorRT compiles an engine the first time it sees each model and tile shape. Feedback diagnostics record the engine that ran and any fallback. See [GPU support](GPU_SUPPORT.md).
 
 With GPU acceleration enabled, OpenFocus A, OpenFocus C, Guided Filter, GFG-FGF, DCT and DTCWT can use a compatible OpenCL GPU for full-image fusion. Insufficient memory, an unavailable device or a device failure can cause CPU fallback. C's depth-map export uses the CPU. ECC alignment can use a supported GPU to shrink large images before the CPU estimates the transforms.
 
