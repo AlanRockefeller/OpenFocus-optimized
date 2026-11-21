@@ -4,9 +4,9 @@ import time
 from threading import Event
 
 import pytest
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QPushButton, QWidget
 
 
 def _wait(qapp, predicate):
@@ -518,6 +518,57 @@ def test_failed_sign_in_can_be_retried(qapp, settings, failure):
         window.deleteLater()
 
 
+@pytest.mark.parametrize('language,operation', [('en', 'github'), ('zh', 'browser')])
+def test_device_limit_offers_account_devices_recovery(qapp, settings, monkeypatch, language, operation):
+    from dialogs.account import AccountDialog, QDesktopServices
+    from locales import trans
+    from utils.account_client import AccountError
+
+    class FullAccount(_Account):
+        full = True
+
+        def login(self, provider, **kwargs):
+            if self.full:
+                raise AccountError('device_limit_reached', status=409)
+            return super().login(provider, **kwargs)
+
+        def login_with_browser(self, **kwargs):
+            if self.full:
+                raise AccountError('device_limit_reached', status=409)
+            return super().login_with_browser(**kwargs)
+
+    opened = []
+    monkeypatch.setattr(trans, 'current_lang', language)
+    monkeypatch.setattr(QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()) or True)
+    window = QWidget()
+    client = window._account_client = FullAccount()
+    dialog = AccountDialog(window)
+    try:
+        dialog.show()
+        recovery = dialog.findChild(QPushButton, 'accountManageDevices')
+        assert recovery is not None and recovery.isHidden()
+        dialog.terms.setChecked(True)
+        sign_in = getattr(dialog, operation + '_button')
+        sign_in.click()
+        _wait(qapp, lambda: dialog._job is None)
+        assert dialog.status.text() == trans.t('account_device_limit')
+        assert recovery.isVisible() and recovery.isEnabled()
+        assert recovery.text() == trans.t('account_web_center')
+        assert not opened and not client.is_signed_in()
+
+        QTest.mouseClick(recovery, Qt.MouseButton.LeftButton)
+        assert opened == [f'https://account.openfocus.top/account/devices?lang={language}']
+        assert sign_in.isEnabled()
+
+        client.full = False
+        sign_in.click()
+        _wait(qapp, lambda: dialog._job is None)
+        assert client.is_signed_in() and recovery.isHidden()
+    finally:
+        dialog.reject()
+        window.deleteLater()
+
+
 def test_switch_to_browser_while_terms_are_loading(qapp, settings):
     from dialogs.account import AccountDialog, _ACTIVE_JOBS
     entered, release = Event(), Event()
@@ -644,12 +695,13 @@ def test_previous_native_crash_requires_separate_review(tmp_path, monkeypatch):
     current = logs / 'openfocus-20261110T020202_000002-456.crash.txt'
     current.write_text('Fatal Python error: current process', encoding='utf-8')
     monkeypatch.setattr(logging_setup, 'logs_dir', lambda: logs)
+    monkeypatch.setattr(logging_setup, '_process_alive', lambda pid: False)
     monkeypatch.setattr(diagnostics, 'crash_log_path', lambda: current)
     monkeypatch.setattr(diagnostics, 'fallback_crash_dir', lambda: None)
-    key, crash, log = crash_report.previous_native_crash()
-    assert crash.startswith('Fatal Python error: Segmentation')
-    assert 'render.failed' in log
-    assert crash_report.previous_native_crash([key]) is None
+    pending = crash_report.previous_crash()
+    assert pending.crash_text.startswith('Fatal Python error: Segmentation')
+    assert 'render.failed' in pending.log_text
+    assert crash_report.previous_crash([pending.key]) is None
 
 
 def test_previous_crash_requires_confirmation_and_cancel_does_not_acknowledge(qapp, settings, monkeypatch):
@@ -677,31 +729,19 @@ def test_previous_crash_requires_confirmation_and_cancel_does_not_acknowledge(qa
     Box.Icon = crash_report.QMessageBox.Icon
     Box.ButtonRole = crash_report.QMessageBox.ButtonRole
     monkeypatch.setattr(crash_report, 'QMessageBox', Box)
-    monkeypatch.setattr(crash_report, 'previous_native_crash', lambda acknowledged: ('key', 'crash', 'log'))
+    pending = crash_report.PreviousCrash('key', 'crash', 'log')
+    monkeypatch.setattr(crash_report, 'previous_crash', lambda acknowledged: pending)
     monkeypatch.setattr(review, 'ReportReviewDialog', Dialog)
     monkeypatch.setattr(crash_report, 'get_settings', lambda: settings)
     crash_report.offer_previous_crash(None)
     assert not opened
     choice[0] = True
     crash_report.offer_previous_crash(None)
-    assert opened == [{'crash_text': 'crash', 'log_text': 'log'}]
+    assert opened == [{'crash_text': 'crash', 'log_text': 'log',
+                       'app_version': 'unknown', 'build_channel': None}]
     assert 'key' not in (settings.value('reports/acknowledged_crashes', []) or [])
 
 
-def test_shutdown_reports_only_send_current_errors(qapp, settings, monkeypatch):
-    from ui import shutdown_reports
-
-    sent = []
-    class Reports:
-        def __init__(self, *_): pass
-        @property
-        def pending_count(self): return 0
-    monkeypatch.setattr(shutdown_reports, 'ReportClient', Reports)
-    monkeypatch.setattr(shutdown_reports, 'session_has_error', lambda: False)
-    monkeypatch.setattr(shutdown_reports, 'send_bundle', lambda *args, **kwargs: sent.append(args))
-    job = shutdown_reports._ShutdownReport(None, 'en', True)
-    job._run()
-    assert not sent
 
 
 def test_previous_crash_discovers_profile_fallback_and_preserves_acknowledgements(tmp_path, monkeypatch):
@@ -722,17 +762,18 @@ def test_previous_crash_discovers_profile_fallback_and_preserves_acknowledgement
     os.utime(normal, (100, 100))
     os.utime(rescued, (200, 200))
     monkeypatch.setattr(logging_setup, 'logs_dir', lambda: logs)
+    monkeypatch.setattr(logging_setup, '_process_alive', lambda pid: False)
     monkeypatch.setattr(diagnostics, 'fallback_crash_dir', lambda: fallback)
     monkeypatch.setattr(diagnostics, 'crash_log_path', lambda: None)
-    fallback_key, text, _ = crash_report.previous_native_crash()
-    assert text.startswith('Windows fatal')
-    normal_key, text, _ = crash_report.previous_native_crash([fallback_key])
-    assert text.startswith('Fatal Python') and normal_key != fallback_key
+    rescued_report = crash_report.previous_crash()
+    assert rescued_report.crash_text.startswith('Windows fatal')
+    normal_report = crash_report.previous_crash([rescued_report.key])
+    assert normal_report.crash_text.startswith('Fatal Python') and normal_report.key != rescued_report.key
     legacy_key = hashlib.sha256(name.encode('utf-8')).hexdigest()
-    assert crash_report.previous_native_crash([legacy_key])[0] == fallback_key
-    assert crash_report.previous_native_crash([legacy_key, fallback_key]) is None
+    assert crash_report.previous_crash([legacy_key]).key == rescued_report.key
+    assert crash_report.previous_crash([legacy_key, rescued_report.key]) is None
     monkeypatch.setattr(diagnostics, 'crash_log_path', lambda: rescued)
-    assert crash_report.previous_native_crash()[0] == normal_key
+    assert crash_report.previous_crash().key == normal_report.key
 
 
 def test_previous_crash_skips_unreadable_candidate(tmp_path, monkeypatch):
@@ -741,15 +782,16 @@ def test_previous_crash_skips_unreadable_candidate(tmp_path, monkeypatch):
     from utils import diagnostics, logging_setup
     logs = tmp_path / 'logs'
     logs.mkdir()
-    valid = logs / 'openfocus-valid.crash.txt'
-    bad = logs / 'openfocus-bad.crash.txt'
+    valid = logs / 'openfocus-20261110T010101_000001-101.crash.txt'
+    bad = logs / 'openfocus-20261110T010101_000002-102.crash.txt'
     valid.write_text('Fatal Python error: Aborted\n')
     bad.write_text('Fatal Python error: Aborted\n')
     os.utime(valid, (100, 100))
     os.utime(bad, (200, 200))
     monkeypatch.setattr(logging_setup, 'logs_dir', lambda: logs)
+    monkeypatch.setattr(logging_setup, '_process_alive', lambda pid: False)
     monkeypatch.setattr(diagnostics, 'fallback_crash_dir', lambda: None)
     monkeypatch.setattr(diagnostics, 'crash_log_path', lambda: None)
     original_tail = crash_report._tail
     monkeypatch.setattr(crash_report, '_tail', lambda path: '' if path == bad else original_tail(path))
-    assert crash_report.previous_native_crash()[1].startswith('Fatal Python')
+    assert crash_report.previous_crash().crash_text.startswith('Fatal Python')

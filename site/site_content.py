@@ -73,13 +73,14 @@ def _en() -> dict:
                 "5 alignment modes",
                 "16-bit end to end",
                 "12 UI languages",
-                "MIT application; StackMFF V1/V2 models have separate terms",
+                "MIT application · StackMFF series model terms vary by release",
             ],
             "cta_windows": "Download for Windows",
             "cta_macos": "Download for macOS",
+            "cta_linux": "Linux desktop",
             "cta_github": "View on GitHub",
-            "desktop_label": "Desktop downloads (may be beta):",
-            "meta": "Windows 10/11 · macOS Apple Silicon · Linux CLI on PyPI",
+            "desktop_label": "Stable desktop downloads:",
+            "meta": "Windows 10/11 · macOS Apple Silicon · Linux x86-64 desktop & CLI",
             "shot_alt": (
                 "The OpenFocus window: a nine-frame stack, a wipe comparison "
                 "and a 50 mm scale bar on the fused result."
@@ -213,7 +214,8 @@ def _en() -> dict:
             "eyebrow": "Headless",
             "title": "The same pipeline, without the window.",
             "sub": (
-                "Install on Windows, macOS or Linux. The model, its weights, "
+                "The separate PyPI package provides a headless CLI, not the desktop app. "
+                "Install it on Windows, macOS or Linux; the model, its weights, "
                 "HEIC and camera-RAW decoding are all in one wheel."
             ),
             "install": "pip install openfocus",
@@ -235,11 +237,9 @@ def _en() -> dict:
             "eyebrow": "Download",
             "title": "Install OpenFocus",
             "sub": (
-                "Windows code signing, when available, is provided free by "
-                "SignPath.io with a SignPath Foundation certificate. Check each "
-                "release's notes for its signing status. If SmartScreen appears, "
-                "choose More info → Run anyway; "
-                "the first start can take 30–60 seconds. On macOS, run xattr -cr, "
+                "Windows builds are unsigned and may trigger a SmartScreen warning. "
+                "Verify your download using the SHA-256 hash in the release manifest. "
+                "The first start can take 30–60 seconds. On macOS, run xattr -cr, "
                 "or allow the app in System Settings → Privacy & Security → "
                 "Open Anyway."
             ),
@@ -271,20 +271,39 @@ def _en() -> dict:
                     "url": RELEASE["macos_zip"],
                 },
                 {
-                    "os": "Linux · any OS",
-                    "kind": "pip install openfocus",
+                    "os": "Windows / macOS / Linux",
+                    "kind": "Headless CLI · pip install openfocus",
                     "size": "PyPI",
                     "url": RELEASE["pypi"],
                 },
             ],
             "action": "Download",
-            "script_label": "Terminal install · macOS / Linux",
+            "linux_title": "Linux x86-64 desktop",
+            "linux_intro": "Requires glibc 2.35 or newer and a graphical X11 or Wayland session. The PyPI package provides a separate headless CLI.",
+            "linux_unknown": "Desktop download availability could not be checked. Check your connection, enable JavaScript and reload.",
+            "linux_unavailable": "The current stable release has no Linux desktop archive.",
+            "linux_available": "A Linux desktop archive is available for the current stable release.",
+            "linux_action": "Download Linux x86-64 desktop",
+            "linux_extract": "After downloading, open a terminal in the download directory and run these commands to extract and launch the app.",
+            "linux_menu": "To add an application-menu entry for your user, run the optional installer from the extracted directory.",
+            "script_label": "Terminal install · macOS desktop / Linux headless CLI from PyPI (not the Linux desktop app)",
             "ps_label": "PowerShell · Windows",
             "copy": "Copy",
             "copied": "Copied",
-            "all": "All releases and checksums",
-            "channel_notice": "Windows and macOS downloads and updates may be beta releases. The Linux CLI on PyPI is a stable release.",
-            "note": "Desktop downloads · MIT application; StackMFF V1/V2 models have separate terms",
+            "all": "Stable release notes and checksums",
+            "channel_notice": "This site serves stable desktop releases. You can opt in to beta updates in the desktop app. The PyPI CLI has its own releases.",
+            "note": "Stable desktop downloads",
+        },
+        "community": {
+            "title": "Community",
+            "group_title": "WeChat group",
+            "group_intro": "Scan in WeChat to join the discussion.",
+            "qr_alt": "QR code for the OpenFocus WeChat group",
+            "official_title": "WeChat Official Account",
+            "official_intro": "Scan in WeChat to follow OpenFocus updates.",
+            "official_qr_alt": "QR code for the OpenFocus WeChat Official Account",
+            "discord_intro": "Ask questions and share your work.",
+            "discord_action": "Join Discord",
         },
         "privacy": {
             "title": "Privacy",
@@ -304,12 +323,20 @@ def _en() -> dict:
                 ("GitHub", REPO),
                 ("Docs", MANUAL["en"]),
                 ("Changelog", f"{REPO}/blob/main/CHANGELOG.md"),
-                ("Code signing policy", f"{REPO}/blob/main/docs/CODE_SIGNING_POLICY.md"),
+                ("Community", "#community"),
                 ("Privacy", "#privacy"),
                 ("Terms of Service", "https://account.openfocus.top/terms?lang=en"),
                 ("Cite", "https://doi.org/10.5281/zenodo.23050823"),
             ],
-            "license": "© 2026 OpenFocus Contributors · MIT application; StackMFF V1/V2 models have separate terms",
+            "license": (
+                "© 2026 OpenFocus Contributors · The OpenFocus application is MIT-licensed. "
+                "StackMFF series models follow the terms of their specific releases. The bundled "
+                "StackMFF V3 v2.0 snapshot remains MIT-licensed. The retrained V1/V2 wrappers "
+                "and weights are under StackMFF V3 License 1.0. Redistribution, incorporation into "
+                "projects made available outside your organisation, and commercial use require "
+                "prior written permission."
+            ),
+            "license_details": "Third-party notices and full license terms",
         },
         "notfound": {
             "title": "That page is out of focus.",
@@ -359,13 +386,14 @@ def _zh() -> dict:
                 "五种配准模式",
                 "全程 16-bit",
                 "十二种界面语言",
-                "MIT 应用；StackMFF V1/V2 模型另有许可",
+                "MIT 应用 · StackMFF 系列模型按各发行版本的条款授权",
             ],
             "cta_windows": "下载 Windows 版",
             "cta_macos": "下载 macOS 版",
+            "cta_linux": "Linux 桌面版",
             "cta_github": "查看源码",
-            "desktop_label": "桌面版下载（可能为测试版）：",
-            "meta": "Windows 10/11 · macOS Apple Silicon · Linux 命令行请见 PyPI",
+            "desktop_label": "稳定版桌面下载：",
+            "meta": "Windows 10/11 · macOS Apple Silicon · Linux x86-64 桌面版与命令行",
             "shot_alt": "OpenFocus 主窗口：九帧源图、拖拽对比，以及融合结果上的 50 mm 比例尺。",
         },
         "why": {
@@ -473,7 +501,7 @@ def _zh() -> dict:
         "cli": {
             "eyebrow": "命令行",
             "title": "同一套流程，无需窗口。",
-            "sub": "Windows、macOS、Linux 皆可安装；模型、权重、HEIC 与相机 RAW 解码，皆在同一安装包内。",
+            "sub": "独立的 PyPI 安装包提供无界面命令行，不是桌面应用。Windows、macOS、Linux 皆可安装；模型、权重、HEIC 与相机 RAW 解码，皆在同一安装包内。",
             "install": "pip install openfocus",
             "copy": "复制",
             "copied": "已复制",
@@ -491,7 +519,7 @@ def _zh() -> dict:
         "download": {
             "eyebrow": "下载",
             "title": "安装 OpenFocus",
-            "sub": "Windows 代码签名启用后，由 SignPath.io 免费提供签名服务、SignPath Foundation 签发证书；请查看各版本说明中的签名状态。若被 SmartScreen 拦截，请点“更多信息 → 仍要运行”；首次启动可能需要 30–60 秒。macOS 请执行 xattr -cr，或在“系统设置 → 隐私与安全性”中点“仍要打开”。",
+            "sub": "Windows 版本未签名，首次启动时可能出现 SmartScreen 提示。可用发布清单中的 SHA-256 校验下载文件。首次启动可能需要 30–60 秒。macOS 请执行 xattr -cr，或在“系统设置 → 隐私与安全性”中点“仍要打开”。",
             "cards": [
                 {
                     "os": "Windows 10/11 · x64",
@@ -520,20 +548,39 @@ def _zh() -> dict:
                     "url": RELEASE["macos_zip"],
                 },
                 {
-                    "os": "Linux · 任意系统",
-                    "kind": "pip install openfocus",
+                    "os": "Windows / macOS / Linux",
+                    "kind": "无界面命令行 · pip install openfocus",
                     "size": "PyPI",
                     "url": RELEASE["pypi"],
                 },
             ],
             "action": "下载",
-            "script_label": "终端安装 · macOS / Linux",
+            "linux_title": "Linux x86-64 桌面版",
+            "linux_intro": "需要 glibc 2.35 或更高版本以及 X11 或 Wayland 图形会话。PyPI 软件包单独提供无界面命令行工具。",
+            "linux_unknown": "无法确认桌面版下载是否可用。请检查网络、启用 JavaScript 并刷新页面。",
+            "linux_unavailable": "当前稳定版暂无 Linux 桌面压缩包。",
+            "linux_available": "当前稳定版已提供 Linux 桌面压缩包。",
+            "linux_action": "下载 Linux x86-64 桌面版",
+            "linux_extract": "下载后，在下载目录打开终端，运行以下命令解压并启动应用。",
+            "linux_menu": "如需为当前用户添加应用菜单项，可在解压目录运行可选的安装脚本。",
+            "script_label": "终端安装 · macOS 桌面版 / Linux PyPI 无界面命令行（不是 Linux 桌面版）",
             "ps_label": "PowerShell · Windows",
             "copy": "复制",
             "copied": "已复制",
-            "all": "所有版本与校验值",
-            "channel_notice": "Windows 和 macOS 的下载及更新可能是测试版；PyPI 上的 Linux 命令行版为稳定版。",
-            "note": "桌面版下载 · MIT 应用；StackMFF V1/V2 模型另有许可",
+            "all": "稳定版发行说明与校验值",
+            "channel_notice": "本站提供桌面稳定版。桌面用户可在应用内选择接收测试版更新。PyPI 命令行版独立发布。",
+            "note": "桌面稳定版下载",
+        },
+        "community": {
+            "title": "用户社区",
+            "group_title": "微信群",
+            "group_intro": "微信扫码，加入 OpenFocus 交流群。",
+            "qr_alt": "OpenFocus 微信交流群二维码",
+            "official_title": "微信公众号",
+            "official_intro": "微信扫码，关注 OpenFocus 更新。",
+            "official_qr_alt": "OpenFocus 微信公众号二维码",
+            "discord_intro": "交流使用问题，分享你的作品。",
+            "discord_action": "加入 Discord",
         },
         "privacy": {
             "title": "隐私",
@@ -553,12 +600,18 @@ def _zh() -> dict:
                 ("GitHub", REPO),
                 ("文档", MANUAL["zh"]),
                 ("更新日志", f"{REPO}/blob/main/CHANGELOG.md"),
-                ("代码签名政策", f"{REPO}/blob/main/docs/CODE_SIGNING_POLICY.md"),
+                ("用户社区", "#community"),
                 ("隐私", "#privacy"),
                 ("服务条款", "https://account.openfocus.top/terms?lang=zh"),
                 ("引用", "https://doi.org/10.5281/zenodo.23050823"),
             ],
-            "license": "© 2026 OpenFocus Contributors · MIT 应用；StackMFF V1/V2 模型另有许可",
+            "license": (
+                "© 2026 OpenFocus Contributors · OpenFocus 应用采用 MIT 许可证。"
+                "StackMFF 系列模型适用各发行版本的许可条款。随附的 StackMFF V3 v2.0 快照仍采用 MIT 许可证。"
+                "重新训练的 V1/V2 封装代码与权重适用 StackMFF V3 License 1.0。"
+                "再分发、并入向组织外部提供的项目或用于商业用途，均须事先取得许可方的书面许可。"
+            ),
+            "license_details": "第三方声明与完整许可条款",
         },
         "notfound": {
             "title": "这个页面失焦了。",

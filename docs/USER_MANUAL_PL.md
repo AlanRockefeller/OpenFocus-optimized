@@ -28,7 +28,7 @@ OpenFocus to profesjonalna aplikacja desktopowa do wieloogniskowej fuzji obrazó
 ### Najważniejsze funkcje
 
 - **Wieloogniskowa fuzja obrazów**: wiele zdjęć o różnych punktach ostrości łączy się w jeden w pełni ostry obraz
-- **Dziesięć algorytmów fuzji**: StackMFF V3 (domyślnie), StackMFF V2, StackMFF, Guided Filter, DCT, DTCWT, GFG-FGF oraz OpenFocus A/B/C, a także tryb tylko wyrównania
+- **Fuzja obrazów** obejmuje stabilne metody OpenFocus A/B/C, eksperymentalne metody StackMFF V1/V2/V3, Guided Filter, DCT, DTCWT i GFG-FGF oraz tryb tylko wyrównania
 - **Rejestracja obrazów**: ECC, homografia, homografia → ECC i szybkie wyrównanie OpenFocus
 - **Automatyczne tło**: zastąpienie niespokojnego tła ze stacku jedną prawdziwą klatką oraz pokazanie, gdzie żadna klatka nie uchwyciła sceny wyraźnie
 - **Porównanie suwakiem**: kontrola wyrównania i wyniku za pomocą przeciąganego dzielnika A/B
@@ -59,7 +59,7 @@ Stosy przezroczystych PNG można łączyć w aplikacji desktopowej, przetwarzani
 
 Wczytaj w pełnym rozmiarze, wybierz brak wyrównania, wyłącz szybki podgląd i ROI, a następnie wyrenderuj i zapisz jako PNG. Przetwarzanie wsadowe wymaga metody fuzji i wyjścia PNG bez zapisywania wyrównanego stosu. Wyrównanie, zmiana rozmiaru i skalowanie w dół, korekcja pyłu, mapy głębi, porównanie, retusz, etykiety i paski skali nie są obsługiwane dla danych przezroczystych. Metoda, która zmienia wymiary prostokąta, jest odrzucana. Zmienne lub rozmyte maski, różne maski klatek, przezroczysty TIFF na wejściu i wyjście inne niż PNG, w tym GIF i wielostronicowy TIFF, nie są obsługiwane. CLI odrzuca również czyszczenie matrycy i mapy głębi dla przezroczystego wejścia.
 
-Odpowiednik w CLI: `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none`.
+Odpowiednik w CLI to `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none --experimental`.
 
 ### Obsługiwane formaty wyjściowe
 
@@ -78,11 +78,12 @@ W oknie **Zapisz jako** zwykły TIFF zapisuje wynik jako jeden obraz, a TIFF z w
 ### Uruchamianie aplikacji
 
 Pobierz najnowszą kompilację ze [strony OpenFocus](https://openfocus.top/#download) lub z [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases). Strona jest preferowana: publikuje bieżący instalator Windows, kompilację macOS i pakiet Linux ze skryptami instalacyjnymi; te artefakty są dokładnym wynikiem potoku wydania, więc wybieraj je zamiast ponownej kompilacji. `pip install openfocus` instaluje tylko headless CLI (koło celowo nie zależy od PyQt6); do interfejsu graficznego użyj gotowej kompilacji albo kodu źródłowego. Po instalacji uruchom OpenFocus na jeden z sposobów:
-Strona i skrypty instalacyjne oferują także nowsze wersje beta, obecnie [wydania przedpremierowego v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Automatyczne aktualizacje aplikacji oferują także nowsze wersje beta; linuksowe CLI z PyPI pozostaje stabilne.
+Strona domyślnie udostępnia stabilne wersje aplikacji. W systemach Windows i macOS można włączyć aktualizacje beta. Aplikacja desktopowa dla systemu Linux jest dostępna od wersji 2.0.0 i aktualizuje się ją przez pobranie nowego archiwum. CLI z PyPI jest publikowane osobno.
 
 1. **Windows (instalator lub wersja przenośna)**: kliknij dwukrotnie skrót lub `OpenFocus.exe`
 2. **macOS**: przeciągnij `OpenFocus.app` do Programów i uruchom; kompilacje są przeznaczone dla Apple Silicon
-3. **Kod źródłowy Pythona**: zainstaluj zależności poleceniem `pip install -r requirements.txt`, a następnie uruchom `python main.py` w aktywowanym środowisku
+3. **Linux (x86-64)**: rozpakuj archiwum aplikacji i uruchom `OpenFocus/OpenFocus` w rozpakowanym katalogu
+4. **Kod źródłowy Pythona**: zainstaluj zależności poleceniem `pip install -r requirements.txt`, a następnie uruchom `python main.py` w aktywowanym środowisku
 
 Instalacja z terminala:
 
@@ -97,16 +98,16 @@ curl -fsSL https://openfocus.top/install.sh | sh
 irm https://openfocus.top/install.ps1 | iex
 ```
 
-Skrypt `install.sh` instaluje kompilację macOS w `~/Applications`, a w systemie Linux — headless CLI. Podpis kompilacji Windows zależy od konkretnego wydania (zobacz informacje o wydaniu); podpis nie jest gwarantowany. W systemie Windows przy ostrzeżeniu SmartScreen wybierz „Więcej informacji → Uruchom mimo to”. Kompilacje macOS nie są notaryzowane: po instalacji z DMG (do Programów) w razie potrzeby wykonaj `xattr -cr /Applications/OpenFocus.app`, po instalacji z terminala (do `~/Applications`) — `xattr -cr ~/Applications/OpenFocus.app`, albo kliknij aplikację prawym przyciskiem i wybierz „Otwórz”.
+Skrypt `install.sh` instaluje kompilację macOS w `~/Applications`, a w systemie Linux — headless CLI. Obecne wersje dla systemu Windows nie są podpisane cyfrowo. Przed uruchomieniem porównaj sumę SHA-256 pobranego pliku z wartością w manifeście wydania. W systemie Windows przy ostrzeżeniu SmartScreen wybierz „Więcej informacji → Uruchom mimo to”. Kompilacje macOS nie są notaryzowane: po instalacji z DMG (do Programów) w razie potrzeby wykonaj `xattr -cr /Applications/OpenFocus.app`, po instalacji z terminala (do `~/Applications`) — `xattr -cr ~/Applications/OpenFocus.app`, albo kliknij aplikację prawym przyciskiem i wybierz „Otwórz”.
 
 Przy pierwszym uruchomieniu otwiera się okno powitalne, w którym można wybrać motyw i wczytać stos demonstracyjny. Domyślnie używany jest jasny motyw; ciemny wybiera się w oknie powitalnym lub później w **Ustawienia → Motyw**. Wybór jest pamiętany.
 
 ### Szybki start
 
 1. Zaimportuj sekwencję obrazów (**Plik → Otwórz folder** lub przeciągnij)
-2. Wybierz metodę fuzji na prawym panelu; domyślnie wybrany jest **StackMFF V3**
+2. Wybierz metodę fuzji na prawym panelu. Domyślnie wybrana jest metoda **OpenFocus B**.
 3. Wybierz metodę rejestracji; domyślnie wybrany jest **ECC**. Jeśli stos jest już wyrównany, wybierz **Bez wyrównania**
-4. W razie potrzeby zmień rozmiar jądra lub parametry wybranej metody
+4. W razie potrzeby zmień parametry wybranej metody
 5. *(opcjonalnie)* Otwórz **Ustawienia renderowania** i zaznacz **Szybki podgląd**, aby najpierw dobrać parametry na zmniejszonym szkicu
 6. Kliknij **Rozpocznij renderowanie**
 7. Wyeksportuj wynik
@@ -144,8 +145,8 @@ Prawy panel zawiera parametry i listy:
 - **Plik**: otwieranie folderu, wideo i projektu, zapisywanie projektu i szablonów przetwarzania, ostatnie pliki i projekty, zapisywanie wyniku i stosu, czyszczenie stosu, wyjście
 - **Edycja**: cofanie i ponawianie, obrót, odbicie, zmiana rozmiaru, retusz wyniku i retusz plików obrazów
 - **Narzędzia**: łączenie obrazów, przetwarzanie wsadowe, porównanie metod, mapa głębi, mapa pyłu, pasek skali, etykiety
-- **Ustawienia**: ustawienia zaawansowane (rejestracja i diagnostyka wyrównania), akceleracja GPU, motyw, język
-- **Pomoc**: informacje o środowisku, opinia, kontakt, przewodnik szybkiego startu, sprawdzanie aktualizacji, instalacja gotowej aktualizacji i folder logów
+- **Ustawienia**: ustawienia zaawansowane (Ogólne, Fuzja, Rejestracja, Uruchamianie i aktualizacje), akceleracja GPU, motyw, język
+- **Pomoc**: Wyślij opinię (diagnostyka i logi), kontakt, przewodnik szybkiego startu, sprawdzanie aktualizacji i instalacja gotowej aktualizacji
 
 **Narzędzia → Połącz obrazy…** otwiera osobny obszar roboczy dla już pofuzjowanych obszarów mikroskopu i panoram fotograficznych; nie zmienia bieżącego stosu. Karta **Asystent projektu** grupuje import, wyrównywanie i punkty kontrolne, **Obrazy źródłowe** zawiera listę, siatkę i ręczne rozmieszczenie, a **Edytor panoramy** zawiera ustawienia szwów, mieszania, ekspozycji/koloru, wyjścia, odwzorowania, aparatu i HDR oraz nakładki podglądu. Użyj **Dodaj pliki…**, **Otwórz folder** lub **Dodaj wyniki…**, aby skopiować wybrane wyniki bieżącej sesji, albo przeciągnij pliki lub foldery na listę bądź obszar roboczy. Import folderu obejmuje tylko obsługiwane pliki bezpośrednio w nim, bez podfolderów. Import zachowuje naturalną kolejność nazw, pomija powtórzone ścieżki i dodaje każdą stronę wielostronicowego TIFF jako osobny obraz. Wybierz obraz i naciśnij Delete lub Backspace, aby usunąć go z obszaru roboczego bez kasowania pliku.
 
@@ -373,20 +374,17 @@ Rejestracja usuwa przestrzenne przesunięcie klatek w stosie. Jest niezbędna, g
 - Wyszukiwanie ocenia różnice próbkowanych pikseli; przekształcenie używa interpolacji Lanczosa
 - Zakres wyszukiwania przesunięcia wynosi domyślnie 3% rozmiaru klatki i można go zmienić przez `--align-shift-limit`. Wyszukiwanie używa poprzedniej wyrównanej klatki i zaczyna od ruchu skumulowanego; łączne przesunięcie może przekroczyć 3%.
 - Dla geometrii nieodkształcalnej lub ekstremalnej wybierz ECC albo homografię
-- Przy rzeczywistym błędzie szacowania `failure_policy=continue` (domyślnie) zachowuje niewyrównaną klatkę, a `fail` przerywa pracę. Mało tekstury, powtarzalne wzory i zmiany ostrości mogą nadal powodować niedokładne dopasowania.
-- W CLI tę samą politykę wybiera `--align openfocus --align-param 'failure_policy="fail"'` (cytowanie zależne od powłoki). Elementy wsadu stosują wybraną politykę niezależnie. Domyślnie jest `"continue"`.
+- Jeśli rejestracja odrzuci klatkę, aplikacja komputerowa zatrzyma przetwarzanie danego stosu. Przed kolejną próbą sprawdź klatkę wskazaną w komunikacie błędu i podaną przyczynę. Mało tekstury, powtarzalne wzory i zmiany ostrości mogą nadal powodować niedokładne dopasowania.
+- W CLI domyślnie obowiązuje `continue`. Aby zatrzymać stos, użyj `--align openfocus --align-param 'failure_policy="fail"'`.
 - Ustaw **Klatkę odniesienia** jako liczbę od 1 w kolejności uwzględnionych, przetworzonych klatek, aby zakotwiczyć geometrię w tej klatce. Kolejność klatek jest zachowana; wyrównanie jasności używa własnego odniesienia. Każdy stos wsadu musi zawierać ten numer, inaczej element kończy się błędem. Przykład CLI: `--align openfocus --align-param reference_frame=3`. Wybór odniesienia nie poprawia paralaksy ani słabego dopasowania; sprawdź wynik.
 
-Raporty wyrównania wskazują odniesienie i wynik każdej klatki. „Wynik zastępczy” oznacza, że metoda nie mogła ustalić wyrównania lub zależy od wcześniejszego nieudanego oszacowania; podana przyczyna odróżnia słabe oszacowania od ruchu poza limitami, gdy jest to znane. Wartości jakości zależą od metody i nie gwarantują dokładności. Przekształcenia mapują współrzędne źródła na płótno odniesienia etapu rejestracji przed wspólnym przycięciem; metody złożone raportują etapy osobno. Homografia i ECC również przyjmują opcjonalny parametr rejestracji `failure_policy="fail"`, aby zatrzymać się po wykryciu błędu. Domyślnie pozostaje `"continue"`; sprawdzaj wyniki nawet przy udanym wyrównaniu.
-
-Aby zbadać render, włącz **Ustawienia → Ustawienia zaawansowane → Rejestracja → Zbieraj diagnostykę wyrównania** i wyrenderuj ponownie. Powoduje to ponowne obliczenie wyrównania zamiast użycia pamięci podręcznej. Podsumowanie zakończenia wyróżnia wyniki zastępcze; otwórz **Ustawienia → Ustawienia zaawansowane → Rejestracja → Diagnostyka wyrównania**, aby zobaczyć raport dla klatek. Pokazuje dostępne przyczyny niepowodzenia, oceny metody, liczbę dopasowań, klatki odniesienia i przekształcenia. Numery i nazwy odniesień dotyczą oryginalnej listy źródeł, także gdy klatki są wykluczone. Renderowania wsadowe i grupowe nie udostępniają tego raportu.
+W pojedynczym, niegrupowanym przebiegu CLI z rejestracją opcja `--alignment-report FILE` zapisuje raport dla poszczególnych klatek. Raporty wyrównania wskazują odniesienie i wynik każdej klatki. „Wynik zastępczy” oznacza, że metoda nie mogła ustalić wyrównania lub zależy od wcześniejszego nieudanego oszacowania; podana przyczyna odróżnia słabe oszacowania od ruchu poza limitami, gdy jest to znane. Wartości jakości zależą od metody i nie gwarantują dokładności. Przekształcenia mapują współrzędne źródła na płótno odniesienia etapu rejestracji przed wspólnym przycięciem; metody złożone raportują etapy osobno. Homografia i ECC również przyjmują opcjonalny parametr rejestracji `failure_policy="fail"`, aby zatrzymać się po wykryciu błędu. Domyślnie pozostaje `"continue"`; sprawdzaj wyniki nawet przy udanym wyrównaniu.
 
 ### Włączanie rejestracji
 
 1. Na prawym panelu znajdź grupę **Rejestracja**
 2. Wybierz jedną metodę z listy rozwijanej: **Bez wyrównania**, **OpenFocus (szybko)**, **ECC**, **Homografia** lub **Homografia → ECC**
-3. Wybierz **Obsługę odrzuconych klatek** w **Ustawienia → Ustawienia zaawansowane → Rejestracja**; zmiana jest stosowana do metod. Dla OpenFocus (szybko) ustaw także klatkę odniesienia.
-4. **Zbieraj diagnostykę wyrównania** znajduje się teraz w ustawieniach zaawansowanych (patrz wyżej)
+3. Klatkę odniesienia i granice wyszukiwania OpenFocus ustawisz w **Ustawienia → Ustawienia zaawansowane → Rejestracja**.
 
 Domyślnie wybrane jest **ECC**. Jeśli stos jest już wyrównany, na przykład pochodzi ze sztywnego stanowiska, wybierz **Bez wyrównania**: jest szybciej i unika zbędnych przekształceń.
 
@@ -404,16 +402,14 @@ Dodatkowe parametry otwiera **Ustawienia → Ustawienia zaawansowane → Rejestr
 - **Szerokość skalowania rejestracji**: rozdzielczość wstępnego przetwarzania (domyślnie 1024 px)
 - Mniejsze wartości — szybciej, ale dokładność może spaść
 - Większe wartości — wolniej, ale dokładność może wzrosnąć
-- **Pamięć rejestracji**: przechowuje wyniki obok stosu, aby ponowne otwarcie pomijało wyrównanie
-- **Zbieraj diagnostykę wyrównania**: ponownie oblicza wyrównanie na potrzeby raportu dla klatek
 
 ---
 
 ## 8. Metody fuzji obrazów
 
-OpenFocus oferuje dziesięć algorytmów fuzji plus tryb tylko wyrównania. W nowym profilu wybrana jest **StackMFF V3** z rejestracją **ECC**; poniżej opisano wszystkie opcje. Każdy ma inne właściwości odpowiednie dla różnych typów obrazów.
+**OpenFocus A, B i C** to stabilne metody fuzji. Nowy profil aplikacji desktopowej domyślnie używa **OpenFocus B** z rejestracją **ECC**. Aby użyć pozostałych metod fuzji lub eksperymentalnych metod rejestracji, przejdź do **Ustawienia → Ustawienia zaawansowane → Ogólne** i zaznacz **Włącz funkcje eksperymentalne**. W CLI dodaj `--experimental` przy każdym uruchomieniu z eksperymentalną metodą fuzji.
 
-### StackMFF V3 (domyślnie, uczenie głębokie)
+### StackMFF V3 (uczenie głębokie)
 
 - **Algorytm**: ONNX Runtime i dołączony model ONNX.
 - **Tryb wyjścia AI** (prawy panel, tylko dla tej metody):
@@ -534,7 +530,7 @@ Dostrajanie parametrów na dużych stosach w pełnej rozdzielczości jest wolne.
 
 ### Obrót
 
-1. Wybierz **Edycja → Obrót**
+1. Wybierz **Edycja → Obrót i odbicie**
 2. Wybierz typ obrotu:
    - **90° zgodnie z ruchem wskazówek zegara**: obrót wszystkich obrazów o 90 stopni w prawo
    - **90° przeciwnie do ruchu wskazówek zegara**: obrót wszystkich obrazów o 90 stopni w lewo
@@ -542,7 +538,7 @@ Dostrajanie parametrów na dużych stosach w pełnej rozdzielczości jest wolne.
 
 ### Odbijanie
 
-1. Wybierz **Edycja → Odbicie**
+1. Wybierz **Edycja → Obrót i odbicie**
 2. Wybierz typ odbicia:
    - **Odbicie poziome**: lustrzane odbicie od lewej do prawej
    - **Odbicie pionowe**: lustrzane odbicie od góry do dołu
@@ -562,7 +558,7 @@ Przekształcenia są stosowane do całego stosu obrazów i zachowują wyrównani
 
 ## 10. Retusz, etykiety i adnotacje
 
-### Retusz wyniku (Edycja → Retusz wyniku…, `Ctrl+T`)
+### Retusz wyniku (Edycja → Retusz wyniku → Wynik w tym obszarze roboczym…, `Ctrl+T`)
 
 Fuzja może pozostawić lokalną wadę — obwódkę przy kontrastowej krawędzi, włos pochodzący z niewłaściwej klatki, szum na płaskim obszarze. Przestrzeń robocza kopiuje piksele z dokładnych klatek, które utworzyły wybrany wynik:
 
@@ -581,7 +577,7 @@ Do lokalnej korekty tonalnej wybierz **Pędzel ekspozycji**, ustaw wartość w s
 
 Pochodzenie podróżuje z wynikiem: wyrównane klatki, przesunięcia przycięcia/wklejenia ROI, przycięcie krawędzi DCT i głębia są zapisywane przy renderowaniu. Pliki wsadowe, starsze wyniki i pozycje folderów tylko wyrównania nie mają zapisanego źródła, więc są oznaczone jako niedostępne, a nie zgadywane z bieżącego stosu. Niezastosowane pociągnięcia i historia cofania istnieją tylko w sesji; zapis projektu ich nie przechowuje.
 
-Dla istniejącego pliku obrazu wybierz **Edycja → Retuszuj pliki obrazów…**, a następnie wskaż wynik i jedną lub więcej klatek źródłowych. Źródła muszą być już wyrównane do wyniku na tej samej siatce pikseli; same pasujące wymiary nie dowodzą wyrównania. Akceptowane są jednostronicowe PNG, TIFF, JPEG i BMP o pasujących wymiarach pionowych, kanałach i głębi 8 lub 16 bitów; orientacja EXIF jest stosowana przy wczytywaniu. Kanały alfa i obrazy wielostronicowe nie są obsługiwane. Wybrane klatki są dostarczone przez użytkownika, a nie zapisanym pochodzeniem renderu. Zastosowanie tworzy osobny niewyeksportowany wynik; zapisz go z listy wyników. Wybrane pliki są chronione przed nadpisaniem w tej sesji, w tym podczas eksportu mapy głębi i siatki 3D. Jak przy innych wynikach, pliki projektów nie przechowują tych pikseli ani historii pędzla.
+Dla istniejącego pliku obrazu wybierz **Edycja → Retusz wyniku → Wynik fuzji z pliku…**, a następnie wskaż wynik i jedną lub więcej klatek źródłowych. Źródła muszą być już wyrównane do wyniku na tej samej siatce pikseli; same pasujące wymiary nie dowodzą wyrównania. Akceptowane są jednostronicowe PNG, TIFF, JPEG i BMP o pasujących wymiarach pionowych, kanałach i głębi 8 lub 16 bitów; orientacja EXIF jest stosowana przy wczytywaniu. Kanały alfa i obrazy wielostronicowe nie są obsługiwane. Wybrane klatki są dostarczone przez użytkownika, a nie zapisanym pochodzeniem renderu. Zastosowanie tworzy osobny niewyeksportowany wynik; zapisz go z listy wyników. Wybrane pliki są chronione przed nadpisaniem w tej sesji, w tym podczas eksportu mapy głębi i siatki 3D. Jak przy innych wynikach, pliki projektów nie przechowują tych pikseli ani historii pędzla.
 
 ### Zastępowanie tła (Automatyczne tło)
 
@@ -650,17 +646,22 @@ Podgląd używa rzeczywistego celu. Przechodź przyciskami Poprzednia/Następna 
 
 ## 11. Ustawienia i konfiguracja
 
-Otwórz **Ustawienia → Ustawienia zaawansowane**, aby zmienić wydajność, rejestrację, czyszczenie matrycy, nazwy wyników, AI StackMFF i ustawienia uruchamiania. Zmiany pozostają szkicem do naciśnięcia **OK**; Anuluj, Esc i zamknięcie okna je odrzucają. Zmniejszenie rozmiaru kafelka natychmiast aktualizuje widoczny limit nakładki do połowy kafelka. Zapisany limit partii AI pozostaje, ale wnioskowanie obecnie wysyła jeden kafelek na wywołanie; szerokość skalowania rejestracji może zmienić dokładność wyrównania. Zbieranie diagnostyki wyrównania to pole wyboru w sekcji Rejestracja.
+**Ustawienia → Ustawienia zaawansowane**
+
+- **Ogólne** — Funkcje eksperymentalne, katalog roboczy i prefiks nazwy pliku wynikowego. W sekcji **Prywatność** automatyczne raporty błędów i statystyki użycia mają osobne pola. Początkowo oba są zaznaczone. Jawnie wyłączona opcja pozostaje wyłączona. Wersje wydaniowe wysyłają raport po sesji, w której wystąpił błąd, jeśli zaakceptowano warunki przy logowaniu lub jawnie włączono raportowanie. Wysłanie raportu o wcześniejszej awarii kodu natywnego wymaga potwierdzenia.
+- **Fuzja** — Wybierz tryb zasobów i ustawienia kafelków. Wybierz **Czyszczenie matrycy**, aby rozwinąć ustawienia.
+- **Rejestracja** — Ustaw szerokość skalowania. Wybierz **OpenFocus (szybko)**, aby rozwinąć ustawienia klatki odniesienia i granic wyszukiwania.
+- **Uruchamianie i aktualizacje** — Przywracanie ostatniego stosu, pytanie o skalę importu i aktualizacje.
+
+Zatwierdź przyciskiem **OK**. Anulowanie, Esc lub zamknięcie okna odrzuca zmiany.
 
 Automatyczne pobieranie aktualizacji działa w bezczynności i nigdy nie instaluje aktualizacji samodzielnie. Ukończone pobieranie pozostaje gotowe, dopóki nie wybierzesz jawnie **Uruchom ponownie i zaktualizuj**. Ponowne uruchomienie chroni aktywne edycje i niezapisaną pracę, a następnie zapisuje dane odzyskiwania przed uruchomieniem zamiennika. Anulowanie pobierania lub przygotowania czeka na bieżącą bezpieczną granicę. Istniejąca kompletna, nowsza przygotowana kompilacja może zostać zainstalowana bez sieci.
 
 W Windows aktualizator przygotowuje osobną wersję kandydującą i podczas przełączenia przenosi znacznik wersji przenośnej oraz `OpenFocusData`. W razie błędu przywraca poprzednią instalację; jeśli przywrócenie się nie powiedzie, zachowuje kopię i nie uruchamia aplikacji automatycznie. Może pojawić się jedno żądanie uprawnień. Anulowanie rozpakowywania usuwa nieukończone dane przygotowawcze i jest sprawdzane między odczytami i zapisami po 256 KiB; zablokowana operacja dyskowa lub sieciowa może je opóźnić.
 
-Korekcja pola płaskiego zmienia piksele robocze sesji bez nadpisywania plików źródłowych. Wybierz białe odniesienie i klatkę podglądu, a następnie ponownie zbuduj podgląd po zmianie źródła lub skali. Odniesienie i obrazy robocze/bazowe muszą mieć tę samą dziedzinę współrzędnych i rozmiar. Zastosowanie przygotowuje oba stosy przed zatwierdzeniem; opcjonalne usunięcie klatki odniesienia należy do tego samego kroku cofania. Wyeksportuj poprawione obrazy źródłowe, jeśli chcesz zachować te piksele poza sesją.
+Mapa pyłu, wsadowa korekcja pola płaskiego i łączenie obrazów są w trakcie tworzenia i pozostają niedostępne.
 
-Przetwarzanie wsadowe przyjmuje opcjonalny obraz białego pola w opcjach przetwarzania. Wybierz rozogniskowane odniesienie w oryginalnej rozdzielczości klatek; jest skalowane razem ze stosem wejściowym i stosowane przed rejestracją, z domyślnym rozmiarem pyłu. Nieczytelne odniesienie lub niezgodny rozmiar jawnie powoduje błąd danego stosu. Odniesienie jest wykluczane z folderów wejściowych, także w przetwarzaniu grupowym; do fuzji muszą pozostać co najmniej dwie klatki źródłowe. Korekcji pola płaskiego nie można łączyć z przezroczystym wejściem. Pozostaw pole puste, aby przetwarzać bez korekcji. CLI przyjmuje odniesienie przez `--dust-map WHITE`.
-
-Czyszczenie matrycy jest opcjonalne i działa na oryginalnych klatkach we współrzędnych matrycy przed rejestracją. W aplikacji desktopowej znajduje się w **Ustawienia → Ustawienia zaawansowane → Czyszczenie matrycy**; okno przetwarzania wsadowego ma te same elementy sterujące. Wybierz jawną maskę defektów, aby poprawić znane gorące lub martwe piksele; OpenFocus nie wnioskuje maski z obrazów preparatu. Maska musi być jednokanałowym obrazem 8- lub 16-bitowym o wymiarach źródła: zero oznacza brak wpływu, a 1 lub maksymalna wartość kanału oznacza defekty. Sprawdź jej zasięg przed przetwarzaniem. Maski pokrywające więcej niż 10 % kadru oraz defekty bez niezamaskowanego sąsiada są odrzucane. Przechowuj maskę w oryginalnej rozdzielczości i nie wybieraj jej jako obrazu źródłowego. W GUI przy używaniu maski wczytuj klatki źródłowe w pełnej skali; maska nigdy nie jest skalowana. Czyszczenia matrycy (w tym odszumiania) nie można zastosować do stosu GUI po obrocie, odbiciu, korekcji pola płaskiego lub innej zmianie źródła: wczytaj ponownie oryginalne klatki albo wyłącz czyszczenie. Dotyczy to także przywróconych projektów z taką historią źródeł. Wstępnie wyrównanego przetwarzania ROI nie można łączyć z czyszczeniem matrycy; wyjdź z trybu ROI i wyrenderuj cały stos. Ustawienia czyszczenia należą do bieżącej sesji i zapisanego projektu, a nie do globalnych preferencji aplikacji. Przetwarzanie wsadowe i CLI przetwarzają swoje oryginalne dane osobno, wykonując czyszczenie matrycy przed korekcją pola płaskiego i rejestracją. Maski defektów wymagają plików źródłowych o neutralnej orientacji EXIF. Pliki z orientacją, RAW aparatów i źródła, których orientacji nie można ustalić, są odrzucane, ponieważ ich zdekodowane piksele mogą nie odpowiadać współrzędnym matrycy. Używaj obrazów źródłowych i maski w tej samej znanej orientacji pikseli, z neutralnymi metadanymi orientacji. Samo odszumianie nie wymaga maski defektów.
+Czyszczenie matrycy jest opcjonalne i działa na oryginalnych klatkach we współrzędnych matrycy przed rejestracją. W aplikacji desktopowej znajduje się w **Ustawienia → Ustawienia zaawansowane → Fuzja → Czyszczenie matrycy**; okno przetwarzania wsadowego ma te same elementy sterujące. Wybierz jawną maskę defektów, aby poprawić znane gorące lub martwe piksele; OpenFocus nie wnioskuje maski z obrazów preparatu. Maska musi być jednokanałowym obrazem 8- lub 16-bitowym o wymiarach źródła: zero oznacza brak wpływu, a 1 lub maksymalna wartość kanału oznacza defekty. Sprawdź jej zasięg przed przetwarzaniem. Maski pokrywające więcej niż 10 % kadru oraz defekty bez niezamaskowanego sąsiada są odrzucane. Przechowuj maskę w oryginalnej rozdzielczości i nie wybieraj jej jako obrazu źródłowego. W GUI przy używaniu maski wczytuj klatki źródłowe w pełnej skali; maska nigdy nie jest skalowana. Czyszczenia matrycy (w tym odszumiania) nie można zastosować do stosu GUI po obrocie, odbiciu, korekcji pola płaskiego lub innej zmianie źródła: wczytaj ponownie oryginalne klatki albo wyłącz czyszczenie. Dotyczy to także przywróconych projektów z taką historią źródeł. Wstępnie wyrównanego przetwarzania ROI nie można łączyć z czyszczeniem matrycy; wyjdź z trybu ROI i wyrenderuj cały stos. Ustawienia czyszczenia należą do bieżącej sesji i zapisanego projektu, a nie do globalnych preferencji aplikacji. Przetwarzanie wsadowe i CLI przetwarzają swoje oryginalne dane osobno, wykonując czyszczenie matrycy przed korekcją pola płaskiego i rejestracją. Maski defektów wymagają plików źródłowych o neutralnej orientacji EXIF. Pliki z orientacją, RAW aparatów i źródła, których orientacji nie można ustalić, są odrzucane, ponieważ ich zdekodowane piksele mogą nie odpowiadać współrzędnym matrycy. Używaj obrazów źródłowych i maski w tej samej znanej orientacji pikseli, z neutralnymi metadanymi orientacji. Samo odszumianie nie wymaga maski defektów.
 
 Opcjonalne odszumianie matrycy jest niezależne od maski defektów i domyślnie wyłączone. Obejrzyj wynik w pełnym rozmiarze, aby ocenić, czy jego wygładzanie pasuje do preparatu. Czyszczenie matrycy zachowuje pliki źródłowe i głębię 8 lub 16 bitów; jest oddzielone od korekcji pola płaskiego. CLI przyjmuje `--defect-mask-path MASK` i `--sensor-denoise`; przepisy i Python API przepisów zapisują te opcje. Przepisy zapisują odcisk maski i odrzucają brakującą lub zmienioną maskę. Czyszczenia w CLI nie można łączyć z przezroczystym wejściem. Przetwarzanie grupowe stosuje czyszczenie do oryginalnych klatek, a nie do pośrednich wyników grup.
 
@@ -668,20 +669,25 @@ Przepisy wymagają, aby miejsce wyjściowe znajdowało się poza każdym foldere
 
 Gdy odniesienie plikowe jest stosowane w **Narzędzia → Mapa pyłu (korekcja pola płaskiego)** w skali bazowej stosu, zapisany projekt przechowuje jego ścieżkę bezwzględną, hash zawartości i rozmiar pyłu, a przy otwarciu stosuje je raz do oryginalnych źródeł. Utrzymuj plik odniesienia niezmieniony i na miejscu: brakujące lub zmienione odniesienie uniemożliwia otwarcie projektu. Odniesienie wybrane ze stosu lub korekcja w innej skali roboczej/bazowej nadal wymaga wyeksportowania poprawionego stosu źródłowego przed zapisaniem projektu. Jeśli skala robocza zmieni się po korekcji, przywróć ją do skali korekcji przed zapisaniem albo wyeksportuj poprawiony stos.
 
-**Pomoc → Wyślij opinię** otwiera lokalne logi. Kopiuj kopiuje widoczny log sesji; ZIP opinii zawiera log sesji i pełny log aplikacji oraz informacje o środowisku. Przejrzyj pakiet przed wysłaniem. Otwarcie GitHub tylko otwiera tracker. Anulowanie eksportu pozostawia pliki bez zmian; przy błędzie poprzedni plik docelowy zostaje zachowany, a ścieżka błędu jest pokazywana.
+Po wybraniu **Pomoc → Wyślij opinię** otwiera się karta **Kanały kontaktu** z dostępem do centrum konta i serwisu GitHub. Na karcie **Diagnostyka** znajdziesz **Dziennik sesji** i **Informacje o środowisku**. Przycisk **Otwórz folder logów** znajduje się na dole obok przycisku Zamknij. Kopiuj kopiuje widoczny log sesji; ZIP opinii zawiera log sesji i pełny log aplikacji oraz informacje o środowisku. Przejrzyj pakiet przed wysłaniem. Otwarcie GitHub tylko otwiera tracker. Anulowanie eksportu pozostawia pliki bez zmian; przy błędzie poprzedni plik docelowy zostaje zachowany, a ścieżka błędu jest pokazywana.
 
-Każde uruchomienie zapisuje własny rotowany log, więc równoległe zadania GUI i CLI prowadzą osobne zapisy. Identyfikatory zadań łączą parametry, czas i wyniki „ukończone/anulowane/błąd”; nieoczekiwane błędy zawierają pełny ślad stosu. ZIP opinii zawiera też bieżący raport awarii i wersje zależności. Użyj **Pomoc → Otwórz folder logów** lub ścieżki na stronie opinii. Logi rotują przy 1 MB z trzema kopiami zapasowymi na proces; nieaktywne logi sesji starsze niż 14 dni są usuwane. Dla szczegółowych logów wsparcia ustaw `OPENFOCUS_LOG_LEVEL=DEBUG` przed uruchomieniem; `OPENFOCUS_LOG_DIR` opcjonalnie wybiera inny folder logów.
+Każde uruchomienie zapisuje własny rotowany log, więc równoległe zadania GUI i CLI prowadzą osobne zapisy. Identyfikatory zadań łączą parametry, czas i wyniki „ukończone/anulowane/błąd”; nieoczekiwane błędy zawierają pełny ślad stosu. ZIP opinii zawiera też bieżący raport awarii i wersje zależności. Użyj **Pomoc → Wyślij opinię → Otwórz folder logów** lub ścieżki na stronie opinii. Logi rotują przy 1 MB z trzema kopiami zapasowymi na proces; nieaktywne logi sesji starsze niż 14 dni są usuwane. Dla szczegółowych logów wsparcia ustaw `OPENFOCUS_LOG_LEVEL=DEBUG` przed uruchomieniem; `OPENFOCUS_LOG_DIR` opcjonalnie wybiera inny folder logów.
 
 ### Ustawienia kafelków (optymalizacja pamięci)
 
-Dla dużych obrazów OpenFocus przetwarza kafelki, aby uniknąć problemów z pamięcią.
+Przetwarzanie kafelkowe jest domyślnie włączone. Komunikat pod polami opisuje działanie wybranej metody. W aplikacji komputerowej OpenFocus A, B i C przetwarzają cały obraz. Tryb samego wyrównania pomija fuzję. Również w tych trybach można ustawić rozmiar kafelka, nakładkę i próg dla kolejnej zgodnej metody. DTCWT wybiera kafelkowanie na podstawie szacowanego zużycia pamięci. Można zmienić rozmiar i nakładkę, a pole progu jest nieaktywne. Metody neuronowe mogą używać kafelków poniżej progu przy dużej liczbie klatek. Wyłączenie kafelkowania dezaktywuje wszystkie trzy pola liczbowe i zachowuje ich wartości.
 
-Otwierane przez **Ustawienia → Ustawienia zaawansowane → Wydajność**:
+Otwierane przez **Ustawienia → Ustawienia zaawansowane → Fuzja**:
 
-- **Fuzja kafelkowa dla dużych obrazów**: włącza przetwarzanie kafelkowe; po wyłączeniu parametry poniżej są ukryte
 - **Rozmiar kafelka (px)**: rozmiar każdego przetwarzanego kafelka (domyślnie 1024 px)
 - **Nakładka kafelków (px)**: nakładka między kafelkami dla bezszwowego mieszania (domyślnie 256 px, nie więcej niż połowa kafelka)
 - **Kafelkuj powyżej (px)**: rozmiar obrazu, powyżej którego włączane są kafelki (domyślnie 2048 px)
+
+Zakresy w pikselach
+
+- Rozmiar kafelka (px) — 64–16384
+- Nakładka kafelków (px) — 0–min(4096, połowa rozmiaru kafelka)
+- Kafelkuj powyżej (px) — 256–131072
 
 **Zalecenia**:
 - Mniejszy kafelek: mniejsze zużycie pamięci, wolniejsze przetwarzanie
@@ -695,8 +701,6 @@ Otwierane przez **Ustawienia → Ustawienia zaawansowane → Rejestracja**:
 - **Szerokość skalowania rejestracji (px)**: rozdzielczość wstępnego przetwarzania rejestracji
   - Domyślnie: 1024 px
   - Mniej — szybciej, więcej — dokładniej
-- **Pamięć rejestracji**: przechowuje wyniki obok stosu, aby ponowne otwarcie pomijało wyrównanie
-- **Zbieraj diagnostykę wyrównania**: ponownie oblicza wyrównanie na potrzeby raportu dla klatek
 
 ### Informacje o wydajności
 
@@ -704,19 +708,9 @@ Zobacz [PERFORMANCE.md](./PERFORMANCE.md): zmierzona przepustowość i zużycie 
 
 Panel stanu pokazuje używaną i całkowitą pamięć fizyczną, gdy system operacyjny udostępnia oba odczyty; w przeciwnym razie pokazuje `N/A`.
 
-### Ustawienia liczby wątków
-
-Sterowanie równoległym przetwarzaniem CPU:
-
-Otwierane przez **Ustawienia → Ustawienia zaawansowane → Wydajność**:
-
-- `0` wybiera automatyczne planowanie i jest domyślne dla nowych ustawień.
-- Wartości dodatnie są górnymi limitami; zapisane limity przetrwają aktualizacje.
-- Możliwości CPU, tryb zasobów i zapas pamięci mogą obniżyć współbieżność. Większa liczba wątków nie zawsze przyspiesza renderowanie.
-
 ### Tryb zasobów
 
-**Ustawienia → Ustawienia zaawansowane → Wydajność → Tryb zasobów** decyduje, jaką część maszyny może wykorzystać renderowanie. Nigdy nie zmienia obrazu po fuzji.
+**Ustawienia → Ustawienia zaawansowane → Fuzja → Tryb zasobów** decyduje, jaką część maszyny może wykorzystać renderowanie. Nigdy nie zmienia obrazu po fuzji.
 
 | Tryb | Zachowanie |
 |---|---|
@@ -728,25 +722,18 @@ Planista uwzględnia fizyczne rdzenie, powinowactwo CPU i limity oraz uruchamia 
 
 ### Akceleracja GPU
 
-StackMFF V1/V2/V3 używają ONNX Runtime. DirectML w Windows i CoreML w macOS mogą przyspieszać wnioskowanie; w przeciwnym razie używany jest CPU. Dostępność dostawcy nie dowodzi wykonania na GPU. Obsługa innych GPU wymaga weryfikacji.
+Dla StackMFF V1/V2/V3 zainstaluj zgodny pakiet w **Ustawienia → Składniki przyspieszania AI**. OpenFocus oferuje TensorRT i PyTorch CUDA w systemie Windows z kartą NVIDIA, PyTorch CUDA w systemie Linux z kartą NVIDIA oraz PyTorch MPS na Apple Silicon. Zależnie od urządzenia może użyć DirectML, CoreML lub CPU. Zobacz [wymagania GPU](GPU_SUPPORT.md).
 
-OpenFocus B może przyspieszać przetwarzanie głębi i łączenie źródeł na zgodnym GPU OpenCL; zależnie od budżetu pamięci może używać ograniczonych etapów GPU lub wrócić do CPU. Po włączeniu akceleracji GPU OpenFocus C może wykonywać fuzję piramidalną całego obrazu na zgodnym GPU OpenCL; przy braku pamięci lub problemach z urządzeniem albo sterownikiem wraca do CPU. Eksport mapy głębi C używa CPU. OpenFocus A i wyrównanie używają CPU. Zobacz [obsługę GPU](GPU_SUPPORT.md).
+OpenFocus B może przyspieszać przetwarzanie głębi i łączenie źródeł na zgodnym GPU OpenCL; zależnie od budżetu pamięci może używać ograniczonych etapów GPU lub wrócić do CPU. Po włączeniu akceleracji GPU OpenFocus A, OpenFocus C, Filtr sterowany, GFG-FGF, DCT i DTCWT mogą wykonywać fuzję całego obrazu na zgodnym GPU OpenCL; przy braku pamięci lub problemach z urządzeniem albo sterownikiem wracają do CPU. Eksport mapy głębi C i wyrównanie używają CPU. Zobacz [obsługę GPU](GPU_SUPPORT.md).
 
 - Przełącznik znajduje się w **Ustawienia → Akceleracja GPU**
 - Odznaczenie wymusza obsługiwane metody fuzji na CPU — przydatne przy problemach ze sterownikami GPU
 - Panel stanu pokazuje `N/A`, gdy akcelerator nie jest używany lub niedostępny, oraz `CPU*`, gdy akcelerator istnieje, ale wybrana metoda działa tylko na CPU
 - Wybór działa przy następnym renderowaniu i jest pamiętany
 
-### Rozmiar partii AI
-
-Otwierany przez **Ustawienia → Ustawienia zaawansowane → AI**:
-
-- Zapisany limit partii domyślnie wynosi 2; bieżąca polityka wykonania ogranicza faktyczne wnioskowanie do jednego kafelka na wywołanie na każdym urządzeniu.
-- Zwiększenie limitu nie włącza niezweryfikowanego przetwarzania wsadowego na GPU ani nie zmniejsza przestrzennego kafelka.
-
 ### Motywy
 
-Dostępne są dwa motywy interfejsu: **Jasny (domyślnie)** i **Ciemny**. Przełączanie — **Ustawienia → Motyw**; wybór stosuje się natychmiast (pasek tytułu Windows też się zmienia) i jest pamiętany. Przy pierwszym uruchomieniu motyw wybiera się w oknie powitalnym; zapisany wybór zawsze wygrywa.
+Dostępne są motywy **Jasny (domyślnie)**, **Ciemny** i **Neutralna szarość**. Neutralna szarość używa średnioszarego tła do oglądania, porównywania i retuszu obrazów. Przełączanie — **Ustawienia → Motyw**; wybór stosuje się natychmiast (pasek tytułu Windows też się zmienia) i jest pamiętany. Przy pierwszym uruchomieniu motyw wybiera się w oknie powitalnym; zapisany wybór zawsze wygrywa.
 
 ### Tryb przenośny
 
@@ -766,11 +753,11 @@ Zdjęcia iPhone'a wczytują się bezpośrednio. Wymagany jest pakiet `pillow-hei
 
 ### Pamięć rejestracji
 
-OpenFocus może przechowywać wyniki rejestracji w folderze `.openfocus_cache` obok stosu źródłowego. Ponowne otwarcie tego samego stosu (bez zmian plików) całkowicie pomija wyrównanie. Przełącznik — **Ustawienia → Ustawienia zaawansowane → Rejestracja → Pamięć rejestracji**; nieaktualne wpisy są automatycznie zastępowane.
+OpenFocus zapisuje wyniki rejestracji w pamięci podręcznej użytkownika. Po ponownym otwarciu niezmienionego stosu z tymi samymi ustawieniami OpenFocus używa zapisanego wyniku. Wszystkie stosy korzystają ze wspólnego limitu 2 GiB. Gdy potrzeba miejsca, usuwane są najdawniej używane wpisy. Starsze foldery `.openfocus_cache` obok stosów źródłowych pozostają na miejscu.
 
 ### Zapamiętywane ustawienia
 
-Wszystko poniższe automatycznie przetrwa restart aplikacji: liczba wątków, tryb zasobów, parametry kafelków, szerokość skalowania rejestracji, rozmiar partii fuzji AI (StackMFF V3), przełącznik akceleracji GPU, przełączniki pamięci rejestracji i zbierania diagnostyki wyrównania, motyw, język interfejsu, rozmiar okna i układ paneli, format eksportu przez przeciąganie, opcje jasności, wygładzania i promienia dla każdej metody oraz ostatnio otwarte stosy. Okna ustawień zapisują się w chwili potwierdzenia; wszystko jest też zapisywane przy zamykaniu aplikacji. Preferencje są przechowywane dla użytkownika w `OpenFocus/OpenFocus.ini` (format INI QSettings).
+Wszystko poniższe automatycznie przetrwa restart aplikacji: tryb zasobów, parametry kafelków, szerokość skalowania rejestracji, przełącznik akceleracji GPU, motyw, język interfejsu, rozmiar okna i układ paneli, format eksportu przez przeciąganie, opcje jasności, wygładzania i promienia dla każdej metody oraz ostatnio otwarte stosy. Okna ustawień zapisują się w chwili potwierdzenia; wszystko jest też zapisywane przy zamykaniu aplikacji. Preferencje są przechowywane dla użytkownika w `OpenFocus/OpenFocus.ini` (format INI QSettings).
 
 ### Język interfejsu
 
@@ -816,6 +803,12 @@ Okno pokazuje postęp w czasie rzeczywistym. Przetwarzanie można anulować w do
 - PNG/TIFF zachowują dane 16-bitowe; jawne wybranie JPG/BMP konwertuje je do 8 bitów.
 - Anulowanie czeka na zatrzymanie wątku roboczego. Zatwierdzone pliki pozostają dostępne; zadania częściowe, nieudane, anulowane i nieuruchomione są liczone osobno.
 
+### Wsadowa konwersja obrazów
+
+Otwórz konwerter obrazów z menu Narzędzia i dodaj pliki. Domyślnie obok każdego folderu źródłowego powstaje folder wynikowy z przyrostkiem `_converted`. Możesz zmienić przyrostek albo wybrać nazwany podfolder, folder źródłowy lub wspólny folder docelowy. Przykładowa ścieżka dotyczy zaznaczonego wiersza.
+
+Zachowaj rozmiar oryginalny, ogranicz dłuższy bok do 2048, 4096 lub 8192 pikseli albo podaj skalę procentową. Małe obrazy nie są powiększane. DNG zachowuje wymiary matrycy. Pliki w formacie docelowym, których nie trzeba zmniejszać, są liczone jako pominięte. Zaznaczone wiersze można usunąć z kolejki za pomocą menu podręcznego albo klawiszy Delete i Backspace.
+
 ---
 
 ## 13. Eksport wyników
@@ -827,7 +820,7 @@ Okno pokazuje postęp w czasie rzeczywistym. Przetwarzanie można anulować w do
 3. Wybierz format i miejsce
 4. Kliknij Zapisz
 
-W **Ustawienia → Ustawienia zaawansowane → Nazwy wyników** opcjonalny prefiks nazwy pomaga identyfikować nowe wyniki. Przykład aktualizuje się podczas wpisywania; dozwolone jest do 40 liter, cyfr, podkreśleń lub łączników. Pozostaw puste, aby zachować oryginalne nazewnictwo. Potwierdź **OK**, aby zapamiętać prefiks, albo anuluj, aby odrzucić zmianę. Prefiks staje się częścią nowych nazw na liście wyników i sugerowanych nazw eksportu; istniejące wyniki zachowują swoje nazwy. Nazwę nadal można zmienić w oknie zapisu. Ustawienie nie zmienia nazw plików źródłowych ani nazw wyjściowych wsadu.
+W **Ustawienia → Ustawienia zaawansowane → Ogólne → Nazwy wyników** opcjonalny prefiks nazwy pomaga identyfikować nowe wyniki. Przykład aktualizuje się podczas wpisywania; dozwolone jest do 40 liter, cyfr, podkreśleń lub łączników. Pozostaw puste, aby zachować oryginalne nazewnictwo. Potwierdź **OK**, aby zapamiętać prefiks, albo anuluj, aby odrzucić zmianę. Prefiks staje się częścią nowych nazw na liście wyników i sugerowanych nazw eksportu; istniejące wyniki zachowują swoje nazwy. Nazwę nadal można zmienić w oknie zapisu. Ustawienie nie zmienia nazw plików źródłowych ani nazw wyjściowych wsadu.
 
 ### Udostępnianie wyniku
 
@@ -878,7 +871,7 @@ openfocus describe                      # JSON: metody, parametry, możliwości,
 openfocus gui [--control] [--socket NAME] [paths…]   # uruchom aplikację desktopową
 openfocus ctl <command> [flags]          # steruj działającym oknem (patrz AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [processing flags]
-openfocus recipe run FILE [--dry-run]    # odtwórz zapisany przepis headless
+openfocus recipe run FILE [--dry-run] [--experimental]  # odtwórz zapisany przepis headless
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -887,20 +880,20 @@ openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 Ze środowiska Pythona (lub obok gotowego pliku wykonywalnego):
 
 ```bash
-# Fuzja folderu metodą domyślną (StackMFF V3)
+# Fuzja folderu metodą domyślną (OpenFocus B)
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT z rejestracją ECC, 8 wątków
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 wymuszony na CPU z niestandardowym rozmiarem kafelka
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Jawna lista plików; pliki wideo są również akceptowane jako wejście
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Jeden wielostronicowy stos Z TIFF z paskiem skali kalibrowanym z metadanych
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Sprawdź sąsiednie podobne klatki bez fuzji i zmiany wejścia
 python main.py -i ./stack_folder --suggest-duplicates
@@ -917,8 +910,9 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--output, -o` | Ścieżka obrazu wyjściowego (rozszerzenie określa format) |
 | `--output-dir, -d` | Tryb wsadowy: łączy każdy folder wejściowy, zapisując `<folder>.png` dla każdego stosu |
 | `--resume` | Pomija folder tylko wtedy, gdy wszystkie żądane wyniki są niepustymi zwykłymi plikami; nie sprawdza treści ani parametrów |
-| `--config FILE` | Tryb wsadowy: JSON z nadpisaniami dla każdego folderu, np. `{"stackA": {"method": "dct"}}` |
-| `--method, -m` | `stackmffv3` (domyślnie), `stackmffv2`, `stackmff`, `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf` |
+| `--config FILE` | Tryb wsadowy: JSON z nadpisaniami dla każdego folderu, np. `{"stackA": {"method": "openfocus_a"}}` |
+| `--method, -m` | Stabilne metody to `openfocus_a`, `openfocus_b` (domyślna) i `openfocus_c`. Eksperymentalne metody to `guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2` i `stackmffv3` |
+| `--experimental` | Zezwala na użycie eksperymentalnych metod fuzji w tym uruchomieniu CLI |
 | `--param KEY=JSON_VALUE` | Ustawia dowolny parametr fuzji; można powtarzać, nadpisuje starsze flagi |
 | `--align, -a` | `none` (domyślnie), `homography`, `ecc`, `both`, `openfocus` |
 | `--align-param KEY=JSON_VALUE` | Ustawia dowolny parametr rejestracji; można powtarzać |
@@ -929,7 +923,6 @@ Na przykład dodaj `--align openfocus --alignment-report alignment.json` do poje
 | `--sort` | Kolejność klatek dla `openfocus_a/b/c`: `asc` (domyślnie, kolejność plików), `desc` (odwrócenie przemiatania od dalekich do bliskich), `off` |
 | `--frame-order` | Folder na wejściu: `auto` (domyślnie) porządkuje klatki od bliskich do dalekich według kroków ostrości z EXIF, gdy mają je wszystkie klatki (bracketing ostrości OM SYSTEM zaczyna się w połowie głębi), w przeciwnym razie według nazwy; `name` zawsze według nazwy pliku. Pliki podane jawnie zachowują swoją kolejność |
 | `--sharpen-output` | Stosuje łagodne wyostrzanie do wyniku fuzji (domyślnie wyłączone) |
-| `--dust-map WHITE` | Korekcja pola płaskiego (mapa pyłu) z rozogniskowanego zdjęcia białego pola |
 | `--defect-mask-path MASK` | Maska defektów we współrzędnych matrycy, naprawiana przed rejestracją |
 | `--sensor-denoise` | Ostrożne odszumianie matrycy przed rejestracją |
 | `--kernel, -k` | Tylko dla metod deklarujących `kernel_size` |
@@ -966,10 +959,12 @@ Przepis to przenośny plik JSON opcji przetwarzania CLI ze ścieżkami względny
 
 ```bash
 openfocus recipe create line.json --input ./stack --output ./out/fused.tif \
-  --method dtcwt --align ecc --threads 8
+  --method openfocus_b --align ecc --threads 8
 openfocus recipe run line.json
 openfocus recipe run line.json --dry-run
 ```
+
+Przepis zapisuje wybraną metodę fuzji. Jeśli jest ona eksperymentalna, dodaj `--experimental` do każdego wywołania `openfocus recipe run`, również podczas próby z `--dry-run`.
 
 `recipe create --project project.ofproj --input ./stack --output ./out/fused.tif` przechwytuje ustawienia przetwarzania projektu dla jawnie wybranych wejść; źródła projektu mogą być przeniesione. Przepisy odrzucają tymczasowe opcje, takie jak `--dry-run`, `--resume`, `--json`, `--json-progress` i `--config`, oraz wymagają, aby wyjście znajdowało się poza każdym folderem wejściowym (i różniło się od jawnie wybranego wejścia). Maska defektów jest przechowywana ścieżką względną z odciskiem SHA-256, więc brakująca lub zmieniona maska powoduje błąd uruchomienia. Edycji źródeł projektu (obrót, odbicie, pole płaskie) nie można przechwycić; najpierw wyeksportuj poprawiony stos.
 
@@ -998,7 +993,7 @@ Ten sam interfejs headless jest dostępny bez importowania PyQt:
 ```python
 from core.recipes import capture_project_recipe, capture_recipe, load_recipe, save_recipe, run_recipe
 
-capture_recipe("workflow.json", ["-i", "stack_folder", "-o", "result/fused.png", "-m", "dct"])
+capture_recipe("workflow.json", ["-i", "stack_folder", "-o", "result/fused.png", "-m", "openfocus_b"])
 capture_project_recipe("from-project.json", "session.ofproj",
                        ["-i", "new_stack", "-o", "result/fused.png"])
 recipe = load_recipe("workflow.json")  # zweryfikowany słownik ze ścieżkami względnymi
@@ -1091,18 +1086,17 @@ Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd uży
 - Upewnij się, że obrazy są prawidłowo wyrównane przed fuzją
 - Wypróbuj inną metodę fuzji
 - Zwiększ rozmiar jądra dla gładszego wyniku
-- Sprawdź **Ustawienia → Ustawienia zaawansowane → Rejestracja → Diagnostyka wyrównania**, włączając zbieranie w **Ustawienia → Ustawienia zaawansowane → Rejestracja**
 
 #### AI niedostępne
 
 - Włącz i zatwierdź funkcje eksperymentalne w ustawieniach zaawansowanych; bez tego metody AI w aplikacji są wyłączone. Środowisko i model to osobne wymagania.
 - Sprawdź ONNX Runtime i dołączony model.
-- Sprawdź przez **Pomoc → Informacje o środowisku**
+- Sprawdź przez **Pomoc → Wyślij opinię → Diagnostyka → Informacje o środowisku**
 - StackMFF V3 nie wymaga torchvision
 
 #### Błędy braku pamięci
 
-- Włącz przetwarzanie kafelkowe w **Ustawienia → Ustawienia zaawansowane → Wydajność**
+- Włącz przetwarzanie kafelkowe w **Ustawienia → Ustawienia zaawansowane → Fuzja**
 - Zmniejsz rozmiar kafelka
 - Używaj mniejszych jąder
 - Zmniejsz rozdzielczość obrazów
@@ -1110,20 +1104,18 @@ Kody wyjścia: `0` — sukces, `1` — błąd przetwarzania, `2` — błąd uży
 
 #### Rejestracja nie udaje się
 
-- Użyj **OpenFocus (szybko)** dla ograniczonego ruchu sztywnego albo włącz **Zatrzymaj przy odrzuconej klatce**, aby zakończyć się błędem wcześniej, zamiast akceptować niewyrównane klatki
+- Jeśli rejestracja odrzuci klatkę, aplikacja komputerowa zatrzyma przetwarzanie danego stosu. Przed kolejną próbą sprawdź klatkę wskazaną w komunikacie błędu i podaną przyczynę.
 - Zmniejsz szerokość skalowania w **Ustawienia → Ustawienia zaawansowane → Rejestracja**
 - Upewnij się, że obrazy mają wystarczający kontrast i charakterystyczne punkty
-- Włącz **Zbieraj diagnostykę wyrównania**, wyrenderuj ponownie i otwórz **Ustawienia → Ustawienia zaawansowane → Rejestracja → Diagnostyka wyrównania**, aby zobaczyć problematyczne klatki
 
 #### Wolne przetwarzanie
 
-- Pozostaw wątki w trybie automatycznym (`0`): dostępna moc CPU, tryb zasobów i zapas pamięci już ograniczają współbieżność
 - Do nienadzorowanego przetwarzania wsadowego wybierz tryb zasobów „Maksymalny” albo użyj filtra sterowanego / GFG-FGF zamiast metody AI
 - Zmniejsz rozdzielczość obrazów lub używaj **Szybkiego podglądu**, gdy dobierasz parametry
 
 #### Ostrzeżenie Windows SmartScreen przy pierwszym uruchomieniu
 
-Podpis kompilacji Windows zależy od konkretnego wydania (zobacz informacje o wydaniu); podpis nie jest gwarantowany. Pobieraj je z **https://openfocus.top**, a nie z lustra strony trzeciej. Jeśli SmartScreen ostrzega, kliknij **Więcej informacji → Uruchom mimo to**. Pierwsze uruchomienie po rozpakowaniu może potrwać 30–60 sekund.
+Obecne wersje dla systemu Windows nie są podpisane cyfrowo. Pobierz plik z oficjalnej strony OpenFocus (**https://openfocus.top**). Przed uruchomieniem porównaj sumę SHA-256 pobranego pliku z wartością w manifeście wydania. Jeśli SmartScreen ostrzega, kliknij **Więcej informacji → Uruchom mimo to**. Pierwsze uruchomienie po rozpakowaniu może potrwać 30–60 sekund.
 
 #### macOS zgłasza, że aplikacji „nie można otworzyć” lub że „jest uszkodzona”
 
@@ -1139,10 +1131,10 @@ albo kliknij aplikację prawym przyciskiem i wybierz **Otwórz**. Opublikowane k
 
 ### Uzyskiwanie pomocy
 
-1. **Informacje o środowisku**: otwórz **Pomoc → Informacje o środowisku**, aby sprawdzić instalację
-2. **Wyślij opinię**: **Pomoc → Wyślij opinię…** otwiera lokalne logi; skopiuj log lub wyeksportuj ZIP i dołącz go do zgłoszenia
+1. **Informacje o środowisku**: otwórz **Pomoc → Wyślij opinię → Diagnostyka → Informacje o środowisku**, aby sprawdzić instalację
+2. **Wyślij opinię**: **Pomoc → Wyślij opinię → Diagnostyka** otwiera lokalne logi; skopiuj log lub wyeksportuj ZIP i dołącz go do zgłoszenia
 3. **Kontakt**: otwórz **Pomoc → Kontakt**, aby uzyskać informacje o wsparciu
-4. **Logi**: **Pomoc → Otwórz folder logów**
+4. **Logi**: **Pomoc → Wyślij opinię → Otwórz folder logów**
 
 ---
 

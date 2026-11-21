@@ -46,6 +46,18 @@ RAW_FORMATS = {'.3fr', '.arw', '.bay', '.cap', '.cr2', '.cr3', '.crw',
 from core.frame_storage import store_frame
 
 
+_JPEG_EXTENSIONS = ('.jpg', '.jpeg', '.jpe', '.jfif')
+
+
+def is_scaled_jpeg(path, scale_factor):
+    """Whether ``decode_image`` reduces this file by ``scale_factor`` itself.
+
+    A caller that resizes after decoding must skip a JPEG that was loaded at
+    a reducing scale, exactly as it skips a RAW developed at the load scale.
+    """
+    return 0 < scale_factor < 1 and os.path.splitext(path)[1].lower() in _JPEG_EXTENSIONS
+
+
 def _is_dng_tiff(path):
     """DNG may have a TIFF extension and a thumbnail as its first IFD."""
     if os.path.splitext(path)[1].lower() not in ('.tif', '.tiff'):
@@ -201,6 +213,26 @@ def validate_pil_header(path, image):
         _cmyk_profiles(path, image.info.get('icc_profile', b''))
 
 
+def tiff_palette_bgr(page, indices):
+    """Look up BGR samples at the output depth used by this indexed page."""
+    colors = page.colormap[::-1].T
+    # Some writers store 8-bit values in the TIFF's 16-bit ColorMap slots.
+    if indices.dtype == np.uint8:
+        colors = (colors if colors.max() < 256 else colors >> 8).astype(np.uint8)
+    return np.ascontiguousarray(colors)[indices]
+
+
+def decode_indexed_tiff_page(page):
+    indices = page.asarray(out='memmap' if page.is_memmappable else None, maxworkers=1)
+    return _orient_tiff_pixels(page, tiff_palette_bgr(page, indices))
+
+
+def _orient_tiff_pixels(page, image):
+    tag = page.tags.get('Orientation')
+    transform = _EXIF_TRANSFORMS.get(int(tag.value)) if tag is not None else None
+    return np.ascontiguousarray(transform(image)) if transform is not None else image
+
+
 def validate_tiff_page(path, page):
     """Validate display TIFF metadata only; return whether samples are CMYK.
 
@@ -210,6 +242,13 @@ def validate_tiff_page(path, page):
     conversion is attempted because Pillow/ImageCms would discard precision.
     """
     _validate_depth(path, page.dtype)
+    if int(page.photometric) == 3:
+        cmap = page.tags.get('ColorMap')
+        if (page.samplesperpixel != 1 or not 1 <= page.bitspersample <= 16
+                or cmap is None or cmap.count != 3 * (1 << page.bitspersample)
+                or int(cmap.dtype) != 3):
+            raise UnsupportedColorSpace(f"Invalid indexed TIFF color map or sample layout: {path}")
+        return False
     if int(page.photometric) != 5:
         return False
     import tifffile
@@ -249,6 +288,8 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
         else:
             page = tif.pages[page_index]
         cmyk = validate_tiff_page(path, page)
+        if int(page.photometric) == 3:
+            return decode_indexed_tiff_page(page)
         if cmyk:
             samples = page.asarray()
             _validate_depth(path, samples.dtype)
@@ -257,9 +298,7 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
             profile_tag = page.tags.get('InterColorProfile')
             image = cmyk_to_bgr(PILImage.fromarray(samples, 'CMYK'), path,
                                 profile_tag.value if profile_tag is not None else b'')
-            orientation_tag = page.tags.get('Orientation')
-            transform = _EXIF_TRANSFORMS.get(int(orientation_tag.value) if orientation_tag is not None else 1)
-            return np.ascontiguousarray(transform(image)) if transform is not None else image
+            return _orient_tiff_pixels(page, image)
     data = np.memmap(path, dtype=np.uint8, mode='r')
     success, decoded = cv2.imdecodemulti(data, flags=cv2.IMREAD_UNCHANGED,
                                         range=(page_index, page_index + 1))
@@ -368,22 +407,29 @@ def _read_raw(path: str, scale_factor: float = 1.0) -> Optional[np.ndarray]:
 
 
 def decode_image(path: str, *, allow_transparent_png: bool = False,
-                 preserve_grayscale: bool = False, scale_factor: float = 1.0) -> Optional[np.ndarray]:
+                 preserve_grayscale: bool = False, scale_factor: float = 1.0,
+                 area_resizer=None) -> Optional[np.ndarray]:
     """Decode an oriented still image, rejecting unsupported transparency.
 
-    ``scale_factor`` applies to RAW decoding only; other callers resize after
-    orientation and transparency handling.
+    Only RAW and JPEG apply ``scale_factor``; ``is_scaled_jpeg`` tells a
+    caller that the JPEG it gets back needs no further resize. A JPEG is
+    decoded at full size, then area-resized (by ``area_resizer`` when it
+    accepts the image) before its EXIF orientation, so the rotation moves
+    only the reduced pixels. Other formats are returned at full size.
     """
     ext = os.path.splitext(path)[1].lower()
     if is_raw_source(path):
         return _read_raw(path, scale_factor)
     if ext in ('.tif', '.tiff'):
         return decode_tiff_page(path, preserve_grayscale=preserve_grayscale)
+    # _downscale_page leaves the image alone at a scale of one.
+    jpeg_scale = scale_factor if is_scaled_jpeg(path, scale_factor) else 1.0
     if PIL_AVAILABLE:
         with PILImage.open(path) as header:
             validate_pil_header(path, header)
             if header.mode == 'CMYK':
                 image = cmyk_to_bgr(header, path, header.info.get('icc_profile', b''))
+                image = _downscale_page(image, jpeg_scale, area_resizer)
                 return apply_exif_orientation(path, image)
     # IMREAD_IGNORE_ORIENTATION is required: modern OpenCV already rotates by
     # the EXIF Orientation tag itself, so letting apply_exif_orientation run
@@ -418,6 +464,7 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
         img = _read_via_pil(path)
     if img is not None:
         _validate_depth(path, img.dtype)
+        img = _downscale_page(img, jpeg_scale, area_resizer)
         img = apply_exif_orientation(path, img)
     return img
 
@@ -426,16 +473,28 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
 _RAW_TIFF_MAGICS = {b"II*\x00", b"MM\x00*", b"IIRO", b"IIRS", b"MMOR", b"IIU\x00"}
 
 
-class _RawExifReader:
-    """Seek within a RAW while bounding the total metadata read by Pillow."""
+_EXIF_SNAPSHOT_LIMIT = 16 * 1024 * 1024
+
+
+class _ExifReadLimit(Exception):
+    """Stop Pillow's IFD parser, which treats OSError as a missing tag."""
+
+    def __init__(self, size):
+        self.size = size
+
+
+class _BoundedExifReader:
+    """Bound the total metadata read while Pillow traverses an IFD and its children."""
 
     def __init__(self, stream):
         self.stream = stream
-        self.remaining = 16 * 1024 * 1024
+        self.remaining = _EXIF_SNAPSHOT_LIMIT
 
     def read(self, size=-1):
-        if size < 0 or size > self.remaining:
-            raise OSError("RAW EXIF metadata exceeds the read limit")
+        if size < 0:
+            raise OSError('Unbounded EXIF read')
+        if size > self.remaining:
+            raise _ExifReadLimit(_EXIF_SNAPSHOT_LIMIT - self.remaining + size)
         data = self.stream.read(size)
         self.remaining -= len(data)
         return data
@@ -462,7 +521,7 @@ def _read_raw_exif_bytes(path: str) -> bytes:
             # Pillow use a standard header without copying or changing the file.
             src = PILImage.Exif()
             src.endian = "<" if magic[:2] == b"II" else ">"
-            src.load_from_fp(_RawExifReader(fh), int.from_bytes(
+            src.load_from_fp(_BoundedExifReader(fh), int.from_bytes(
                 offset, "little" if src.endian == "<" else "big"))
             exif = _sanitize_exif(src)
             return exif.tobytes() if exif is not None else b""
@@ -485,6 +544,19 @@ def _exif_bytes_from_image(image) -> bytes:
         return b''
 
 
+def _tiff_page_exif(tif, page, path):
+    # Read the IFD directly even when Pillow has no decoder for the pixel layout.
+    src = PILImage.Exif()
+    src.endian = tif.byteorder
+    src.bigtiff = tif.is_bigtiff
+    try:
+        src.load_from_fp(_BoundedExifReader(tif.filehandle), page.offset)
+        clean = _sanitize_exif(src)
+    except _ExifReadLimit as exc:
+        raise SourceExifTooLarge(path, exc.size, _EXIF_SNAPSHOT_LIMIT) from exc
+    return clean.tobytes() if clean is not None else b''
+
+
 def _read_exif_bytes(path: str, page: Optional[int] = None) -> bytes:
     """Read export-safe metadata from one physical page."""
     if not PIL_AVAILABLE:
@@ -493,17 +565,19 @@ def _read_exif_bytes(path: str, page: Optional[int] = None) -> bytes:
         ext = os.path.splitext(path)[1].lower()
         if is_raw_source(path):
             return _read_raw_exif_bytes(path)
-        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.tif', '.tiff', '.png', '.webp'):
+        if ext in ('.tif', '.tiff'):
+            import tifffile
+            with tifffile.TiffFile(path) as tif:
+                entry = next(tiff_source_pages(tif))[1] if page is None else tif.pages[page]
+                return _tiff_page_exif(tif, entry, path)
+        if ext not in ('.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.webp'):
             return b''
         with PILImage.open(path) as image:
-            if page is not None and image.format == 'TIFF':
-                image.seek(page)
             return _exif_bytes_from_image(image)
+    except SourceExifTooLarge:
+        raise
     except Exception:
         return b''
-
-
-_EXIF_SNAPSHOT_LIMIT = 16 * 1024 * 1024
 
 
 def _read_safe_exif(path: str, page: Optional[int] = None) -> bytes:
@@ -528,17 +602,15 @@ def _safe_exif_bytes(path, raw):
     return data
 
 
-def _icc_profile_from_image(path, image):
-    """Validate the RGB profile on the currently selected image page."""
+def _display_profile(path, profile, cmyk):
+    """Validate an embedded profile against the output pixel representation."""
     from io import BytesIO
     try:
         from PIL import ImageCms
     except ImportError:
         return b''
     try:
-        profile = (image.tag_v2.get(34675, b'') if image.format == 'TIFF'
-                   else image.info.get('icc_profile', b''))
-        if image.mode == 'CMYK':
+        if cmyk:
             from utils.image_utils import srgb_icc_profile
             _cmyk_profiles(path, profile)
             return srgb_icc_profile()
@@ -554,6 +626,11 @@ def _icc_profile_from_image(path, image):
         return b''
 
 
+def _tiff_page_profile(path, page):
+    tag = page.tags.get('InterColorProfile')
+    return _display_profile(path, tag.value if tag is not None else b'', int(page.photometric) == 5)
+
+
 def _read_icc_profile(path: str, page: Optional[int] = None) -> bytes:
     """Read one physical page, or the common profile of a TIFF container."""
     if not PIL_AVAILABLE:
@@ -562,18 +639,15 @@ def _read_icc_profile(path: str, page: Optional[int] = None) -> bytes:
         from utils.image_utils import srgb_icc_profile
         return srgb_icc_profile()
     try:
+        if os.path.splitext(path)[1].lower() in ('.tif', '.tiff'):
+            import tifffile
+            with tifffile.TiffFile(path) as tif:
+                if page is not None:
+                    return _tiff_page_profile(path, tif.pages[page])
+                return common_profile_values(_tiff_page_profile(path, entry)
+                                             for _, entry in tiff_source_pages(tif))
         with PILImage.open(path) as image:
-            if image.format == 'TIFF' and page is None:
-                import tifffile
-                with tifffile.TiffFile(path) as tif:
-                    pages = tuple(index for index, _ in tiff_source_pages(tif))
-            else:
-                pages = (page if page is not None else 0,)
-            profiles = []
-            for index in pages:
-                image.seek(index)
-                profiles.append(_icc_profile_from_image(path, image))
-            return common_profile_values(profiles)
+            return _display_profile(path, image.info.get('icc_profile', b''), image.mode == 'CMYK')
     except UnsupportedColorSpace:
         raise
     except (OSError, ValueError, TypeError, EOFError):
@@ -586,17 +660,18 @@ def _frame_metadata(path, frames, should_cancel):
         exif = _read_safe_exif(path)
         profile = _read_icc_profile(path)
         return [(exif, profile) for _ in frames]
+    import tifffile
     result = []
     try:
-        with PILImage.open(path) as image:
+        with tifffile.TiffFile(path) as tif:
             for frame in frames:
                 if should_cancel():
                     raise _DecodeCancelled()
                 try:
-                    image.seek(frame.page)
-                    raw = _exif_bytes_from_image(image)
-                    profile = _icc_profile_from_image(path, image)
-                except UnsupportedColorSpace:
+                    page = tif.pages[frame.page]
+                    raw = _tiff_page_exif(tif, page, path)
+                    profile = _tiff_page_profile(path, page)
+                except (SourceExifTooLarge, UnsupportedColorSpace):
                     raise
                 except (OSError, ValueError, TypeError, EOFError):
                     raw, profile = b'', b''
@@ -637,15 +712,31 @@ def stack_icc_profile(window, indices=None) -> bytes:
     return common_profile_values(profiles[i] for i in selected)
 
 
+def _quarter_turn(image, turns):
+    """Rotate a quarter turn: ``turns`` is 1 (counter-clockwise) or -1.
+
+    Callers copy the upright pixels into a contiguous array. np.rot90 returns
+    a view, and copying it walks a whole image column for every output row.
+    OpenCV writes the same pixels in blocks. It drops a single-channel third
+    axis, so that layout and unusual dtypes keep the NumPy view.
+    """
+    supported_layout = image.ndim == 2 or (image.ndim == 3 and image.shape[2] in (3, 4))
+    if (supported_layout and image.size and image.flags.c_contiguous
+            and image.dtype in (np.uint8, np.uint16)):
+        code = cv2.ROTATE_90_CLOCKWISE if turns == -1 else cv2.ROTATE_90_COUNTERCLOCKWISE
+        return cv2.rotate(image, code)
+    return np.rot90(image, turns)
+
+
 # EXIF Orientation tag values that need a pixel transform (1 = already OK).
 _EXIF_TRANSFORMS = {
     2: lambda a: a[:, ::-1],                       # mirror horizontal
     3: lambda a: np.rot90(a, 2),                   # rotate 180
     4: lambda a: a[::-1, :],                       # mirror vertical
     5: lambda a: np.rot90(a[:, ::-1], 1),          # transpose
-    6: lambda a: np.rot90(a, -1),                  # rotate 90 CW
+    6: lambda a: _quarter_turn(a, -1),             # rotate 90 CW
     7: lambda a: np.rot90(a[::-1, :], 1),          # anti-transpose
-    8: lambda a: np.rot90(a, 1),                   # rotate 90 CCW
+    8: lambda a: _quarter_turn(a, 1),              # rotate 90 CCW
 }
 
 
@@ -800,8 +891,9 @@ def _decode_one_source(path: str, scale_factor: float,
         pages = _read_tiff_pages(path, scale_factor, should_cancel)
         if pages is not None:
             return DecodedSource(path, pages)
-        if is_raw_source(path):
-            image = _read_raw(path, scale_factor)
+        if is_raw_source(path) or is_scaled_jpeg(path, scale_factor):
+            # decode_image applies the load scale to these formats itself.
+            image = decode_image(path, scale_factor=scale_factor)
             if image is None:
                 return DecodedSource(path, error=ValueError("decode failed"))
             return DecodedSource(path, [image])
@@ -822,11 +914,17 @@ class _DecodeCancelled(Exception):
     """Internal marker: a cancelled decode is not a failed file."""
 
 
-def _downscale_page(image: np.ndarray, scale_factor: float) -> np.ndarray:
+def _downscale_page(image: np.ndarray, scale_factor: float, area_resizer=None) -> np.ndarray:
+    """Area-resize by a reducing scale; ``area_resizer`` may decline with None."""
     if scale_factor != 1.0 and 0 < scale_factor < 1.0:
         width = max(1, int(image.shape[1] * scale_factor))
         height = max(1, int(image.shape[0] * scale_factor))
-        return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+        target = (width, height)
+        if area_resizer is not None:
+            resized = area_resizer.resize(image, target)
+            if resized is not None:
+                return resized
+        return cv2.resize(image, target, interpolation=cv2.INTER_AREA)
     return image
 
 
@@ -1162,61 +1260,74 @@ class ImageStackLoader:
         return result
 
     def load_from_video(self, video_path: str, scale_factor: float = 1.0) -> Tuple[bool, str, List[np.ndarray], List[str]]:
+        loaded_images = []
+
+        def append_frame(frame):
+            loaded_images.append(store_frame(frame))
+
+        ok, message = self._decode_video(video_path, scale_factor, append_frame)
+        if not ok:
+            return False, message, [], []
+        filenames = self._set_video_frames(video_path, loaded_images)
+        return True, message, loaded_images, filenames
+
+    def _decode_video(self, video_path, scale_factor, append_frame):
         if not os.path.isfile(video_path):
-            return False, "Video file does not exist", [], []
+            return False, "Video file does not exist"
 
         ext = os.path.splitext(video_path)[1].lower()
         if ext not in self.SUPPORTED_VIDEO_FORMATS:
-            return False, f"Unsupported video format: {ext}", [], []
+            return False, f"Unsupported video format: {ext}"
 
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return False, "Failed to open video file", [], []
-
-        loaded_images = []
-        filenames = []
         frame_index = 0
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
 
         try:
+            if not cap.isOpened():
+                return False, "Failed to open video file"
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
             while True:
                 if self.should_cancel():
-                    return False, 'CANCELLED', [], []
+                    return False, 'CANCELLED'
                 ret, frame = cap.read()
                 if not ret:
                     break
 
-                frame = _downscale_page(frame, scale_factor)
-
-                loaded_images.append(store_frame(frame))
-                filenames.append(f"{video_name}_frame_{frame_index:04d}.png")
+                append_frame(_downscale_page(frame, scale_factor))
                 frame_index += 1
         finally:
             cap.release()
 
         if self.should_cancel():
-            return False, 'CANCELLED', [], []
+            return False, 'CANCELLED'
 
-        if not loaded_images:
-            return False, "No frames could be extracted from the video", [], []
+        if not frame_index:
+            return False, "No frames could be extracted from the video"
+
+        message = f"Loaded {frame_index} frame(s) from video"
+        if total_frames > 0 and frame_index < total_frames:
+            message += f" (expected: {total_frames})"
+        return True, message
+
+    def _set_video_frames(self, video_path, loaded_images):
+        frame_count = len(loaded_images)
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        filenames = [f"{video_name}_frame_{index:04d}.png" for index in range(frame_count)]
+        source_paths = [video_path] * frame_count
+        empty_metadata = (b"",) * frame_count
 
         self.images = loaded_images
-        self.image_paths = [video_path] * len(loaded_images)
+        self.image_paths = source_paths
         self.source_exif = b""
-        self.source_exifs = tuple(b"" for _ in loaded_images)
+        self.source_exifs = empty_metadata
         self.source_icc_profile = b""
-        self.source_icc_profiles = tuple(b'' for _ in loaded_images)
+        self.source_icc_profiles = empty_metadata
         self.px_size_um = None
         self.linear_dng_metadata = None
         self.failed_count = 0
 
-        message = f"Loaded {len(loaded_images)} frame(s) from video"
-        if total_frames > 0 and len(loaded_images) < total_frames:
-            message += f" (expected: {total_frames})"
-
-        return True, message, loaded_images, filenames
+        return filenames
 
     def is_video_file(self, filepath: str) -> bool:
         ext = os.path.splitext(filepath)[1].lower()

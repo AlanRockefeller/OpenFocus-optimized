@@ -1,9 +1,11 @@
-"""ONNX Runtime inference for the bundled dynamic StackMFF graphs."""
+"""Admit and dispatch StackMFF inference to installed native and ONNX engines."""
 import atexit
 from collections import OrderedDict
+from contextlib import contextmanager
 import json
 import hashlib
 import os
+import sys
 import tempfile
 import uuid
 import threading
@@ -21,11 +23,24 @@ _SESSIONS = OrderedDict()
 _PROVIDER = {'CPU': 'CPUExecutionProvider', 'DIRECTML': 'DmlExecutionProvider',
              'CUDA': 'CUDAExecutionProvider', 'ROCM': 'ROCMExecutionProvider',
              'OPENVINO': 'OpenVINOExecutionProvider', 'COREML': 'CoreMLExecutionProvider'}
+_ORT_ORDER = ('CUDA', 'ROCM', 'DIRECTML', 'OPENVINO', 'COREML')
+_NATIVE_ORDER = ('TENSORRT', 'TORCH_CUDA', 'TORCH_MPS')
+# A refresh publishes one immutable installation snapshot. A live job holds
+# its own reference, so an installer cannot switch its interpreter mid-job.
+_PACK = None
+_JOB_PACK = None
+_WORKER = None
+_JOB_RAM_LIMIT = _JOB_VRAM_LIMIT = None
+_WORKER_FAILURE = None
+_FAILED_SHAPES = {}
+_FALLBACK_REASONS = []
+_JOB_DEVICES = []
 _DEVICE = None
 _DIRECTML_ADAPTER_INDEX = 0
-_DIRECTML_ADAPTER_NAME = ''
+_ADAPTER_NAME = ''
 _LOCK = threading.RLock()
 _ACTUAL_DEVICE = None
+_JOB_ACCELERATOR = None
 _FALLBACK_CPU = False
 _ACTUAL_CHECKPOINT = None
 _AVAILABLE_PROVIDERS = ()
@@ -35,13 +50,21 @@ _PROBE_ERRORS = ()
 # cannot be read; AI jobs then run on CPU.
 _UNADMITTED = None
 # Providers whose jobs logits() admits only against known free device memory.
-VRAM_GATED_KINDS = ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO')
+VRAM_GATED_KINDS = ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO', 'TENSORRT', 'TORCH_CUDA')
+UNIFIED_MEMORY_KINDS = ('COREML', 'TORCH_MPS')
+
+
+def native_startup_bytes(kind):
+    return 512 * 1024**2 if kind in _NATIVE_ORDER else 0
 
 
 def device_diagnostics():
     """Cached hardware, provider capability and job execution; never probes."""
     return {'hardware': _HARDWARE_ADAPTERS, 'providers': _AVAILABLE_PROVIDERS,
-            'selected': _DEVICE, 'adapter': _DIRECTML_ADAPTER_NAME,
+            'ort_selected': _DEVICE,
+            'selected': cached_device(), 'adapter': _adapter_name(cached_device()),
+            'eligible_native': _PACK[0] if _PACK else (),
+            'actual_devices': tuple(_JOB_DEVICES), 'fallback_reasons': tuple(_FALLBACK_REASONS),
             'actual': _ACTUAL_DEVICE, 'checkpoint': _ACTUAL_CHECKPOINT,
             'fallback_cpu': _FALLBACK_CPU, 'probe_errors': _PROBE_ERRORS,
             'unadmitted': _UNADMITTED}
@@ -96,10 +119,39 @@ def _record_admission(kind, snapshot):
             _UNADMITTED = None
 
 
+def finish_inference_job():
+    global _WORKER
+    worker, _WORKER = _WORKER, None
+    if worker is not None:
+        worker.close()
+
+
+atexit.register(finish_inference_job)
+
+
+@contextmanager
+def inference_job(owned=True):
+    """Enter after acquiring the heavy-job lease. Nested callers borrow it."""
+    if owned:
+        start_inference_job()
+    try:
+        yield
+    finally:
+        if owned:
+            finish_inference_job()
+
+
 def start_inference_job():
     """Reset actual-device reporting and fallback for a new serialized job."""
-    global _ACTUAL_DEVICE, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
-    _ACTUAL_DEVICE = _ACTUAL_CHECKPOINT = None
+    global _ACTUAL_DEVICE, _JOB_ACCELERATOR, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
+    global _JOB_PACK, _WORKER_FAILURE, _JOB_RAM_LIMIT, _JOB_VRAM_LIMIT
+    finish_inference_job()
+    _JOB_PACK = _WORKER_FAILURE = None
+    _JOB_RAM_LIMIT = _JOB_VRAM_LIMIT = None
+    _FAILED_SHAPES.clear()
+    _FALLBACK_REASONS.clear()
+    _JOB_DEVICES.clear()
+    _ACTUAL_DEVICE = _JOB_ACCELERATOR = _ACTUAL_CHECKPOINT = None
     _FALLBACK_CPU = False
 
 
@@ -107,22 +159,40 @@ def actual_device():
     """Device actually used by the current job, or None before inference."""
     return _ACTUAL_DEVICE
 
+
+def actual_device_report():
+    """Name the device used by this job, retaining successful GPU work on fallback."""
+    if len(_JOB_DEVICES) > 1:
+        return ' + '.join(display_name(kind) for kind in sorted(_JOB_DEVICES, key=lambda k: k != 'CPU'))
+    if _ACTUAL_DEVICE == 'CPU' and _JOB_ACCELERATOR is not None:
+        return 'CPU + ' + display_name(_JOB_ACCELERATOR)
+    return display_name(_ACTUAL_DEVICE or 'CPU')
+
+
 def cached_device():
     """Return the latest verified device, or None before probing."""
-    return _DEVICE
+    return _PACK[0][0] if _PACK and _PACK[0] else _DEVICE
 
 
 
 def is_accelerator(kind):
-    return kind in ('DIRECTML', 'CUDA', 'ROCM', 'OPENVINO', 'COREML')
+    return kind in _ORT_ORDER or kind in _NATIVE_ORDER
 
 
-def display_name(kind):
-    if kind == 'DIRECTML' and _DIRECTML_ADAPTER_NAME:
-        return f'DirectML ({_DIRECTML_ADAPTER_NAME})'
-    return {'DIRECTML': 'DirectML', 'CUDA': 'CUDA', 'ROCM': 'ROCm',
-            'OPENVINO': 'OpenVINO GPU', 'COREML': 'CoreML', 'CPU': 'CPU',
-            'N/A': 'N/A'}.get(kind, str(kind))
+def _adapter_name(kind):
+    if kind in _NATIVE_ORDER:
+        pack = _JOB_PACK if _JOB_PACK is not None else _PACK
+        return pack[2] if pack and kind in pack[0] else ''
+    return _ADAPTER_NAME if kind == _DEVICE else ''
+
+
+def display_name(kind, *, include_adapter=True):
+    provider = {'DIRECTML': 'DirectML', 'CUDA': 'CUDA', 'ROCM': 'ROCm',
+                'OPENVINO': 'OpenVINO GPU', 'COREML': 'CoreML',
+                'TENSORRT': 'TensorRT', 'TORCH_CUDA': 'PyTorch CUDA',
+                'TORCH_MPS': 'PyTorch MPS'}.get(kind, str(kind))
+    adapter = _adapter_name(kind) if include_adapter else ''
+    return f'{provider} ({adapter})' if adapter else provider
 
 
 def gpu_toggle_state(kind, use_gpu, available):
@@ -130,24 +200,32 @@ def gpu_toggle_state(kind, use_gpu, available):
     return enabled, bool(enabled and use_gpu)
 
 
-def execution_status(neural, use_gpu, checkpoint, capability):
-    """Return (device, state) without probing or claiming planned work ran.
+def _driver_adapter_name(kind, index):
+    """Query the driver ordinal configured as the execution provider's device_id."""
+    # OpenVINO's auto-selected GPU and CoreML's compute units are opaque
+    # here. Keep the provider label when we cannot identify its adapter.
+    if kind not in ('CUDA', 'ROCM'):
+        return ''
+    import ctypes
 
-    Capability is the completed background probe; actual placement belongs to
-    the last inference of the selected checkpoint. Explicit CPU and classical
-    methods always describe CPU mode, even after an earlier accelerated job.
-    """
-    if not neural or not use_gpu:
-        return 'CPU', 'selected'
-    checkpoint = os.path.basename(os.path.splitext(checkpoint or '')[0] + '.onnx')
-    if (_ACTUAL_DEVICE is not None and _ACTUAL_CHECKPOINT == checkpoint
-            and (_ACTUAL_DEVICE == 'CPU' or _ACTUAL_DEVICE == capability)):
-        return _ACTUAL_DEVICE, 'actual'
-    if capability is None:
-        return None, 'pending'
-    if is_accelerator(capability):
-        return capability, 'ready'
-    return 'CPU', 'selected'
+    name = ctypes.create_string_buffer(256)
+    try:
+        if kind == 'CUDA':
+            driver = ctypes.CDLL('nvcuda.dll' if sys.platform == 'win32' else 'libcuda.so.1')
+            device = ctypes.c_int()
+            if driver.cuInit(0) or driver.cuDeviceGet(ctypes.byref(device), index):
+                return ''
+            status = driver.cuDeviceGetName(name, len(name), device.value)
+        else:
+            driver = ctypes.CDLL('amdhip64.dll' if sys.platform == 'win32' else 'libamdhip64.so')
+            if driver.hipInit(0):
+                return ''
+            status = driver.hipDeviceGetName(name, len(name), index)
+        if status == 0:
+            return name.value.decode('utf-8', errors='replace').strip()
+    except (OSError, AttributeError, ValueError):
+        _LOG.debug('Could not identify the %s adapter', kind, exc_info=True)
+    return ''
 
 
 class _ProfiledSession:
@@ -192,14 +270,56 @@ class _ProfiledSession:
         return result
 
 
+class _CpuSession:
+    """A CPU session that releases its arena's unused memory after each run.
+
+    The arena would otherwise keep the working set of both inference scales
+    between tiles and after the render.
+    """
+
+    def __init__(self, session, run_options):
+        self.session = session
+        self._run_options = run_options
+
+    def run(self, outputs, inputs):
+        return self.session.run(outputs, inputs, self._run_options)
+
+
+def refresh_accelerator_pack():
+    """Refresh local pack eligibility without importing its engines or running a model."""
+    global _PACK
+    from core.inference_pack import pack_status, worker_command
+    with _LOCK:
+        try:
+            command = worker_command()
+            status = pack_status() if command else None
+        except (OSError, KeyError, ValueError, TypeError):
+            _LOG.warning('Optional accelerator installation could not be read', exc_info=True)
+            command, status = None, None
+        adapter = status.device if status and status.supported else ''
+        engines = tuple(k for k in _NATIVE_ORDER if adapter and k in status.backends)
+        _PACK = (engines, tuple(command or ()), adapter)
+        return engines
+
+
 def resolve_device(use_gpu):
     if not use_gpu:
         return 'CPU'
-    global _DEVICE, _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME
+    if _PACK is None:
+        refresh_accelerator_pack()
+    if _PACK[0]:
+        return _PACK[0][0]
+    return resolve_ort_device()
+
+
+def resolve_ort_device():
+    """Probe the compact-runtime provider independently of native pack eligibility."""
+    global _DEVICE, _DIRECTML_ADAPTER_INDEX, _ADAPTER_NAME
     global _AVAILABLE_PROVIDERS, _HARDWARE_ADAPTERS, _PROBE_ERRORS, _UNADMITTED
     with _LOCK:
         if _DEVICE is None:
             _UNADMITTED = None
+            _ADAPTER_NAME = ''
             import onnxruntime as ort
             from utils.weights import weights_path
             available = ort.get_available_providers()
@@ -210,7 +330,7 @@ def resolve_device(use_gpu):
             log_action('neural_provider_probe', providers=available,
                        hardware=_HARDWARE_ADAPTERS)
             device = 'CPU'
-            for kind in ('CUDA', 'ROCM', 'DIRECTML', 'OPENVINO', 'COREML'):
+            for kind in _ORT_ORDER:
                 if _PROVIDER[kind] not in available:
                     continue
                 if kind == 'DIRECTML':
@@ -239,8 +359,9 @@ def resolve_device(use_gpu):
                         if kind == 'DIRECTML':
                             from core.resource_policy import set_directml_adapter
                             set_directml_adapter(adapter_index)
-                        if kind == 'DIRECTML':
-                            _DIRECTML_ADAPTER_INDEX, _DIRECTML_ADAPTER_NAME = adapter_index, adapter_name
+                            _DIRECTML_ADAPTER_INDEX = adapter_index
+                        _ADAPTER_NAME = (adapter_name.strip() if kind == 'DIRECTML'
+                                         else _driver_adapter_name(kind, adapter_index))
                         if _memory_unreadable(kind):
                             _UNADMITTED = kind
                         device = kind
@@ -254,8 +375,8 @@ def resolve_device(use_gpu):
             _DEVICE = device
             _PROBE_ERRORS = tuple(errors)
             log_action('neural_provider_selected', provider=_PROVIDER[device],
-                       adapter=_DIRECTML_ADAPTER_NAME or None,
-                       adapter_index=_DIRECTML_ADAPTER_INDEX if device == 'DIRECTML' else None,
+                       adapter=_ADAPTER_NAME or None,
+                       adapter_index=adapter_index if is_accelerator(device) else None,
                        fallback=device == 'CPU', probe_errors=errors)
         return _DEVICE
 
@@ -271,13 +392,17 @@ def estimate_inference_bytes(n, h, w, kind):
     hp, wp = h + (-h) % 64, w + (-w) % 64
     pixels = hp * wp
     feature_base = 7 if kind == 'CPU' else 12
+    workspace = 0
+    if kind == 'TENSORRT':
+        from core.inference_tensorrt import workspace_bytes
+        workspace = workspace_bytes(n, hp, wp)
     return (int(n * pixels * 3 * 4 * (feature_base + 4))
             + int(pixels / 16 * 3 * 4 * (n * 64 + n * n))
-            + n * pixels * 4 * 6 + 4 * 1024 * 1024)
+            + n * pixels * 4 * 6 + 4 * 1024 * 1024 + workspace)
 
 
 def _session_key(path, shape, device, threads):
-    path = os.path.abspath(os.path.splitext(path)[0] + '.onnx')
+    path = os.path.abspath(path)
     stat = os.stat(path)
     adapter = _DIRECTML_ADAPTER_INDEX if device == 'DIRECTML' else 0
     return (path, stat.st_mtime_ns, stat.st_size, shape, device, adapter, int(threads or 1))
@@ -346,7 +471,7 @@ def _clear_sessions():
 def _session(path, shape, device, threads):
     import onnxruntime as ort
     global _SESSIONS
-    path = os.path.abspath(os.path.splitext(path)[0] + '.onnx')
+    path = os.path.abspath(path)
     if not os.path.isfile(path):
         raise FileNotFoundError(f'ONNX model not found: {path}')
     key = _session_key(path, shape, device, threads)
@@ -367,7 +492,16 @@ def _session(path, shape, device, threads):
                 profile.session_evicted(_describe_session(evicted))
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, int(threads or 1))
-        options.enable_cpu_mem_arena = False
+        if device == 'CPU':
+            # Buffer reuse keeps a buffer allocated from the first tensor
+            # planned into it until the last one, so a run held about 2.5
+            # times the memory it holds without reuse, and took longer.
+            # Without reuse, the first run of a shape allocates each tensor
+            # separately. The arena keeps that run fast, and _CpuSession
+            # asks it to release its unused memory when every run ends.
+            options.enable_mem_reuse = False
+        else:
+            options.enable_cpu_mem_arena = False
         trace_directory = operator_trace_directory() if device == 'CPU' else None
         if device != 'CPU':
             options.enable_profiling = True
@@ -411,8 +545,12 @@ def _session(path, shape, device, threads):
                    shape=shape, threads=options.intra_op_num_threads)
         if device != 'CPU':
             session = _ProfiledSession(session, device)
-        elif trace_directory is not None:
-            _TRACED[key] = session
+        else:
+            if trace_directory is not None:
+                _TRACED[key] = session
+            run_options = ort.RunOptions()
+            run_options.add_run_config_entry('memory.enable_memory_arena_shrinkage', 'cpu:0')
+            session = _CpuSession(session, run_options)
         _SESSIONS[key] = session
     _SESSIONS.move_to_end(key)
     return _SESSIONS[key]
@@ -435,6 +573,161 @@ def _log_session_failure(shape, session, device):
         pass
 
 
+def apply_inference_budget(plan):
+    """Carry a serialized stage's frozen limits into actual shape admission."""
+    global _JOB_RAM_LIMIT, _JOB_VRAM_LIMIT, _FALLBACK_CPU
+    _JOB_RAM_LIMIT = plan.ram_budget
+    _JOB_VRAM_LIMIT = plan.vram_budget or None
+    if plan.device_fallback and plan.device_fallback not in _FALLBACK_REASONS:
+        _FALLBACK_REASONS.append(plan.device_fallback)
+        _FALLBACK_CPU |= plan.device_kind == 'CPU'
+
+
+def candidate_devices(device, *, probe_ort=True):
+    """Yield increasingly compatible engines, deferring ORT probes until needed."""
+    if device == 'CPU':
+        yield 'CPU'
+        return
+    if device in _NATIVE_ORDER:
+        pack = _JOB_PACK if _JOB_PACK is not None else _PACK
+        yield device
+        if pack:
+            yield from (kind for kind in _NATIVE_ORDER[_NATIVE_ORDER.index(device) + 1:]
+                        if kind in pack[0])
+        device = resolve_ort_device() if probe_ort else _DEVICE
+    if device in _ORT_ORDER:
+        yield device
+    for kind in _ORT_ORDER:
+        if kind != device and _PROVIDER[kind] in _AVAILABLE_PROVIDERS:
+            yield kind
+    yield 'CPU'
+
+
+def resolve_job_device(use_gpu):
+    global _FALLBACK_CPU
+    device = resolve_device(use_gpu)
+    if device == 'CPU' and use_gpu:
+        # A provider declined the bundled probe graph, but a custom graph may
+        # be supported. Try it with real placement verification in logits().
+        device = next((k for k in _ORT_ORDER if _PROVIDER[k] in _AVAILABLE_PROVIDERS), device)
+        if device == 'CPU':
+            reason = 'no eligible GPU inference backend'
+            if reason not in _FALLBACK_REASONS:
+                _FALLBACK_REASONS.append(reason)
+            _FALLBACK_CPU = True
+    return device
+
+
+def _memory_refusal(path, shape, device, threads, *, reclaim=True):
+    if device == 'TORCH_MPS':
+        from core.resource_policy import probe_memory, ram_ceiling
+        n, hp, wp = shape
+        # The staged planes already exist. Admit the extra mmap plus the GPU
+        # working set in RAM. A live reading already reflects a started worker.
+        required = estimate_inference_bytes(*shape, device) + n * hp * wp * 4
+        startup = native_startup_bytes(device)
+        if _JOB_RAM_LIMIT is not None and required + startup > _JOB_RAM_LIMIT:
+            return f'Host memory plan budget {_JOB_RAM_LIMIT} bytes, requires {required + startup}'
+        if _WORKER is None:
+            required += startup
+        snapshot = probe_memory()
+        if not snapshot.ram_known:
+            return 'available host memory could not be read'
+        budget = ram_ceiling(snapshot)
+        if required > budget:
+            return f'Host memory budget {budget} bytes, requires {required}'
+        return None
+    from core.resource_policy import vram_budget
+    if device not in VRAM_GATED_KINDS:
+        return None
+    if device in _PROVIDER:
+        try:
+            session = _SESSIONS.get(_session_key(path, shape, device, threads))
+        except OSError:
+            session = None
+        if session is not None and session.actual_device == device:
+            return None
+        del session
+    n, hp, wp = shape
+    required = estimate_inference_bytes(*shape, device) + n * hp * wp * 4 * 6
+    snapshot = _vram_snapshot(device)
+    if reclaim and (_vram_unknown(snapshot) or required > vram_budget(snapshot)) and (_SESSIONS or _WORKER):
+        _clear_sessions()
+        finish_inference_job()
+        snapshot = _vram_snapshot(device)
+    _record_admission(device, snapshot)
+    if _vram_unknown(snapshot):
+        return 'free GPU memory could not be read'
+    budget = vram_budget(snapshot)
+    if _JOB_VRAM_LIMIT is not None:
+        budget = min(budget, _JOB_VRAM_LIMIT)
+    if required > budget:
+        return f'GPU memory budget {budget} bytes, requires {required}'
+    return None
+
+
+def _run_ort(planes, path, device, threads, should_cancel, profile):
+    from fusion_methods.neural_common import cancel
+    from core.registration import RegistrationCancelled
+    session = None
+    try:
+        with profile.stage('session.acquire'):
+            session = _session(path, planes.shape[1:], device, threads)
+        cancel(should_cancel)
+        with profile.stage('session.run'):
+            result = session.run(['logits'], {'input': planes})[0]
+    except RegistrationCancelled:
+        raise
+    except Exception:
+        _log_session_failure(planes.shape[1:], session, device)
+        raise
+    return result, 'CPU' if device == 'CPU' else session.actual_device
+
+
+def _run_native(planes, path, device, should_cancel, profile):
+    global _WORKER, _WORKER_FAILURE, _JOB_PACK
+    from fusion_methods.inference_client import Worker, WorkerLost, WorkerError
+    from core.inference_pack import pack_root
+    if _WORKER_FAILURE:
+        raise WorkerLost(_WORKER_FAILURE)
+    if _JOB_PACK is None:
+        if _PACK is None:
+            refresh_accelerator_pack()
+        _JOB_PACK = _PACK
+    if not _JOB_PACK[1]:
+        raise WorkerLost('Optional accelerator pack is unavailable')
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    try:
+        with profile.stage('session.acquire'):
+            if _WORKER is None:
+                if device in VRAM_GATED_KINDS:
+                    # Leave physical/commit headroom for importing CUDA libraries.
+                    from core.resource_policy import require_memory
+                    require_memory(native_startup_bytes(device) + planes.nbytes, None, _JOB_RAM_LIMIT)
+                _WORKER = Worker(_JOB_PACK[1], should_cancel)
+                # Worker startup reduces whichever memory pool admits the model.
+                refusal = _memory_refusal(path, planes.shape[1:], device, 1, reclaim=False)
+                if refusal:
+                    raise WorkerError(refusal)
+        if device not in _WORKER.backends:
+            raise WorkerError('Engine unavailable on this GPU/driver')
+        with profile.stage('session.run'):
+            result = _WORKER.run(device, path, planes, pack_root() / 'engine-cache', should_cancel)
+        return result, device
+    except (WorkerLost, OSError) as exc:
+        _WORKER_FAILURE = str(exc)
+        finish_inference_job()
+        raise WorkerLost(_WORKER_FAILURE) from None
+
+
+def _record_fallback(device, shape, reason):
+    message = f'{device} {tuple(shape)}: {reason}'
+    if message not in _FALLBACK_REASONS:
+        _FALLBACK_REASONS.append(message)
+        _LOG.warning('Neural fallback: %s', message)
+
+
 def logits(planes, path, device, threads, should_cancel=None):
     from fusion_methods.neural_common import cancel
     from core.registration import RegistrationCancelled
@@ -446,116 +739,67 @@ def logits(planes, path, device, threads, should_cancel=None):
         planes = np.pad(planes, ((0, 0), (0, 0), (0, ph), (0, pw)), mode=mode)
     planes = np.ascontiguousarray(planes, dtype=np.float32)
     shape = planes.shape[1:]
-    global _ACTUAL_DEVICE, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
-    if _FALLBACK_CPU:
-        device = 'CPU'
-    cached = None
-    if device in VRAM_GATED_KINDS:
-        from core.resource_policy import vram_budget
-        try:
-            cached = _SESSIONS.get(_session_key(path, shape, device, threads))
-        except OSError:
-            cached = None
-        # A completed session already owns its workspace; charging its full
-        # estimate against the remaining free VRAM would force a false fallback.
-        reusable = cached is not None and cached.actual_device == device
-        n, hp, wp = shape
-        required = estimate_inference_bytes(n, hp, wp, device) + n * hp * wp * 4 * 6
-
-        def refused(snapshot):
-            return _vram_unknown(snapshot) or required > vram_budget(snapshot)
-
-        if not reusable:
-            snapshot = _vram_snapshot(device)
-            if refused(snapshot) and _SESSIONS:
-                cached = None
-                _clear_sessions()
-                snapshot = _vram_snapshot(device)
-            # What the status shows follows the probe this job acted on.
-            _record_admission(device, snapshot)
-            if refused(snapshot):
-                known = not _vram_unknown(snapshot)
-                _LOG.warning('%s checkpoint=%s shape=%s memory required=%s budget=%s known=%s; using CPU for this job',
-                             device, os.path.basename(path), shape, required,
-                             vram_budget(snapshot) if known else 0, known)
-                _FALLBACK_CPU = True
-                _clear_sessions()
-                device = 'CPU'
-    if _FALLBACK_CPU:
-        from core.resource_policy import require_memory
-        require_memory(estimate_inference_bytes(*shape, 'CPU'))
-    session = None
+    global _ACTUAL_DEVICE, _JOB_ACCELERATOR, _FALLBACK_CPU, _ACTUAL_CHECKPOINT
+    requested = device
+    model = os.path.abspath(path)
     profile = _profile()
-    device_failed = False
-    try:
-        with profile.stage('session.acquire'):
-            try:
-                session = _session(path, shape, device, threads)
-            except RegistrationCancelled:
-                raise
-            except Exception:
-                _log_session_failure(shape, None, device)
-                raise
+    placed_on_cpu = None
+    for device in candidate_devices(requested):
         cancel(should_cancel)
-        with profile.stage('session.run'):
+        key = (model, shape, device)
+        if key in _FAILED_SHAPES:
+            continue
+        if device == 'CPU' and placed_on_cpu is not None:
+            result = placed_on_cpu
+            break
+        if placed_on_cpu is not None:
+            # Trying another GPU must not retain an extra full stack of logits.
+            placed_on_cpu = result = None
+        if device == 'CPU' and requested != 'CPU':
+            from core.resource_policy import require_memory
+            require_memory(estimate_inference_bytes(*shape, device), None, _JOB_RAM_LIMIT)
+        reason = _memory_refusal(path, shape, device, threads)
+        if reason is None:
             try:
-                result = session.run(['logits'], {'input': planes})[0]
-            except RegistrationCancelled:
+                if device in _NATIVE_ORDER:
+                    result, actual = _run_native(planes, model, device, should_cancel, profile)
+                else:
+                    result, actual = _run_ort(planes, path, device, threads, should_cancel, profile)
+                if actual == device:
+                    break
+                # Keep usable CPU-placed logits in case another GPU cannot run.
+                placed_on_cpu = result
+                reason = 'all graph nodes were placed on CPU'
+            except (RegistrationCancelled, FileNotFoundError, PermissionError):
                 raise
-            except Exception:
-                _log_session_failure(shape, session, device)
-                raise
-        if device != 'CPU':
-            device = session.actual_device
-            if device == 'CPU':
-                # ORT can initialize a provider yet place this graph entirely
-                # on CPU. Reuse its valid output and keep later scales on CPU.
-                _FALLBACK_CPU = True
-                _clear_sessions()
-    except RegistrationCancelled:
-        raise
-    except Exception:
-        if device == 'CPU':
-            raise
-        _LOG.warning('%s checkpoint=%s shape=%s adapter=%s inference failed; falling back to CPU for this job\n%s',
-                     device, os.path.basename(path), shape, display_name(device), traceback.format_exc())
-        device_failed = True
-    if device_failed:
-        session = None
-        cached = None
+            except Exception as exc:
+                if device == 'CPU':
+                    raise
+                from fusion_methods.inference_client import WorkerError
+                reason = str(exc) if isinstance(exc, WorkerError) else f'inference failed ({type(exc).__name__})'
+                _LOG.warning('%s inference failed for %s %s\n%s', device, os.path.basename(path),
+                             shape, traceback.format_exc())
+        cancel(should_cancel)
+        _record_fallback(device, shape, reason)
+        _FAILED_SHAPES[key] = reason
         _clear_sessions()
-        cancel(should_cancel)
-        with _LOCK:
-            _FALLBACK_CPU = True
-        from core.resource_policy import require_memory
-        require_memory(estimate_inference_bytes(*shape, 'CPU'))
-        with profile.stage('session.acquire'):
-            try:
-                session = _session(path, shape, 'CPU', threads)
-            except RegistrationCancelled:
-                raise
-            except Exception:
-                _log_session_failure(shape, None, 'CPU')
-                raise
-        cancel(should_cancel)
-        with profile.stage('session.run'):
-            try:
-                result = session.run(['logits'], {'input': planes})[0]
-            except RegistrationCancelled:
-                raise
-            except Exception:
-                _log_session_failure(shape, session, 'CPU')
-                raise
-        device = 'CPU'
+        if device in _NATIVE_ORDER and _WORKER is not None:
+            # Release native allocations before admission on another engine.
+            finish_inference_job()
+    _FALLBACK_CPU = _FALLBACK_CPU or (requested != 'CPU' and device == 'CPU')
+    if device not in _JOB_DEVICES:
+        _JOB_DEVICES.append(device)
     _ACTUAL_DEVICE = device
-    _ACTUAL_CHECKPOINT = os.path.basename(os.path.splitext(path)[0] + '.onnx')
+    if is_accelerator(device):
+        _JOB_ACCELERATOR = device
+    _ACTUAL_CHECKPOINT = os.path.basename(model)
     if profile.enabled:
         profile.session_run((_ACTUAL_CHECKPOINT, tuple(int(v) for v in shape), device,
                              int(threads or 1)))
         profile.add('threads', 'session_intra_op', max(1, int(threads or 1)))
-        profile.add('render', 'actual_provider', _PROVIDER[device])
+        profile.add('render', 'actual_provider', _PROVIDER.get(device, device))
     _LOG.debug('Neural inference checkpoint=%s provider=%s adapter=%s shape=%s output=%s fallback=%s',
-               _ACTUAL_CHECKPOINT, _PROVIDER[device], display_name(device), shape,
+               _ACTUAL_CHECKPOINT, _PROVIDER.get(device, device), display_name(device), shape,
                result.shape, _FALLBACK_CPU)
     cancel(should_cancel)
     return result[..., :h, :w]
@@ -568,9 +812,9 @@ def softmax(x):
     return x
 
 
-def _resize_antialias(planes, scale, should_cancel=None):
+def _resize_triangle(planes, scale, should_cancel=None):
+    """Antialiased bilinear resize of the last two axes, at any scale."""
     from fusion_methods.neural_common import cancel
-    # PyTorch bilinear antialias uses a triangle filter widened for downsampling.
     result = planes
     for axis in (2, 3):
         cancel(should_cancel)
@@ -591,6 +835,55 @@ def _resize_antialias(planes, scale, should_cancel=None):
             dst[..., i] = np.sum(src[..., first:last] * weights, axis=-1)
         result = np.moveaxis(dst, -1, axis)
     return result
+
+
+def _resize_three_quarters_axis(source, dest):
+    """Reduce the first axis by 3/4: four input rows make three output rows.
+
+    These are the weights `_resize_triangle` computes at this scale. Output
+    centers repeat at input offsets 1/6, 3/2 and 17/6 with radius 4/3, so the
+    outer two outputs also read one row of the neighbouring group. At either
+    end of the axis that row is missing, and renormalizing the two remaining
+    taps gives 7/10 and 3/10. Products are summed in input order, which keeps
+    every float32 result identical to the general filter.
+    """
+    a, b, c, d = (source[offset::4] for offset in range(4))
+    dest[0] = a[0] * 0.7 + b[0] * 0.3
+    dest[3::3] = d[:-1] * (1 / 11) + a[1:] * (7 / 11) + b[1:] * (3 / 11)
+    dest[1::3] = b * 0.5 + c * 0.5
+    dest[2:-1:3] = c[:-1] * (3 / 11) + d[:-1] * (7 / 11) + a[1:] * (1 / 11)
+    dest[-1] = c[-1] * 0.3 + d[-1] * 0.7
+
+
+def _resize_three_quarters(planes, should_cancel=None):
+    """`_resize_triangle` at 3/4 scale for float32 planes of whole four-row groups.
+
+    Each plane is finished before the next starts, so the intermediate
+    vertical pass is one plane however deep the stack is.
+    """
+    from fusion_methods.neural_common import cancel
+    cancel(should_cancel)
+    h, w = planes.shape[-2:]
+    height, width = 3 * h // 4, 3 * w // 4
+    result = np.empty((*planes.shape[:2], height, width), dtype=np.float32)
+    vertical = np.empty((height, w), dtype=np.float32)
+    for batch, layer in np.ndindex(planes.shape[:2]):
+        cancel(should_cancel)
+        _resize_three_quarters_axis(planes[batch, layer], vertical)
+        cancel(should_cancel)
+        _resize_three_quarters_axis(vertical.T, result[batch, layer].T)
+    return result
+
+
+def _resize_antialias(planes, scale, should_cancel=None):
+    # PyTorch bilinear antialias uses a triangle filter widened for downsampling.
+    h, w = planes.shape[-2:]
+    # Staged tiles are padded to multiples of 64, so the reduced inference
+    # scale normally takes the grouped path.
+    if (scale == 0.75 and planes.dtype == np.float32 and h and w
+            and h % 4 == 0 and w % 4 == 0):
+        return _resize_three_quarters(planes, should_cancel)
+    return _resize_triangle(planes, scale, should_cancel)
 
 
 def probabilities(planes, path, device, threads, sigma, cancel=None):

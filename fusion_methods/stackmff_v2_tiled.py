@@ -5,7 +5,6 @@ positions to a single feathered image, which is normalized once before any
 source pixels are selected.
 """
 
-from contextlib import nullcontext
 
 import cv2
 import numpy as np
@@ -70,13 +69,9 @@ class _Source:
 
     def get(self, index, region=None):
         common.cancel(self.should_cancel)
-        from core.source_frames import SourceFrame, ProcessedFrame, resolve_frame
+        from core.source_frames import resolve_frame, validate_frame_source
         if self.original_items is not None:
-            original = self.original_items[index]
-            while isinstance(original, ProcessedFrame):
-                original = original.source
-            if isinstance(original, SourceFrame):
-                original.validate_source()
+            validate_frame_source(self.original_items[index])
         frame = resolve_frame(self.items[index])
         if frame.shape[:2] != self.shape[:2]:
             raise ValueError('All frames must have the same dimensions')
@@ -110,15 +105,22 @@ def _normalized(frame):
     return frame
 
 
+def tiled_output_bytes(height, width, channels, result_count):
+    """Full-canvas accumulators for V2's globally normalized depth."""
+    padded_h = height + (-height) % common.ATTENTION_PAD_ALIGN
+    padded_w = width + (-width) % common.ATTENTION_PAD_ALIGN
+    return padded_h * padded_w * (32 + channels * 8 * result_count)
+
+
 def _plan(source, model_path, use_gpu, tile_size, execution_plan,
           thread_count, resource_preference, result_count):
     from core.resource_policy import ResourceLimitError, plan_neural_tiles
-    from fusion_methods.neural_runtime import resolve_device, estimate_inference_bytes
+    from fusion_methods.neural_runtime import resolve_job_device, estimate_inference_bytes
     from fusion_methods.stackmff_v2 import _prepare_inference
     h, w = source.shape[:2]
     channels = source.shape[2] if len(source.shape) == 3 else 1
-    device = (execution_plan.device_kind if execution_plan is not None
-              else resolve_device(use_gpu))
+    device = (execution_plan.device_kind if execution_plan is not None and use_gpu
+              else resolve_job_device(use_gpu))
     from core.source_frames import frame_resolution_bytes, source_cache_growth_bytes
     source_resolution = max(frame_resolution_bytes(frame) for frame in source.items)
     source_cache = source_cache_growth_bytes(source.items)
@@ -133,12 +135,12 @@ def _plan(source, model_path, use_gpu, tile_size, execution_plan,
     if execution_plan is not None:
         from dataclasses import replace
         outer = replace(outer, ram_budget=min(outer.ram_budget, execution_plan.ram_budget),
+                        vram_budget=min(outer.vram_budget, execution_plan.vram_budget)
+                        if execution_plan.vram_budget else outer.vram_budget,
+                        device_fallback=outer.device_fallback or execution_plan.device_fallback,
                         native_threads=min(outer.native_threads, execution_plan.native_threads))
     first = source.get(0)
-    padded_h = h + (-h) % common.ATTENTION_PAD_ALIGN
-    padded_w = w + (-w) % common.ATTENTION_PAD_ALIGN
-    fixed = padded_h * padded_w * (32 + channels * 8 * result_count)
-    fixed += source_resolution + source_cache
+    fixed = tiled_output_bytes(h, w, channels, result_count) + source_resolution + source_cache
     while True:
         crop = first[:block, :block]
         try:
@@ -159,16 +161,30 @@ def _weights(x0, y0, x1, y1, width, height, overlap):
         None, x0, y0, x1, y1, x1-x0, y1-y0, width, height, overlap)
 
 
+def _stage_tile_planes(source, region, should_cancel):
+    """Stage an already padded tile, releasing each crop before the next read."""
+    _, _, width, height = region
+    count = len(source.items)
+    planes = np.empty((1, count, height, width), dtype=np.float32)
+    for index in range(count):
+        common.cancel(should_cancel)
+        frame = source.get(index, region)
+        if frame.shape[:2] != (height, width):
+            raise ValueError('All frames must have the same dimensions')
+        frame = common.working_frame(frame, source.mixed_16 or frame.dtype == np.uint16)
+        # Keep the packed conversion grid for OpenCV's edge rounding.
+        planes[0, index] = common.luma_plane(np.ascontiguousarray(frame))
+        del frame
+    common.cancel(should_cancel)
+    return planes
+
+
 def tiled_depth(source, model_path, use_gpu, should_cancel=None,
                 execution_plan=None, thread_count=None,
                 resource_preference='balanced', tile_size=None, tile_overlap=0,
                 progress_callback=None, result_count=0):
     """Return globally normalized depth and sampled indices for a source."""
-    from core.resource_policy import heavy_job
-    from fusion_methods.neural_runtime import start_inference_job
-    with heavy_job(should_cancel) if execution_plan is None else nullcontext():
-        if execution_plan is None:
-            start_inference_job()
+    with common.neural_lease(execution_plan, should_cancel):
         return _tiled_depth_under_lease(
             source, model_path, use_gpu, should_cancel, execution_plan,
             thread_count, resource_preference, tile_size, tile_overlap,
@@ -178,7 +194,7 @@ def tiled_depth(source, model_path, use_gpu, should_cancel=None,
 def _tiled_depth_under_lease(source, model_path, use_gpu, should_cancel=None,
                              execution_plan=None, thread_count=None,
                              resource_preference='balanced', tile_size=None, tile_overlap=0,
-                             progress_callback=None, result_count=0):
+                             progress_callback=None, result_count=0, tile_grid_callback=None):
     from fusion_methods import neural_runtime
     source_h, source_w = source.shape[:2]
     h = source_h + (-source_h) % common.ATTENTION_PAD_ALIGN
@@ -195,6 +211,8 @@ def _tiled_depth_under_lease(source, model_path, use_gpu, should_cancel=None,
     ys = sorted(set(_tile_axis_starts(h, block, overlap, common.ATTENTION_PAD_ALIGN)))
     xs = sorted(set(_tile_axis_starts(w, block, overlap, common.ATTENTION_PAD_ALIGN)))
     total = len(xs) * len(ys)
+    if tile_grid_callback is not None:
+        tile_grid_callback(block, overlap, total)
     expected = create_frame((h, w), np.float32)
     weight = create_frame((h, w), np.float32)
     expected[...] = 0
@@ -205,15 +223,7 @@ def _tiled_depth_under_lease(source, model_path, use_gpu, should_cancel=None,
     for y in ys:
         for x in xs:
             common.cancel(should_cancel)
-            crops = []
-            for i in range(count):
-                frame = source.get(i, (x, y, block, block))
-                if frame.shape[:2] != (block, block):
-                    raise ValueError('All frames must have the same dimensions')
-                crops.append(common.working_frame(
-                    frame, source.mixed_16 or frame.dtype == np.uint16).copy())
-            planes = common.stage_planes(crops, common.ATTENTION_PAD_ALIGN, should_cancel)
-            del crops
+            planes = _stage_tile_planes(source, (x, y, block, block), should_cancel)
             probs = neural_runtime.softmax(neural_runtime.logits(
                 planes, model, device, plan.native_threads, should_cancel))
             del planes
@@ -248,11 +258,7 @@ def tiled_fusion(input_source, img_resize, model_path, use_gpu,
                  resource_preference='balanced', tile_size=None, tile_overlap=0,
                  progress_callback=None, exposure_gains=None, source_all_uint8=None):
     """Fuse a list or directory without materializing a full-frame stack."""
-    from core.resource_policy import heavy_job
-    from fusion_methods.neural_runtime import start_inference_job
-    with heavy_job(should_cancel) if execution_plan is None else nullcontext():
-        if execution_plan is None:
-            start_inference_job()
+    with common.neural_lease(execution_plan, should_cancel):
         return _tiled_fusion_under_lease(
             input_source, img_resize, model_path, use_gpu, should_cancel,
             execution_plan, thread_count, resource_preference, tile_size,
@@ -262,11 +268,12 @@ def tiled_fusion(input_source, img_resize, model_path, use_gpu,
 def _tiled_fusion_under_lease(input_source, img_resize, model_path, use_gpu,
                               should_cancel=None, execution_plan=None, thread_count=None,
                               resource_preference='balanced', tile_size=None, tile_overlap=0,
-                              progress_callback=None, exposure_gains=None, source_all_uint8=None):
+                              progress_callback=None, exposure_gains=None, source_all_uint8=None,
+                              focus_callback=None, tile_grid_callback=None):
     source = _Source(input_source, img_resize, exposure_gains, should_cancel)
     depth, index = _tiled_depth_under_lease(source, model_path, use_gpu, should_cancel,
                                execution_plan, thread_count, resource_preference,
-                               tile_size, tile_overlap, progress_callback, 1)
+                               tile_size, tile_overlap, progress_callback, 1, tile_grid_callback)
     del depth
     first = _normalized(source.get(0))
     if source_all_uint8 is None:
@@ -285,4 +292,6 @@ def _tiled_fusion_under_lease(input_source, img_resize, model_path, use_gpu,
     if output.dtype != np.uint8:
         np.clip(output, 0, 255, out=output)
     common.cancel(should_cancel)
+    if focus_callback is not None:
+        focus_callback(index, len(source.items) - 1)
     return output[..., 0] if output.ndim == 3 and output.shape[-1] == 1 else output

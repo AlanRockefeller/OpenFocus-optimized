@@ -327,6 +327,7 @@ def test_settings_data_override_bypasses_portable_store(tmp_path, monkeypatch):
 def test_private_tool_launches_isolate_settings_and_instances(tmp_path, monkeypatch):
     from core.control.client import tool_session
     from core.control import client as control_client
+    from utils import account_client
     import tempfile
 
     launch_command = control_client._launch_command
@@ -336,7 +337,7 @@ def test_private_tool_launches_isolate_settings_and_instances(tmp_path, monkeypa
         bootstrap = (
             "import runpy, sys; "
             "from tests.process_isolation import install_test_account; "
-            "install_test_account(); "
+            "install_test_account(seed=False); "
             "sys.argv = sys.argv[1:]; "
             "runpy.run_path(sys.argv[0], run_name='__main__')"
         )
@@ -357,6 +358,13 @@ def test_private_tool_launches_isolate_settings_and_instances(tmp_path, monkeypa
     settings.sync()
     original = real_file.read_bytes()
     monkeypatch.setenv("OPENFOCUS_DATA_DIR", str(real_root))
+    token_store = account_client.TokenStore
+    account = {"token": "test-session-token", "expires_at": 1, "user": {"id": "test-user"}}
+    source_store = token_store(real_root / "account-session")
+    source_store.save(account)
+    # Use file stores so this test also runs with a locked macOS Keychain.
+    monkeypatch.setattr(account_client, "TokenStore", lambda *, profile=None:
+                        token_store((profile or real_root) / "account-session"))
     monkeypatch.setenv("OPENFOCUS_CONTROL_FILE", str(real_root / "control.json"))
     monkeypatch.setenv("OPENFOCUS_INSTANCE_NAME", "OpenFocus-existing-instance")
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
@@ -372,6 +380,7 @@ def test_private_tool_launches_isolate_settings_and_instances(tmp_path, monkeypa
         assert first.call("app.state")["options"]["thread_count"] == 3
         assert second.call("app.state")["options"]["thread_count"] != 3
         assert real_file.read_bytes() == original
+        assert source_store.load() == account
         assert not (real_root / "control.json").exists()
         assert os.environ["OPENFOCUS_DATA_DIR"] == str(real_root)
         assert os.environ["OPENFOCUS_INSTANCE_NAME"] == "OpenFocus-existing-instance"
@@ -435,8 +444,9 @@ if reporters:
                             + log_path.read_text(encoding="utf-8", errors="replace"))
             time.sleep(0.05)
         assert discovery.is_file(), "GUI did not publish control discovery"
+        client_env = dict(env, TMPDIR=str(tmp_path))
         cli = subprocess.run([sys.executable, str(root / "main.py"), "ctl", "ping"],
-                             cwd=root, env=env, capture_output=True, text=True, timeout=30)
+                             cwd=root, env=client_env, capture_output=True, text=True, timeout=30)
         assert cli.returncode == 0, cli.stderr
         assert json.loads(cli.stdout)["result"]["pong"] is True
         forwarded = subprocess.run(command, cwd=root, env=env, capture_output=True,
@@ -464,7 +474,7 @@ try:
 finally:
     session.close()
 '''
-        client = subprocess.run([sys.executable, "-c", script], cwd=root, env=env,
+        client = subprocess.run([sys.executable, "-c", script], cwd=root, env=client_env,
                                 capture_output=True, text=True, timeout=45)
         assert client.returncode == 0, client.stderr
         assert gui.wait(timeout=30) == 0, log_path.read_text(encoding="utf-8", errors="replace")
@@ -480,21 +490,31 @@ finally:
         log.close()
 
 
+def _load_stack_for_render(server, folder):
+    reply = call(server, "stack.load", folder=str(folder))
+    assert reply["ok"], reply
+    started = reply["result"]
+    assert started["loading"] is True
+
+    deadline = time.monotonic() + 30
+    frames = call(server, "stack.frames")["result"]
+    while not frames["load"]["finished"] and time.monotonic() < deadline:
+        QTest.qWait(20)
+        frames = call(server, "stack.frames")["result"]
+    load = frames["load"]
+    assert load["id"] == started["load_id"] and load["finished"], load
+    assert load["error"] is None, load
+    return frames
+
+
 def test_stack_method_render_export_and_project(server, stack_frames, tmp_path):
     token = server.token
-    assert call(server, "stack.load", token=token,
-                folder=str(stack_frames))["result"]["loading"] is True
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        frames = call(server, "stack.frames", token=token)["result"]
-        if frames["count"] == 3:
-            break
-        QTest.qWait(20)
+    frames = _load_stack_for_render(server, stack_frames)
     assert frames["count"] == 3 and frames["dtype"] == "uint16"
 
     assert call(server, "method.set", token=token, id="openfocus_a")["result"]["id"] == "openfocus_a"
-    started = call(server, "render.start", token=token)["result"]
-    assert started["started"] is True
+    reply = call(server, "render.start", token=token)
+    assert reply["ok"] and reply["result"]["started"], reply
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         state = call(server, "render.state", token=token)["result"]
@@ -521,6 +541,32 @@ def test_stack_method_render_export_and_project(server, stack_frames, tmp_path):
     assert json.loads(project.read_text(encoding='utf-8'))['settings']['stack_reverse_order'] is True
 
 
+def test_render_all_names_outputs_after_the_method_used(server, stack_frames, monkeypatch):
+    import re
+
+    from controllers import render_manager
+
+    methods = ('openfocus_a', 'openfocus_b')
+    monkeypatch.setattr(render_manager, 'fusion_algorithms',
+                        lambda: tuple(get_fusion(method) for method in methods))
+    window = server.window
+    window.output_name_prefix = 'Trial'
+    window.set_fusion_method('openfocus_b')
+    assert _load_stack_for_render(server, stack_frames)['count'] == 3
+
+    window.btn_compare_all.click()
+    assert wait_until(lambda: window.btn_render.isEnabled(), timeout=75)
+    outputs = call(server, 'output.list')['result']['records']
+    assert len(outputs) == 2
+    for output, tag in zip(outputs, ('OpenFocusB', 'OpenFocusA')):
+        name = output['label']
+        assert re.fullmatch(rf'Trial_OpenFocus_\d{{8}}_\d{{6}}_{tag}_NoAlign', name)
+        assert window.output_list.item(output['index']).text() == name
+        call(server, 'output.select', index=output['index'])
+        _, filename = window.export_manager.selected_output()
+        assert filename == name
+
+
 def test_ui_actions_tree_find_set_click_and_screenshot(server, stack_frames, tmp_path):
     token = server.token
     actions = call(server, "ui.actions", token=token)["result"]["actions"]
@@ -539,12 +585,7 @@ def test_ui_actions_tree_find_set_click_and_screenshot(server, stack_frames, tmp
     tree = call(server, "ui.tree", token=token, window="main")["result"]
     assert tree["children"]
 
-    call(server, "stack.load", token=token, folder=str(stack_frames))
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        if call(server, "stack.frames", token=token)["result"]["count"] == 3:
-            break
-        QTest.qWait(20)
+    assert _load_stack_for_render(server, stack_frames)["count"] == 3
     button = call(server, "ui.find", token=token, object_name="btn_render")["result"]["matches"]
     assert button, "btn_render must be addressable"
     assert "clicked" in call(server, "ui.click", token=token,
@@ -567,6 +608,111 @@ def test_ui_actions_tree_find_set_click_and_screenshot(server, stack_frames, tmp
             break
         QTest.qWait(20)
     assert call(server, "stack.frames", token=token)["result"]["count"] == 0
+
+
+def test_settings_tab_inventory_and_navigation(server):
+    assert call(server, "dialog.open", name="settings")["result"]["opened"]
+    try:
+        root = call(server, "dialog.list")["result"]["dialogs"][0]["root"]
+
+        def inventory():
+            matches = call(server, "ui.find", window=root)["result"]["matches"]
+            return {node["control_id"]: node for node in matches if node["control_id"]}
+
+        controls = inventory()
+        tabs = controls["advanced_settings_tabs"]
+        assert tabs["class"] == "QTabWidget" and tabs["value"] == 0
+        assert len(tabs["tabs"]) == 4
+        assert all(tab["text"] and tab["visible"] and tab["enabled"] for tab in tabs["tabs"])
+        assert {"combo_align_failure", "chk_align_cache", "btn_clear_align_cache",
+                "chk_collect_alignment_report", "btn_alignment_report", "chk_profile_performance",
+                "btn_performance_report", "chk_debug_logging", "btn_open_logs",
+                "spin_ai_batch", "spin_threads"}.isdisjoint(controls)
+
+        page_controls = ("chk_experimental_features", "sensor_cleanup_disclosure",
+                         "registration_options_disclosure", "chk_include_beta")
+        for index in (1, 2, 3, 0):
+            reply = call(server, "ui.set", path=tabs["path"], value=index)
+            assert reply["result"]["value"] == index
+            controls = inventory()
+            assert controls["advanced_settings_tabs"]["value"] == index
+            assert [i for i, name in enumerate(page_controls) if controls[name]["visible"]] == [index]
+
+        for invalid in (-1, 4, 1.5, True):
+            reply = call(server, "ui.set", path=tabs["path"], value=invalid)
+            assert reply["error"]["code"] == "invalid_argument"
+        assert inventory()["advanced_settings_tabs"]["value"] == 0
+    finally:
+        call(server, "dialog.reject")
+
+
+@pytest.mark.parametrize("index,disclosure,panel", [
+    (1, "sensor_cleanup_disclosure", {"class": "SensorCleanupControls"}),
+    (2, "registration_options_disclosure", {"control_id": "openfocus_registration_panel"}),
+])
+def test_settings_disclosures_via_control(server, index, disclosure, panel):
+    assert call(server, "dialog.open", name="settings")["ok"]
+    try:
+        root = call(server, "dialog.list")["result"]["dialogs"][0]["root"]
+
+        def find(**selector):
+            node, = call(server, "ui.find", window=root, **selector)["result"]["matches"]
+            return node
+
+        tabs = find(control_id="advanced_settings_tabs")
+        assert call(server, "ui.set", path=tabs["path"], value=index)["ok"]
+        button = find(control_id=disclosure)
+        assert button["class"] == "QToolButton" and button["visible"] and button["enabled"]
+        assert button["checkable"] and not button["checked"]
+        assert not find(**panel)["visible"]
+        assert call(server, "ui.click", path=button["path"])["result"]["clicked"]
+        assert find(control_id=disclosure)["checked"] and find(**panel)["visible"]
+        assert call(server, "ui.focus", path=button["path"])["result"]["focused"]
+        assert call(server, "ui.key", key="Space", path=button["path"])["ok"]
+        assert not find(control_id=disclosure)["checked"] and not find(**panel)["visible"]
+    finally:
+        call(server, "dialog.reject")
+
+
+def test_settings_save_tile_geometry_for_other_methods(server):
+    from ui.control_surface import path_for, window_roots
+
+    assert call(server, "method.set", id="openfocus_b")["ok"]
+    assert call(server, "option.set", name="tile_enabled", value=True)["ok"]
+    assert call(server, "dialog.open", name="settings")["ok"]
+    try:
+        dialog = server._dialogs["settings"]
+        roots = window_roots(server.window)
+        assert call(server, "ui.set", path=path_for(roots, dialog.tabs), value=1)["ok"]
+        for editor, value in ((dialog.spin_block, 768), (dialog.spin_overlap, 96),
+                              (dialog.spin_threshold, 1536)):
+            assert editor.isVisible() and editor.isEnabled()
+            assert call(server, "ui.set", path=path_for(roots, editor), value=value)["result"]["value"] == value
+        assert call(server, "dialog.accept")["result"]["accepted"]
+    finally:
+        if "settings" in server._dialogs:
+            call(server, "dialog.reject")
+    assert call(server, "method.set", id="dct")["ok"]
+    options = call(server, "app.state")["result"]["options"]
+    assert (options["tile_block_size"], options["tile_overlap"], options["tile_threshold"]) == (768, 96, 1536)
+
+
+def test_tab_inventory_and_selection_respect_unavailable_pages(qapp):
+    from PyQt6.QtWidgets import QTabWidget, QWidget
+    from ui.control_surface import set_widget_value, widget_tree
+
+    tabs = QTabWidget()
+    for name in ("Start", "Disabled", "Hidden"):
+        tabs.addTab(QWidget(), name)
+    tabs.setTabEnabled(1, False)
+    tabs.setTabVisible(2, False)
+    pages = widget_tree(tabs, max_depth=0)["tabs"]
+    assert [page["text"] for page in pages] == ["Start", "Disabled", "Hidden"]
+    assert not pages[1]["enabled"] and not pages[2]["visible"]
+    for index in (1, 2):
+        with pytest.raises(ValueError, match="unavailable"):
+            set_widget_value(tabs, index)
+        assert tabs.currentIndex() == 0
 
 
 def test_dialog_lifecycle_and_batch_hook(server):
@@ -888,7 +1034,7 @@ def test_context_menu_catalog_and_trigger(server, control_window):
     action.triggered.connect(lambda: hit.append(True))
     menu.addAction(action)
     menu.popup(control_window.mapToGlobal(control_window.rect().center()))
-    QTest.qWait(30)
+    assert wait_until(menu.isVisible)
     catalog = call(server, "ui.menu")["result"]
     assert any(item["text"] == "Do thing" for item in catalog["actions"])
     context = call(server, "ui.context")["result"]
@@ -896,8 +1042,7 @@ def test_context_menu_catalog_and_trigger(server, control_window):
     triggered = call(server, "ui.menu", action="Do thing")["result"]
     assert triggered["scheduled"] is True
     assert hit == []
-    QTest.qWait(200)
-    assert hit == [True]
+    assert wait_until(lambda: hit == [True]), hit
     menu.hide()
 
 
@@ -1003,6 +1148,7 @@ def test_gpu_action_disables_after_backend_probe_fails(qapp, tmp_path, monkeypat
     monkeypatch.setattr(OpenFocus, "_probe_stackmff_availability_async", lambda self: None)
     monkeypatch.setattr(platform_utils, "has_compute_gpu", lambda: True)
     monkeypatch.setattr(mff, "neural_device_kind", lambda: "N/A")
+    monkeypatch.setattr(mff, '_OPENFOCUS_GPU_NAME', '')
     window = _new_main_window(qapp, tmp_path, monkeypatch)
     try:
         window.use_gpu = True
@@ -1031,6 +1177,8 @@ def test_gpu_action_allows_retry_when_memory_becomes_readable(qapp, tmp_path, mo
     monkeypatch.setattr(OpenFocus, "_probe_device_kind_async", lambda self: None)
     monkeypatch.setattr(mff, "neural_device_kind", lambda: "CUDA")
     monkeypatch.setattr(neural_runtime, "_DEVICE", "CUDA")
+    monkeypatch.setattr(neural_runtime, "_AVAILABLE_PROVIDERS", ("CUDAExecutionProvider",))
+    monkeypatch.setattr(neural_runtime, "_ADAPTER_NAME", "")
     monkeypatch.setattr(neural_runtime, "_UNADMITTED", "CUDA")
     monkeypatch.setattr(neural_runtime, "_ACTUAL_DEVICE", None)
     monkeypatch.setattr(neural_runtime, "_ACTUAL_CHECKPOINT", None)
@@ -1057,7 +1205,7 @@ def test_gpu_action_allows_retry_when_memory_becomes_readable(qapp, tmp_path, mo
     monkeypatch.setattr(neural_runtime, "_session", session)
     window = _new_main_window(qapp, tmp_path, monkeypatch, use_gpu=False)
     try:
-        monkeypatch.setattr(window, "_ai_method_selected", lambda: True)
+        window.combo_fusion.setCurrentIndex(window.combo_fusion.findData('stackmff'))
         window._update_dynamic_status()
         assert window.use_gpu is False
         settings = settings_store._settings_singleton
@@ -1094,6 +1242,58 @@ def test_gpu_action_allows_retry_when_memory_becomes_readable(qapp, tmp_path, mo
         action.trigger()
         assert not window.use_gpu and not action.isChecked()
         assert settings.value("rendering/use_gpu", type=bool) is False
+    finally:
+        _destroy_main_window(qapp, window)
+
+
+@pytest.mark.parametrize('method', ['openfocus_a', 'openfocus_b', 'openfocus_c', 'stackmff', 'stackmffv3'])
+def test_device_label_separates_available_adapter_and_completed_job(
+        qapp, tmp_path, monkeypatch, method):
+    from core import multi_focus_fusion as mff
+    from fusion_methods import neural_runtime
+    from locales import trans
+    from main import OpenFocus
+
+    monkeypatch.setattr(OpenFocus, '_probe_stackmff_availability_async', lambda self: None)
+    monkeypatch.setattr(mff, '_OPENFOCUS_GPU_NAME', 'OpenCL: A380')
+    monkeypatch.setattr(neural_runtime, '_DEVICE', 'DIRECTML')
+    monkeypatch.setattr(neural_runtime, '_ADAPTER_NAME', 'A380')
+    monkeypatch.setattr(neural_runtime, '_UNADMITTED', None)
+    # Neural inference elsewhere in the process does not describe this desktop job.
+    monkeypatch.setattr(neural_runtime, '_ACTUAL_DEVICE', 'CPU')
+    window = _new_main_window(qapp, tmp_path, monkeypatch, use_gpu=True)
+    try:
+        window.combo_fusion.setCurrentIndex(window.combo_fusion.findData(method))
+        status = window.lbl_status_gpu
+        manager = window.render_manager
+        window._update_dynamic_status()
+        ready = 'DirectML (A380)' if method.startswith('stackmff') else 'OpenCL: A380'
+        assert status.toolTip().splitlines()[0] == trans.t('neural_provider_ready').format(ready)
+        assert status.text() == trans.t('status_gpu').format('A380')
+
+        manager.last_state = 'done'
+        manager.last_result = {'method': 'guided_filter', 'device': 'CPU'}
+        window._update_dynamic_status()
+        assert status.text() == trans.t('status_gpu').format('A380')
+
+        manager.last_result = {'method': method, 'device': 'CPU'}
+        window._update_dynamic_status()
+        assert status.text() == trans.t('status_gpu').format('CPU')
+        assert status.toolTip().splitlines()[0] == trans.t('info_proc_unit').format('CPU')
+
+        model = 'NVIDIA GeForce RTX 4060 Laptop GPU'
+        actual = f'DirectML ({model})' if method.startswith('stackmff') else f'OpenCL: {model}'
+        manager.last_result['device'] = actual
+        window._update_dynamic_status()
+        full_label = trans.t('status_gpu').format('RTX 4060 Laptop GPU')
+        status.resize(status.fontMetrics().horizontalAdvance(full_label) + 2 * status.margin() + 4,
+                      status.height())
+        assert status.text() == full_label
+        assert status.toolTip().splitlines()[0] == trans.t('info_proc_unit').format(actual)
+
+        window.use_gpu = False
+        window._update_dynamic_status()
+        assert status.text() == trans.t('status_gpu').format('CPU')
     finally:
         _destroy_main_window(qapp, window)
 
@@ -1445,7 +1645,20 @@ def test_server_encodes_a_too_large_reply_as_an_error(server):
     assert reply["error"]["code"] == "internal"
 
 
-def test_stack_load_reports_its_own_completion(server, stack_frames):
+def test_stack_load_reports_its_own_completion(server, stack_frames, monkeypatch):
+    manager = server.window.source_manager
+    finish_worker = manager._finish_load_worker
+    pending = {}
+
+    def observe_before_release(worker):
+        try:
+            pending["frames"] = call(server, "stack.frames")
+            pending["render"] = call(server, "render.start")
+        finally:
+            finish_worker(worker)
+
+    monkeypatch.setattr(manager, "_finish_load_worker", observe_before_release)
+    assert call(server, "method.set", id="dct")["ok"]
     token = server.token
     started = call(server, "stack.load", token=token, folder=str(stack_frames))["result"]
     assert started["load_id"] == 1
@@ -1458,6 +1671,54 @@ def test_stack_load_reports_its_own_completion(server, stack_frames):
     assert frames["load"]["finished"] is True
     assert frames["load"]["error"] is None
     assert frames["count"] == 3
+    before_release = pending["frames"]["result"]
+    assert before_release["count"] == frames["count"]
+    assert before_release["load"]["active"]
+    assert not before_release["load"]["finished"]
+    assert pending["render"]["error"]["code"] == "busy"
+
+
+@pytest.mark.parametrize("outcome", ["published", "failed", "superseded"])
+def test_stack_load_waits_for_gui_publication(server, stack_frames, outcome):
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    manager = server.window.source_manager
+    during = {}
+    errors = []
+
+    def prepare(options):
+        # Deliver the thread's queued finished signal inside preparation, as
+        # the nested event loop used by project restore can do on Windows.
+        during["thread_stopped"] = manager._load_worker.wait(5000)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.MetaCall)
+        during["frames"] = call(server, "stack.frames")["result"]
+        if outcome == "failed":
+            raise ValueError("Project frame could not be decoded")
+        if outcome == "superseded":
+            manager.clear_image_stack()
+        return options
+
+    load_id = manager._start_load_worker(folder=str(stack_frames), prepare_options=prepare,
+                                         on_error=errors.append)
+    assert wait_until(lambda: call(server, "stack.frames")["result"]["load"]["finished"])
+    assert during["thread_stopped"]
+    pending = during["frames"]
+    assert pending["names"] == []
+    assert pending["load"]["id"] == load_id
+    assert pending["load"]["active"] and not pending["load"]["finished"]
+    final = call(server, "stack.frames")["result"]
+    assert final["load"]["id"] == load_id
+    assert not final["load"]["active"]
+    if outcome == "published":
+        assert final["names"] == ["f0.tif", "f1.tif", "f2.tif"]
+        assert final["load"]["error"] is None and not errors
+    elif outcome == "failed":
+        assert final["names"] == []
+        assert errors == ["Project frame could not be decoded"]
+        assert final["load"]["error"] == errors[0]
+    else:
+        assert final["names"] == []
+        assert final["load"]["error"] == "cancelled" and not errors
 
 
 def test_stack_load_reports_a_failed_decode(server, tmp_path):
@@ -1473,6 +1734,100 @@ def test_stack_load_reports_a_failed_decode(server, tmp_path):
     assert frames["load"]["finished"] is True
     assert frames["load"]["error"], frames["load"]
     assert frames["count"] == 0
+
+
+def _decode_video_with_controlled_reader(path, scale, pixels_path, result_path):
+    """Spawn target that runs the real decoder around a controllable read()."""
+    import cv2
+    from core.video_import import _decode_video_child
+
+    class Capture:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.index = 0
+
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            return 2
+
+        def read(self):
+            if self.index == 1 and self.path.stem == 'blocked':
+                self.path.with_suffix('.reading').write_text(str(os.getpid()), encoding='ascii')
+                threading.Event().wait()
+            if self.index == 2:
+                return False, None
+            self.index += 1
+            image = np.empty((24, 32, 3), dtype=np.uint8)
+            image[:] = (5, self.index * 40, 150)
+            return True, image
+
+        def release(self):
+            pass
+
+    cv2.VideoCapture = Capture  # This replacement is confined to the spawned process.
+    _decode_video_child(path, scale, pixels_path, result_path)
+
+
+def test_cancel_blocked_video_import_allows_retry(server, stack_frames, tmp_path, monkeypatch):
+    from multiprocessing import active_children
+    from core import frame_storage, video_import
+
+    scratch = tmp_path / 'video-scratch'
+    scratch.mkdir()
+    monkeypatch.setattr(frame_storage, '_storage_directory', str(scratch))
+    monkeypatch.setattr(video_import, '_decode_video_child', _decode_video_with_controlled_reader)
+
+    def stack():
+        return call(server, 'stack.frames')['result']
+
+    assert call(server, 'stack.load', folder=str(stack_frames))['ok']
+    assert wait_until(lambda: stack()['load']['finished'], timeout=20)
+    previous = stack()
+    assert previous['count'] == 3
+    window = server.window
+    previous_stack = window.raw_images
+    previous_paths = window.image_source_paths
+    previous_loader_images = window.image_loader.images
+
+    blocked = tmp_path / 'blocked.avi'
+    blocked.touch()
+    reading = blocked.with_suffix('.reading')
+    started = call(server, 'stack.load', video=str(blocked), scale=0.5)['result']
+    assert wait_until(lambda: reading.exists() and reading.stat().st_size > 0, timeout=20)
+    child_pid = int(reading.read_text(encoding='ascii'))
+    assert stack()['load']['active']
+    assert stack()['names'] == previous['names']
+    assert next(scratch.glob('openfocus-video-*/*.bin')).stat().st_size == 12 * 16 * 3
+
+    window.source_manager._load_cancel_button.click()
+    assert wait_until(lambda: stack()['load']['finished'], timeout=5)
+    cancelled = stack()
+    assert cancelled['load']['id'] == started['load_id']
+    assert cancelled['load']['error'] == 'cancelled'
+    assert not cancelled['load']['active']
+    assert not list(scratch.glob('openfocus-video-*'))
+    assert child_pid not in {process.pid for process in active_children()}
+    assert window.raw_images is previous_stack
+    assert window.image_source_paths is previous_paths
+    assert window.image_loader.images is previous_loader_images
+
+    good = tmp_path / 'good clip.avi'
+    good.touch()
+    retried = call(server, 'stack.load', video=str(good), scale=0.5)['result']
+    assert wait_until(lambda: stack()['load']['finished'], timeout=20)
+    loaded = stack()
+    assert loaded['load']['id'] == retried['load_id'] > started['load_id']
+    assert loaded['load']['error'] is None
+    assert loaded['names'] == ['good clip_frame_0000.png', 'good clip_frame_0001.png']
+    assert loaded['scale'] == 0.5
+    assert loaded['shape'] == [12, 16, 3] and loaded['dtype'] == 'uint8'
+    assert window.image_source_paths == [str(good), str(good)]
+    assert window.image_source_exifs == window.image_icc_profiles == [b'', b'']
+    assert window.source_px_um is None and window.linear_dng_metadata is None
+    for image, green in zip(window.raw_images, (40, 80), strict=True):
+        np.testing.assert_array_equal(image, np.broadcast_to([5, green, 150], (12, 16, 3)))
 
 
 def test_gui_started_load_advances_the_generation(server, stack_frames):
@@ -1618,14 +1973,14 @@ def test_stack_include_uses_the_checkbox_path(server, control_window):
     control_window.image_filenames = []
 
 
-def test_dust_dialog_requires_experimental_opt_in(server, control_window):
-    control_window.experimental_features = False
-    response = call(server, 'dialog.open', name='dust')
-    assert response['error']['code'] == 'invalid_argument'
+@pytest.mark.parametrize('name', ['dust', 'mosaic'])
+def test_development_tools_stay_unavailable_through_control(server, control_window, name):
+    from locales import trans
 
     control_window.experimental_features = True
-    assert call(server, 'dialog.open', name='dust')['result']['opened']
-    call(server, 'dialog.reject')
+    response = call(server, 'dialog.open', name=name)
+    assert response['error']['code'] == 'invalid_argument'
+    assert response['error']['message'] == trans.t('development_unavailable_hint')
 
 
 def test_dialog_open_reuses_the_managed_instance(server):
@@ -1652,9 +2007,25 @@ def test_option_set_keeps_checkboxes_in_sync(server, control_window, monkeypatch
     call(server, "option.set", name="reverse_order", value=False)
 
 
+def test_sharpening_options_are_independent(server, control_window):
+    control_window._clear_project_dirty()
+    assert call(server, 'option.set', name='sharpen_strength', value=170)['result']['value'] == 170
+    assert control_window._project_dirty
+    assert call(server, 'option.set', name='sharpen_output', value=True)['result']['value'] is True
+    assert control_window.chk_sharpen_output.isChecked()
+    assert call(server, 'option.set', name='sharpen_output', value=False)['result']['value'] is False
+    options = call(server, 'app.state')['result']['options']
+    assert options['sharpen_output'] is False
+    assert options['sharpen_strength'] == 170
+
+    control_window.reset_to_default()
+    assert call(server, 'app.state')['result']['options']['sharpen_strength'] == 100
+
+
 def test_diagnostic_options_are_reachable_and_take_effect_at_once(server, control_window):
     from utils import logging_setup as logs
     assert call(server, "app.state")["result"]["options"]["profile_performance"] is False
+    initial_detail = logs.debug_enabled()
     try:
         call(server, "option.set", name="profile_performance", value=True)
         call(server, "option.set", name="debug_logging", value=True)
@@ -1668,9 +2039,9 @@ def test_diagnostic_options_are_reachable_and_take_effect_at_once(server, contro
         control_window.render_manager.performance_report = {"outcome": "completed"}
         assert call(server, "render.result")["result"]["performance"] == {"outcome": "completed"}
     finally:
-        call(server, "option.set", name="debug_logging", value=False)
+        call(server, "option.set", name="debug_logging", value=initial_detail)
         call(server, "option.set", name="profile_performance", value=False)
-    assert not logs.debug_enabled()
+    assert logs.debug_enabled() is initial_detail
 
 
 def test_output_delete_clears_the_result_and_protects_retouch(server, stack_frames):
@@ -1855,15 +2226,30 @@ def test_output_export_routes_aligned_records(server, control_window, monkeypatc
     assert captured["destination"] == str(tmp_path)
 
 
-def test_control_channel_respects_experimental_opt_in(server, control_window):
+def test_control_channel_guards_experimental_fusion_and_alignment(server, control_window):
+    from core.algorithms import fusion_algorithms
     from locales import trans
 
+    assert call(server, 'method.set', id='guided_filter')['result']['id'] == 'guided_filter'
     control_window.experimental_features = False
     control_window.apply_experimental_features()
-    response = call(server, 'method.set', id='guided_filter')
+    locked_render = call(server, 'render.start')
+    assert locked_render['error']['code'] == 'invalid_argument'
+    assert trans.t('experimental_locked_hint') in locked_render['error']['message']
+    assert control_window.current_fusion_method() == 'guided_filter'
+    for spec in fusion_algorithms():
+        before = control_window.current_fusion_method()
+        reply = call(server, 'method.set', id=spec.id)
+        if spec.experimental:
+            assert reply['error']['code'] == 'invalid_argument'
+            assert trans.t('experimental_locked_hint') in reply['error']['message']
+            assert control_window.current_fusion_method() == before
+        else:
+            assert reply['result']['id'] == spec.id
+    response = call(server, 'align.set', id='openfocus')
     assert response['error']['code'] == 'invalid_argument'
     assert response['error']['message'] == trans.t('experimental_locked_hint')
-    assert control_window.current_fusion_method() != 'guided_filter'
+    assert control_window.current_alignment_method() == 'none'
 
 
 def test_alignment_only_selection_is_accepted(server, control_window):
@@ -1979,7 +2365,7 @@ def test_reset_stack_menu_clears_real_wipe_and_restores_import(qapp, control_win
     window.source_manager._apply_load_options(
         LoadOptions(1.0, ["frame0.tif", "frame1.tif"], list(frames), list(frames)))
     window.stack_slider.setValue(1)
-    window.ui_objs["menu_rotate"].actions()[0].trigger()
+    window.ui_objs["action_rotate_90_cw"].trigger()
     assert window.current_display_index == 1
     assert window.raw_images[0].shape == (40, 24, 3)
 
@@ -2027,6 +2413,8 @@ def test_reset_stack_menu_clears_real_wipe_and_restores_import(qapp, control_win
     ('tile_block_size', 63), ('tile_overlap', -1), ('tile_threshold', 0),
     ('ai_batch_size', 0), ('reg_downscale_width', 63),
     ('resource_preference', None), ('resource_preference', 'other'),
+    ('sharpen_output', 1), ('sharpen_strength', True), ('sharpen_strength', 100.0),
+    ('sharpen_strength', -1), ('sharpen_strength', 201),
 ])
 def test_option_validation_is_atomic(server, control_window, monkeypatch, name, value):
     before = call(server, 'app.state')['result']['options']
@@ -2070,6 +2458,13 @@ def test_method_parameter_validation_precedes_selector(server, control_window, m
     assert not persisted
     assert call(server, command, id='none', parameters={'unknown': 1})['error']['code'] == 'invalid_argument'
     assert call(server, command, id='none', parameters={})['ok']
+
+
+def test_align_set_rejects_continue_before_changing_method(server, control_window):
+    control_window.set_alignment_method('none')
+    response = call(server, 'align.set', id='openfocus', parameters={'failure_policy': 'continue'})
+    assert response['error']['code'] == 'invalid_argument'
+    assert control_window.current_alignment_method() == 'none'
 
 
 def test_stack_include_rejects_all_indices_before_mutation(server, control_window):

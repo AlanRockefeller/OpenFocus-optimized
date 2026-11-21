@@ -29,13 +29,13 @@ def _bind(host):
     return host
 
 
-def test_title_marks_unsaved_changes():
+def test_title_marks_only_named_projects_with_unsaved_changes():
     host = _bind(_Host())
     host._update_project_title()
     assert host.titles[-1] == "OpenFocus"
 
     host._mark_project_dirty()
-    assert host.titles[-1] == "OpenFocus*"
+    assert host.titles[-1] == "OpenFocus"
 
     host.project_path = "C:/work/stack.ofproj"
     host._update_project_title()
@@ -53,7 +53,7 @@ def test_marking_twice_only_retitles_once():
     assert len(host.titles) == count, "an already-dirty project must not retitle"
 
 
-@pytest.mark.parametrize("action", ["open", "close"])
+@pytest.mark.parametrize("action", ["open", "external", "close"])
 @pytest.mark.parametrize("choice", ["cancel", "discard", "save_ok", "save_cancel", "save_failed", "escape", "default"])
 def test_dirty_project_confirmation(qapp, tmp_path, monkeypatch, action, choice):
     import numpy as np
@@ -75,7 +75,7 @@ def test_dirty_project_confirmation(qapp, tmp_path, monkeypatch, action, choice)
         window.file_list.addItem(item)
         window._clear_project_dirty()
         item.setCheckState(Qt.CheckState.Unchecked)
-        assert window._project_dirty and window.windowTitle().endswith("*")
+        assert window._project_dirty and window.windowTitle() == "OpenFocus"
         assert 0 in window.excluded_frames
 
         opened = []
@@ -106,10 +106,13 @@ def test_dirty_project_confirmation(qapp, tmp_path, monkeypatch, action, choice)
         if action == "open":
             window.open_project_dialog()
             continued = bool(opened)
+        elif action == "external":
+            window.open_project_path(new_path)
+            continued = getattr(window, "project_path", None) == new_path
         else:
             continued = window.close()
         assert continued == (choice in ("discard", "save_ok"))
-        if action == "open" and continued:
+        if action in ("open", "external") and continued:
             assert window.image_filenames == ["new.png"]
             assert window.project_path == new_path
             assert not window._project_dirty

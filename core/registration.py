@@ -37,6 +37,7 @@ from typing import Union, List, Optional
 
 from utils.sorting import natural_sort_key as _image_sort_key
 from core.image_loader import apply_exif_orientation
+from core.registration_errors import RejectedAlignmentFrame
 from core.frame_storage import capture_scratch, create_frame, run_with_scratch, store_frame
 from utils.logging_setup import log_action, log_operation
 from utils.performance_profile import current as _profile
@@ -353,10 +354,10 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
             source_identities.append(identity)
             _check_cancel(should_cancel)
             if curr_des is None or len(curr_kps) < 4 or last_des is None:
-                print(f"Warning: Frame {idx} features insufficient. Keeping original position.")
                 if failure_policy == 'fail':
                     _report_alignment(idx, 'homography', 'failed', reason='insufficient features', reference_index=last_index)
-                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: insufficient features')
+                    raise RejectedAlignmentFrame('Homography', idx, 'insufficient features')
+                print(f"Warning: Frame {idx} features insufficient. Keeping original position.")
                 _report_alignment(idx, 'homography', 'fallback', reason='insufficient features',
                                   reference_index=last_index, transform=H_global)
                 H_matrices.append(H_global.copy())
@@ -370,10 +371,10 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
                     if m.distance < 0.70 * n.distance:
                         good_matches.append(m)
             if len(good_matches) < 6:
-                print(f"Warning: Frame {idx} poor matches ({len(good_matches)}). Keeping previous trajectory.")
                 if failure_policy == 'fail':
                     _report_alignment(idx, 'homography', 'failed', reason='insufficient matches', reference_index=last_index, match_count=len(good_matches))
-                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: insufficient matches')
+                    raise RejectedAlignmentFrame('Homography', idx, 'insufficient matches')
+                print(f"Warning: Frame {idx} poor matches ({len(good_matches)}). Keeping previous trajectory.")
                 _report_alignment(idx, 'homography', 'fallback', reason='insufficient matches',
                                   reference_index=last_index, transform=H_global,
                                   match_count=len(good_matches))
@@ -389,7 +390,7 @@ def _align_homography_impl(input_source, output_path=None, img_filenames=None, d
                 print(f"Frame {idx} alignment failed.")
                 if failure_policy == 'fail':
                     _report_alignment(idx, 'homography', 'failed', reason='homography estimation failed', reference_index=last_index, match_count=len(good_matches))
-                    raise ValueError(f'Homography alignment failed at frame {idx + 1}: homography estimation failed')
+                    raise RejectedAlignmentFrame('Homography', idx, 'homography estimation failed')
                 _report_alignment(idx, 'homography', 'fallback', reason='homography estimation failed',
                                   reference_index=last_index, transform=H_global,
                                   match_count=len(good_matches))
@@ -923,7 +924,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None, *,
                         reference_frame=1, rotation=0., magnification=3.,
                         defer_warps=False, plan_callback=None):
     """Wide detector using the verified search and sampling behavior."""
-    from core.openfocus_alignment import estimate_alignment_plan, AlignmentEstimationError
+    from core.openfocus_alignment import estimate_alignment_plan
     images = input_source
     if isinstance(input_source, str):
         from dataclasses import replace
@@ -946,10 +947,10 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None, *,
                 reference_frame=reference_frame, rotation=rotation, magnification=magnification,
                 should_cancel=should_cancel,
                 failure_policy=failure_policy)
-        except AlignmentEstimationError as error:
-            for transform in getattr(error, 'completed_transforms', ()):
+        except RejectedAlignmentFrame as error:
+            for transform in error.completed_transforms:
                 _report_openfocus_transform(transform, reference_frame - 1)
-            _report_alignment(getattr(error, 'frame_index', None), 'openfocus', 'failed', reason=str(error))
+            _report_alignment(error.frame_index, 'openfocus', 'failed', reason=error.reason)
             raise
         if plan_callback is not None:
             plan_callback(plan)
@@ -963,7 +964,10 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None, *,
 
 # ========== ECC对齐算法实现（高精度） ==========
 
-def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscale_width=1000, thread_count: int = 4, should_cancel=None, use_gpu: bool = False, failure_policy='continue', *, defer_warps=False, plan_callback=None):
+def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscale_width=1000,
+                    thread_count: int = 4, should_cancel=None, use_gpu: bool = False,
+                    failure_policy='continue', *, defer_warps=False, plan_callback=None,
+                    accelerate_ecc=False):
     """
     基于 ECC (增强相关系数) 的高精度图像栈对齐算法
     适用于：显微摄影、微距摄影中伴随呼吸效应的图像栈
@@ -977,6 +981,11 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
 
     if len(images) < 2:
         return images
+
+    area_gpu = None
+    if accelerate_ecc:
+        from core._ecc_area_gpu import ExactAreaGpu
+        area_gpu = ExactAreaGpu()
 
     # --- 2. 初始化 ---
     h_orig, w_orig = images[0].shape[:2]
@@ -1005,28 +1014,38 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, number_of_iterations, termination_eps)
 
     # 预处理函数：转灰度 + 降采样 + 高斯模糊 + 归一化
-    def preprocess(img):
-        from core.source_frames import resolve_frame
-        source = img
-        img = resolve_frame(img, should_cancel=should_cancel)
-        identity = _perspective_source(source, img, should_cancel)
-        h, w = img.shape[:2]
+    def preprocess(source):
+        from core.source_frames import resolve_frame, source_area_resizer
+        # Replace each intermediate so a deferred full-size decode can be
+        # released as soon as resize or color conversion no longer needs it.
+        with source_area_resizer(area_gpu):
+            pixels = resolve_frame(source, should_cancel=should_cancel)
+        identity = _perspective_source(source, pixels, should_cancel)
+        w = pixels.shape[1]
         scale = downscale_width / float(w) if w > downscale_width else 1.0
         if scale < 1.0:
-            small_img = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        else:
-            small_img = img # 引用即可，无需拷贝
+            resized = None
+            if area_gpu is not None:
+                # OpenCV keeps fx/fy when it rounds the destination height.
+                # An explicit size is equivalent only if it gives the same scale.
+                height = pixels.shape[0]
+                target_height = round(height * scale)
+                if target_height > 0 and target_height / height == scale:
+                    resized = area_gpu.resize(pixels, (downscale_width, target_height))
+            pixels = (resized if resized is not None else
+                      cv2.resize(pixels, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
+            del resized
 
-        if small_img.ndim == 2:
-            gray = small_img
-        elif small_img.shape[2] == 1:
-            gray = small_img[:, :, 0]
-        else:
-            gray = cv2.cvtColor(small_img, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        if pixels.ndim != 2:
+            if pixels.shape[2] == 1:
+                pixels = pixels[:, :, 0]
+            else:
+                pixels = cv2.cvtColor(pixels, cv2.COLOR_BGR2GRAY)
+        pixels = cv2.GaussianBlur(pixels, (5, 5), 0)
         # findTransformECC 的数值稳定性依赖归一化的浮点输入：uint8 的
         # 大幅值梯度会让优化步长过大，常见于小位移场景直接不收敛
-        gray = gray.astype(np.float32) / (65535.0 if gray.dtype == np.uint16 else 255.0)
+        divisor = 65535.0 if pixels.dtype == np.uint16 else 255.0
+        gray = np.divide(pixels, divisor, dtype=np.float32)
         return gray, scale, identity
 
     print(f"Aligning {len(images)} images using ECC (Parallel Optimized)...")
@@ -1081,6 +1100,8 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
                 None,
                 1
             )
+            if failure_policy == 'fail' and (cc is None or not np.isfinite(cc)):
+                raise RejectedAlignmentFrame('ECC', idx, 'ECC failed to converge')
 
             # 尺度还原
             if warp_mode == cv2.MOTION_HOMOGRAPHY:
@@ -1091,7 +1112,9 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
             else:
                 warp_matrix[0, 2] /= scale_factor
                 warp_matrix[1, 2] /= scale_factor
-        except cv2.error:
+        except cv2.error as exc:
+            if failure_policy == 'fail':
+                raise RejectedAlignmentFrame('ECC', idx, 'ECC failed to converge') from exc
             cc = None
             print(f"Warning: ECC failed to converge at frame {idx}. Assuming no motion.")
             if warp_mode == cv2.MOTION_HOMOGRAPHY:
@@ -1131,13 +1154,13 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
             on_prepared=remember_scale)
         source_identities.extend(prepared_identities)
 
+    if area_gpu is not None:
+        log_action('registration_ecc_resize', device=area_gpu.device_name or 'CPU',
+                   gpu_resizes=area_gpu.frames_resized, frames=len(images))
+
     trajectory_failed = False
     for idx, (warp_matrix, cc) in enumerate(pair_transforms, start=1):
         _check_cancel(should_cancel)
-        if cc is None and failure_policy == 'fail':
-            _report_alignment(idx, 'ecc', 'failed', reason='ECC failed to converge',
-                              reference_index=idx - 1)
-            raise ValueError(f'ECC alignment failed at frame {idx + 1}: ECC failed to converge')
         # 矩阵累积：warp_matrix maps frame k-1 -> frame k, so the map
         # frame0 -> frame_k is Wk @ ... @ W1 — compose on the LEFT.
         # (The old right-side product W1 @ W2 @ ... left frame 3+ misaligned
@@ -1401,7 +1424,7 @@ class ImageRegistration:
     
     def __init__(self, method='homography', downscale_width=1024,
                  max_shift_ratio=None, brightness_reference='first',
-                 use_gpu=False, parameters=None, *, defer_warps=False):
+                 use_gpu=False, parameters=None, *, defer_warps=False, accelerate_ecc=False):
         from core.algorithms import (alignment_steps, registration_parameter_specs,
                                      resolve_registration_parameters)
         self.method = method
@@ -1416,6 +1439,9 @@ class ImageRegistration:
         self.downscale_width = int(downscale_width) if downscale_width is not None else 1024
         self.brightness_reference = brightness_reference if brightness_reference in ('first', 'last') else 'first'
         self.use_gpu = bool(use_gpu)
+        # use_gpu explicitly selects the CuPy warp. The application switch
+        # only admits exact resize work and keeps the Lanczos warp contract.
+        self.accelerate_ecc = bool(accelerate_ecc)
         self.defer_warps = bool(defer_warps)
         self.alignment_plan = None
         self._perspective_stages = []
@@ -1540,14 +1566,14 @@ class ImageRegistration:
             channels = images[0].shape[2] if images[0].ndim == 3 else 1
             # Charge active source resolution and bounded concurrent estimation;
             # deferred output descriptors retain no full-resolution warp stack.
-            gray_bytes = height * width * 4
+            from core.resource_policy import registration_working_set
             from core.source_frames import frame_resolution_bytes
+            fixed, per_worker = registration_working_set(height, width,
+                max(image.size * 16 + frame_resolution_bytes(image) for image in images))
             plan = plan_execution(Workload(
                 algorithm='registration', frames=len(images), height=height,
                 width=width, channels=channels, itemsize=images[0].dtype.itemsize,
-                fixed_bytes=gray_bytes,
-                per_worker_bytes=max(image.size * 16 + frame_resolution_bytes(image)
-                                     for image in images),
+                fixed_bytes=fixed, per_worker_bytes=per_worker,
                 outer_tasks=len(images), parallel_layer='outer'),
                 preference=resource_preference, user_threads=thread_count)
             workers = min(plan.workers, plan.max_in_flight)
@@ -1620,7 +1646,16 @@ class ImageRegistration:
         Returns:
             配准后的图像列表
         """
-        return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width, thread_count=thread_count, should_cancel=should_cancel, use_gpu=self.use_gpu, failure_policy=failure_policy, defer_warps=self.defer_warps, plan_callback=self._perspective_stages.append)
+        try:
+            return _align_ecc_impl(input_source, output_path, downscale_width=self.downscale_width,
+                thread_count=thread_count, should_cancel=should_cancel, use_gpu=self.use_gpu,
+                failure_policy=failure_policy, defer_warps=self.defer_warps,
+                plan_callback=self._perspective_stages.append, accelerate_ecc=self.accelerate_ecc)
+        except RejectedAlignmentFrame as error:
+            # Pair estimation may run on a pool thread. Record it in the caller's report.
+            _report_alignment(error.frame_index, 'ecc', 'failed', reason=error.reason,
+                              reference_index=error.frame_index - 1)
+            raise
 
 
     def set_method(self, method):

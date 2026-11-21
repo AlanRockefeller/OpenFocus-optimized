@@ -7,6 +7,7 @@
  * - "/download/latest/<kind>" streams the matching R2 object with byte-range
  *   support, or redirects to the GitHub asset when the mirror has no object.
  * - "/api/updates" and "/download/releases/<tag>/<kind>" use R2 only.
+ * - The two WeChat QR paths proxy the current PNGs from the account service.
  *
  * With `run_worker_first: true` in wrangler.jsonc every request reaches this
  * worker, so `www` canonicalisation also applies to static paths. Everything
@@ -25,15 +26,25 @@ const DOWNLOAD_SUFFIXES = {
   "windows-zip": "windows-x64.zip",
   "macos-dmg": "macos.dmg",
   "macos-zip": "macos-arm64.zip",
+  "linux-desktop": "linux-x86_64.tar.gz",
 };
 const DOWNLOAD_KINDS = new Set([
   "windows-setup",
   "windows-zip",
   "macos-dmg",
   "macos-zip",
+  "linux-desktop",
 ]);
 const EDGE_CACHE_SECONDS = 300;
 const NO_STORE = "no-store";
+const QR_ORIGIN = "https://account.openfocus.top";
+const QR_ROUTES = new Map([
+  ["/wechat-group.png", "wechat-group"],
+  ["/wechat-official-account.jpg", "wechat-official-account"],
+]);
+const QR_MAX_BYTES = 512 * 1024;
+const QR_MAX_DIMENSION = 1024;
+const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 // /download/latest/* is a mutable URL even though the R2 object it resolves to
 // is versioned, so no downstream cache may pin the response.
 const OBJECT_CACHE = NO_STORE;
@@ -70,6 +81,80 @@ function badGateway(message, method = "GET") {
       "Retry-After": "60",
     },
   });
+}
+
+async function readQrPng(response) {
+  const declaredLength = response.headers.get("Content-Length");
+  const limit = declaredLength === null ? QR_MAX_BYTES : Number(declaredLength);
+  if (!response.body || limit < 45 || limit > QR_MAX_BYTES ||
+      (declaredLength !== null && !/^\d+$/.test(declaredLength)) ||
+      response.headers.get("Content-Type")?.toLowerCase() !== "image/png") {
+    response.body?.cancel().catch(() => {});
+    return null;
+  }
+
+  const buffer = new Uint8Array(limit);
+  let size = 0;
+  const reader = response.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (size + value.byteLength > limit) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    buffer.set(value, size);
+    size += value.byteLength;
+  }
+  if (size < 45 || (declaredLength !== null && size !== limit) ||
+      !PNG_SIGNATURE.every((byte, offset) => buffer[offset] === byte)) return null;
+
+  const header = new DataView(buffer.buffer);
+  if (header.getUint32(8) !== 13 || header.getUint32(12) !== 0x49484452) return null; // IHDR
+  if (header.getUint32(size - 12) !== 0 || header.getUint32(size - 8) !== 0x49454e44 ||
+      header.getUint32(size - 4) !== 0xae426082) return null; // IEND
+  const width = header.getUint32(16);
+  const height = header.getUint32(20);
+  return width > 0 && height > 0 && width <= QR_MAX_DIMENSION && height <= QR_MAX_DIMENSION
+    ? buffer.subarray(0, size) : null;
+}
+
+async function proxyQr(id, method) {
+  if (method !== "GET" && method !== "HEAD") {
+    return textResponse("Method Not Allowed", 405, { Allow: "GET, HEAD" }, method);
+  }
+
+  try {
+    // The account API exposes GET. Validate the same representation for HEAD.
+    const upstream = await fetch(`${QR_ORIGIN}/v1/qr/${id}`, {
+      method: "GET",
+      headers: { Accept: "image/png", "User-Agent": "OpenFocus/Website" },
+      credentials: "omit",
+      redirect: "manual",
+      cache: "no-store",
+    });
+    if (upstream.status !== 200) {
+      upstream.body?.cancel().catch(() => {});
+      if (upstream.status === 404) {
+        return textResponse("QR code is unpublished", 404, {}, method);
+      }
+    } else {
+      const png = await readQrPng(upstream);
+      if (png) {
+        return new Response(method === "HEAD" ? null : png, {
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(png.byteLength),
+            "Cache-Control": NO_STORE,
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+    }
+  } catch {
+    // Network and body read failures use the same public upstream error.
+  }
+  return textResponse("QR code service is unavailable", 502, {}, method);
 }
 
 function preferredLanguage(request) {
@@ -115,6 +200,21 @@ function safeObjectKey(value) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) ? value : null;
 }
 
+function linuxRequired(tag) {
+  if (!/^v[0-9]+(?:\.[0-9]+)*$/.test(tag)) return false;
+  const [major, minor = 0] = tag.slice(1).split(".").map(Number);
+  return major > 1 || (major === 1 && minor >= 77);
+}
+
+function validLinuxAsset(asset, tag) {
+  const name = `OpenFocus-${tag}-${DOWNLOAD_SUFFIXES["linux-desktop"]}`;
+  const remote = asset && githubAssetUrl(asset.url);
+  return !!asset && asset.name === name && safeObjectKey(name) &&
+    Number.isSafeInteger(asset.size) && asset.size > 0 && !!remote &&
+    remote === `https://github.com/${REPO}/releases/download/${tag}/${name}` &&
+    (!asset.digest || /^sha256:[0-9a-fA-F]{64}$/.test(asset.digest));
+}
+
 function releasePayload(release) {
   const assets = Array.isArray(release.assets) ? release.assets : [];
   const pick = (pattern) => {
@@ -131,6 +231,12 @@ function releasePayload(release) {
       url: githubAssetUrl(asset.browser_download_url),
     };
   };
+  const linuxName = `OpenFocus-${release.tag_name}-${DOWNLOAD_SUFFIXES["linux-desktop"]}`;
+  const linux = assets.find((item) => item && item.name === linuxName);
+  const linuxAsset = linux ? {
+    name: linux.name, size: linux.size, url: githubAssetUrl(linux.browser_download_url),
+    ...(linux.digest ? { digest: linux.digest } : {}),
+  } : null;
 
   return {
     tag: release.tag_name,
@@ -140,10 +246,11 @@ function releasePayload(release) {
       "windows-zip": pick(/-windows-x64\.zip$/i),
       "macos-dmg": pick(/-macos\.dmg$/i),
       "macos-zip": pick(/-macos-arm64\.zip$/i),
+      "linux-desktop": validLinuxAsset(linuxAsset, release.tag_name) ? linuxAsset : null,
     },
   };
 }
-// The mirror workflow publishes this manifest only after uploading all four
+// The mirror workflow publishes metadata only after uploading all required
 // assets. It keeps downloads available when GitHub's shared-IP rate limit is
 // exhausted; the response identifies the mirror as its metadata source.
 async function mirroredRelease(env, key = MIRROR_MANIFEST) {
@@ -174,6 +281,11 @@ async function mirroredRelease(env, key = MIRROR_MANIFEST) {
           !Number.isSafeInteger(asset.size) || asset.size <= 0) return null;
       if (!mirrorOnly && (!remote || decodeURIComponent(new URL(remote).pathname) !==
           `/${REPO}/releases/download/${data.tag}/${expected}`)) return null;
+    }
+    const linux = data.assets && data.assets["linux-desktop"];
+    if (linux && (!validLinuxAsset(linux, data.tag) ||
+        !/^sha256:[0-9a-fA-F]{64}$/.test(linux.digest || ""))) {
+      delete data.assets["linux-desktop"];
     }
     if (key === MIRROR_MANIFEST && Array.isArray(data.releases)) {
       data.releases = data.releases.filter((release) => release &&
@@ -246,17 +358,19 @@ async function stableRelease(ctx, env) {
   }
 
   const payload = releasePayload(release);
-  if (Object.values(payload.assets).some((asset) => !asset)) {
+  const requiredKinds = [...DOWNLOAD_KINDS].filter((kind) =>
+    kind !== "linux-desktop" || linuxRequired(payload.tag));
+  if (requiredKinds.some((kind) => !payload.assets[kind])) {
     const mirror = await mirroredRelease(env);
     if (mirror && mirror.tag === payload.tag) {
       for (const kind of DOWNLOAD_KINDS) {
-        if (!payload.assets[kind]) payload.assets[kind] = mirror.assets[kind];
+        if (!payload.assets[kind] && mirror.assets[kind]) payload.assets[kind] = mirror.assets[kind];
       }
     }
   }
   const body = JSON.stringify(payload);
   // Do not cache a release while its split Windows assets are still mirroring.
-  if (cache && Object.values(payload.assets).every(Boolean)) {
+  if (cache && requiredKinds.every((kind) => payload.assets[kind])) {
     const cacheable = new Response(body, {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -308,11 +422,13 @@ function betaAlias(tag) {
 
 function previewUpdate(preview) {
   const alias = betaAlias(preview.tag);
-  if (!alias || [...DOWNLOAD_KINDS].some((kind) =>
-    !/^sha256:[0-9a-fA-F]{64}$/.test(preview.assets[kind].digest || ""))) return null;
-  const assets = Object.fromEntries(Object.entries(DOWNLOAD_SUFFIXES).map(([kind, suffix]) => [kind, {
-    ...preview.assets[kind], name: `OpenFocus-${alias}-${suffix}`,
-  }]));
+  if (!alias || Object.values(preview.assets).some((asset) =>
+    !asset || !/^sha256:[0-9a-fA-F]{64}$/.test(asset.digest || ""))) return null;
+  const assets = Object.fromEntries(Object.entries(DOWNLOAD_SUFFIXES)
+    .filter(([kind]) => preview.assets[kind])
+    .map(([kind, suffix]) => [kind, {
+      ...preview.assets[kind], name: `OpenFocus-${alias}-${suffix}`,
+    }]));
   const result = { ...preview, tag: alias, actual_tag: preview.tag, assets };
   if (Array.isArray(preview.releases)) {
     result.releases = preview.releases.flatMap((release) => {
@@ -714,6 +830,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const method = (request.method || "GET").toUpperCase();
+
+    const qrId = QR_ROUTES.get(url.pathname);
+    if (qrId) return proxyQr(qrId, method);
 
     if (url.hostname === "www.openfocus.top") {
       const target = new URL(request.url);

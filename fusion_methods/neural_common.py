@@ -1,5 +1,6 @@
 """Shared staging, cancellation and resource planning for neural fusion."""
 import os
+from contextlib import contextmanager
 
 import cv2
 import numpy as np
@@ -15,6 +16,17 @@ def cancel(should_cancel):
         raise RegistrationCancelled()
 
 
+
+
+@contextmanager
+def neural_lease(execution_plan, should_cancel):
+    if execution_plan is not None:
+        yield
+        return
+    from core.resource_policy import heavy_job
+    from fusion_methods.neural_runtime import inference_job
+    with heavy_job(should_cancel), inference_job():
+        yield
 
 
 def read_stack(input_source, img_resize, should_cancel=None, execution_plan=None,
@@ -64,8 +76,8 @@ def working_frame(frame, normalize_stack):
     return result
 
 
-def _plane(frame):
-    """One 0-255 luma plane as float32, independent of source bit depth."""
+def luma_plane(frame):
+    """Return one 0-1 float32 luma plane from a grayscale or BGR frame."""
     if frame.ndim == 2:
         gray = frame
     elif frame.shape[2] == 1:
@@ -94,7 +106,7 @@ def stage_planes(frames, align, should_cancel=None):
         if ph or pw:
             padding = ((0, ph), (0, pw)) + ((0, 0),) * (frame.ndim - 2)
             frame = np.pad(frame, padding, mode=mode)
-        batch[0, index] = _plane(frame)
+        batch[0, index] = luma_plane(frame)
     cancel(should_cancel)
     return batch
 
@@ -106,16 +118,35 @@ def normalized_frames(frames, should_cancel=None):
     return normalize_frames(frames, should_cancel)
 
 
+def attention_inference_bytes(frames, height, width, channels, device, result_count=1):
+    """Host working set and new VRAM requirement for a whole inference."""
+    from fusion_methods.neural_runtime import (UNIFIED_MEMORY_KINDS, VRAM_GATED_KINDS,
+                                               estimate_inference_bytes, native_startup_bytes)
+    hp = height + (-height) % ATTENTION_PAD_ALIGN
+    wp = width + (-width) % ATTENTION_PAD_ALIGN
+    inference = estimate_inference_bytes(frames, height, width, device)
+    host = (frames * hp * wp * 4 * (2 * channels + 3)
+            + result_count * height * width * channels * 4 + inference)
+    if device in UNIFIED_MEMORY_KINDS:
+        host += native_startup_bytes(device)
+    vram = inference + frames * hp * wp * 4 * 6 if device in VRAM_GATED_KINDS else 0
+    return host, vram
+
+
 def plan_attention_inference(algorithm, frames, model_path, device,
                              thread_count=None,
                              resource_preference='balanced', execution_plan=None,
                              result_count=1, fixed_bytes=0, height=None, width=None):
     """Admit the compact runtime's working set before creating a session."""
-    from core.resource_policy import Workload, plan_execution, probe_resources
-    from fusion_methods.neural_runtime import estimate_inference_bytes
+    from dataclasses import replace
+    from core.resource_policy import ResourceLimitError, Workload, plan_execution, probe_resources
+    from core.source_frames import frame_resolution_bytes, source_cache_growth_bytes
+    from fusion_methods.neural_runtime import apply_inference_budget, candidate_devices
 
+    preferred = device
     if execution_plan is not None:
-        device = getattr(execution_plan, 'device_kind', device)
+        if device != 'CPU':
+            device = getattr(execution_plan, 'device_kind', device)
         thread_count = min(thread_count or execution_plan.native_threads,
                            execution_plan.native_threads)
     h, w = frames[0].shape[:2]
@@ -123,20 +154,32 @@ def plan_attention_inference(algorithm, frames, model_path, device,
     w = int(width) if width is not None else w
     n = len(frames)
     c = frames[0].shape[2] if frames[0].ndim == 3 else 1
-    hp, wp = h + (-h) % 64, w + (-w) % 64
-    inference = estimate_inference_bytes(n, h, w, device)
-    host = (fixed_bytes + n * hp * wp * 4 * (2 * c + 3)
-            + result_count * h * w * c * 4 + inference)
-    from core.source_frames import frame_resolution_bytes, source_cache_growth_bytes
-    host += max(frame_resolution_bytes(frame) for frame in frames) + source_cache_growth_bytes(frames)
-    workload = Workload(algorithm=algorithm, frames=n, height=h, width=w,
-                        channels=c, itemsize=max(f.dtype.itemsize for f in frames),
-                        parallel_layer='native', fixed_bytes=host, per_worker_bytes=0)
-    plan = plan_execution(workload, probe_resources(), preference=resource_preference,
-                          user_threads=thread_count,
-                          ram_budget_override=execution_plan.ram_budget if execution_plan else None)
-    from dataclasses import replace
-    return model_path, device, replace(plan, device_kind=device)
+    fixed_bytes += max(frame_resolution_bytes(frame) for frame in frames) + source_cache_growth_bytes(frames)
+    itemsize = max(frame.dtype.itemsize for frame in frames)
+    snapshot = probe_resources()
+    requested = device
+    for device in candidate_devices(requested):
+        host, _ = attention_inference_bytes(n, h, w, c, device, result_count)
+        workload = Workload(algorithm=algorithm, frames=n, height=h, width=w,
+                            channels=c, itemsize=itemsize, parallel_layer='native',
+                            fixed_bytes=host + fixed_bytes, per_worker_bytes=0)
+        try:
+            plan = plan_execution(workload, snapshot, preference=resource_preference,
+                                  user_threads=thread_count,
+                                  ram_budget_override=execution_plan.ram_budget if execution_plan else None)
+        except ResourceLimitError:
+            if device == 'CPU':
+                raise
+            continue
+        fallback = getattr(execution_plan, 'device_fallback', None)
+        if preferred != 'CPU' and requested == 'CPU' and not fallback:
+            fallback = 'execution plan selected CPU'
+        if device != requested:
+            fallback = f'{requested} did not fit the host memory budget'
+        plan = replace(plan, device_kind=device, device_fallback=fallback,
+                       vram_budget=getattr(execution_plan, 'vram_budget', 0))
+        apply_inference_budget(plan)
+        return model_path, device, plan
 
 
 def _ycbcr(frame):

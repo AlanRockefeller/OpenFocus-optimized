@@ -3,7 +3,7 @@
 OpenFocus does not upload your images, file names or project data. Desktop
 usage reporting is enabled by default when no preference exists. An existing
 explicitly disabled preference stays disabled. Change the switch in
-**Settings → Advanced Settings → Share usage statistics**, then choose **OK**;
+**Settings → Advanced Settings → General → Share usage statistics**, then choose **OK**.
 Cancel, Esc or closing the settings dialog discards the draft. Usage statistics
 are independent of account sign-in and diagnostic reporting.
 
@@ -17,6 +17,10 @@ are independent of account sign-in and diagnostic reporting.
   newer release from `openfocus.top` while idle; installation requires the user
   to choose to restart and update. Builds without self-update open the website
   download page instead.
+- **Sponsor acknowledgments** — opening **Support Us** requests the public list
+  from `account.openfocus.top` without account credentials or an installation
+  ID. Only display names approved for public acknowledgment are published.
+  The payment QR codes are bundled and available offline.
 - **Usage reporting** — while enabled, the desktop app sends only a
   randomly generated installation ID, app version and operating system to
   `openfocus.top`, normally no more than once every 24 hours after a successful
@@ -26,26 +30,37 @@ are independent of account sign-in and diagnostic reporting.
   Turning the setting off deletes the local ID and send timestamp and stops
   future reports; enabling it again creates a new ID. Closing the application
   also cancels future reports. A request already in flight may still complete.
-- **Account** — desktop use requires an account. Sign in online once on each
-  device; the saved local session permits offline use until sign-out or removal.
-  A device that has never signed in cannot enter while offline. Email, GitHub or
+- **Account** — desktop use requires an account. Sign in online once in each
+  profile. Its saved session permits offline use until sign-out or removal.
+  A profile that has never signed in cannot enter while offline. Email, GitHub or
   Google sign-in uses your browser and `account.openfocus.top`. The account service
   receives the verified email and identity needed for sign-in. You can sign out
   or delete your account. Authentication credentials are stored locally and are not included in
   diagnostic reports. Signing out also requests server session revocation. If
   local credential removal fails, the account dialog reports incomplete cleanup
   and offers a retry; signing out in memory does not erase credentials on disk.
-  The service also receives a random ID saved for this profile and a device
-  label based on the computer name when exchanging a sign-in code, to manage
-  the three-device limit. Account requests include the app version, operating
-  system, and a random ID and start time for the current app run.
-- **Error reports** — you can review and send a sanitized report, signed in or
-  anonymously. After desktop sign-in, automatic error reporting is enabled by
-  default unless you previously disabled it; a saved preference is preserved.
-  You can change it in Advanced Settings. Automatic reports are prepared only
-  after a session records an error; a previous native crash is offered for review
-  and requires a separate confirmation. Automatic reports are skipped for
-  development runs; report metadata includes the build channel.
+  OpenFocus uses a device ID to manage the three-device limit. The computer
+  name is a display label. On Windows, installed, portable, source and
+  recognized preview builds run by the same user share the device ID in
+  `%LOCALAPPDATA%\OpenFocus\account-device`. When signing in, OpenFocus also
+  sends a product-specific hash of the Windows installation identifier and
+  any existing device IDs it finds in local OpenFocus profiles. The raw
+  Windows identifier stays on the PC. The service scopes the key to the
+  signed-in account and uses it to reuse the same registration. An updated
+  portable build can carry over its prior ID when it restores a saved session.
+  Each profile keeps its own credentials. Explicit session paths and macOS
+  and Linux builds keep profile-local device IDs.
+  Account requests include the app version, operating system, and a random ID
+  and start time for the current app run.
+- **Error reports** — you can review and send a sanitized report while signed in or
+  anonymously. **Automatically send error reports** is checked by default in
+  **Settings → Advanced Settings → General**. The default takes effect after
+  signing in with the reporting terms. Your saved choice also applies after
+  restarting or resetting other settings. When enabled, the app stores a
+  sanitized report when it logs an error and attempts delivery in the background.
+  At startup the app can offer a previous native crash or an uncaught Python
+  exit for review. Sending either requires confirmation. Automatic reports are
+  skipped for development runs. Report metadata includes the build channel.
   Reports can include a separate random
   report installation ID,
   software and system versions, selected hardware details, image counts and
@@ -58,15 +73,16 @@ are independent of account sign-in and diagnostic reporting.
   Render-child errors may include a fixed error category, origin and last
   reported render stage; that stage does not establish where the error occurred.
   Rejected memory admissions may include a fixed unknown or insufficient status
-  and bounded required, available, total and ceiling byte counts when known.
+  and bounded required, available, total and ceiling byte counts. On Windows,
+  reports can also include system and process commit headroom when measured.
   An unavailable memory measurement is omitted, not reported as zero. A Python
   traceback may include the timestamp from its immediately preceding error log
   header when available. Arbitrary error messages and source code are excluded.
   Reports retain at most the most recent 2,000 recognized events from a bounded
   log tail and indicate detected omissions; older rotated logs may already be gone.
-  Failed reports can be stored locally for bounded retries, with at most three
-  pending reports and three attempts. Account-linked queued reports are retried
-  only with the same account. Turning automatic reporting off revokes permission
+  Up to three reports can await delivery on disk, with priority for manual
+  reports and up to three delivery attempts per entry. Account-linked reports
+  are retried only with the same account. Turning automatic reporting off revokes permission
   for requests that have not yet been authorized to start and removes queued
   automatic reports. A request already authorized to start may still complete;
   previously received reports are not immediately deleted. Manually submitted
@@ -103,8 +119,8 @@ local machine (in portable mode, beside the executable). Image and project data
 are not uploaded. When usage reporting is enabled, its random installation ID is
 also stored locally and sent as described above.
 
-Diagnostic logs remain on the local machine unless you choose to share them;
-they rotate at approximately 1 MB per file with three backups per process, and
+Detailed session logs are written locally. Open **Help → Report a Problem → Open Logs Folder** to
+find them. They rotate at approximately 1 MB per file with three backups per process, and
 inactive process logs expire after 14 days. Local logs may contain source/output
 paths and final-pixel checksums. Usage statistics never read these logs. A local
 feedback export may include up to 20 MB of recent log tails and should be reviewed

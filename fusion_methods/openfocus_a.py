@@ -95,7 +95,6 @@ def _hard_response(gray, radius, should_cancel, check_cancel):
     height, width = gray.shape
     levels = int(np.floor(np.log2(max(1, radius)))) + 3
     response = create_frame((height, width), np.int32)
-    response[...] = 0
     for level in range(levels):
         check_cancel(should_cancel)
         reduced = create_frame(((gray.shape[0] + 1) // 2,
@@ -104,17 +103,23 @@ def _hard_response(gray, radius, should_cancel, check_cancel):
             check_cancel(should_cancel)
             down2_rows(gray, reduced, start, stop)
         run_bands(reduced.shape[0], 128, reduce_rows)
-        laplacian = create_frame(gray.shape, np.int32)
-        def laplacian_rows(start, stop):
-            check_cancel(should_cancel)
-            burt_laplacian_rows(gray, reduced, laplacian, start, stop)
-        run_bands(gray.shape[0], 128, laplacian_rows)
-        def accumulate_rows(start, stop):
-            check_cancel(should_cancel)
-            burt_accumulate_rows(laplacian, response, level, start, stop)
-        run_bands(height, 128, accumulate_rows)
+        if level == 0:
+            def laplacian0_rows(start, stop):
+                check_cancel(should_cancel)
+                burt_laplacian_rows(gray, reduced, response, start, stop, True)
+            run_bands(height, 128, laplacian0_rows)
+        else:
+            laplacian = create_frame(gray.shape, np.int32)
+            def laplacian_rows(start, stop):
+                check_cancel(should_cancel)
+                burt_laplacian_rows(gray, reduced, laplacian, start, stop, False)
+            run_bands(gray.shape[0], 128, laplacian_rows)
+            def accumulate_rows(start, stop):
+                check_cancel(should_cancel)
+                burt_accumulate_rows(laplacian, response, level, start, stop)
+            run_bands(height, 128, accumulate_rows)
+            del laplacian
         gray = reduced
-        del laplacian
     return response
 
 
@@ -123,7 +128,8 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
                      thread_count: int = None, blend_smoothing: float = 2.0,
                      blend_mode: str = 'hard', soft_gamma: float = 1.0,
                      feather_theta: float = 0.9,
-                     should_cancel=None, progress_callback=None):
+                     should_cancel=None, progress_callback=None,
+                     use_gpu: bool = False, device_callback=None):
     """Fuse with the Burt-pyramid focus response.
 
     ``kernel_size=2*R+1`` controls ``floor(log2(R))+3`` levels. Smoothing is
@@ -142,6 +148,30 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
     configure_rows(frames, img_resize, 'openfocus_a', thread_count, should_cancel)
     radius = max(1, int(kernel_size) // 2)
     hard = blend_mode not in ('soft', 'feather')
+    if progress_callback is not None:
+        callback = progress_callback
+        reported = -1
+        def progress_callback(index, total):
+            nonlocal reported
+            if index > reported:
+                callback(index, total)
+                reported = index
+    if hard and use_gpu:
+        from core.source_frames import SOURCE_CACHE
+        from fusion_methods._openfocus_gpu import GpuError, log_fallback
+        from fusion_methods._openfocus_gpu_a import GpuA
+        gpu = None
+        try:
+            gpu = GpuA()
+            result = gpu.fuse(frames, img_resize, radius, should_cancel, progress_callback)
+            if device_callback is not None:
+                device_callback(gpu.device_name)
+            return result
+        except GpuError as exc:
+            log_fallback(exc)
+        finally:
+            gpu = None
+            SOURCE_CACHE.clear()
     fast_hard = hard and img_resize is None and all(
         source.dtype in (np.uint8, np.uint16) for source in frames)
     workers = _frame_pass_workers(frames, img_resize, 'openfocus_a', thread_count)
@@ -220,9 +250,12 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
             blend2 = w2 >= float(feather_theta)
 
             # pass 2: weighted accumulation over top-2 picks
+            def prepare(index, cancelled):
+                return _prepare_frame(frames[index], img_resize, cancelled)
+
             accumulated = None
-            produced = _ordered_frame_results(len(frames), produce, workers, should_cancel)
-            for index, (frame, response) in produced:
+            produced = _ordered_frame_results(len(frames), prepare, workers, should_cancel)
+            for index, frame in produced:
                 _check_cancel(should_cancel)
                 if accumulated is None:
                     accumulated = np.zeros(frame.shape, np.float32)
@@ -240,7 +273,7 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
                         accumulated[rows] += np.where(is2, 0.5, 0.0) * frame[rows]
                 run_bands(height, 128, accumulate_top_two,
                           scratch_bytes=min(128, height) * width * 64)
-                del frame, response
+                del frame
                 step += 1
                 if progress_callback is not None:
                     progress_callback(step, total_steps)
@@ -367,7 +400,10 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
         run_bands(output.shape[0], 128, blend_background, scratch_bytes=row_scratch)
         del best, accumulated, weights, statistics
         SOURCE_CACHE.clear()
-        return output_codes(output, frames, should_cancel, e37=True)
+        result = output_codes(output, frames, should_cancel, e37=True)
+        if device_callback is not None:
+            device_callback('CPU')
+        return result
     np.clip(output, 0, 255, out=output)
     if all(frame.dtype == np.uint8 for frame in frames):
         result = create_frame(output.shape, np.uint8)
@@ -376,5 +412,9 @@ def openfocus_a_impl(input_source, img_resize=None, kernel_size: int = 17,
             rows = slice(start, stop)
             result[rows] = output[rows]
         run_bands(output.shape[0], 128, convert)
+        if device_callback is not None:
+            device_callback('CPU')
         return result
+    if device_callback is not None:
+        device_callback('CPU')
     return output

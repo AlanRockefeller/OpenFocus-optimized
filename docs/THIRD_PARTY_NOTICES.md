@@ -161,7 +161,9 @@ OTHER DEALINGS IN THE SOFTWARE.
 - **Changes**: the module imports were rewritten for this package layout
   (`stackmff_v3.network` → `core.models.stackmff_v3.network`), the default
   weights path points at OpenFocus's `weights/` directory, and the docstring of
-  the package was rewritten. The network math is unchanged.
+  the package was rewritten. The attention blocks select query, key and value
+  before transposing their heads, so each projection is transposed on its own
+  instead of the joint tensor. The network math is unchanged.
 - **Weights**: `weights/stackmff_v3_final.pth` is the released checkpoint from
   the upstream v1.0 release (658,587 bytes, SHA-256
   `39b2ea3738e8fea1676c379238d6be81a87988fc9952dbd6ac3825d5d7249f46`).
@@ -194,22 +196,33 @@ OTHER DEALINGS IN THE SOFTWARE.
 - **ONNX identity**: the V1 graph SHA-256 is
   `f7ba388afcefb988f38707b349d5609b4a56770d81c8405d881e50f605b18a19`;
   the V3 graph SHA-256 is
-  `7b92bf31c984eac2b93d6000158b4802b7d62c23140d52e28a47676f58d5c4f7`.
-  They contain distinct learned initializers. V1's checkpoint records a 0.7
-  weight soup of the released V3 model and its retraining checkpoint; sharing
-  the backbone can produce visually similar results on some source stacks.
+  `187a02757a888b3e6dfef927e75e5f329d9e2a8d647c38e15bafc97397b29edf`.
+  The V3 graph is the earlier export
+  (`7b92bf31c984eac2b93d6000158b4802b7d62c23140d52e28a47676f58d5c4f7`) with
+  two reorderings of reshapes and transposes applied: query, key and value
+  are selected before their attention heads are transposed, and the pooled
+  inter-layer attention moves one axis per transpose. Its initializers and
+  logits are unchanged.
+  The V1 and V3 graphs contain distinct learned initializers. V1's checkpoint
+  records a 0.7 weight soup of the released V3 model and its retraining
+  checkpoint; sharing the backbone can produce visually similar results on
+  some source stacks.
   No image-independent difference between final outputs is guaranteed.
 - **Development diagnosis**: `python tools/diagnose_stackmff.py --torch`
   compares the shipped ONNX graphs with their original PyTorch checkpoints
   using a two-layer 64×64 tensor, and exercises whole/tiled public fusion on
   two 64×80 colour frames. `--gpu` requests the runtime's verified accelerator
-  for those consumers, repeats V1/V3 in one process, and reports actual device,
-  output hashes and differences. `--weights-dir` can inspect a packaged build.
-  PyTorch remains optional and is not used by the product runtime.
+  for those consumers, repeats V1/V2/V3 in one process, and reports actual
+  devices, output hashes and differences. `--weights-dir` can inspect a build.
+  The optional acceleration packs use these verified checkpoints with PyTorch.
 - **Citations**: Xie et al., *Applied Intelligence* 55:503 (2025),
   https://doi.org/10.1007/s10489-025-06383-8; Xie et al., *Engineering
   Applications of Artificial Intelligence* 162 (2025) 112667,
   https://doi.org/10.1016/j.engappai.2025.112667.
+
+The Unix acceleration packs use [Python Build Standalone](https://github.com/astral-sh/python-build-standalone)
+and official [PyTorch](https://github.com/pytorch/pytorch) wheels. The pinned
+archives and wheels retain the upstream license files and dependency notices.
 
 The MIT text below covers the vendored V3 snapshot and its released V3 weights;
 the retrained V1/V2 derivatives have the separate terms that follow it.

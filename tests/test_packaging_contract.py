@@ -58,10 +58,20 @@ def test_the_ai_stack_is_a_base_dependency():
 
 
 def test_dynamic_onnx_checkpoints_are_packaged():
+    import hashlib
+    from core.inference_worker import _TORCH_EXPORTS
+
     data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["setuptools"]["package-data"]
-    assert "*.onnx" in data["weights"]
+    assert {'*.onnx', '*.pth'} <= set(data['weights'])
+    shipped = {}
     for name in ("stackmff_final.onnx", "stackmff_v2_final.onnx", "stackmff_v3_final.onnx"):
-        assert (ROOT / "weights" / name).is_file()
+        graph = ROOT / "weights" / name
+        checkpoint = graph.with_suffix(".pth")
+        shipped[hashlib.sha256(graph.read_bytes()).hexdigest()] = (
+            checkpoint.name, hashlib.sha256(checkpoint.read_bytes()).hexdigest())
+    # Exactly the shipped graphs: code that checks every entry against its
+    # graph file would reject one kept for a replaced graph.
+    assert _TORCH_EXPORTS == shipped
 
 
 def test_optional_input_decoders_ship_by_default():
@@ -119,6 +129,12 @@ def test_frozen_resource_manifest_covers_runtime_files():
           ('DE', 'EN', 'ES', 'FR', 'IT', 'JA', 'KO', 'NL', 'PL', 'PT', 'RU', 'ZH')),
         *(f'weights/{model}.onnx' for model in
           ('stackmff_final', 'stackmff_v2_final', 'stackmff_v3_final')),
+        *(f'weights/{model}.pth' for model in
+          ('stackmff_final', 'stackmff_v2_final', 'stackmff_v3_final')),
+        'core/inference_worker.py', 'core/inference_tensorrt.py',
+        *(f'core/accelerator_{tag}.json' for tag in ('win64', 'linux_x86_64', 'macos_arm64')),
+        'core/__init__.py', 'core/models/__init__.py', 'core/models/stackmff_v3/model_io.py',
+        *(f'core/models/stackmff_v{version}/network.py' for version in (1, 2, 3)),
     }
     assert expected <= included
     assert {path.relative_to(ROOT).as_posix() for path in (ROOT / 'assets').glob('*.svg')} <= included

@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6")
-from PyQt6.QtCore import QEventLoop, QTimer, Qt
-from PyQt6.QtGui import QPixmap
-from PyQt6.QtWidgets import QMainWindow
+from PyQt6.QtCore import QEventLoop, QPoint, QTimer, Qt
+from PyQt6.QtGui import QKeySequence, QPixmap
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QLineEdit, QMainWindow, QMenu, QPushButton
 
 from controllers.source_manager import SourceManager
 from locales import trans
@@ -28,14 +29,22 @@ def _window():
     window.excluded_frames = set()
     manager = SourceManager(window)
     from main import OpenFocus
+    window.included_indices = OpenFocus.included_indices.__get__(window)
+    window.effective_stack = OpenFocus.effective_stack.__get__(window)
+    from ui.status_bar import WorkspaceStatusBar
     window._status_host = QMainWindow()
+    bar = WorkspaceStatusBar(window._status_host)
+    window._status_host.setStatusBar(bar)
+    window._review_status = bar._message_label
     window.statusBar = window._status_host.statusBar
     window._set_review_status = OpenFocus._set_review_status.__get__(window)
-    window._on_status_message_changed = OpenFocus._on_status_message_changed.__get__(window)
+    window._refresh_status_sponsor = OpenFocus._refresh_status_sponsor.__get__(window)
+    window.ui_theme = 'light'
+    window.show_contact_info = lambda: None
     window._on_update_action_clicked = lambda: None
     window.source_manager = manager
     OpenFocus._build_update_indicator(window)
-    panel.btn_review_stack.clicked.connect(manager.toggle_stack_review)
+    manager.bind_source_actions(window.file_list)
     window.file_list.itemChanged.connect(manager.on_item_changed)
     thumbs = [QPixmap(8, 8) for _ in names]
     manager.update_file_list(names, thumbs)
@@ -161,6 +170,15 @@ def test_thumbnail_completion_does_not_restart_displayed_source(qapp, monkeypatc
     panel.widget.close()
 
 
+def _focus_list(qapp, panel):
+    panel.widget.resize(500, 1100)
+    panel.widget.show()
+    panel.widget.activateWindow()
+    panel.file_list.setFocus()
+    qapp.processEvents()
+    assert panel.file_list.hasFocus()
+
+
 def _finish(qapp, manager):
     worker = manager._review_worker
     assert worker is not None
@@ -175,7 +193,7 @@ def _finish(qapp, manager):
 
 def test_review_suggests_without_changing_participation(qapp):
     window, manager, panel = _window()
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     _finish(qapp, manager)
     assert window.excluded_frames == set()
     assert window.file_list.item(1).checkState() == Qt.CheckState.Checked
@@ -209,7 +227,7 @@ def test_selection_change_during_review_does_not_discard_results(qapp, monkeypat
 
     monkeypatch.setattr(core.stack_review, "analyze_frames", analyze)
     window, manager, panel = _window()
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     try:
         assert entered.wait(5)
         window.file_list.item(2).setCheckState(Qt.CheckState.Unchecked)
@@ -237,7 +255,7 @@ def test_excluded_reference_never_suggests_its_successor(qapp, monkeypatch, timi
     window, manager, panel = _window()
     if timing == "before":
         window.file_list.item(0).setCheckState(Qt.CheckState.Unchecked)
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     try:
         assert entered.wait(5)
         if timing == "during":
@@ -272,7 +290,7 @@ def test_reorder_and_replacement_discard_stale_results(qapp, monkeypatch):
 
     monkeypatch.setattr(core.stack_review, "analyze_frames", analyze)
     window, manager, panel = _window()
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     try:
         assert entered.wait(5)
         item = window.file_list.takeItem(2)
@@ -290,7 +308,7 @@ def test_reorder_and_replacement_discard_stale_results(qapp, monkeypatch):
     # A replacement may arrive before the list itself has been rebuilt.
     entered.clear()
     release.clear()
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     try:
         assert entered.wait(5)
         window.raw_images[0] = window.raw_images[0].copy()
@@ -301,7 +319,8 @@ def test_reorder_and_replacement_discard_stale_results(qapp, monkeypatch):
     assert not manager._review_results
 
 
-def test_cancel_discards_even_a_late_result(qapp, monkeypatch):
+@pytest.mark.parametrize('start_from_menu', [True, False])
+def test_cancel_discards_even_a_late_result(qapp, monkeypatch, start_from_menu):
     import core.stack_review
     entered = threading.Event()
     release = threading.Event()
@@ -313,20 +332,67 @@ def test_cancel_discards_even_a_late_result(qapp, monkeypatch):
 
     monkeypatch.setattr(core.stack_review, "analyze_frames", analyze)
     window, manager, panel = _window()
-    panel.btn_review_stack.click()
+    view = panel.file_list
+    _focus_list(qapp, panel)
+    view.setCurrentRow(0)
+    view.item(1).setSelected(True)
+    target = view.visualItemRect(view.item(2)).center()
+
+    def choose_review(menu, _position):
+        actions = [action for action in menu.actions() if not action.isSeparator()]
+        review_key = 'stack_review_action' if start_from_menu else 'stack_review_cancel'
+        assert [action.text() for action in actions] == [trans.t(key) for key in (
+            review_key, 'source_include_selected', 'source_exclude_selected', 'action_delete')]
+        assert actions[0].shortcut() == QKeySequence('Ctrl+Shift+F')
+        assert actions[0].isShortcutVisibleInContextMenu()
+        actions[0].trigger()
+
+    monkeypatch.setattr(QMenu, 'exec', choose_review)
+    manager.show_source_context_menu(QPoint(-1, -1))
+    assert manager._review_worker is None
+    if start_from_menu:
+        manager.show_source_context_menu(target)
+    else:
+        QTest.keySequence(view, QKeySequence('Ctrl+Shift+F'))
     try:
         assert window._review_status.text() == trans.t("stack_review_working")
         assert entered.wait(5)
-        panel.btn_review_stack.click()
+        assert [id(frame) for frame in manager._review_worker.frames] == list(map(id, window.raw_images))
+        assert manager._review_action.text() == trans.t('stack_review_cancel')
+        if start_from_menu:
+            QTest.keySequence(view, QKeySequence('Ctrl+Shift+F'))
+        else:
+            manager.show_source_context_menu(target)
+        assert view.currentRow() == 2 and view.selectedItems() == [view.item(2)]
         assert manager._review_worker._cancelled
         assert window._review_status.text() == trans.t("stack_review_cancelling")
     finally:
         release.set()
+        panel.widget.close()
     _finish(qapp, manager)
     assert not manager._review_results
     assert manager._review_status_key == "stack_review_cancelled"
     assert window._review_status.text() == trans.t("stack_review_cancelled")
     assert window.excluded_frames == set()
+
+    # Exercise expiration with a newer message already on screen.
+    from PyQt6.QtTest import QSignalSpy
+    expired = QSignalSpy(manager._review_notice_timer.timeout)
+    manager._review_notice_timer.setInterval(150)
+    if start_from_menu:
+        window.statusBar().showMessage('Fusion 7/29')
+        assert expired.wait(5000)
+        assert window._review_status.text() == 'Fusion 7/29'
+        window.statusBar().clearMessage()
+        assert not window._review_status.text()
+    else:
+        manager.toggle_stack_review()
+        _finish(qapp, manager)
+        expected = trans.t('stack_review_found').format(count=1)
+        assert len(expired) or expired.wait(5000)
+        assert window._review_status.text() == expected
+
+
 def test_review_error_is_visible_and_does_not_change_checks(qapp, monkeypatch):
     import core.stack_review
 
@@ -335,7 +401,7 @@ def test_review_error_is_visible_and_does_not_change_checks(qapp, monkeypatch):
 
     monkeypatch.setattr(core.stack_review, "analyze_frames", fail)
     window, manager, panel = _window()
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     _finish(qapp, manager)
     assert manager._review_status_key == "stack_review_error"
     assert "bad frame" in window._review_status.text()
@@ -344,6 +410,53 @@ def test_review_error_is_visible_and_does_not_change_checks(qapp, monkeypatch):
                for i in range(3))
 
 
+def test_bulk_source_context_menu_changes_only_selected_frames(qapp, monkeypatch):
+    window, manager, panel = _window()
+    view = window.file_list
+    original = window.raw_images
+    view.setCurrentRow(0)
+    view.item(2).setSelected(True)
+    window.excluded_frames = {0, 1}
+    manager.decorate_source_items()
+    undo = []
+    window.push_undo = lambda: undo.append(set(window.excluded_frames))
+    revision = getattr(window, 'source_revision', 0)
+
+    menus = iter([
+        (True, True, 'source_exclude_selected'),
+        (True, False, 'source_include_selected'),
+        (False, True, None),
+    ])
+
+    def choose_action(menu, position):
+        by_text = {action.text(): action for action in menu.actions()}
+        include, exclude, trigger = next(menus)
+        assert by_text[trans.t('source_include_selected')].isEnabled() is include
+        assert by_text[trans.t('source_exclude_selected')].isEnabled() is exclude
+        assert by_text[trans.t('action_delete')].isEnabled()
+        if trigger is not None:
+            by_text[trans.t(trigger)].trigger()
+
+    monkeypatch.setattr(QMenu, 'exec', choose_action)
+    position = view.visualItemRect(view.item(0)).center()
+    try:
+        manager.show_source_context_menu(position)
+        assert window.excluded_frames == {0, 1, 2}
+        assert all(view.item(row).checkState() == Qt.CheckState.Unchecked for row in range(3))
+        assert undo == [{0, 1}]
+        assert window.source_revision == revision + 1
+
+        manager.show_source_context_menu(position)
+        assert window.excluded_frames == {1}
+        assert [view.item(row).font().strikeOut() for row in range(3)] == [False, True, False]
+        assert undo == [{0, 1}, {0, 1, 2}]
+        assert window.source_revision == revision + 2
+        assert window.raw_images is original
+        assert {view.row(item) for item in view.selectedItems()} == {0, 2}
+        assert view.currentRow() == 0
+        manager.show_source_context_menu(position)
+    finally:
+        panel.widget.close()
 
 
 def test_review_text_is_available_in_every_locale(qapp):
@@ -353,13 +466,22 @@ def test_review_text_is_available_in_every_locale(qapp):
         manager._review_frames = tuple(window.raw_images)
         manager._review_results = [{"index": 1, "reference_index": 0, "difference": 0.0}]
         manager._review_status_key = "stack_review_found"
-        keys = ["button", "cancel", "hint", "working", "cancelling", "cancelled",
+        keys = ["action", "cancel", "hint", "working", "cancelling", "cancelled",
                 "stale", "error", "found", "none", "row"]
         for language in trans.PACK_ORDER:
             assert all("stack_review_" + key in trans.translations[language] for key in keys)
+            assert 'source_include_selected' in trans.translations[language]
+            assert 'source_exclude_selected' in trans.translations[language]
+            assert 'source_include_all' in trans.translations[language]
+            assert 'source_exclude_all' in trans.translations[language]
             trans.set_language(language)
             manager.decorate_source_items()
-            assert panel.btn_review_stack.text() == trans.t("stack_review_button")
+            assert manager._review_action.text() == trans.t('stack_review_action')
+            hint = panel.source_images_label.toolTip()
+            for keyspec, label in [('Ctrl+Shift+I', 'source_include_all'),
+                                   ('Ctrl+Shift+X', 'source_exclude_all')]:
+                assert QKeySequence(keyspec).toString(QKeySequence.SequenceFormat.NativeText) in hint
+                assert trans.t(label) in hint
             assert window._review_status.text() == trans.t("stack_review_found").format(count=1)
             assert window.file_list.item(1).toolTip() == trans.t("stack_review_row").format(
                 reference=1, difference=0.0)
@@ -382,7 +504,7 @@ def test_clear_stack_resets_review_even_after_a_late_completion(qapp, monkeypatc
     window, manager, panel = _window()
     if during_review:
         monkeypatch.setattr(core.stack_review, 'analyze_frames', analyze)
-    panel.btn_review_stack.click()
+    manager.toggle_stack_review()
     worker = manager._review_worker
     try:
         if during_review:
@@ -392,8 +514,8 @@ def test_clear_stack_resets_review_even_after_a_late_completion(qapp, monkeypatc
             assert window._review_status.text()
         manager.clear_image_stack()
         assert manager._review_worker is None
-        assert panel.btn_review_stack.text() == trans.t('stack_review_button')
-        assert not panel.btn_review_stack.isEnabled()
+        assert manager._review_action.text() == trans.t('stack_review_action')
+        assert not manager._review_action.isEnabled()
         assert not window._review_status.text()
         assert not manager._review_results and not manager._review_frames
     finally:
@@ -402,27 +524,53 @@ def test_clear_stack_resets_review_even_after_a_late_completion(qapp, monkeypatc
             assert worker.wait(5000)
             qapp.processEvents()
     assert not window._review_status.text()
-    assert not panel.btn_review_stack.isEnabled()
+    assert not manager._review_action.isEnabled()
     assert manager._review_status_key is None
 
 
-def test_review_precedes_select_all_and_retouch_belongs_to_outputs(qapp):
-    panel = create_right_panel()
-    panel.widget.resize(500, 1100)
-    panel.widget.show()
-    qapp.processEvents()
+def test_source_shortcuts_change_render_inputs_and_preserve_highlighted_rows(qapp):
+    window, manager, panel = _window()
+    view = panel.file_list
+    _focus_list(qapp, panel)
     try:
-        review = panel.btn_review_stack
-        select_all = panel.btn_select_all
-        assert review.parentWidget() is select_all.parentWidget()
-        assert review.geometry().right() <= select_all.geometry().left()
-        assert abs(review.geometry().center().y() - select_all.geometry().center().y()) <= 2
+        assert not panel.source_images_label.parentWidget().findChildren(QPushButton)
+        view.setCurrentRow(0)
+        view.item(2).setSelected(True)
+        undo = []
+        window.push_undo = lambda: undo.append(set(window.excluded_frames))
+        QTest.keySequence(view, QKeySequence('Ctrl+Shift+X'))
+        assert window.effective_stack() == ([], [], [])
+        assert window.excluded_frames == {0, 1, 2}
+        assert manager._selected_source_rows() == {0, 2} and view.currentRow() == 0
+        assert all(view.item(i).checkState() == Qt.CheckState.Unchecked for i in range(3))
+        assert panel.source_images_label.text() == trans.t('label_source_images_included').format(
+            included=0, total=3)
+        QTest.keySequence(view, QKeySequence('Ctrl+Shift+X'))
+        QTest.keySequence(view, QKeySequence(QKeySequence.StandardKey.SelectAll))
+        assert manager._selected_source_rows() == {0, 1, 2}
+        assert window.excluded_frames == {0, 1, 2} and undo == [set()]
+
+        editor = QLineEdit('frame name', panel.widget)
+        editor.show()
+        editor.setFocus()
+        assert editor.hasFocus()
+        QTest.keySequence(editor, QKeySequence('Ctrl+Shift+I'))
+        QTest.keySequence(editor, QKeySequence(QKeySequence.StandardKey.SelectAll))
+        assert editor.selectedText() == 'frame name'
+        assert window.excluded_frames == {0, 1, 2}
+        view.setFocus()
+        QTest.keySequence(view, QKeySequence('Ctrl+Shift+I'))
+        assert window.effective_stack()[2] == [0, 1, 2]
+        assert all(view.item(i).checkState() == Qt.CheckState.Checked for i in range(3))
+        assert panel.source_images_label.text() == trans.t('label_source_images').format(3)
+        assert undo == [set(), {0, 1, 2}]
     finally:
         panel.widget.close()
         panel.widget.deleteLater()
 
 
 def test_review_status_yields_to_temporary_messages_and_returns(qapp):
+    from PyQt6.QtTest import QSignalSpy
     window, manager, panel = _window()
     window._status_host.show()
     try:
@@ -436,13 +584,17 @@ def test_review_status_yields_to_temporary_messages_and_returns(qapp):
         assert window._review_status.accessibleName() == expected
         assert window._review_status.isVisible()
 
-        window.statusBar().showMessage("Rendering")
-        assert not window._review_status.isVisible()
+        status = window.statusBar()
+        status.showMessage('Background notice', 100)
+        expired = QSignalSpy(status.messageChanged)
+        assert window._review_status.text() == 'Background notice'
+        manager._review_status_key = 'stack_review_stale'
         manager.refresh_review_text()
-        assert window.statusBar().currentMessage() == "Rendering"
-        window.statusBar().clearMessage()
+        assert window._review_status.text() == 'Background notice'
+        assert expired.wait(5000)
+        assert not status.currentMessage()
         assert window._review_status.isVisible()
-        assert window._review_status.text() == expected
+        assert window._review_status.text() == trans.t('stack_review_stale')
 
         manager._clear_review()
         assert not window._review_status.text()

@@ -1,5 +1,7 @@
 """Consumer-visible guarantees of crash-isolated GUI rendering."""
 import gc
+import json
+import logging
 import os
 from pathlib import Path
 import sys
@@ -18,6 +20,7 @@ def _crash_child(connection, cancel_event, request, budget, directory, language)
     from core.render_process import _Relay
     storage.restore_storage_directory(directory)
     relay = _Relay(connection, cancel_event)
+    relay.stage('fuse')
     with storage.observe_temp_files(relay.temporary_file), storage.scratch_directory():
         frame = storage.create_frame((8, 9), np.uint16)
         frame[0] = 1001
@@ -39,10 +42,26 @@ def _abort_child(connection, cancel_event, request, budget, directory, language)
             ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE
     os.abort()
 
+
+def _silent_child(connection, cancel_event, request, budget, directory, language):
+    connection.send(('stage', 'align'))
+    connection.close()
+
+
 def _diagnostic_error_child(connection, cancel_event, request, budget, directory, language):
     connection.send(('error', 'user-visible private detail', None,
                      ('value', 'child_setup_or_transfer', 'unknown')))
     connection.close()
+
+
+def _runtime_error_child(connection, cancel_event, request, budget, directory, language):
+    from core import render_process
+
+    def fail_render(self):
+        raise RuntimeError('fixture private detail synthetic/source.tif')
+
+    render_process._ChildRenderWorker._run_admitted_body = fail_render
+    render_process._render_child(connection, cancel_event, request, budget, directory, language)
 
 
 def _diagnostic_cancel_child(connection, cancel_event, request, budget, directory, language):
@@ -50,12 +69,29 @@ def _diagnostic_cancel_child(connection, cancel_event, request, budget, director
     connection.close()
 
 
+def _legacy_source_child(connection, cancel_event, request, budget, directory, language):
+    from core.frame_transport import FrameDecoder
+    try:
+        FrameDecoder().decode(request)
+    except ValueError as exc:
+        connection.send(('error', str(exc), None, ('value', 'child_setup_or_transfer', 'prepare')))
+    finally:
+        connection.close()
+
+
+def _changed_source_child(connection, cancel_event, request, budget, directory, language):
+    from core import render_process
+    render_process._windows_source_run = lambda: True
+    render_process._LOADED_SOURCE_REVISION = b'new worker revision'
+    render_process._render_child(connection, cancel_event, request, budget, directory, language)
+
+
 
 def _render_with_prepared_cache(connection, cancel_event, request, budget, directory, language, failure):
     """Run the real child pipeline with a mapped cache produced after fusion."""
     from core import frame_storage, render_process, workers
     from core.multi_focus_fusion import MultiFocusFusion
-    from core.resource_policy import ResourceLimitError
+    from core.resource_policy import ResourceSnapshot, require_memory
     from utils import output_sharpen
 
     fuse = MultiFocusFusion.fuse
@@ -76,14 +112,20 @@ def _render_with_prepared_cache(connection, cancel_event, request, budget, direc
         self.alignment_report = [{'probe': 'alignment diagnostic'}]
         self.alignment_report_provenance = {'probe': 'child'}
 
-    def fail_sharpen(*args, **kwargs):
-        raise ResourceLimitError('injected sharpen memory failure')
+    def fail_sharpen(image, should_cancel=None, *, strength):
+        assert strength == 175
+        snapshot = ResourceSnapshot(available_ram=8 * 1024**3, total_ram=16 * 1024**3,
+                                    commit_headroom=9 * 1024**2,
+                                    process_commit_headroom=5 * 1024**2)
+        require_memory(6 * 1024**2, snapshot, user_limit=3 * 1024**2)
 
     MultiFocusFusion.fuse = fuse_with_cache
     render_process._ChildRenderWorker.run = run_with_diagnostics
     if failure == 'sharpen':
         output_sharpen.sharpen_output = fail_sharpen
-    render_process._render_child(connection, cancel_event, request, budget, directory, language)
+    # The memory rejection fixture controls the complete admission snapshot.
+    render_process._render_child(connection, cancel_event, request,
+                                 None if failure == 'sharpen' else budget, directory, language)
 
 
 def _sharpen_failure_child(*args):
@@ -165,7 +207,6 @@ def test_isolated_render_reports_preparation_after_admission(qapp, monkeypatch):
 
 
 def test_spawn_failure_reports_pending_dispatch_and_releases_worker(qapp, scratch, monkeypatch, caplog):
-    import logging
     from threading import Event
     from types import SimpleNamespace
     from core import render_process
@@ -209,6 +250,48 @@ def test_spawn_failure_reports_pending_dispatch_and_releases_worker(qapp, scratc
     assert not any(r.event == 'render_dispatch.spawn_completed' for r in dispatch)
     assert all(r.getMessage().endswith(' {}') for r in dispatch)
     assert all(private_detail not in r.getMessage() for r in dispatch)
+
+
+def test_changed_render_source_reports_restart_before_spawn(qapp, tmp_path, monkeypatch):
+    from core import render_process
+
+    source_file = tmp_path / 'source_frames.py'
+    source_file.write_text('revision = 1\n', encoding='utf-8')
+    monkeypatch.setattr(render_process, '_windows_source_run', lambda: True)
+    monkeypatch.setattr(render_process, '_RENDER_SOURCE_FILES', (source_file,))
+    monkeypatch.setattr(render_process, '_LOADED_SOURCE_REVISION', render_process._render_source_revision())
+    monkeypatch.setattr(render_process.trans, 'current_lang', 'en')
+    monkeypatch.setattr(render_process.multiprocessing, 'get_context',
+                        lambda method: pytest.fail('Spawn attempted with changed source code'))
+    source_file.write_text('revision = 2\n', encoding='utf-8')
+
+    worker = render_process.RenderProcessWorker([], algorithm=None, need_fusion=False)
+    errors = []
+    worker.error_signal.connect(errors.append)
+    worker.run()
+    assert errors == [render_process.trans.t('render_source_changed')]
+    assert 'Restart OpenFocus' in errors[0]
+    assert worker.child_pid is None
+
+
+@pytest.mark.parametrize('exception, category', [
+    (MemoryError('allocation failed'), 'memory'),
+    (ResourceLimitError('render limit exceeded'), 'resource_limit'),
+])
+def test_render_process_classifies_parent_memory_failure(qapp, monkeypatch, exception, category):
+    from core.render_process import RenderProcessWorker
+
+    worker = RenderProcessWorker([], algorithm=None, need_fusion=False)
+    errors = []
+    worker.error_signal.connect(errors.append)
+
+    def fail():
+        raise exception
+
+    monkeypatch.setattr(worker, '_run_process', fail)
+    worker.run()
+    assert errors == [str(exception)]
+    assert worker.failure_category == category
 
 
 def test_relay_keeps_stage_order_and_first_progress_per_stage(monkeypatch):
@@ -272,12 +355,45 @@ def test_worker_cancellation_has_no_error_category(qapp, monkeypatch):
     assert worker._render_error_category is None
 
 
-def test_child_setup_failure_and_cancellation_packets(monkeypatch):
+def test_source_child_rejects_legacy_gui_before_decoding(monkeypatch):
+    from threading import Event
+    from core import render_process
+    from utils import diagnostics, logging_setup
+
+    request = render_process.FrameEncoder().encode({'args': []})
+    receiver, sender = render_process.multiprocessing.Pipe(duplex=False)
+    monkeypatch.setattr(logging_setup, 'setup_logging', lambda: None)
+    monkeypatch.setattr(diagnostics, 'install_exception_hooks', lambda: None)
+    monkeypatch.setattr(render_process, '_windows_source_run', lambda: True)
+    monkeypatch.setattr(render_process, '_LOADED_SOURCE_REVISION', b'worker revision')
+    monkeypatch.setattr(render_process.multiprocessing, 'parent_process', object)
+    monkeypatch.setattr(render_process.trans, 'current_lang', 'en')
+    monkeypatch.setattr(render_process, 'FrameDecoder',
+                        lambda **kwargs: pytest.fail('Legacy descriptors reached the decoder'))
+
+    with receiver, sender:
+        render_process._render_child(sender, Event(), request, None, None, 'zh')
+        assert receiver.poll()
+        kind, message, state, metadata, details = receiver.recv()
+        assert (kind, message, state, metadata) == (
+            'error', render_process.trans.t('render_source_changed'), None,
+            ('runtime', 'child_setup_or_transfer', 'prepare'))
+        assert details['error']['kind'] == 'RuntimeError'
+        assert details['error']['stack'][0]['function'] == '_render_child'
+        assert '重启 OpenFocus' in render_process.trans.t('render_source_changed')
+
+
+@pytest.mark.parametrize('frozen', [False, True])
+def test_child_setup_failure_and_cancellation_packets(monkeypatch, frozen):
     from contextlib import nullcontext
     from threading import Event
+    from types import SimpleNamespace
     from core import render_process
     from core.registration import RegistrationCancelled
     from utils import diagnostics, logging_setup
+
+    monkeypatch.setattr(render_process, 'sys', SimpleNamespace(platform='win32', frozen=frozen))
+    monkeypatch.setattr(render_process.multiprocessing, 'parent_process', lambda: frozen or None)
 
     class Connection:
         def __init__(self):
@@ -305,8 +421,12 @@ def test_child_setup_failure_and_cancellation_packets(monkeypatch):
     monkeypatch.setattr(render_process, 'FrameDecoder', Decoder)
     connection = Connection()
     render_process._render_child(connection, Event(), ValueError('private path'), None, None, 'en')
-    assert connection.messages == [('error', 'private path', None,
-                                    ('value', 'child_setup_or_transfer', 'prepare'))]
+    (kind, message, state, metadata, details), = connection.messages
+    assert (kind, message, state, metadata) == (
+        'error', 'private path', None, ('value', 'child_setup_or_transfer', 'prepare'))
+    assert details['error']['kind'] == 'ValueError'
+    assert details['error']['stack'][0]['function'] == '_render_child'
+    assert 'private path' not in repr(details)
     connection = Connection()
     render_process._render_child(connection, Event(), RegistrationCancelled(), None, None, 'en')
     assert connection.messages == [('error', 'CANCELLED: render cancelled', None, None)]
@@ -329,6 +449,77 @@ def test_child_error_event_and_user_message(qapp, scratch, monkeypatch, target, 
     _wait(worker, qapp)
     assert not results and errors == [expected_error]
     assert events == ([] if expected_event is None else [('render_child_error', expected_event)])
+    assert worker.failure_category == (expected_event['error_category'] if expected_event else None)
+
+
+def _child_evidence(caplog):
+    # Pytest can observe the same record on both the application and root logger.
+    records = dict.fromkeys(caplog.records)
+    events = [record for record in records if getattr(record, 'event', None) == 'render_child_error']
+    failures = [record for record in records if hasattr(record, 'report_child_evidence')]
+    event, = events
+    failure, = failures
+    fields = json.loads(event.getMessage().split(' ', 1)[1])
+    assert fields == failure.report_child_evidence
+    assert failure.exc_info[0] is RuntimeError
+    return fields
+
+
+def test_worker_error_reports_original_stack_through_ipc(qapp, scratch, monkeypatch, caplog):
+    from core import render_process
+
+    caplog.set_level(logging.INFO, logger='openfocus')
+    monkeypatch.setattr(logging.getLogger('openfocus'), 'propagate', True)
+    monkeypatch.setattr(render_process, '_render_child', _runtime_error_child)
+    worker = render_process.RenderProcessWorker([], algorithm=None, need_fusion=False)
+    results, errors = _start(worker)
+    _wait(worker, qapp)
+
+    assert not results and errors == ['fixture private detail synthetic/source.tif']
+    fields = _child_evidence(caplog)
+    assert fields['error_category'] == 'runtime'
+    assert fields['error_origin'] == 'child_worker'
+    assert fields['render_stage'] == 'prepare'
+    assert fields['error']['kind'] == 'RuntimeError'
+    assert [(frame['file'], frame['function']) for frame in fields['error']['stack']] == [
+        ('workers.py', 'run'), ('workers.py', '_run_admitted')]
+    assert all(type(line) is int and line > 0 for line in fields['error']['stack_lines'])
+    assert 'synthetic/source.tif' not in json.dumps(fields)
+
+
+def test_exchange_filters_malformed_child_details():
+    from core.render_process import _RenderExchange
+
+    exchange = _RenderExchange(None)
+    exchange.receive(('error', 'fixture UI message', None, ('resource_limit', 'child_worker', 'finish'), {
+        'error': {'kind': 'RuntimeError', 'stack_lines': [4], 'stack': [
+            {'file': 'synthetic/workers.py', 'line': 4, 'function': 'run'}]},
+        'admission': {'resource_status': 'insufficient', 'required_bytes': 8,
+                      'ram_ceiling': True, 'available_ram_bytes': 10**16,
+                      'available_commit_bytes': -1, 'message': 'fixture private detail'},
+        'exit_code': 12,
+    }), None)
+    assert exchange.error == 'fixture UI message'
+    assert exchange.error_metadata == {
+        'error_category': 'resource_limit', 'error_origin': 'child_worker', 'render_stage': 'finish',
+        'admission': {'resource_status': 'insufficient', 'required_bytes': 8},
+    }
+
+
+@pytest.mark.parametrize('target', [_legacy_source_child, _changed_source_child])
+def test_spawn_revision_mismatch_relays_restart(qapp, scratch, monkeypatch, target):
+    from core import render_process
+
+    monkeypatch.setattr(render_process, '_windows_source_run', lambda: True)
+    monkeypatch.setattr(render_process, '_LOADED_SOURCE_REVISION', render_process._render_source_revision())
+    monkeypatch.setattr(render_process, '_render_child', target)
+    monkeypatch.setattr(render_process.trans, 'current_lang', 'en')
+    worker = render_process.RenderProcessWorker([], algorithm=None, need_fusion=False)
+    results, errors = _start(worker)
+    _wait(worker, qapp)
+    assert worker.child_pid is not None
+    assert not results and errors == [render_process.trans.t('render_source_changed')]
+    assert not list(scratch.glob('openfocus-frame-*'))
 
 
 def test_relay_sanitizes_unknown_stage(monkeypatch):
@@ -345,18 +536,17 @@ def test_relay_sanitizes_unknown_stage(monkeypatch):
 
 
 @pytest.mark.parametrize('target, message, category', [
-    (_sharpen_failure_child, 'injected sharpen memory failure', 'resource_limit'),
+    (_sharpen_failure_child, 'Insufficient memory: need 6 MB', 'resource_limit'),
     (_store_failure_child, 'injected output store failure', 'os'),
 ])
 def test_failed_render_preserves_parent_cache_and_cleans_child_scratch(
-        qapp, tmp_path, scratch, monkeypatch, target, message, category):
+        qapp, tmp_path, scratch, monkeypatch, caplog, target, message, category):
     from core import frame_storage, render_process
 
     parent_cache = [frame_storage.store_frame(
         np.full((8, 9), 137, np.uint16), prefer_ram=False)]
     parent_path = Path(frame_storage.describe_frame(parent_cache[0])['path'])
     opened, cleaned, directories, warnings = [], set(), set(), []
-    events = []
     open_frame = frame_storage.open_frame
     cleanup = render_process._cleanup_files
     warning = render_process.logger.warning
@@ -376,8 +566,8 @@ def test_failed_render_preserves_parent_cache_and_cleans_child_scratch(
 
     monkeypatch.setattr(frame_storage, 'open_frame', record_open)
     monkeypatch.setattr(render_process, '_cleanup_files', record_cleanup)
-    monkeypatch.setattr(render_process, 'log_action', lambda event, **fields:
-                        events.append((event, fields)) if event == 'render_child_error' else None)
+    caplog.set_level(logging.INFO, logger='openfocus')
+    monkeypatch.setattr(logging.getLogger('openfocus'), 'propagate', True)
     monkeypatch.setattr(render_process.logger, 'warning', record_warning)
     frames = _sources(tmp_path)
     with monkeypatch.context() as patch:
@@ -386,16 +576,25 @@ def test_failed_render_preserves_parent_cache_and_cleans_child_scratch(
             frames, algorithm='guided_filter', thread_count=1, use_gpu=False,
             tile_enabled=False, exposure_match=False, prepared_cache=parent_cache,
             retain_preparation=True, sharpen_output=(target is _sharpen_failure_child),
+            sharpen_strength=175,
             collect_alignment_report=True, profile_performance=True)
         results, errors = _start(worker)
         _wait(worker, qapp)
 
     assert not results and len(errors) == 1 and message in errors[0]
-    assert len(events) == 1 and events[0][0] == 'render_child_error'
-    assert events[0][1]['error_category'] == category
-    assert events[0][1]['error_origin'] == 'child_worker'
-    assert events[0][1]['render_stage'] in ('prepare', 'align', 'fuse', 'finish')
-    assert len(events[0][1]) == 3
+    fields = _child_evidence(caplog)
+    assert fields['error_category'] == category
+    assert fields['error_origin'] == 'child_worker'
+    assert fields['render_stage'] in ('prepare', 'align', 'fuse', 'finish')
+    if target is _sharpen_failure_child:
+        assert fields['error']['kind'] == 'ResourceLimitError'
+        assert any(frame['function'] == 'require_memory' for frame in fields['error']['stack'])
+        assert fields['admission'] == {
+            'resource_status': 'insufficient', 'required_bytes': 6 * 1024**2,
+            'ram_ceiling': 3 * 1024**2, 'available_ram_bytes': 8 * 1024**3,
+            'total_ram_bytes': 16 * 1024**3, 'available_commit_bytes': 9 * 1024**2,
+            'process_commit_headroom_bytes': 5 * 1024**2,
+        }
     assert worker.prepared_cache is parent_cache
     assert worker.alignment_report == [{'probe': 'alignment diagnostic'}]
     assert worker.alignment_report_provenance == {'probe': 'child'}
@@ -439,13 +638,68 @@ def test_successful_render_adopts_prepared_cache(qapp, tmp_path, scratch, monkey
     assert not path.exists()
 
 
+def test_spawned_tiled_fusion_publishes_frozen_tooltip_details(qapp, tmp_path, scratch, monkeypatch):
+    from types import SimpleNamespace
+    from PyQt6.QtWidgets import QLabel, QListWidget
+    from controllers.output_manager import OutputManager
+    from core.render_context import build_render_context
+    from core.render_process import RenderProcessWorker
+    from locales import trans
+
+    monkeypatch.setattr(trans, 'current_lang', 'en')
+    parameters = {'kernel_size': 9}
+    worker = RenderProcessWorker(_sources(tmp_path), algorithm='guided_filter',
+        fusion_parameters=parameters, tile_enabled=True, tile_threshold=32,
+        tile_block_size=100, tile_overlap=64, thread_count=1, use_gpu=False)
+    results, errors = _start(worker)
+    _wait(worker, qapp)
+    assert not errors and len(results) == 1
+    assert worker.performance_report is None
+    details = worker.fusion_details
+    assert (details.input_size, details.tile_grid) == ((64, 48), (48, 24, 6))
+    assert dict(details.parameters) == {'kernel_size': 9}
+
+    frames, image, *_ = results[0]
+    context = build_render_context(frames, image, algorithm='guided_filter',
+                                   parameters=parameters, fusion_details=details)
+    panel = SimpleNamespace(output_list=QListWidget(), output_label=QLabel(),
+        fusion_results=[], fusion_result=image)
+    manager = OutputManager(panel)
+    manager.update_output_list_for_fusion('result', context=context)
+    parameters['kernel_size'] = 31
+    manager._refresh_output_tooltip(0)
+    tooltip = panel.output_list.item(0).toolTip()
+    assert 'spatial tiles (64 × 48 px input)' in tooltip
+    assert 'Block: 48 × 48 px · Grid overlap setting: 24 px · Tile passes: 6' in tooltip
+    assert f'{trans.t("label_kernel_guided").rstrip(":： ")} 9' in tooltip
+    assert trans.t('retouch_unexported') in tooltip
+
+
+def test_legacy_tooltip_uses_saved_choice_without_guessing_tiling(monkeypatch):
+    from types import SimpleNamespace
+    from controllers.output_manager import OutputRecord, _fusion_tooltip_lines
+    from locales import trans
+
+    monkeypatch.setattr(trans, 'current_lang', 'zh')
+    context = SimpleNamespace(algorithm='stackmffv3', parameters={
+        'fusion_parameters': {'mode': 'hard'}, 'tile_enabled': True,
+        'tile_block_size': 1024, 'defect_mask_path': 'private/location.tif'})
+    record = OutputRecord.create(None, 'archived', context=context)
+    tooltip = '\n'.join(_fusion_tooltip_lines(record))
+    assert trans.t('radio_ai_hard') in tooltip
+    assert trans.t('sensor_mask') in tooltip
+    assert '1024' not in tooltip and 'private' not in tooltip
+    assert trans.t('output_fusion_whole').split('（')[0] not in tooltip
+    assert trans.t('output_fusion_tiled').split('（')[0] not in tooltip
+
+
 @pytest.mark.parametrize('alignment', ['none', 'openfocus'])
 def test_spawned_render_preserves_uint16_and_lazy_alignment(qapp, tmp_path, scratch, alignment):
     from core.render_process import RenderProcessWorker
     from core.source_frames import ProcessedFrame, SourceFrame, resolve_frame
     from core.workers import RenderWorker
     frames = _sources(tmp_path)
-    options = dict(algorithm='openfocus_a', alignment=alignment, tile_enabled=False,
+    options = dict(algorithm='openfocus_a', alignment=alignment, tile_enabled=True, tile_threshold=1,
                    thread_count=1, use_gpu=False, exposure_match=False,
                    collect_alignment_report=True)
     baseline, baseline_errors = [], []
@@ -471,6 +725,9 @@ def test_spawned_render_preserves_uint16_and_lazy_alignment(qapp, tmp_path, scra
         np.testing.assert_array_equal(resolve_frame(frame), resolve_frame(expected))
     assert registered == (alignment != 'none')
     assert worker.alignment_report == reference.alignment_report
+    assert worker.fusion_details == reference.fusion_details
+    assert worker.fusion_details.tile_grid is None
+    assert worker.fusion_details.input_size == tuple(processed[0].shape[1::-1])
     # The map must survive the child's exit, then disappear with its last GUI view.
     root = fused
     while getattr(root, 'base', None) is not None:
@@ -489,8 +746,11 @@ def test_spawned_render_preserves_uint16_and_lazy_alignment(qapp, tmp_path, scra
 
 @pytest.mark.parametrize('target', [_crash_child, _abort_child])
 def test_native_child_failure_keeps_application_alive_and_allows_retry(
-        qapp, tmp_path, scratch, monkeypatch, target):
+        qapp, tmp_path, scratch, monkeypatch, caplog, target):
     from core import render_process
+
+    caplog.set_level(logging.INFO, logger='openfocus')
+    monkeypatch.setattr(logging.getLogger('openfocus'), 'propagate', True)
     frames = _sources(tmp_path)
     with monkeypatch.context() as patch:
         patch.setattr(render_process, '_render_child', target)
@@ -500,6 +760,14 @@ def test_native_child_failure_keeps_application_alive_and_allows_retry(
         _wait(worker, qapp)
     assert not results
     assert len(errors) == 1
+    fields = _child_evidence(caplog)
+    assert fields['error_origin'] == 'child_exit'
+    assert fields['error_category'] == worker.failure_category == 'runtime'
+    assert 'error' not in fields
+    if target is _crash_child:
+        assert fields['render_stage'] == 'fuse' and fields['exit_code'] == 23
+    else:
+        assert fields['render_stage'] == 'prepare' and fields['exit_code'] != 0
     assert qapp is not None and not qapp.closingDown()
     assert not list(scratch.glob('openfocus-frame-*'))
     retry = render_process.RenderProcessWorker(
@@ -511,9 +779,39 @@ def test_native_child_failure_keeps_application_alive_and_allows_retry(
     assert results[0][1].dtype == np.uint16
 
 
-def test_cancel_during_child_startup_publishes_no_result(qapp, tmp_path, scratch):
+def test_child_exit_without_terminal_packet_still_reports_failure(qapp, scratch, monkeypatch, caplog):
+    from core import render_process
+
+    caplog.set_level(logging.INFO, logger='openfocus')
+    monkeypatch.setattr(logging.getLogger('openfocus'), 'propagate', True)
+    monkeypatch.setattr(render_process, '_render_child', _silent_child)
+    worker = render_process.RenderProcessWorker([], algorithm=None, need_fusion=False)
+    results, errors = _start(worker)
+    _wait(worker, qapp)
+
+    assert not results and len(errors) == 1
+    assert _child_evidence(caplog) == {'error_category': 'runtime', 'error_origin': 'child_exit',
+                                      'render_stage': 'align', 'exit_code': 0}
+
+
+@pytest.mark.parametrize('platform, code, expected', [
+    ('nt', -1073741819, 0xC0000005), ('nt', 0xFFFFFFFF, 0xFFFFFFFF), ('nt', 2**32, None),
+    ('posix', -6, -6), ('posix', 2**31, None), ('posix', True, None),
+])
+def test_exit_evidence_bounds(platform, code, expected, monkeypatch):
+    from types import SimpleNamespace
+    from core import render_process
+
+    monkeypatch.setattr(render_process, 'os', SimpleNamespace(name=platform))
+    assert render_process._bounded_exit_code(code) == expected
+
+
+def test_cancel_during_child_startup_publishes_no_result(qapp, tmp_path, scratch, monkeypatch, caplog):
     from PyQt6.QtCore import QTimer
     from core.render_process import RenderProcessWorker
+
+    caplog.set_level(logging.INFO, logger='openfocus')
+    monkeypatch.setattr(logging.getLogger('openfocus'), 'propagate', True)
     worker = RenderProcessWorker(_sources(tmp_path), algorithm='openfocus_a',
                                  thread_count=1, use_gpu=False)
     results, errors = _start(worker)
@@ -528,7 +826,10 @@ def test_cancel_during_child_startup_publishes_no_result(qapp, tmp_path, scratch
     _wait(worker, qapp)
     timer.stop()
     assert not results
+    assert worker.fusion_details is None
     assert len(errors) == 1 and errors[0].startswith('CANCELLED:')
+    assert all(getattr(record, 'event', None) != 'render_child_error' for record in caplog.records)
+    assert all(not hasattr(record, 'report_child_evidence') for record in caplog.records)
     assert not list(scratch.glob('openfocus-frame-*'))
 
 
@@ -563,6 +864,8 @@ def test_heap_input_snapshot_survives_parent_staging_release(qapp, scratch):
 
 
 def test_registered_extension_and_composite_alignment_execute_in_child(qapp, scratch, monkeypatch):
+    from PyQt6.QtCore import QRect
+
     from core import algorithms
     from core.render_process import RenderProcessWorker
     monkeypatch.setattr(algorithms, '_FUSION', dict(algorithms._FUSION))
@@ -586,12 +889,15 @@ def test_registered_extension_and_composite_alignment_execute_in_child(qapp, scr
     images = [np.full((16, 20, 3), value, np.uint8) for value in (20, 100)]
     worker = RenderProcessWorker(images, algorithm='isolated_extension',
         alignment='isolated_composite', registration_parameters={'delta': 7},
-        fusion_parameters={'fraction': .25, 'direction': 'reverse'},
+        fusion_parameters={'fraction': .25, 'direction': 'reverse'}, roi_rect=QRect(4, 3, 5, 6),
         thread_count=1, use_gpu=False, tile_enabled=False, exposure_match=False)
     results, errors = _start(worker)
     _wait(worker, qapp)
     assert not errors
-    np.testing.assert_array_equal(results[0][1], np.full((16, 20, 3), 174, np.uint8))
+    np.testing.assert_array_equal(results[0][1], np.full((6, 5, 3), 174, np.uint8))
+    assert worker.fusion_details.input_size == (20, 16)
+    assert worker.fusion_details.tile_grid is None
+    assert dict(worker.fusion_details.parameters) == {'fraction': .25, 'direction': 'reverse'}
 
 
 def test_fusion_preparation_progress_transitions_to_tile_progress():
@@ -654,6 +960,7 @@ def test_prepared_cache_invalidation_preserves_inflight_reader(qapp, scratch, ch
         window.destroyed.slot()
     assert manager._prepared_cache is None
     assert manager._prepared_cache_key is None
+    assert manager._prepared_cache_source is None
     assert path.exists()
     np.testing.assert_array_equal(reader[0], np.ones((8, 9), np.uint8))
     reader.clear()
@@ -805,3 +1112,26 @@ def test_nonstreaming_reuse_keeps_mixed_frame_positions(qapp, tmp_path, scratch,
     output = results[0][0]
     np.testing.assert_array_equal(output[0], ordinary)
     assert output[1] is retained
+
+
+def test_isolated_render_adopts_readonly_focus_map(qapp, scratch):
+    from core.frame_storage import describe_frame, owns_temp_file
+    from core.render_process import RenderProcessWorker
+
+    shape = (32, 39)
+    sharp = (np.indices(shape).sum(axis=0) % 2 * 240 + 8).astype(np.uint8)
+    flat = np.full(shape, 128, np.uint8)
+    worker = RenderProcessWorker([sharp, flat], algorithm='openfocus_c', use_gpu=False,
+        sort_mode='desc', fusion_parameters={'smoothing': 0}, thread_count=1, exposure_match=False)
+    results, errors = _start(worker)
+    _wait(worker, qapp)
+    assert len(results) == 1 and not errors
+    retained = worker.rendered_depth
+    index = retained['index']
+    assert retained['frame_count'] == 2 and retained['reverse_order']
+    assert retained['valid_rect'] == (0, 0, shape[1], shape[0])
+    assert index.dtype == np.float32 and not index.flags.writeable
+    mapping = describe_frame(index)
+    assert Path(mapping['path']).parent.is_relative_to(scratch)
+    assert owns_temp_file(mapping['path'])
+    np.testing.assert_array_equal(index[1:-1, 1:-1], 1)

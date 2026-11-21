@@ -20,7 +20,7 @@ def _until(qapp, predicate):
 
 
 @pytest.fixture
-def algorithm_host(qapp, extension):
+def algorithm_host(qapp, extension, monkeypatch):
     from main import OpenFocus
     from ui.right_panel import create_right_panel
 
@@ -48,6 +48,7 @@ def algorithm_host(qapp, extension):
     host.exposure_match = False
     host.source_revision = 0
     host.ui_theme = "light"
+    monkeypatch.setattr('ui.algorithm_combo._package_available', lambda name: True)
     host.persist_settings = lambda: None
     for name in ("current_fusion_method", "current_alignment_method",
                  "set_fusion_method", "set_alignment_method", "fusion_parameters_for",
@@ -137,21 +138,25 @@ def _edit_fraction(editors, fraction, direction):
 
 
 def test_openfocus_registration_panel_is_hidden_but_retains_values(algorithm_host):
-    from core.algorithms import registration_defaults
+    from core.algorithms import desktop_registration_parameters
 
     host = algorithm_host
     host.set_registration_parameters('openfocus', {'rotation': 6, 'reference_frame': 3})
     host.set_alignment_method('openfocus')
     assert host.registration_parameter_panel.isHidden()
+    assert host.registration_parameter_panel.disclosure.isHidden()
     assert host.registration_parameter_panel.values()['rotation'] == 6
     assert host.registration_parameter_panel.values()['reference_frame'] == 3
     host.set_alignment_method('shift')
-    assert not host.registration_parameter_panel.isHidden()
+    panel = host.registration_parameter_panel
+    assert not panel.disclosure.isHidden() and panel.isHidden()
+    panel.disclosure.click()
+    assert not panel.isHidden()
     assert host.registration_parameter_panel.values()['delta'] == 7
     host.reset_parameter_memories()
     host.set_alignment_method('openfocus')
     assert host.registration_parameter_panel.isHidden()
-    assert host.registration_parameter_panel.values() == registration_defaults('openfocus')
+    assert host.registration_parameter_panel.values() == desktop_registration_parameters('openfocus')
 
 
 def test_new_parameters_edited_in_main_and_batch_change_actual_pixels(
@@ -288,10 +293,16 @@ def test_exposure_defaults_on_preserves_choice_and_reset(algorithm_host):
 
     host = algorithm_host
     host._brightness_by_method.clear()
-    for method in ["none", *(spec.id for spec in fusion_algorithms())]:
-        host.set_fusion_method(method)
-        assert host.chk_exposure_match.isChecked() == (method != "none")
+    host.set_fusion_method("openfocus_b")
+    host.set_fusion_method("none")
+    assert host.chk_exposure_match.isChecked()
+    host.chk_exposure_match.setChecked(False)
+    for spec in fusion_algorithms():
+        host.set_fusion_method(spec.id)
+        assert host.chk_exposure_match.isChecked()
         assert not host.chk_base_correct.isChecked()
+    host.set_fusion_method("none")
+    assert not host.chk_exposure_match.isChecked()
 
     host.set_fusion_method("openfocus_a")
     host.chk_exposure_match.setChecked(False)
@@ -316,7 +327,7 @@ def test_exposure_defaults_on_preserves_choice_and_reset(algorithm_host):
     assert host._brightness_by_method == {}
     for method in ["none", *(spec.id for spec in fusion_algorithms())]:
         host.set_fusion_method(method)
-        assert host.chk_exposure_match.isChecked() == (method != "none")
+        assert host.chk_exposure_match.isChecked()
         assert not host.chk_base_correct.isChecked()
 
 
@@ -406,21 +417,69 @@ def test_method_dropdown_groups_families_in_a_stable_order(qapp, algorithm_host)
                 assert item.font().pointSizeF() < combo.font().pointSizeF()
 
 
-def test_openfocus_b_default_precision_and_saved_value(qapp, algorithm_host):
+@pytest.mark.parametrize('method', ['openfocus_a', 'openfocus_b', 'openfocus_c'])
+def test_openfocus_smoothing_edits_whole_levels(algorithm_host, method):
     host = algorithm_host
-    host.set_fusion_method('openfocus_b')
-    editors = host.fusion_parameter_panel.editors
-    assert editors['radius'].value() == 8
-    assert editors['smoothing'].value() == pytest.approx(4)
-    assert editors['feather'].value() == 3
-    assert editors['smoothing'].text().endswith('4.0')
+    host.set_fusion_method(method)
+    panel = host.fusion_parameter_panel
+    editor = panel.editors['smoothing']
+    assert editor.text() == '4'
+    editor.stepUp()
+    assert editor.text() == '5' and host.fusion_parameters_for(method)['smoothing'] == 5
+    editor.stepDown()
+    assert editor.text() == '4' and host.fusion_parameters_for(method)['smoothing'] == 4
 
-    editors['smoothing'].setValue(6.666667)
-    assert editors['smoothing'].value() == pytest.approx(6.666667)
-    assert editors['smoothing'].text().endswith('6.666667')
 
-    editors['smoothing'].setValue(1.2)
+def test_saved_fraction_survives_other_edits_and_method_switch(algorithm_host):
+    from PyQt6.QtCore import Qt
+
+    host = algorithm_host
+    method = 'openfocus_b'
+    exact = 1.6 / .24
+    host.set_fusion_method(method)
+    host.set_fusion_parameters(method, {'smoothing': exact})
+    panel = host.fusion_parameter_panel
+    editor = panel.editors['smoothing']
+    assert editor.text() == '7'
+    assert editor.accessibleDescription() and editor.toolTip()
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+    panel.editors['radius'].stepUp()
     host.set_fusion_method('openfocus_c')
-    assert host.fusion_parameter_panel.editors['smoothing'].value() == pytest.approx(4)
-    host.set_fusion_method('openfocus_b')
-    assert host.fusion_parameter_panel.editors['smoothing'].value() == pytest.approx(1.2)
+    host.set_fusion_method(method)
+    assert panel.values() == {'radius': 9, 'smoothing': exact, 'feather': 3}
+    editor = panel.editors['smoothing']
+    editor.selectAll()
+    QTest.keyClicks(editor, '7')
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+    assert host.fusion_parameters_for(method)['smoothing'] == 7
+
+
+def test_compare_and_batch_edit_smoothing_locally(algorithm_host):
+    from dialogs.batch import BatchProcessingDialog
+    from dialogs.compare import CompareDialog
+
+    host = algorithm_host
+    method = 'openfocus_b'
+    exact = 1.6 / .24
+    host.set_fusion_method(method)
+    host.set_fusion_parameters(method, {'smoothing': exact})
+    compare = CompareDialog(host)
+    batch = BatchProcessingDialog(host)
+    try:
+        widgets = compare.param_widgets[method]
+        assert widgets['smoothing'].text() == '7'
+        widgets['feather'].stepUp()
+        assert compare._method_params[method]['smoothing'] == exact
+        widgets['smoothing'].stepDown()
+        assert compare._method_params[method]['smoothing'] == 6
+        widgets = batch.fusion_parameter_panel.editors
+        assert widgets['smoothing'].text() == '7'
+        widgets['radius'].stepDown()
+        assert batch.get_processing_settings()['fusion_params']['smoothing'] == exact
+        widgets['smoothing'].stepUp()
+        assert batch.get_processing_settings()['fusion_params']['smoothing'] == 8
+        assert host.fusion_parameters_for(method)['smoothing'] == exact
+    finally:
+        for dialog in (compare, batch):
+            dialog.reject()
+            dialog.deleteLater()

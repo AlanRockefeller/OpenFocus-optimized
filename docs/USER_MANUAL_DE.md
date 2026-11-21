@@ -28,7 +28,7 @@ OpenFocus ist eine professionelle Desktop-Anwendung zur Multifokus-Bildfusion f�
 ### Hauptfunktionen
 
 - **Multifokus-Bildfusion**: Mehrere Bilder mit unterschiedlichen Fokuspunkten zu einem einzigen vollständig scharfen Bild kombinieren
-- **Zehn Fusionsverfahren**: Guided Filter, DCT, DTCWT, GFG-FGF, StackMFF, StackMFF V2, StackMFF V3 sowie OpenFocus A, B und C; zusätzlich ein reiner Ausrichtungsmodus
+- **Zehn Fusionsverfahren**. OpenFocus A, B und C sind stabil. Guided Filter, DCT, DTCWT, GFG-FGF und StackMFF V1/V2/V3 sind experimentell. Dazu kommt ein reiner Ausrichtungsmodus.
 - **Bildregistrierung**: Fehlausgerichtete Bildsequenzen mit ECC, Homographie, Homographie mit anschließender ECC-Verfeinerung oder der schnellen OpenFocus-Ausrichtung ausrichten
 - **Automatischer Hintergrund**: einen unruhigen gestackten Hintergrund durch ein echtes Einzelbild ersetzen und sehen, wo kein Bild die Szene klar erfasst hat
 - **Quellengebundene Retusche**: Pixel aus den Bildern malen, die das Ergebnis tatsächlich erzeugt haben, mit Quell- und Wiederherstellungspinsel, Belichtungspinsel und Rückgängig pro Strich
@@ -57,7 +57,7 @@ Transparente PNG-Stapel lassen sich in der Desktop-App, in der Stapelverarbeitun
 
 Laden Sie in voller Größe, wählen Sie keine Ausrichtung, deaktivieren Sie Schnellvorschau und ROI, rendern Sie und speichern Sie als PNG. Die Stapelverarbeitung verlangt ein Fusionsverfahren und eine PNG-Ausgabe ohne Export eines ausgerichteten Stapels. Ausrichtung, Größenänderung oder Downsampling, Flachfeldkorrektur, Tiefenkarten, Methodenvergleich, Retusche und Maßstabsbalken sind für transparente Daten nicht verfügbar; Beschriftungen lassen sich nicht in einen Export einbrennen. Ein Fusionsverfahren, das die Abmessungen des Rechtecks ändert, wird abgelehnt. Abweichende oder weich auslaufende Masken, unterschiedliche Masken pro Bild, transparente TIFF-Eingaben und Nicht-PNG-Ausgaben – einschließlich GIF und mehrseitiger TIFF – sind nicht möglich. Die CLI lehnt außerdem Sensorbereinigung und Tiefenkarten für transparente Eingaben ab.
 
-Das CLI-Äquivalent lautet beispielsweise `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none`.
+Das CLI-Äquivalent lautet beispielsweise `python main.py --input ./png-stack --output ./result.png --method guided_filter --align none --experimental`.
 
 ### Unterstützte Ausgabeformate
 
@@ -75,8 +75,8 @@ Unter **Speichern unter** speichert gewöhnliches TIFF das Ergebnis als einzelne
 
 ### Installation
 
-Laden Sie den aktuellen Windows- oder macOS-Build von der [OpenFocus-Website](https://openfocus.top/#download). Dieselben Dateien und ältere Versionen stehen auch unter [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases) bereit.
-Website und Installationsskripte bieten auch neuere Betaversionen an, derzeit [Vorabversion v1.77.0-beta.7](https://github.com/Xinzhe99/OpenFocus/releases/tag/v1.77.0-beta.7). Der Desktop-Updater bietet ebenfalls neuere Betas an; die Linux-CLI von PyPI bleibt stabil.
+Laden Sie den aktuellen Windows-, macOS- oder Linux-x86-64-Desktop-Build von der [OpenFocus-Website](https://openfocus.top/#download). Der Linux-Desktop-Build ist ab Version 2.0.0 verfügbar. Ältere Versionen stehen auch unter [GitHub Releases](https://github.com/Xinzhe99/OpenFocus/releases) bereit.
+Die Website bietet standardmäßig stabile Desktopversionen. Unter Windows und macOS können Betaversionen für automatische Updates aktiviert werden; unter Linux laden Sie zum Aktualisieren ein neues Desktoparchiv herunter. Die PyPI-CLI wird separat veröffentlicht.
 
 | Plattform | Datei | Typ |
 |-----------|-------|-----|
@@ -84,8 +84,9 @@ Website und Installationsskripte bieten auch neuere Betaversionen an, derzeit [V
 | Windows 10/11 (64 Bit) | `OpenFocus-*-windows-x64.zip` | Portabel (entpacken und starten) |
 | macOS Apple Silicon (M1–M4) | `OpenFocus-*-macos.dmg` | Disk-Image (in „Programme“ ziehen) |
 | macOS Apple Silicon (M1–M4) | `OpenFocus-*-macos-arm64.zip` | Portabel (entpacken) |
+| Linux x86-64 | `OpenFocus-*-linux-x86_64.tar.gz` | Portabel (entpacken und `OpenFocus/OpenFocus` starten) |
 
-Ob die Windows-Builds signiert sind, hängt vom jeweiligen Release ab (siehe Release-Notes); eine Signatur ist nicht garantiert. Beim ersten Start kann daher eine Sicherheitsabfrage erscheinen: unter **Windows** SmartScreen → „Weitere Informationen“ → „Trotzdem ausführen“ (der erste Start kann 30–60 s dauern). Die macOS-Builds sind nicht notarisiert; nach der DMG-Installation (in „Programme“) führen Sie bei Bedarf `xattr -cr /Applications/OpenFocus.app` aus, nach der Terminal-Installation (nach `~/Applications`) `xattr -cr ~/Applications/OpenFocus.app`, oder Sie klicken mit der rechten Maustaste auf die App und wählen **Öffnen**.
+Die aktuellen Windows-Builds sind nicht signiert. Vergleichen Sie vor dem Start den SHA-256-Hash der heruntergeladenen Datei mit dem Wert im Release-Manifest. Beim ersten Start kann daher eine Sicherheitsabfrage erscheinen: unter **Windows** SmartScreen → „Weitere Informationen“ → „Trotzdem ausführen“ (der erste Start kann 30–60 s dauern). Die macOS-Builds sind nicht notarisiert; nach der DMG-Installation (in „Programme“) führen Sie bei Bedarf `xattr -cr /Applications/OpenFocus.app` aus, nach der Terminal-Installation (nach `~/Applications`) `xattr -cr ~/Applications/OpenFocus.app`, oder Sie klicken mit der rechten Maustaste auf die App und wählen **Öffnen**.
 
 Für die Installation im Terminal zuerst den Befehl für macOS oder Linux mit `--dry-run` prüfen und anschließend ohne diese Option ausführen. Unter Linux installiert das die Headless-CLI; macOS-Builds erfordern Apple Silicon und werden nach `~/Applications` installiert.
 
@@ -151,7 +152,7 @@ Der rechte Bereich enthält alle Konfigurationsoptionen, vertikal gegliedert:
 1. **Fusionseinstellungen**: Fusionsverfahren und dessen Parameter wählen
 2. **Registrierungseinstellungen**: Ausrichtungsmethode und zugehörige Parameter wählen
 3. **Rendereinstellungen**: Der Dialog enthält Schnellvorschau, Bildreihenfolge, Belichtungsabgleich, Entfernung der Helligkeitsdrift und Ausgabeschärfung
-4. **Aktionsschaltflächen**: Rendern starten sowie Zurücksetzen, Rendereinstellungen und alle Methoden rendern
+4. **Aktionsschaltflächen**: Rendern starten, zurücksetzen, Rendereinstellungen öffnen oder mit **Alle Methoden rendern…** alle verfügbaren Methoden rendern
 5. **Liste der Quellbilder**: alle geladenen Bilder mit Dateinamen und Auswahlkästchen
 6. **Ausgabeliste**: die erzeugten Ergebnisse
 
@@ -162,8 +163,8 @@ Die Menüleiste am oberen Rand bietet Zugriff auf alle Funktionen:
 - **Datei**: Importieren, Projekte, Verarbeitungsvorlagen, Speichern, Stapel speichern und die Liste der zuletzt geöffneten Dateien
 - **Bearbeiten**: Bildtransformationen, Retusche und Bearbeitung einzelner Bilddateien
 - **Werkzeuge**: Bilder zusammenfügen, Stapelverarbeitung, Methodenvergleich, Tiefenkarte, Staubkarte (Flat-Field), Maßstabsbalken und Beschriftungen
-- **Einstellungen**: Erweiterte Einstellungen (Registrierung und Ausrichtungsdiagnose), GPU-Beschleunigung, Design und Sprache
-- **Hilfe**: Schnellstart, Umgebungsinformationen, Feedback, Kontakt, Log-Ordner und Update-Prüfung
+- **Einstellungen**: Erweiterte Einstellungen (Allgemein, Fusion, Registrierung, Start und Updates), GPU-Beschleunigung, Design und Sprache
+- **Hilfe**: Schnellstart, Feedback senden (Diagnose und Protokolle), Kontakt und Update-Prüfung
 
 **Werkzeuge → Bilder zusammenfügen…** öffnet einen separaten Arbeitsbereich für bereits fusionierte Mikroskopbereiche und Kamerapanoramen; der aktuelle Stapel bleibt unverändert. Die Registerkarte **Projektassistent** bündelt Import, Ausrichtung und Kontrollpunkte, **Quellbilder** enthält Liste, Raster und manuelle Platzierung, **Panoramaeditor** enthält Naht-, Überblendungs-, Belichtungs-/Farb-, Ausgabe-, Projektions-, Kamera- und HDR-Einstellungen sowie Vorschau-Überlagerungen. Mit **Dateien hinzufügen…**, **Ordner öffnen** oder **Ergebnisse hinzufügen…** kopieren Sie ausgewählte Ergebnisse der aktuellen Sitzung, oder Sie ziehen Dateien bzw. Ordner auf Liste oder Leinwand. Der Ordnerimport umfasst nur unterstützte Dateien direkt im Ordner, keine Unterordner. Importe folgen der natürlichen Dateinamenreihenfolge, ignorieren doppelte Pfade und fügen jede Seite mehrseitiger TIFFs als eigenes Bild hinzu. Ein ausgewähltes Bild lässt sich mit Entf oder Rücktaste aus dem Arbeitsbereich entfernen, ohne die Datei zu löschen.
 
@@ -392,20 +393,17 @@ Die Bildregistrierung korrigiert räumliche Fehlausrichtungen zwischen den Bilde
 - Sucht begrenzte Ähnlichkeitstransformationen über abgetastete Bilddifferenzen und verzerrt mit Lanczos-Interpolation
 - Der Suchbereich für Verschiebungen beträgt standardmäßig 3 % der Bildgröße und lässt sich mit `--align-shift-limit` ändern. Die Suche verwendet das zuvor ausgerichtete Bild und die kumulierte Bewegung als Ausgangspunkt; die Gesamtverschiebung kann 3 % überschreiten.
 - Für nicht-starre oder extreme Geometrien stattdessen ECC oder Homographie wählen
-- Bei einem tatsächlichen Schätzfehler behält `failure_policy=continue` (Standard) das Bild unausgerichtet; `fail` bricht ab. Wenig Struktur, wiederholte Muster und Fokusänderungen können dennoch ungenaue Zuordnungen verursachen.
-- In der CLI dieselbe Richtlinie mit `--align openfocus --align-param 'failure_policy="fail"'` wählen (shellgerechte Anführungszeichen verwenden). Stapel-Elemente verwenden die gewählte Richtlinie unabhängig. Standard ist `"continue"`.
+- Die Desktop-App stoppt den betroffenen Stapel, wenn ein Bild bei der Registrierung abgelehnt wird. Prüfen Sie das in der Fehlermeldung genannte Bild und den angegebenen Grund, bevor Sie es erneut versuchen. Wenig Struktur, wiederholte Muster und Fokusänderungen können dennoch ungenaue Zuordnungen verursachen.
+- Die CLI verwendet standardmäßig `continue`. Mit `--align openfocus --align-param 'failure_policy="fail"'` stoppt auch der CLI-Lauf bei einem abgelehnten Bild.
 - **Referenzbild** auf eine 1-basierte Nummer in der einbezogenen, verarbeiteten Stapelreihenfolge setzen, um die Geometrie an diesem Bild auszurichten. Die Bildreihenfolge bleibt erhalten; der Helligkeitsabgleich verwendet seine eigene Referenz. Jeder Stapel in der Stapelverarbeitung muss diese Nummer enthalten, sonst schlägt das Element fehl. CLI-Beispiel: `--align openfocus --align-param reference_frame=3`. Eine Referenz kann Parallaxe oder eine schlechte Zuordnung nicht korrigieren; prüfen Sie das Ergebnis.
 
-Ausrichtungsberichte nennen die Referenz und das Ergebnis jedes Bildes. Ein Rückfall bedeutet, dass die Methode die Ausrichtung nicht herstellen konnte oder von einer früheren fehlgeschlagenen Schätzung abhängt; der gemeldete Grund unterscheidet schwache Schätzungen und Bewegung außerhalb der Grenzen, sofern bekannt. Qualitätswerte sind methodenspezifisch und keine Garantie für Genauigkeit. Transformationen bilden Quellkoordinaten auf die Referenzleinwand der Registrierungsstufe vor dem gemeinsamen Zuschnitt ab; zusammengesetzte Methoden melden ihre Stufen getrennt. Homographie und ECC akzeptieren ebenfalls den optionalen Registrierungsparameter `failure_policy="fail"`, um bei erkanntem Fehler zu stoppen. Standard bleibt `"continue"`; prüfen Sie Ergebnisse auch bei erfolgreicher Ausrichtung.
-
-Um ein Rendering zu untersuchen, aktivieren Sie **Einstellungen → Erweiterte Einstellungen… → Registrierung → Ausrichtungsdiagnose erfassen** und rendern erneut. Dadurch wird die Ausrichtung neu berechnet, statt zwischengespeicherte Bilder wiederzuverwenden. Der Abschlussstatus hebt Rückfälle hervor; **Einstellungen → Erweiterte Einstellungen… → Registrierung → Ausrichtungsdiagnose** öffnet den Bericht pro Bild. Er zeigt verfügbare Fehlergründe, methodenspezifische Werte, Übereinstimmungszahlen, referenzierte Bilder und Transformationen. Referenznummern und -namen beziehen sich auf die ursprüngliche Quellenliste, auch wenn Bilder ausgeschlossen sind. Stapel- und gruppierte Renderings liefern diesen Bericht nicht.
+Für einen einzelnen, nicht gruppierten CLI-Lauf mit Registrierung schreibt `--alignment-report FILE` einen Bericht pro Bild. Ausrichtungsberichte nennen die Referenz und das Ergebnis jedes Bildes. Ein Rückfall bedeutet, dass die Methode die Ausrichtung nicht herstellen konnte oder von einer früheren fehlgeschlagenen Schätzung abhängt; der gemeldete Grund unterscheidet schwache Schätzungen und Bewegung außerhalb der Grenzen, sofern bekannt. Qualitätswerte sind methodenspezifisch und keine Garantie für Genauigkeit. Transformationen bilden Quellkoordinaten auf die Referenzleinwand der Registrierungsstufe vor dem gemeinsamen Zuschnitt ab; zusammengesetzte Methoden melden ihre Stufen getrennt. Homographie und ECC akzeptieren ebenfalls den optionalen Registrierungsparameter `failure_policy="fail"`, um bei erkanntem Fehler zu stoppen. Standard bleibt `"continue"`; prüfen Sie Ergebnisse auch bei erfolgreicher Ausrichtung.
 
 ### Registrierung aktivieren
 
 1. Im rechten Bereich die Gruppe **Registrierung** suchen
-2. Eine Methode im Dropdown wählen: **Keine Ausrichtung**, **OpenFocus (schnell)**, **ECC**, **Homographie** oder **Homographie → ECC**. Ohne gespeicherte Auswahl startet eine neue Sitzung mit ECC; die zuletzt gewählte Methode wird gespeichert.
-3. Unter **Einstellungen → Erweiterte Einstellungen… → Registrierung** die **Behandlung abgelehnter Bilder** wählen. Änderungen gelten für die Methoden; für OpenFocus (schnell) lässt sich außerdem das Referenzbild festlegen.
-4. **Ausrichtungsdiagnose erfassen** befindet sich jetzt unter **Einstellungen → Erweiterte Einstellungen… → Registrierung** (siehe oben).
+2. Wählen Sie **Keine Ausrichtung** oder **ECC**. Mit aktivierten experimentellen Funktionen stehen auch **OpenFocus (schnell)**, **Homographie** und **Homographie → ECC** zur Auswahl. Ohne gespeicherte Auswahl startet eine neue Sitzung mit ECC.
+3. Referenzbild und Suchgrenzen für OpenFocus finden Sie unter **Einstellungen → Erweiterte Einstellungen… → Registrierung**.
 
 ### Wann Registrierung sinnvoll ist
 
@@ -421,13 +419,12 @@ Weitere Einstellungen über **Einstellungen → Erweiterte Einstellungen… → 
 - **Verkleinerungsbreite**: Auflösung der Vorverarbeitung (Standard: 1024 px)
 - Kleinere Werte = schnellere Verarbeitung, eventuell geringere Genauigkeit
 - Größere Werte = langsamere Verarbeitung, eventuell höhere Genauigkeit
-- **Ausrichtungsdiagnose erfassen** und **Registrierungs-Cache** befinden sich im selben Abschnitt
 
 ---
 
 ## 8. Fusionsmethoden
 
-OpenFocus bietet zehn Fusionsalgorithmen plus einen reinen Ausrichtungsmodus. Ein frisches Profil startet mit **StackMFF V3** und **ECC**; die folgenden Abschnitte beschreiben jede Option. Jeder Algorithmus hat eigene Eigenschaften für unterschiedliche Bildtypen.
+Ein neues Desktop-Profil verwendet **OpenFocus B** mit **ECC**-Registrierung. Die stabilen Fusionsverfahren sind OpenFocus A, B und C. Um die übrigen Fusionsverfahren in der Desktop-App zu nutzen, wählen Sie **Einstellungen → Erweiterte Einstellungen… → Allgemein**, setzen Sie das Häkchen bei **Experimentelle Funktionen aktivieren** und bestätigen Sie die Auswahl. Fügen Sie in der CLI bei jedem Aufruf mit einem experimentellen Fusionsverfahren `--experimental` hinzu.
 
 ### Guided Filter
 
@@ -437,7 +434,7 @@ OpenFocus bietet zehn Fusionsalgorithmen plus einen reinen Ausrichtungsmodus. Ei
 - **Parameter**: Kernelgröße (einstellbar von 1–51, nur ungerade Werte)
   - Kleinerer Kernel: mehr lokales Detail, potenziell mehr Rauschen
   - Größerer Kernel: glattere Ergebnisse, bessere Rauschunterdrückung
-- **Hinweis**: Guided Filter ist das klassische Standardverfahren, aber nicht die Voreinstellung. Ohne gespeicherte Auswahl startet eine neue Sitzung mit StackMFF V3.
+- **Hinweis**: Guided Filter ist ein klassisches Fusionsverfahren und wird als experimentell angeboten.
 
 ### DCT (Diskrete Kosinustransformation)
 
@@ -489,8 +486,6 @@ Jede neuronale Kachel verwendet alle Bilder. Quelldaten und Ausrichtungsdaten k�
 
 Ist kein temporäres Verzeichnis angegeben, schätzt OpenFocus den Bedarf anhand bekannter Eingaben und temporärer Daten und berücksichtigt bei Platzmangel beschreibbare feste lokale Laufwerke. Ist das gewählte Verzeichnis nicht verfügbar, wird eine Warnung angezeigt und vorübergehend das System-Temporärverzeichnis verwendet; neue Aufgaben versuchen die gespeicherte Wahl erneut. Bei Platzmangel auf dem gewählten Laufwerk wird nicht automatisch gewechselt. Die Platzprüfung ist eine Momentaufnahme und keine Reservierung. Wählen Sie bei einem Speicherfehler in den erweiterten Einstellungen ein beschreibbares Verzeichnis.
 
-- **Standard**: StackMFF V3.
-
 ### OpenFocus A / B / C
 
 A nutzt eine mehrskalige Fokusantwort (Radius 8, Glättung 4); seine Glättung ist derzeit inaktiv.
@@ -501,7 +496,7 @@ CLI: `--method openfocus_b --param radius=8 --param smoothing=4 --param feather=
 
 In der Oberfläche ist der Belichtungsabgleich für A/B/C standardmäßig an und nutzt das erste verarbeitete Bild; für andere Methoden ist er standardmäßig aus und nutzt das letzte. Explizit gespeicherte Einstellungen bleiben erhalten; bei aktiviertem A/B/C gilt das erste Bild. Die Korrektur der Helligkeitsdrift bleibt standardmäßig aus. Zurücksetzen stellt die Vorgaben jeder Methode wieder her. In der CLI ist der Belichtungsabgleich für alle Methoden standardmäßig an; `--no-exposure-match` schaltet ihn aus.
 
-Bei Auswahl von A/B/C wird die OpenFocus-Ausrichtung verwendet, sofern keine Ausrichtung ausdrücklich gewählt oder ein Projekt wiederhergestellt wurde. Ihre Vorgaben sind Verschiebung 0,03 und Vergrößerung 5 %.
+ECC bleibt bei A/B/C auch mit aktivierten experimentellen Funktionen die Standardregistrierung. Wählen Sie die OpenFocus-Ausrichtung ausdrücklich aus, wenn Sie sie verwenden möchten. Ihre Vorgaben sind eine Verschiebung von 0,03 und eine Vergrößerung von 5 %.
 
 **Fusionsergebnis schärfen** wendet nach der Fusion eine milde Unscharfmaskierung an, bevor das Ergebnis in seine Ausgabebittiefe überführt wird. Sie ist standardmäßig aus und kann in den Haupt-Fusionsoptionen oder den Stapeloptionen aktiviert werden; die entsprechende CLI-Option ist `--sharpen-output`. Sie betrifft das fusionierte Bild, nicht registrierte Bilder oder Tiefenkarten. Kanten können deutlicher werden, Rauschen und Halos aber ebenfalls zunehmen. Die Einstellung wird im Projekt gespeichert und zwischen Sitzungen gemerkt.
 
@@ -534,6 +529,8 @@ Bei Auswahl von A/B/C wird die OpenFocus-Ausrichtung verwendet, sofern keine Aus
 **Werkzeuge → Methoden vergleichen…** öffnet einen Dialog, in dem mehrere Verfahren unabhängig eingestellt werden. Name, Parameterbeschriftungen und Bedienelemente jeder Methode bleiben zusammen, wenn das Fenster schmaler wird. Änderungen aktualisieren die Vorschau automatisch. **ROI-Vorschau (schnell)** fusioniert den ausgewählten Bereich mit umgebendem Kontext; **Ganzbild-Fusion** prüft das Ergebnis des gesamten Bildes und erlaubt die Untersuchung eines anderen Bereichs ohne erneutes Rendern. ROI-Ergebnisse können von Ganzbild-Ergebnissen abweichen, weil Belichtungsstatistiken und einige Algorithmen von der Bildausdehnung abhängen.
 Die **Ganzbild-Fusion** ist standardmäßig ausgewählt.
 
+Experimentelle Verfahren stehen im Vergleich nur zur Verfügung, wenn experimentelle Funktionen aktiviert sind.
+
 Ein sichtbarer Hinweis erklärt die Ergebnisauswahl: Ein Ergebnis anklicken oder es mit `Tab` fokussieren und mit `Enter` oder der Leertaste auswählen.
 
 Über den rechten Bereichen wählt **Vorschaugröße (px)** eine quadratische Größe von 160 bis 960 Pixeln, per Regler oder Zahleneingabe. Alle Methoden verwenden dieselbe Größe und umbrechen passend zur verfügbaren Breite. Die Größe wird für das nächste Öffnen gemerkt. Eine Änderung behält die aktuelle Vergrößerung bei und passt das Prüfquadrat um seinen Mittelpunkt an, begrenzt auf die Bildränder.
@@ -552,7 +549,7 @@ Das Abstimmen von Parametern auf großen Stapeln ist in voller Auflösung langsa
 
 ### Drehen
 
-1. Auf **Bearbeiten → Drehen** gehen
+1. Auf **Bearbeiten → Drehen und Spiegeln** gehen
 2. Drehungsart wählen:
    - **90° im Uhrzeigersinn**: alle Bilder um 90 Grad nach rechts drehen
    - **90° gegen den Uhrzeigersinn**: alle Bilder um 90 Grad nach links drehen
@@ -560,7 +557,7 @@ Das Abstimmen von Parametern auf großen Stapeln ist in voller Auflösung langsa
 
 ### Spiegeln
 
-1. Auf **Bearbeiten → Spiegeln** gehen
+1. Auf **Bearbeiten → Drehen und Spiegeln** gehen
 2. Spiegelungsart wählen:
    - **Horizontal spiegeln**: von links nach rechts spiegeln
    - **Vertikal spiegeln**: von oben nach unten spiegeln
@@ -580,7 +577,7 @@ Transformationen wirken auf den gesamten Bildstapel und erhalten die Ausrichtung
 
 ## 10. Retusche, Beschriftungen und Anmerkungen
 
-### Ergebnis retuschieren (Bearbeiten → Ergebnis retuschieren…, `Ctrl+T`)
+### Ergebnis retuschieren (Bearbeiten → Ergebnis retuschieren → Ausgabe in diesem Arbeitsbereich…, `Ctrl+T`)
 
 Die Fusion kann örtliche Fehler hinterlassen – einen Halo an einer kontrastreichen Kante, ein Härchen aus dem falschen Bild, Rauschen in einer gleichmäßigen Fläche. Der Retusche-Arbeitsbereich kopiert Pixel aus genau den Bildern, aus denen das gewählte Ergebnis erzeugt wurde:
 
@@ -599,7 +596,7 @@ Für eine lokale Tonwertkorrektur **Belichtungspinsel** wählen, den Betrag in H
 
 Die Herkunft wird mit der Ausgabe gespeichert: ausgerichtete Bilder, ROI-Zuschnitt-/Einfügeversätze, DCT-Kantenbeschneidung und Bittiefe werden beim Rendern des Ergebnisses aufgezeichnet. Stapeldateien, ältere Ergebnisse und reine Ausrichtungsordner haben keine aufgezeichnete Quelle und werden daher als nicht verfügbar aufgeführt, statt aus dem aktuellen Stapel geraten zu werden. Nicht angewendete Striche und der Rückgängig-Verlauf gelten nur für die Sitzung; das Speichern eines Projekts legt sie nicht ab.
 
-Für eine vorhandene Bilddatei **Bearbeiten → Bilddateien retuschieren…** wählen und dann das Ergebnis sowie ein oder mehrere Quellbilder auswählen. Die Quellen müssen bereits auf dasselbe Pixelraster ausgerichtet sein; gleiche Abmessungen allein belegen keine Ausrichtung. Einseitige PNG-, TIFF-, JPEG- und BMP-Bilder mit übereinstimmenden aufrechten Abmessungen, Kanälen und 8- oder 16-Bit-Tiefe werden akzeptiert; die EXIF-Ausrichtung wird beim Laden angewendet. Alpha- und mehrseitige Bilder werden nicht unterstützt. Die ausgewählten Bilder sind vom Benutzer bereitgestellt und keine aufgezeichnete Rendering-Herkunft. **Übernehmen** erzeugt eine separate, nicht exportierte Ausgabe; speichern Sie sie aus der Ausgabeliste. Die gewählten Dateien sind während dieser Sitzung vor Überschreiben geschützt, einschließlich Tiefenkarten- und 3D-Modell-Exporten. Wie bei anderen Ergebnissen speichern Projektdateien diese Pixel oder den Pinselverlauf nicht.
+Für eine vorhandene Bilddatei **Bearbeiten → Ergebnis retuschieren → Fusionsergebnis aus Datei…** wählen und dann das Ergebnis sowie ein oder mehrere Quellbilder auswählen. Die Quellen müssen bereits auf dasselbe Pixelraster ausgerichtet sein; gleiche Abmessungen allein belegen keine Ausrichtung. Einseitige PNG-, TIFF-, JPEG- und BMP-Bilder mit übereinstimmenden aufrechten Abmessungen, Kanälen und 8- oder 16-Bit-Tiefe werden akzeptiert; die EXIF-Ausrichtung wird beim Laden angewendet. Alpha- und mehrseitige Bilder werden nicht unterstützt. Die ausgewählten Bilder sind vom Benutzer bereitgestellt und keine aufgezeichnete Rendering-Herkunft. **Übernehmen** erzeugt eine separate, nicht exportierte Ausgabe; speichern Sie sie aus der Ausgabeliste. Die gewählten Dateien sind während dieser Sitzung vor Überschreiben geschützt, einschließlich Tiefenkarten- und 3D-Modell-Exporten. Wie bei anderen Ergebnissen speichern Projektdateien diese Pixel oder den Pinselverlauf nicht.
 
 ### Hintergrund ersetzen (Automatischer Hintergrund)
 
@@ -675,17 +672,22 @@ Die Vorschau verwendet das tatsächliche Ziel. Mit **Zurück/Weiter** navigieren
 
 ## 11. Einstellungen und Konfiguration
 
-**Einstellungen → Erweiterte Einstellungen…** öffnet Leistungs-, Registrierungs-, Sensorbereinigungs-, Ausgabebenennungs-, KI- und Starteinstellungen. Änderungen bleiben Entwürfe, bis Sie **OK** drücken; Abbrechen, Esc und Schließen verwerfen sie. Eine Verringerung der Kachelgröße aktualisiert sofort das sichtbare Überlappungslimit auf eine halbe Kachel. Die gespeicherte KI-Batch-Obergrenze bleibt erhalten; die Inferenz verwendet derzeit eine Kachel pro Aufruf. Die Registrierungsbreite kann die Genauigkeit der Ausrichtung verändern. Die Erfassung der Ausrichtungsdiagnose ist ein Kästchen im Abschnitt Registrierung.
+**Einstellungen → Erweiterte Einstellungen…**
+
+- **Allgemein** — Experimentelle Funktionen, Arbeitsverzeichnis und Präfix für Ausgabedateien. Unter **Datenschutz** lassen sich automatische Fehlerberichte und Nutzungsstatistiken getrennt ein- und ausschalten. Beide sind anfangs aktiviert. Eine ausdrücklich deaktivierte Option bleibt aus. Release-Versionen senden automatische Berichte nach einer Sitzung mit Fehler, sobald die Bedingungen bei der Anmeldung akzeptiert wurden oder die Funktion ausdrücklich aktiviert wurde. Ein früherer nativer Absturz erfordert eine Bestätigung.
+- **Fusion** — Ressourcenmodus und Kacheleinstellungen wählen. Wählen Sie **Sensorbereinigung**, um die eingeklappten Optionen zu öffnen.
+- **Registrierung** — Verkleinerungsbreite einstellen. Wählen Sie **OpenFocus (schnell)**, um die Einstellungen für Referenzbild und Suchgrenzen aufzuklappen.
+- **Start und Updates** — Letzten Stapel wiederherstellen, Abfrage der Ladeskalierung und Updates einstellen.
+
+Mit **OK** speichern. Abbrechen, Esc oder Schließen verwirft die Änderungen.
 
 Automatische Update-Downloads laufen im Leerlauf und installieren nie von selbst. Ein abgeschlossener Download bleibt bereit, bis Sie ausdrücklich **Aktualisieren und neu starten** wählen. Der Neustart schützt aktive Bearbeitungen und ungespeicherte Arbeit und schreibt anschließend Wiederherstellungsdaten, bevor die Ersatzversion startet. Das Abbrechen eines Downloads oder einer Vorbereitung wartet auf die aktuelle sichere Grenze. Ein vorhandener vollständiger, neuerer bereitgestellter Build kann offline installiert werden.
 
 Unter Windows erstellt das Update eine separate Kandidatenversion und verschiebt beim Wechsel die portable Markierung und `OpenFocusData`. Scheitert der Wechsel, wird die alte Installation wiederhergestellt; scheitert die Rücksetzung, bleibt die Sicherung erhalten und die App startet nicht automatisch neu. Eine Berechtigungsabfrage kann einmal erscheinen. Abbrechen der Entpackung verwirft unvollständige Dateien und wird zwischen 256-KiB-Lese- und Schreibvorgängen geprüft; blockierte Datenträger- oder Netzwerkzugriffe können es verzögern.
 
-Die Flat-Field-Korrektur ändert die Arbeitssitzungspixel, ohne Quelldateien zu überschreiben. Über **Werkzeuge → Staubkarte (Flat-Field)** das Weißbild und ein Vorschaubild wählen und die Vorschau nach einer Änderung von Quelle oder Skalierung erneut erzeugen. Referenz- und Arbeits-/Basisbilder müssen denselben Koordinatenbereich und dieselbe Größe haben. Das Anwenden bereitet beide Stapel vor dem Übernehmen vor; das optionale Entfernen des Referenzbilds gehört zum selben Rückgängig-Schritt. Korrigierte Quellbilder exportieren, wenn diese Pixel außerhalb der Sitzung erhalten bleiben sollen.
+Staubkarte, Flat-Field-Korrektur im Stapelmodus und Bildzusammenfügung sind in Entwicklung und derzeit nicht verfügbar.
 
-Die Stapelverarbeitung akzeptiert optional ein Weißfeldbild in ihren Verarbeitungsoptionen. Ein defokussiertes Referenzbild in der ursprünglichen Bildauflösung wählen; es wird mit dem Eingabestapel skaliert und vor der Registrierung mit der Standardstaubgröße angewendet. Ein unlesbares Referenzbild oder eine Größenabweichung lässt den betroffenen Stapel sichtbar fehlschlagen. Das Referenzbild wird aus Ordner-Eingaben ausgeschlossen, auch bei gruppierter Verarbeitung; mindestens zwei Quellbilder müssen für die Fusion übrig bleiben. Flat-Field-Korrektur lässt sich nicht mit transparenten Eingaben kombinieren. Leer lassen, um ohne Korrektur zu verarbeiten. Die CLI akzeptiert die Referenz mit `--dust-map WHITE`.
-
-Die Sensorbereinigung ist optional und läuft auf den Originalbildern in Sensorkoordinaten vor der Registrierung. In der Desktop-App finden Sie sie unter **Einstellungen → Erweiterte Einstellungen… → Sensorbereinigung**; der Stapeldialog bietet dieselben Steuerelemente. Eine ausdrückliche Defektmaske korrigiert bekannte Hot- oder Dead-Pixel; OpenFocus leitet keine Maske aus Probenbildern ab. Die Maske muss ein einkanaliges 8- oder 16-Bit-Bild mit denselben Abmessungen wie die Quelle sein: null bedeutet unberührt, und entweder 1 oder der maximale Kanalwert markiert Defekte. Prüfen Sie ihre Ausdehnung vor der Verarbeitung. Masken, die mehr als 10 % des Bildes abdecken, oder Defekte ohne unmaskierten Nachbarn werden abgelehnt. Die Maske in der Originalauflösung belassen und nicht als Quellbild auswählen. Für die GUI-Verarbeitung Quellbilder bei Verwendung einer Defektmaske in voller Skalierung laden; die Maske wird nie skaliert. Die Sensorbereinigung (einschließlich Entrauschung) kann nach einer Drehung, Spiegelung, Flat-Field-Korrektur oder anderen Quelländerung nicht auf einen GUI-Stapel angewendet werden: Originalbilder neu laden oder Bereinigung deaktivieren. Das gilt auch für wiederhergestellte Projekte mit solchen Quellverläufen. Vorab ausgerichtete ROI-Verarbeitung lässt sich nicht mit Sensorbereinigung kombinieren; ROI-Modus verlassen und den vollständigen Stapel rendern. Bereinigungseinstellungen gehören zur aktuellen Sitzung und zum gespeicherten Projekt, nicht zu globalen Anwendungseinstellungen. Stapelverarbeitung und CLI verarbeiten ihre Originaleingaben getrennt, mit Sensorbereinigung vor Flat-Field-Korrektur und Registrierung. Defektmasken erfordern Quelldateien mit neutraler EXIF-Ausrichtung. Orientierte Dateien, Kamera-RAW-Dateien und Quellen, deren Ausrichtung nicht feststellbar ist, werden abgelehnt, weil ihre dekodierten Pixel möglicherweise nicht mehr zu den Sensorkoordinaten passen. Verwenden Sie Quellbilder und eine Maske in derselben bekannten Pixelausrichtung mit neutralen Ausrichtungsmetadaten. Die reine Entrauschung benötigt keine Defektmaske.
+Die Sensorbereinigung ist optional und läuft auf den Originalbildern in Sensorkoordinaten vor der Registrierung. In der Desktop-App finden Sie sie unter **Einstellungen → Erweiterte Einstellungen… → Fusion → Sensorbereinigung**; der Stapeldialog bietet dieselben Steuerelemente. Eine ausdrückliche Defektmaske korrigiert bekannte Hot- oder Dead-Pixel; OpenFocus leitet keine Maske aus Probenbildern ab. Die Maske muss ein einkanaliges 8- oder 16-Bit-Bild mit denselben Abmessungen wie die Quelle sein: null bedeutet unberührt, und entweder 1 oder der maximale Kanalwert markiert Defekte. Prüfen Sie ihre Ausdehnung vor der Verarbeitung. Masken, die mehr als 10 % des Bildes abdecken, oder Defekte ohne unmaskierten Nachbarn werden abgelehnt. Die Maske in der Originalauflösung belassen und nicht als Quellbild auswählen. Für die GUI-Verarbeitung Quellbilder bei Verwendung einer Defektmaske in voller Skalierung laden; die Maske wird nie skaliert. Die Sensorbereinigung (einschließlich Entrauschung) kann nach einer Drehung, Spiegelung, Flat-Field-Korrektur oder anderen Quelländerung nicht auf einen GUI-Stapel angewendet werden: Originalbilder neu laden oder Bereinigung deaktivieren. Das gilt auch für wiederhergestellte Projekte mit solchen Quellverläufen. Vorab ausgerichtete ROI-Verarbeitung lässt sich nicht mit Sensorbereinigung kombinieren; ROI-Modus verlassen und den vollständigen Stapel rendern. Bereinigungseinstellungen gehören zur aktuellen Sitzung und zum gespeicherten Projekt, nicht zu globalen Anwendungseinstellungen. Stapelverarbeitung und CLI verarbeiten ihre Originaleingaben getrennt, mit Sensorbereinigung vor Flat-Field-Korrektur und Registrierung. Defektmasken erfordern Quelldateien mit neutraler EXIF-Ausrichtung. Orientierte Dateien, Kamera-RAW-Dateien und Quellen, deren Ausrichtung nicht feststellbar ist, werden abgelehnt, weil ihre dekodierten Pixel möglicherweise nicht mehr zu den Sensorkoordinaten passen. Verwenden Sie Quellbilder und eine Maske in derselben bekannten Pixelausrichtung mit neutralen Ausrichtungsmetadaten. Die reine Entrauschung benötigt keine Defektmaske.
 
 Die optionale Sensorentrauschung ist unabhängig von der Defektmaske und standardmäßig aus. Prüfen Sie das Ergebnis in voller Größe, um zu entscheiden, ob die Glättung für die Probe geeignet ist. Die Sensorbereinigung bewahrt die Quelldateien und die 8- oder 16-Bit-Bildtiefe; sie ist von der Flat-Field-Korrektur getrennt. Die CLI akzeptiert `--defect-mask-path MASK` und `--sensor-denoise`; Rezepte und die Python-Rezept-API erfassen diese Optionen. Rezepte zeichnen einen Maskenfingerabdruck auf und lehnen eine fehlende oder geänderte Maske ab. CLI-Bereinigung lässt sich nicht mit transparenten Eingaben kombinieren. Gruppierte Verarbeitung wendet die Bereinigung auf Originalbilder an, nicht auf Zwischenergebnisse von Gruppen.
 
@@ -693,19 +695,25 @@ Rezepte verlangen einen Ausgabeort außerhalb jedes Eingabeordners und lehnen ei
 
 Wird eine Dateireferenz in den Werkzeugen auf der Basisskalierung des Stapels angewendet, zeichnet ein gespeichertes Projekt ihren absoluten Pfad, ihren Inhaltshash und ihre Staubgröße auf und wendet sie beim Öffnen einmal auf die Originalquellen an. Die Referenzdatei unverändert und an ihrem Ort belassen: Eine fehlende oder geänderte Referenz verhindert das Öffnen des Projekts. Eine aus dem Stapel gewählte Referenz oder eine Korrektur auf einer anderen Arbeits-/Basisskalierung erfordert weiterhin den Export des korrigierten Quellstapels vor dem Speichern eines Projekts. Ändert sich die Arbeitsskalierung nach der Korrektur, vor dem Speichern auf die Korrekturskalierung zurückkehren oder den korrigierten Stapel exportieren.
 
-**Hilfe → Feedback senden…** öffnet lokale Protokolle. Kopieren kopiert das sichtbare Sitzungsprotokoll; das Feedback-ZIP enthält Sitzungs- und vollständige Anwendungsprotokolle sowie Umgebungsinformationen. Prüfen Sie das Paket, bevor Sie es selbst einreichen. Das Öffnen von GitHub öffnet nur den Tracker. Ein abgebrochener Export lässt Dateien unverändert; bei einem Fehler bleibt die vorherige Zieldatei erhalten und der fehlgeschlagene Pfad wird angezeigt.
+**Hilfe → Feedback senden** öffnet den Reiter **Feedbackkanäle** mit Zugängen zur Kontozentrale und zu GitHub. Unter **Diagnose** finden Sie **Sitzungsprotokoll** und **Umgebungsinformationen**. **Log-Ordner öffnen** steht unten neben „Schließen“. Kopieren kopiert das sichtbare Sitzungsprotokoll; das Feedback-ZIP enthält Sitzungs- und vollständige Anwendungsprotokolle sowie Umgebungsinformationen. Prüfen Sie das Paket, bevor Sie es selbst einreichen. Das Öffnen von GitHub öffnet nur den Tracker. Ein abgebrochener Export lässt Dateien unverändert; bei einem Fehler bleibt die vorherige Zieldatei erhalten und der fehlgeschlagene Pfad wird angezeigt.
 
-Jeder Start schreibt sein eigenes rotierendes Protokoll, sodass gleichzeitige GUI-/CLI-Aufträge getrennte Aufzeichnungen behalten. Aufgaben-IDs verknüpfen Parameter, Laufzeit und Ergebnisse (abgeschlossen/abgebrochen/fehlgeschlagen); unerwartete Fehler enthalten einen vollständigen Traceback. Das Feedback-ZIP enthält außerdem den aktuellen Absturzbericht und Abhängigkeitsversionen. Über **Hilfe → Log-Ordner öffnen** oder den auf der Feedback-Seite angezeigten Pfad finden Sie die Dateien. Protokolle rotieren bei 1 MB mit drei Sicherungen pro Prozess; inaktive Sitzungsprotokolle, die älter als 14 Tage sind, werden entfernt. Für ausführliche Support-Protokolle vor dem Start `OPENFOCUS_LOG_LEVEL=DEBUG` setzen; `OPENFOCUS_LOG_DIR` wählt optional einen anderen Protokollordner.
+Jeder Start schreibt sein eigenes rotierendes Protokoll, sodass gleichzeitige GUI-/CLI-Aufträge getrennte Aufzeichnungen behalten. Aufgaben-IDs verknüpfen Parameter, Laufzeit und Ergebnisse (abgeschlossen/abgebrochen/fehlgeschlagen); unerwartete Fehler enthalten einen vollständigen Traceback. Das Feedback-ZIP enthält außerdem den aktuellen Absturzbericht und Abhängigkeitsversionen. Über **Hilfe → Feedback senden → Log-Ordner öffnen** oder den auf der Feedback-Seite angezeigten Pfad finden Sie die Dateien. Protokolle rotieren bei 1 MB mit drei Sicherungen pro Prozess; inaktive Sitzungsprotokolle, die älter als 14 Tage sind, werden entfernt. Für ausführliche Support-Protokolle vor dem Start `OPENFOCUS_LOG_LEVEL=DEBUG` setzen; `OPENFOCUS_LOG_DIR` wählt optional einen anderen Protokollordner.
 
 ### Kachel-Einstellungen (Speicheroptimierung)
 
-Für große Bilder verwendet OpenFocus eine kachelbasierte Verarbeitung, um Speicherprobleme zu vermeiden.
+Die Kachelverarbeitung ist standardmäßig aktiv. Der Status unter den Feldern beschreibt die Verarbeitung mit der gewählten Methode. OpenFocus A, B und C verarbeiten in der Desktop-App das ganze Bild. Bei reiner Ausrichtung entfällt die Fusion. Auch dann können Sie Kachelgröße, Überlappung und Schwelle für das nächste kompatible Verfahren einstellen. DTCWT entscheidet anhand des geschätzten Speicherbedarfs. Größe und Überlappung sind einstellbar, das Schwellenfeld ist deaktiviert. Neuronale Verfahren können bei tiefen Stapeln bereits unterhalb der Schwelle Kacheln nutzen. Beim Ausschalten der Kachelung werden alle drei Zahlenfelder deaktiviert und ihre Werte bleiben erhalten.
 
-Zugriff über **Einstellungen → Erweiterte Einstellungen… → Leistung**:
+Zugriff über **Einstellungen → Erweiterte Einstellungen… → Fusion**:
 
 - **Kachelgröße (px)**: Größe jeder Verarbeitungskachel (Standard: 1024 px)
 - **Kachelüberlappung (px)**: Überlappung zwischen Kacheln für nahtloses Zusammensetzen (Standard: 256 px)
 - **Kacheln ab (px)**: Bildgröße, ab der Kacheln verwendet werden (Standard: 2048 px)
+
+Grenzen in Pixeln
+
+- Kachelgröße (px) — 64–16384
+- Kachelüberlappung (px) — 0–min(4096, halbe Kachelgröße)
+- Kacheln ab (px) — 256–131072
 
 **Empfehlungen**:
 
@@ -729,19 +737,9 @@ Siehe [PERFORMANCE.md](./PERFORMANCE.md) für gemessene Durchsatz- und Speicherw
 
 Das Statusfeld zeigt belegten und gesamten physischen Speicher, wenn das Betriebssystem beide Werte liefern kann; andernfalls zeigt es `N/A`.
 
-### Thread-Einstellungen
-
-Steuert die parallele Verarbeitung auf der CPU:
-
-Zugriff über **Einstellungen → Erweiterte Einstellungen… → Leistung**:
-
-- `0` wählt die automatische Planung und ist der Standard für neue Einstellungen.
-- Positive Werte sind Obergrenzen; gespeicherte Grenzen überstehen Upgrades.
-- CPU-Kapazität, Ressourcenmodus und freier Speicher können die Parallelität verringern. Mehr Threads machen ein Rendering nicht zwangsläufig schneller.
-
 ### Ressourcenmodus
 
-**Einstellungen → Erweiterte Einstellungen… → Leistung → Ressourcenmodus** entscheidet, wie viel der Rechner für ein Rendering verwenden darf. Der Modus ändert nie das fusionierte Bild.
+**Einstellungen → Erweiterte Einstellungen… → Fusion → Ressourcenmodus** entscheidet, wie viel der Rechner für ein Rendering verwenden darf. Der Modus ändert nie das fusionierte Bild.
 
 | Modus | Verhalten |
 |---|---|
@@ -753,25 +751,18 @@ Der Planer berücksichtigt physische Kerne, CPU-Affinität und Kontingente und f
 
 ### GPU-Beschleunigung
 
-StackMFF V1/V2/V3 nutzen ONNX Runtime. DirectML unter Windows und CoreML unter macOS können die Inferenz beschleunigen; andernfalls wird die CPU verwendet. Die Verfügbarkeit eines Providers belegt keine GPU-Ausführung. Weitere GPU-Unterstützung muss validiert werden.
+Für StackMFF V1/V2/V3 können Sie unter **Einstellungen → KI-Beschleunigungskomponenten** ein passendes Paket installieren. OpenFocus bietet TensorRT und PyTorch CUDA unter Windows mit NVIDIA, PyTorch CUDA unter Linux mit NVIDIA und PyTorch MPS auf Apple Silicon an. Je nach Gerät stehen DirectML, CoreML oder die CPU als Alternativen zur Verfügung. Die Voraussetzungen finden Sie in der [GPU-Dokumentation](GPU_SUPPORT.md).
 
-OpenFocus B kann Tiefenverarbeitung und Quellenzusammenführung mit einer kompatiblen OpenCL-GPU beschleunigen; je nach Speicherbudget sind begrenzte GPU-Schritte oder CPU-Rückfall möglich. Bei aktivierter GPU-Beschleunigung kann OpenFocus C die Ganzbild-Pyramidenfusion auf einer kompatiblen OpenCL-GPU ausführen; bei unzureichendem Speicher oder Geräte- bzw. Treiberproblemen fällt es auf die CPU zurück. Der Tiefenkartenexport von C verwendet die CPU. OpenFocus A und Ausrichtung laufen auf der CPU. Siehe [GPU-Unterstützung](GPU_SUPPORT.md).
+OpenFocus B kann Tiefenverarbeitung und Quellenzusammenführung mit einer kompatiblen OpenCL-GPU beschleunigen; je nach Speicherbudget sind begrenzte GPU-Schritte oder CPU-Rückfall möglich. Bei aktivierter GPU-Beschleunigung können OpenFocus A, OpenFocus C, Geführter Filter, GFG-FGF, DCT und DTCWT die Ganzbild-Fusion auf einer kompatiblen OpenCL-GPU ausführen; bei unzureichendem Speicher oder Geräte- bzw. Treiberproblemen fallen sie auf die CPU zurück. Der Tiefenkartenexport von C und die Ausrichtung laufen auf der CPU. Siehe [GPU-Unterstützung](GPU_SUPPORT.md).
 
 - Umschalten über **Einstellungen → GPU-Beschleunigung**
 - Deaktivieren zwingt unterstützte Fusionsmethoden auf die CPU – nützlich bei Problemen mit GPU-Treibern
 - Das Statusfeld zeigt `N/A`, wenn kein Beschleuniger verwendet wird oder verfügbar ist, und `CPU*`, wenn ein Beschleuniger vorhanden ist, die gewählte Methode aber nur auf der CPU läuft
 - Die Wahl greift beim nächsten Rendern und wird gespeichert
 
-### KI-Batchgröße
-
-Zugriff über **Einstellungen → Erweiterte Einstellungen… → KI**:
-
-- Die gespeicherte Batch-Obergrenze ist standardmäßig 2; die aktuelle Ausführungsrichtlinie begrenzt die tatsächliche Inferenz auf jedem Gerät auf eine Kachel pro Aufruf.
-- Ein höherer Wert aktiviert keine ungeprüfte GPU-Batch-Verarbeitung und verringert nicht die räumliche Kachelgröße.
-
 ### Oberflächendesign
 
-Es stehen zwei Oberflächendesigns zur Verfügung: **Hell (Standard)** und **Dunkel**. Umschalten über **Einstellungen → Design**; die Wahl wird sofort angewendet (die Windows-Titelleiste folgt) und gespeichert. Beim ersten Start wird das Design im Willkommensdialog gewählt; eine gespeicherte Auswahl hat Vorrang.
+Die Oberflächendesigns **Hell (Standard)**, **Dunkel** und **Neutralgrau** stehen zur Verfügung. Neutralgrau verwendet einen mittelgrauen Hintergrund zum Betrachten, Vergleichen und Retuschieren von Bildern. Umschalten über **Einstellungen → Design**; die Wahl wird sofort angewendet (die Windows-Titelleiste folgt) und gespeichert. Beim ersten Start wird das Design im Willkommensdialog gewählt; eine gespeicherte Auswahl hat Vorrang.
 
 ### Portabler Modus
 
@@ -791,11 +782,11 @@ iPhone-Fotos lassen sich direkt laden. Erfordert `pillow-heif`; `pip install ope
 
 ### Registrierungs-Cache
 
-OpenFocus kann Registrierungsergebnisse in einem Ordner `.openfocus_cache` neben dem Quellstapel ablegen. Wird derselbe Stapel erneut geöffnet (Dateien unverändert), entfällt die Ausrichtung vollständig. Umschalten über **Einstellungen → Erweiterte Einstellungen… → Registrierung → Registrierungs-Cache**; veraltete Einträge werden automatisch ersetzt. Der Schalter ist standardmäßig an.
+OpenFocus speichert Registrierungsergebnisse im Cache-Ordner des Benutzers. Wird derselbe unveränderte Stapel mit denselben Einstellungen erneut geöffnet, verwendet OpenFocus die gespeicherten Ergebnisse. Alle Stapel teilen sich ein Limit von 2 GiB. Bei Platzbedarf werden die am längsten nicht verwendeten Einträge entfernt. Frühere `.openfocus_cache`-Ordner neben dem Quellstapel bleiben erhalten.
 
 ### Gespeicherte Einstellungen
 
-Alles Folgende übersteht einen Neustart der Anwendung automatisch: Thread-Anzahl, Ressourcenmodus, Kachelparameter, Verkleinerungsbreite der Registrierung, KI-Batchgröße (StackMFF V3), GPU-Beschleunigung, Registrierungs-Cache, Ausrichtungsdiagnose, Oberflächensprache, Fenstergröße/Panel-Layout, Exportformat beim Herausziehen, die Helligkeitsoptionen pro Methode, Glättungs- und Radiuswerte sowie die zuletzt geöffneten Stapel. Einstellungsdialoge speichern in dem Moment, in dem bestätigt wird; zusätzlich wird alles beim Beenden der Anwendung gesichert. Die Voreinstellungen liegen pro Benutzer in `OpenFocus/OpenFocus.ini` (QSettings-INI-Format).
+Alles Folgende übersteht einen Neustart der Anwendung automatisch: Ressourcenmodus, Kachelparameter, Verkleinerungsbreite der Registrierung, GPU-Beschleunigung, Oberflächensprache, Fenstergröße/Panel-Layout, Exportformat beim Herausziehen, die Helligkeitsoptionen pro Methode, Glättungs- und Radiuswerte sowie die zuletzt geöffneten Stapel. Einstellungsdialoge speichern in dem Moment, in dem bestätigt wird; zusätzlich wird alles beim Beenden der Anwendung gesichert. Die Voreinstellungen liegen pro Benutzer in `OpenFocus/OpenFocus.ini` (QSettings-INI-Format).
 
 ### Oberflächensprache
 
@@ -839,6 +830,12 @@ Der Stapeldialog zeigt den Fortschritt in Echtzeit. Die Verarbeitung kann jederz
 - PNG/TIFF erhalten 16-Bit-Daten; die ausdrückliche Wahl von JPG/BMP wandelt sie in 8 Bit um.
 - Ein Abbruch wartet, bis der Worker stoppt. Abgeschlossene Dateien bleiben verfügbar; teilweise, fehlgeschlagene, abgebrochene und nicht gestartete Aufgaben werden getrennt gezählt.
 
+### Stapelkonvertierung von Bildern
+
+Den Bildkonverter im Menü Werkzeuge öffnen und Dateien hinzufügen. Standardmäßig entsteht neben jedem Quellordner ein Ausgabeordner mit dem Suffix `_converted`. Das Suffix lässt sich ändern. Alternativ stehen ein benannter Unterordner, der Quellordner oder ein gemeinsamer Zielordner zur Wahl. Der Beispielpfad bezieht sich auf die ausgewählte Zeile.
+
+Die Originalgröße beibehalten, die lange Seite auf 2048, 4096 oder 8192 Pixel begrenzen oder einen Prozentsatz wählen. Kleine Bilder werden nicht vergrößert. DNG behält die Sensorabmessungen bei. Dateien im Zielformat, die keine Verkleinerung benötigen, zählen als übersprungen. Ein Rechtsklick, Entf oder die Rücktaste entfernt die Auswahl aus der Warteschlange.
+
 ---
 
 ## 13. Ergebnisse exportieren
@@ -850,7 +847,7 @@ Der Stapeldialog zeigt den Fortschritt in Echtzeit. Die Verarbeitung kann jederz
 3. Format und Speicherort wählen
 4. Auf Speichern klicken
 
-Unter **Einstellungen → Erweiterte Einstellungen… → Ausgabebenennung** hilft ein optionales Dateinamenpräfix, neu gerenderte Ergebnisse zu erkennen. Das Beispiel aktualisiert sich während der Eingabe; verwenden Sie bis zu 40 Buchstaben, Zahlen, Unterstriche oder Bindestriche. Leer lassen für die ursprüngliche Benennung. Mit **OK** bestätigen, um es zu merken, oder abbrechen, um die Änderung zu verwerfen. Das Präfix wird Teil neuer Namen in der Ausgabeliste und ihrer vorgeschlagenen Exportnamen; vorhandene Ergebnisse behalten ihre Namen. Im Speicherdialog lässt sich ein Name weiterhin bearbeiten. Diese Voreinstellung benennt keine Quelldateien um und ändert keine Batch-Ausgabenamen.
+Unter **Einstellungen → Erweiterte Einstellungen… → Allgemein → Ausgabebenennung** hilft ein optionales Dateinamenpräfix, neu gerenderte Ergebnisse zu erkennen. Das Beispiel aktualisiert sich während der Eingabe; verwenden Sie bis zu 40 Buchstaben, Zahlen, Unterstriche oder Bindestriche. Leer lassen für die ursprüngliche Benennung. Mit **OK** bestätigen, um es zu merken, oder abbrechen, um die Änderung zu verwerfen. Das Präfix wird Teil neuer Namen in der Ausgabeliste und ihrer vorgeschlagenen Exportnamen; vorhandene Ergebnisse behalten ihre Namen. Im Speicherdialog lässt sich ein Name weiterhin bearbeiten. Diese Voreinstellung benennt keine Quelldateien um und ändert keine Batch-Ausgabenamen.
 
 ### Ein Ergebnis teilen
 
@@ -897,7 +894,7 @@ openfocus describe                      # JSON: Methoden, Parameter, Fähigkeite
 openfocus gui [--control] [--socket NAME] [Pfade…]   # Desktop-App starten
 openfocus ctl <command> [flags]          # ein laufendes Fenster steuern (siehe AGENT_CONTROL_SPEC.md)
 openfocus recipe create FILE --input … --output … [Verarbeitungsoptionen]
-openfocus recipe run FILE [--dry-run]    # ein gespeichertes Headless-Rezept wiedergeben
+openfocus recipe run FILE [--dry-run] [--experimental]
 openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 ```
 
@@ -906,20 +903,20 @@ openfocus retouch replay CHECKPOINT --base BASE --sources … --output RESULT
 Aus einer Python-Umgebung (oder neben der gepackten ausführbaren Datei):
 
 ```bash
-# Einen Ordner mit dem standardmäßigen KI-Verfahren fusionieren
+# Einen Ordner mit dem Standardverfahren (OpenFocus B) fusionieren
 python main.py --input ./stack_folder --output ./result/fused.png
 
 # DTCWT mit ECC-Registrierung, 8 Threads
-python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8
+python main.py -i ./stack_folder -o ./result/fused.png -m dtcwt -a ecc -t 8 --experimental
 
 # StackMFF V3 auf CPU erzwungen, mit eigener Kachelgröße
-python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512
+python main.py -i ./stack_folder -o ./result/fused.png -m stackmffv3 --cpu --tile-size 512 --experimental
 
 # Explizite Dateiliste; Videodateien werden ebenfalls als Eingabe akzeptiert
-python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf
+python main.py -i img1.jpg img2.jpg img3.jpg -o fused.png -m gfgfgf --experimental
 
 # Einzelner mehrseitiger TIFF-Z-Stapel mit metadatenkalibriertem Maßstabsbalken
-python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar
+python main.py -i ./zstack.tif -o fused.png -m dtcwt --scale-bar --experimental
 
 # Benachbarte ähnliche Bilder prüfen, ohne zu fusionieren oder die Eingabe zu ändern
 python main.py -i ./stack_folder --suggest-duplicates
@@ -934,7 +931,8 @@ Für ein einzelnes Rendering lässt sich beispielsweise `--align openfocus --ali
 | `--input, -i` | Bildordner (auch mehrere), Videodatei, eine bzw. mehrere Bilddateien oder eine mehrseitige TIFF |
 | `--output, -o` | Pfad des Ausgabebildes (die Endung bestimmt das Format) |
 | `--output-dir, -d` | Stapelmodus: jeden Eingabeordner fusionieren und pro Stapel `<Ordner>.png` schreiben |
-| `--method, -m` | `stackmffv3` (Standard), `openfocus_a`, `openfocus_b`, `openfocus_c`, `guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2` |
+| `--method, -m` | Stabile Verfahren (`openfocus_a`, `openfocus_b` als Standard, `openfocus_c`) und experimentelle Verfahren (`guided_filter`, `dct`, `dtcwt`, `gfgfgf`, `stackmff`, `stackmffv2`, `stackmffv3`) |
+| `--experimental` | Erlaubt experimentelle Fusionsverfahren für diesen Aufruf, auch bei der Auswahl über `--config` |
 | `--align, -a` | `none` (Standard), `homography`, `ecc`, `both`, `openfocus` |
 | `--param KEY=JSON_VALUE` | Fusionsparameter; für mehrere Schlüssel wiederholen; überschreibt ältere Flags |
 | `--align-param KEY=JSON_VALUE` | Registrierungsparameter; für mehrere Schlüssel wiederholen |
@@ -944,7 +942,6 @@ Für ein einzelnes Rendering lässt sich beispielsweise `--align openfocus --ali
 | `--base-frame` | Optionaler Schritt nach der Fusion: die niedrigen Frequenzen der Ausgabe an das `last`/`first`-Bild angleichen (Standard `none`) |
 | `--sort` | Bildreihenfolge für `openfocus_a/b/c`: `asc` (Standard, Dateireihenfolge), `desc` (kehrt einen Fern-nach-Nah-Durchlauf um), `off` |
 | `--frame-order` | Ordner als Eingabe: `auto` (Standard) sortiert die Bilder von nah nach fern nach den EXIF-Fokusschritten, wenn alle Bilder sie haben (OM-SYSTEM-Fokus-Bracketing beginnt in der Mitte), sonst nach Namen; `name` immer nach Dateiname. Einzeln angegebene Dateien behalten ihre Reihenfolge |
-| `--dust-map WHITE` | Flat-Field-Korrektur (Staubkarte) aus einer defokussierten Weißfeldaufnahme |
 | `--defect-mask-path MASK` | Sensordefektmaske; Werte ungleich null werden vor der Registrierung repariert |
 | `--sensor-denoise` | Behutsame Sensorentrauschung vor der Registrierung |
 | `--kernel, -k` | Nur für Methoden mit deklariertem `kernel_size` |
@@ -984,10 +981,12 @@ Es gibt keinen `--method none`-Wert: Die CLI fusioniert immer. Für reine Ausric
 Rezepte erfassen Einstellungen der Headless-Verarbeitung zur Wiederverwendung und zum Verschieben:
 
 ```bash
-openfocus recipe create workflow.json -i ./stack_folder -o ./result/fused.png -m dct --cpu
+openfocus recipe create workflow.json -i ./stack_folder -o ./result/fused.png -m openfocus_b
 openfocus recipe run workflow.json --dry-run
 openfocus recipe run workflow.json
 ```
+
+Wenn das Rezept ein experimentelles Fusionsverfahren verwendet, geben Sie bei jedem Lauf `--experimental` an, auch beim Probelauf mit `--dry-run`. Das Rezept speichert das gewählte Verfahren.
 
 Das JSON-Format der Version 1 enthält `version`, ein `input`-Array, entweder `output` oder `output_dir` und ein `options`-Objekt. Pfade sind relativ zur Rezeptdatei; verschieben Sie das Rezept zusammen mit seinen Eingabedateien. Das Erstellen übernimmt die CLI-Einstellungen und die aufgelösten Algorithmusparameter. Unbekannte Felder, ungültige Werte und nicht unterstützte Versionen werden abgelehnt. Ein Probelauf prüft die Eingabe, ohne Ergebnisdateien zu schreiben. Bestehende Projektdateien bleiben unverändert.
 
@@ -1053,7 +1052,7 @@ Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler, `2` Nutzungsfehler. Der Aufruf 
 | `Ctrl+W` | Stack leeren |
 | `Ctrl+Q` | Beenden |
 | `Ctrl+R` | Rendern starten |
-| `Ctrl+Shift+R` | Alle Methoden vergleichen |
+| `Ctrl+Shift+R` | Verfügbare Methoden vergleichen |
 | `Ctrl+T` | Ergebnis retuschieren |
 | `Ctrl+M` | Tiefenkarte |
 | `Ctrl+E` | Wischvergleich umschalten |
@@ -1098,31 +1097,29 @@ Exit-Codes: `0` Erfolg, `1` Verarbeitungsfehler, `2` Nutzungsfehler. Der Aufruf 
 
 - Aktivieren und bestätigen Sie experimentelle Funktionen in den erweiterten Einstellungen; KI-Methoden sind sonst in der Desktop-App gesperrt. Laufzeit und Modell sind separate Voraussetzungen.
 - Prüfen Sie ONNX Runtime und das mitgelieferte Modell.
-- Über **Hilfe → Umgebungsinformationen** prüfen
+- Über **Hilfe → Feedback senden → Diagnose → Umgebungsinformationen** prüfen
 
 #### Fehler wegen zu wenig Arbeitsspeicher
 
-- Die Kachelverarbeitung in **Einstellungen → Erweiterte Einstellungen… → Leistung** aktivieren
+- Die Kachelverarbeitung in **Einstellungen → Erweiterte Einstellungen… → Fusion** aktivieren
 - Die Kachelblockgröße verringern
 - Kleinere Kernelgrößen verwenden
 - Die Bilder auf kleinere Abmessungen skalieren
 
 #### Registrierung schlägt fehl
 
-- Für begrenzte starre Bewegung **OpenFocus (schnell)** wählen oder **Bei abgelehntem Bild stoppen** aktivieren, um früh fehlzuschlagen statt unausgerichtete Bilder zu akzeptieren
+- Die Desktop-App stoppt den betroffenen Stapel, wenn ein Bild bei der Registrierung abgelehnt wird. Prüfen Sie das in der Fehlermeldung genannte Bild und den angegebenen Grund, bevor Sie es erneut versuchen.
 - Die Verkleinerungsbreite in **Einstellungen → Erweiterte Einstellungen… → Registrierung** reduzieren
 - Sicherstellen, dass die Bilder ausreichend Kontrast und Merkmale haben
-- Unter **Einstellungen → Erweiterte Einstellungen… → Registrierung** die **Ausrichtungsdiagnose erfassen** aktivieren, erneut rendern und **Einstellungen → Erweiterte Einstellungen… → Registrierung → Ausrichtungsdiagnose** für die betroffenen Bilder lesen
 
 #### Langsame Verarbeitung
 
-- Threads auf automatisch (`0`) lassen; CPU-Kapazität, Ressourcenmodus und Speicherreserve begrenzen die Parallelität bereits
 - Für einen unbeaufsichtigten Stapel den Modus **Maximal** verwenden oder Guided Filter / GFG-FGF statt einer KI-Methode wählen
 - Die Bildauflösung reduzieren oder während des Abstimmens die **Schnellvorschau** verwenden
 
 #### Windows-SmartScreen-Warnung beim ersten Start
 
-Ob die Windows-Binärdateien signiert sind, hängt vom jeweiligen Release ab (siehe Release-Notes); eine Signatur ist nicht garantiert. Laden Sie sie von **https://openfocus.top** statt von einem Drittanbieter-Spiegel. Falls SmartScreen warnt, klicken Sie auf **Weitere Informationen → Trotzdem ausführen**. Der erste Start nach dem Entpacken kann 30–60 Sekunden dauern.
+Die aktuellen Windows-Builds sind nicht signiert. Laden Sie die Dateien von der offiziellen OpenFocus-Website herunter (**https://openfocus.top**). Vergleichen Sie vor dem Start den SHA-256-Hash der heruntergeladenen Datei mit dem Wert im Release-Manifest. Falls SmartScreen warnt, klicken Sie auf **Weitere Informationen → Trotzdem ausführen**. Der erste Start nach dem Entpacken kann 30–60 Sekunden dauern.
 
 #### macOS meldet, die App „kann nicht geöffnet werden“ oder „ist beschädigt“
 
@@ -1138,9 +1135,9 @@ oder mit der rechten Maustaste auf die App klicken und **Öffnen** wählen. Die 
 
 ### Hilfe erhalten
 
-1. **Umgebungsinformationen**: Über **Hilfe → Umgebungsinformationen** die Installation prüfen
+1. **Umgebungsinformationen**: Über **Hilfe → Feedback senden → Diagnose → Umgebungsinformationen** die Installation prüfen
 2. **Kontakt zum Support**: Über **Hilfe → Kontakt** Supportinformationen aufrufen
-3. **Feedback senden**: Über **Hilfe → Feedback senden…** Protokolle kopieren oder ein Paket zur manuellen Einreichung exportieren
+3. **Feedback senden**: Über **Hilfe → Feedback senden → Diagnose** Protokolle kopieren oder ein Paket zur manuellen Einreichung exportieren
 
 ---
 

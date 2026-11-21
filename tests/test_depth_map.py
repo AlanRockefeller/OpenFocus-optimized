@@ -576,3 +576,253 @@ def test_depth_guided_render_rejects_out_of_range_index():
     frames = [np.zeros((1, 1), np.uint8)] * 2
     with pytest.raises(ValueError):
         render_indices(np.array([[3]], np.uint16), frames)
+
+
+def test_openfocus_b_merger_emits_its_normalized_depth():
+    from core.multi_focus_fusion import MultiFocusFusion
+    from core.render_context import store_rendered_focus
+    from core.frame_storage import is_mapped_frame
+
+    frames = _synthetic_thirds(64, 75)
+    parameters = {'smoothing': 3, 'radius': 4, 'feather': 2}
+    fusion = MultiFocusFusion(algorithm='openfocus_b', use_gpu=False,
+        tile_enabled=False, exposure_match=False, base_frame='none',
+        sort_mode='desc', fusion_parameters=parameters)
+    retained = []
+    fusion.fuse(frames, thread_count=1, focus_callback=lambda positions, scale: retained.append(
+        store_rendered_focus(positions, scale, frames[0].shape[:2])))
+    assert len(retained) == 1
+    positions, valid_rect = retained[0]
+    assert is_mapped_frame(positions)
+    assert valid_rect == (0, 0, 75, 64)
+    expected = compute_focus_index(frames[::-1], 'openfocus_b', parameters, thread_count=1)
+    np.testing.assert_allclose(positions, expected, atol=1e-7, rtol=0)
+
+
+@pytest.mark.parametrize('use_gpu', [False, True])
+def test_openfocus_c_records_finest_detail_winners(use_gpu, monkeypatch):
+    from fusion_methods.openfocus_bc import openfocus_c_impl
+    if use_gpu:
+        from fusion_methods import _openfocus_gpu
+        if not _openfocus_gpu.gpu_available():
+            pytest.skip('OpenCL GPU unavailable')
+        monkeypatch.setattr(_openfocus_gpu, '_free_vram',
+                            lambda device: (int(device.global_mem_size), int(device.global_mem_size)))
+
+    shape = (41, 47)
+    sharp = (np.indices(shape).sum(axis=0) % 2 * 240 + 8).astype(np.uint8)
+    flat = np.full(shape, 128, np.uint8)
+    maps, devices = [], []
+    openfocus_c_impl([flat, sharp, sharp], blend_smoothing=0, thread_count=1, use_gpu=use_gpu,
+                     focus_callback=lambda positions, scale: maps.append((positions, scale)),
+                     device_callback=devices.append)
+    assert len(maps) == 1
+    positions, scale = maps[0]
+    assert scale == 2
+    np.testing.assert_array_equal(positions[1:-1, 1:-1], 1)
+    np.testing.assert_array_equal(positions[[0, -1]], 0)
+    if use_gpu:
+        assert devices[0].startswith('OpenCL: ')
+
+
+@pytest.mark.parametrize('method, mode', [('stackmffv2', None), ('stackmffv3', 'hard'),
+                                         ('stackmffv3', 'soft')])
+@pytest.mark.parametrize('tiled', [False, True])
+def test_neural_fusion_retains_the_positions_used_to_mix_color(method, mode, tiled):
+    pytest.importorskip('onnxruntime')
+    from core.multi_focus_fusion import MultiFocusFusion
+    from core.render_context import store_rendered_focus
+
+    frames = [np.full((83, 91, 3), value, np.uint8) for value in (11, 87, 163)]
+    fusion = MultiFocusFusion(algorithm=method, use_gpu=False, exposure_match=False,
+        base_frame='none', tile_enabled=tiled, tile_block_size=64, tile_overlap=16,
+        tile_threshold=32, fusion_parameters={'mode': mode} if mode else None)
+    focus = []
+    progress = []
+    fused = fusion.fuse(frames, thread_count=1,
+        progress_callback=lambda done, total: progress.append(total),
+        focus_callback=lambda positions, scale: focus.append(
+            store_rendered_focus(positions, scale, frames[0].shape[:2])[0]))
+    assert len(focus) == 1
+    assert (max(progress) > 1) is tiled
+    reconstructed = np.rint(11 + 152 * focus[0])
+    np.testing.assert_allclose(fused[..., 0], reconstructed, rtol=0,
+                               atol=1 if mode == 'soft' else 0)
+
+
+def test_render_focus_intersects_transparency_with_a_full_frame_roi():
+    from core.render_context import store_rendered_focus
+    from core.frame_storage import is_mapped_frame
+
+    positions = np.arange(24, dtype=np.uint16).reshape(4, 6)
+    region = ((7, 10, 4), np.dtype(np.uint8), 2, 6, 3, 9, 255)
+    index, rectangle = store_rendered_focus(positions, 23, (7, 10),
+        crop=(2, 3, 5, 4), transparent=region)
+    assert is_mapped_frame(index)
+    assert rectangle == (1, 0, 4, 3)
+    expected = np.zeros((4, 5), dtype=np.float32)
+    expected[:3, 1:] = positions[1:, :4] / np.float32(23)
+    np.testing.assert_array_equal(index, expected)
+
+
+@pytest.mark.parametrize("method", ["dct", "gfgfgf", "dtcwt", "openfocus_c"])
+def test_streaming_depth_methods_skip_full_stack_materialization(monkeypatch, method):
+    if method == "dtcwt":
+        pytest.importorskip("dtcwt")
+    from core import source_frames
+
+    frames = _synthetic_thirds(64, 96)
+    lazy = [source_frames.process_frame(frame.copy(), lambda img: img, shape=frame.shape)
+            for frame in frames]
+    monkeypatch.setattr(
+        source_frames, "materialize_frames",
+        lambda *a, **kw: pytest.fail(f"{method} materialized the whole stack"),
+    )
+    actual = compute_focus_index(lazy, method, thread_count=2)
+    expected = compute_focus_index(frames, method, thread_count=1)
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("method", ["dct", "gfgfgf", "dtcwt"])
+@pytest.mark.parametrize("first_16bit", [False, True])
+def test_mixed_and_parallel_depth_match_serial_reference(method, first_16bit):
+    if method == "dtcwt":
+        pytest.importorskip("dtcwt")
+    frames = _synthetic_thirds(65, 97)
+    mixed = [frame.astype(np.uint16) * np.uint16(257) if ((i == 0) == first_16bit) else frame
+             for i, frame in enumerate(frames)]
+    serial = compute_focus_index(mixed, method, thread_count=1)
+    parallel = compute_focus_index(mixed, method, thread_count=4)
+    np.testing.assert_array_equal(parallel, serial)
+
+
+def test_dct_low_contrast_depth_matches_padded_block_variance():
+    from utils.image_utils import normalize_fuse_input
+
+    rng = np.random.default_rng(145)
+    h, w = 131, 103
+    frames = [rng.integers(60535, 60660, (h, w, 3), dtype=np.uint16) for _ in range(3)]
+    variances = []
+    for image in normalize_fuse_input(frames)[0]:
+        padded = cv2.copyMakeBorder(image, 0, 5, 0, 1, cv2.BORDER_REPLICATE)
+        gray = cv2.cvtColor(padded, cv2.COLOR_BGR2GRAY)
+        mean = cv2.resize(gray, (13, 17), interpolation=cv2.INTER_AREA)
+        mean_square = cv2.resize(gray ** 2, (13, 17), interpolation=cv2.INTER_AREA)
+        variances.append(mean_square - mean ** 2)
+    winners = np.argmax(variances, axis=0).astype(np.float32) / np.float32(2)
+    expected = winners.repeat(8, axis=0).repeat(8, axis=1)[:h, :w]
+
+    actual = compute_focus_index(frames, "dct", kernel_size=1, thread_count=3)
+
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gfg_depth_preserves_mixed_bit_depth_grayscale_order():
+    from fusion_methods.gfg_fgf import GfgDecision, gfg_focus_map
+    from utils.image_utils import normalize_fuse_input
+
+    rng = np.random.default_rng(116)
+    image = rng.integers(100, 220, (132, 104, 3), dtype=np.uint8)
+    frames = [image.astype(np.uint16) * np.uint16(257), image]
+    decision = GfgDecision()
+    for index, source in enumerate(normalize_fuse_input(frames)[0]):
+        gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY) / np.float32(255)
+        decision.update(index, gfg_focus_map(gray, 7))
+
+    actual = compute_focus_index(frames, "gfgfgf", kernel_size=7, thread_count=2)
+
+    np.testing.assert_array_equal(actual, decision.idx)
+
+
+def test_dtcwt_depth_preserves_near_tied_wavelet_energy():
+    pytest.importorskip("dtcwt")
+    from fusion_methods.dtcwt import dtcwt
+    from utils.image_utils import normalize_fuse_input
+
+    rng = np.random.default_rng(27)
+    h, w = 132, 104
+    original = rng.integers(60000, 62000, (h, w, 3), dtype=np.uint16)
+    other = original.copy()
+    other[h // 2, w // 2, 1] += 1
+    energies = []
+    for source in normalize_fuse_input([original, other])[0]:
+        gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY) / np.float32(255)
+        acc = np.zeros((h, w), np.float32)
+        for highpass in dtcwt.Transform2d().forward(gray, nlevels=3).highpasses:
+            power = np.sum(np.abs(highpass) ** 2, axis=2).astype(np.float32)
+            acc += cv2.resize(power, (w, h), interpolation=cv2.INTER_LINEAR)
+        energies.append(acc)
+
+    actual = compute_focus_index([original, other], "dtcwt", {"N": 3}, thread_count=2)
+
+    np.testing.assert_array_equal(actual, energies[1] > energies[0])
+
+
+@pytest.mark.parametrize("method", ["dct", "gfgfgf", "dtcwt"])
+def test_16bit_streaming_depth_stays_below_full_stack_conversion_memory(method):
+    if method == "dtcwt":
+        pytest.importorskip("dtcwt")
+    import tracemalloc
+
+    rng = np.random.default_rng(19)
+    h, w, n = 128, 160, 16
+    frames = [rng.integers(0, 65536, (h, w, 3), dtype=np.uint16) for _ in range(n)]
+    full_float_stack_bytes = n * h * w * 3 * 4
+    _ = compute_focus_index([f[:32, :32] for f in frames[:2]], method, thread_count=1)
+
+    already_tracing = tracemalloc.is_tracing()
+    if not already_tracing:
+        tracemalloc.start()
+    baseline = tracemalloc.get_traced_memory()[0]
+    tracemalloc.reset_peak()
+    try:
+        compute_focus_index(frames, method, thread_count=1)
+        peak = tracemalloc.get_traced_memory()[1] - baseline
+    finally:
+        if not already_tracing:
+            tracemalloc.stop()
+    assert peak < full_float_stack_bytes
+
+
+@pytest.mark.parametrize("method", ["dct", "gfgfgf", "dtcwt"])
+def test_depth_admission_is_stack_independent_for_streaming_methods(monkeypatch, method):
+    from core import depth_map, resource_policy
+
+    if method == "dtcwt":
+        pytest.importorskip("dtcwt")
+    recorded = []
+    real_plan = resource_policy.plan_execution
+
+    def observe(workload, **kwargs):
+        recorded.append((workload.frames, workload.fixed_bytes, workload.per_worker_bytes))
+        return real_plan(workload, **kwargs)
+
+    monkeypatch.setattr(resource_policy, "plan_execution", observe)
+    small = [np.zeros((32, 32, 3), np.uint16)] * 2
+    large = [np.zeros((32, 32, 3), np.uint16)] * 100
+    depth_map.compute_focus_index(small, method, thread_count=1)
+    # Run only admission check for the 100-frame stack by short-circuiting runner.
+    monkeypatch.setattr(depth_map, "resolve_runner", lambda _path: (lambda imgs, **_kw: np.zeros((32, 32), np.int32)))
+    depth_map.compute_focus_index(large, method, thread_count=1)
+    assert len(recorded) == 2
+    assert recorded[0][1] == recorded[1][1]
+    assert recorded[0][2] == recorded[1][2]
+
+
+@pytest.mark.parametrize("runner_name", ["_measure_dct", "_measure_gfgfgf", "_measure_dtcwt"])
+def test_parallel_depth_runners_cancel_promptly(runner_name):
+    if runner_name == "_measure_dtcwt":
+        pytest.importorskip("dtcwt")
+    from core import depth_map
+
+    frames = _synthetic_thirds(64, 80) * 4
+    calls = 0
+
+    def should_cancel():
+        nonlocal calls
+        calls += 1
+        return calls >= 2
+
+    runner = getattr(depth_map, runner_name)
+    with pytest.raises(DepthMapCancelled):
+        runner(frames, None, should_cancel, thread_count=4)

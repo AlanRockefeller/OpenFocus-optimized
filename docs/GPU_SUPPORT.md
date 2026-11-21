@@ -1,28 +1,76 @@
 # GPU support
 
-OpenFocus B can use OpenCL for depth resampling, filtering, activity and selection, guided smoothing and ordered source merging. Full GPU depth processing requires sufficient host and verified device memory; otherwise bounded GPU activity and merging can still run. Standalone depth export can also use full GPU depth when admitted, or bounded GPU activity. B's other processing remains on the CPU. OpenFocus C can use an OpenCL GPU for full-image pyramid fusion when GPU acceleration is enabled; its depth-map export uses the CPU. OpenFocus A and application alignment use the CPU. GPU acceleration must be enabled, and an OpenCL GPU with a working driver and compiler must be available. CPU-only OpenCL devices do not provide GPU acceleration. Unavailable or insufficient resources and device failures fall back to the CPU.
+OpenFocus B can use OpenCL for depth resampling, filtering, activity and selection, guided smoothing and ordered source merging. Full GPU depth processing requires sufficient host and verified device memory. Otherwise bounded GPU activity and merging can still run. Standalone depth export can also use full GPU depth when admitted, or bounded GPU activity. B's other processing remains on the CPU. OpenFocus A, OpenFocus C, Guided Filter, GFG-FGF, DCT and DTCWT can use an OpenCL GPU for full-image fusion when GPU acceleration is enabled. OpenFocus C, GFG-FGF, DCT and DTCWT export depth maps on the CPU. OpenCL acceleration requires a GPU with a working driver and compiler. Unavailable or insufficient resources and device failures fall back to the CPU.
 
-For OpenFocus B full GPU depth and OpenFocus C GPU pyramid fusion, unified-memory devices use the host budget; discrete GPUs require a readable free-memory report. AMD devices use the OpenCL free-memory extension and NVIDIA devices use a uniquely matched `nvidia-smi` report. If discrete free memory is unknown, C falls back to CPU and B skips full GPU depth; B's bounded GPU stages can still be used when admitted.
+OpenFocus A, Guided Filter, GFG-FGF, DCT and DTCWT stream one source frame at a time to the GPU. Their host memory checks cover decoding, deferred alignment, upload and output readback under the render process's RAM limit. During upload they can reuse existing cached frames while keeping newly decoded frames only for the current transfer.
 
-Windows and macOS desktop releases include PyOpenCL. The Linux CLI wheel declares it as a dependency; there is no published Linux desktop bundle. The PyOpenCL wheels include an ICD loader on Linux, but a compatible GPU driver and its OpenCL ICD must be installed separately (normally registered in `/etc/OpenCL/vendors`). Windows needs the GPU vendor's OpenCL driver. macOS supplies OpenCL through the system, but Apple has deprecated OpenCL and device and compiler availability depend on the macOS version and hardware. The presence of PyOpenCL or an OpenCL loader alone does not establish GPU support; platforms without a compatible PyOpenCL wheel may need a source build and OpenCL development libraries. See [PyOpenCL installation](https://documen.tician.de/pyopencl/misc.html).
+For OpenFocus B full GPU depth and OpenFocus A/C, Guided Filter, GFG-FGF, DCT and DTCWT GPU fusion, unified-memory devices use the host budget; discrete GPUs require a readable free-memory report. AMD devices use the OpenCL free-memory extension and NVIDIA devices use a uniquely matched `nvidia-smi` report. If discrete free memory is unknown, A, C, Guided Filter, GFG-FGF, DCT and DTCWT fall back to CPU and B skips full GPU depth; B's bounded GPU stages can still be used when admitted.
 
-StackMFF V1, V2 and V3 use the bundled dynamic ONNX models through ONNX Runtime. The standard Windows package includes DirectML; macOS uses CoreML when available. The runtime also recognizes CUDA and ROCm execution providers when a compatible ONNX Runtime build and its driver libraries are installed. The standard Linux ONNX Runtime dependency is CPU-only; an accelerator-specific ONNX Runtime distribution must be installed separately. Other classical fusion and application registration use the CPU; explicitly requested low-level CuPy registration is a separate backend. PyTorch is not bundled for production inference.
+DTCWT retains the upstream wavelet transform on the CPU. Its OpenCL path uses
+single-precision arithmetic, so GPU results can vary slightly by driver.
+Unsupported floating-point ranges and non-finite samples use the CPU path.
+Cancelling a GPU render waits for queued device work and ends the render.
+
+Retouch’s **Auto background** and the CLI `--auto-background` can use OpenCL to select the peak, first sharpest frame, and median focus energy for every pixel in a large stack. The GPU processes bands that fit the device memory budget. The log records the device after the reduction completes. Small stacks, unavailable devices, and failed GPU operations use the CPU path. Turning off GPU acceleration in the desktop or passing `--cpu` on the CLI selects CPU processing for the entire replacement.
+
+Windows, macOS and Linux desktop builds include PyOpenCL. The separate Linux CLI wheel declares it as a dependency. The PyOpenCL wheels include an ICD loader on Linux, but a compatible GPU driver and its OpenCL ICD must be installed separately (normally registered in `/etc/OpenCL/vendors`). Windows needs the GPU vendor's OpenCL driver. macOS supplies OpenCL through the system, but Apple has deprecated OpenCL and device and compiler availability depend on the macOS version and hardware. The presence of PyOpenCL or an OpenCL loader alone does not establish GPU support; platforms without a compatible PyOpenCL wheel may need a source build and OpenCL development libraries. See [PyOpenCL installation](https://documen.tician.de/pyopencl/misc.html).
+
+ECC registration can use OpenCL to downsample large source and working images. The GPU path matches the area filter and rounding of the supported Windows x64 OpenCV 5.0.0 build. It accepts contiguous 8-bit and 16-bit images and fractional reductions up to 4× on each axis. Other builds, unsupported dimensions and insufficient memory use the CPU resize. ECC estimates the transforms on the CPU and applies them with the same Lanczos interpolation. The desktop GPU Acceleration switch and CLI `--cpu` control this preparation step. The `registration_ecc_resize` log event gives the device and completed GPU resize count for the stack.
+
+StackMFF V1, V2 and V3 ship with dynamic ONNX models. **Settings → AI acceleration
+components** checks the hardware and offers a compatible optional pack once
+per pack version. Windows Setup can also open this screen.
+
+| Desktop platform | Optional native engines | Requirements | Download | Free disk |
+| --- | --- | --- | ---: | ---: |
+| Windows x64 | TensorRT 10.4, PyTorch 2.5.1 CUDA | NVIDIA CUDA 12.4 driver support and compute capability 7.5, 8.0, 8.6, 8.9 or 9.0 | 3.65 GB | 8 GiB |
+| Linux x86-64 | PyTorch 2.6 CUDA | glibc 2.17+, NVIDIA CUDA 12.4 driver support and a supported Maxwell through Hopper GPU | 3.13 GB | 8 GiB |
+| macOS arm64 | PyTorch 2.6 MPS | Apple Silicon, macOS 13 or later | 116 MB | 1 GiB |
+
+OpenFocus tries an installed native engine, a compatible ONNX Runtime
+accelerator and CPU in that order. Windows includes DirectML, and macOS uses
+CoreML when available. The Linux desktop includes ONNX Runtime CPU. Source
+and CLI environments can also use compatible CUDA or ROCm ONNX Runtime
+distributions. The NVIDIA packs use CUDA device 0 and supply their own CUDA
+libraries. For Linux, NVIDIA lists driver 550.54.15 for CUDA 12.4 Update 1.
+[NVIDIA CUDA release notes](https://docs.nvidia.com/cuda/archive/12.4.1/cuda-toolkit-release-notes/index.html)
+
+Compatible packs are reused across app updates. Windows Setup keeps the pack
+in `%LOCALAPPDATA%\OpenFocus\inference-packs`. Portable installations keep it
+in `OpenFocusData`, which should move with the application. Linux and macOS
+store downloaded components under the user's OpenFocus data directory.
+
+**Automatic** prefers mirrors for mainland China network connections and
+official sources elsewhere. When the network region is unknown, Windows can
+use its system **Country or region**. Use **Mirrors first** or **Official
+first** to override the order. OpenFocus downloads from a catalog of sources
+and can resume a partial download on the next source.
+
+Choose **Install from folder…** to use saved archives listed in the matching
+`core/accelerator_*.json` manifest. Each download and local file is checked
+against its pinned size and SHA-256. The installer activates the isolated
+worker after the GPU probe passes. The Linux and macOS probes execute all
+three shipped StackMFF models.
+
+TensorRT compiles an FP32 engine for each ONNX model and input shape and reuses compatible plans. PyTorch CUDA and MPS use the verified FP32 checkpoint for each shipped StackMFF model. When an engine declines the model, shape or memory budget, OpenFocus tries the next compatible engine. Decoding, registration, colour reconstruction and export have their own execution costs.
 
 An integrated GPU is a GPU and can accelerate AI fusion when its driver and a supported ONNX Runtime execution provider can execute the bundled model. OpenFocus does not require a discrete GPU, dedicated VRAM or a particular adapter name. DirectML tries the enumerated hardware adapters, including integrated Intel/AMD adapters, preferring adapters with more dedicated memory without excluding shared-memory devices. Apple silicon also has an integrated GPU; CoreML may choose CPU, GPU or Neural Engine compute units. A CoreML profile proves use of the CoreML provider, not which compute unit it used.
 
-Three separate facts matter: a GPU can be present in hardware inventory; a runtime can register a provider that fails to initialize or execute this model; and a particular inference can actually run on CPU. OpenFocus selects an accelerator only after running a small bundled model and inspecting its ONNX Runtime profile. The nonblocking GUI, control API and feedback capability report remain unknown until that background probe finishes. The synchronous CLI capability query can run the probe. Hardware names and vendor utilities do not grant AI capability, and CPU mode never automatically offloads AI work to a GPU. PyTorch installation alone does not enable the production ONNX path.
+Hardware inventory, engine availability and actual execution are reported separately. The managed pack check identifies eligible engines without running a model on the GUI thread. ONNX Runtime verifies its accelerator by running a small bundled model and inspecting the resulting placement profile. The environment report records successful inference on the requested model and gives the reason when an engine is skipped or fails.
 
-For neural inference, the execution status shows CPU for an explicit CPU preference. A verified provider is shown as ready before inference; successful execution is reported only for the selected model. Each accelerator session's first real inference also checks its profile, because placement can differ by model or input shape. A session registered with a GPU provider but executed entirely by the CPU is reported as CPU; mixed CPU/provider placement is reported by provider name and does not promise that every operation ran on GPU. Profiles are deleted immediately after inspection and placement is retained only with the existing bounded session cache. The environment report separates registered providers, hardware inventory, probe errors and the last successful neural inference. Turning GPU acceleration off remains authoritative even after an earlier accelerated job.
+An explicit CPU preference runs neural inference on CPU. With acceleration enabled, the status shows an eligible engine before a render and the actual engine after successful execution. Each ONNX accelerator session checks its first real inference profile, since placement can differ by model or input shape. Entirely CPU-placed inference is reported as CPU. Mixed placement is reported by provider name. Profiles are deleted after inspection and placement is retained in the bounded session cache.
 
-If an accelerator fails or its memory budget is unknown or insufficient, neural inference can fall back to CPU for that job without erasing the verified provider capability. Windows DirectML admission uses the selected adapter's DXGI LOCAL budget, including GPU-accessible unified memory, together with host-RAM admission. CUDA and ROCm require a readable free-VRAM budget from the driver. An OpenVINO GPU provider without a reliable free-VRAM reading is not admitted and falls back to CPU. GPU memory does not replace the system memory and temporary disk space used for images, alignment and output. Alignment remains a CPU algorithm regardless of the acceleration preference.
+If an engine fails or its memory budget is unknown or insufficient, OpenFocus can fall back for that job. Windows DirectML admission uses the selected adapter's DXGI LOCAL budget and host RAM. CUDA and ROCm require a readable free-VRAM estimate. An OpenVINO GPU provider needs a reliable free-VRAM estimate for admission. MPS uses unified memory, so its model, worker and staging buffers share the host-RAM budget. Image decoding, alignment and output also use system memory and temporary disk space.
 
 The GPU Acceleration menu option is a preference for future supported jobs. For neural inference it remains available for a verified provider when its free memory is temporarily unreadable, so it can be enabled or disabled and a later job can retry the memory check. The execution status continues to show CPU while the provider is unadmitted.
 
 For tiled StackMFF V1 and V3 inference, OpenFocus retains the two compiled input scales when GPU memory permits. Cached sessions are released and memory is checked again before a new shape falls back to CPU.
 
-CPU fallback remains in effect for the rest of the current inference job, including its tiles and scales. A later independent job starts with fresh execution status and can try the accelerator again. When accelerated inference fails, OpenFocus releases its references to the failed session, including cached and tracing references, before admitting or constructing the CPU retry. This does not imply that the provider or driver immediately returns all native memory.
+During a render, a rejected engine for a model and input shape is skipped when the shape recurs. A later independent render can try the accelerator again. When inference fails, OpenFocus releases the failed session before admitting a retry. The provider or driver controls when its native memory is returned.
 
 Multiscale inference releases temporary host arrays after their last use: the reduced input after its inference returns, and the reduced probabilities after they have been combined. Memory admission remains conservative; actual host memory usage and release depend on the allocator and runtime.
+
+After V1 inference, OpenFocus weights the luma samples in their existing host buffer before summing them. This saves one float32 image per source frame during luma reconstruction.
 
 Cancellation is cooperative. An ONNX Runtime, OpenCV or NumPy call already in progress finishes before cancellation is observed; surrounding resize and per-layer processing checks for cancellation between work units. A cancelled job does not start a CPU retry, and its heavy-job lease remains held until ongoing synchronous work has returned.
 Local inventory observed on 2026-11-06 lists Intel UHD Graphics 770 and three virtual-display drivers. The system Python environment has ONNX Runtime 1.31.0 advertising AzureExecutionProvider and CPUExecutionProvider, which provides no supported AI accelerator here. A separate Windows validation environment uses ONNX Runtime DirectML 1.23.0: a complete GUI StackMFF V3 render of two 256×192 uint16 RGB frames ran on Intel UHD Graphics 770, with the real model profile confirming DirectML placement and the final output retaining uint16 dimensions. Turning acceleration off then completed another render on CPU and displayed CPU mode. Provider availability is therefore environment-specific; the system-Python inventory does not describe the Windows package's inference capability. CUDA/RTX 3090, ROCm, OpenVINO and CoreML remain unverified on physical devices here.

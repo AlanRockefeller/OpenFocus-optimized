@@ -17,6 +17,8 @@ from core.algorithms import (fusion_algorithms, get_fusion, get_registration,
                              resolve_registration_parameters)
 from locales import trans
 from utils import app_paths
+from utils.design_tokens import PALETTES, UI_FONT_PRESETS, UI_FONT_RANGE
+from utils.output_sharpen import DEFAULT_SHARPEN_STRENGTH, validate_sharpen_strength
 from utils.validators import normalize_kernel_size
 
 ORGANIZATION = "OpenFocus"
@@ -88,14 +90,13 @@ _PERSISTED_FIELDS = {
     "ai_batch_size": ("rendering/ai_batch_size", 2, int),
     "use_gpu": ("rendering/use_gpu", True, "bool"),
     "align_cache_enabled": ("rendering/align_cache_enabled", True, "bool"),
-    "collect_alignment_report": ("rendering/collect_alignment_report", False, "bool"),
-    "profile_performance": ("diagnostics/profile_performance", False, "bool"),
-    "debug_logging": ("diagnostics/debug_logging", False, "bool"),
     "output_name_prefix": ("export/name_prefix", "", "str"),
     "restore_last_stack": ("ui/restore_last_stack", False, "bool"),
     "experimental_features": ("ui/experimental_features", False, "bool"),
-    "auto_error_reports": (REPORTS_AUTO_SEND_KEY, False, "bool"),
-    "ui_theme": ("ui/theme", DEFAULT_THEME, "str"),
+    "auto_error_reports": (REPORTS_AUTO_SEND_KEY, True, "bool"),
+    "theme_mode": ("ui/theme", DEFAULT_THEME, "str"),
+    "font_size_mode": ("ui/font_size_mode", "medium", "str"),
+    "custom_font_size": ("ui/custom_font_size", UI_FONT_PRESETS['medium'], int),
     "scale_bar_enabled": ("export/scale_bar_enabled", False, "bool"),
     "scale_um_per_px_manual": ("export/scale_um_per_px_manual", 0.0, "float"),
     "scale_bar_position": ("export/scale_bar_position", "bottom-right", "str"),
@@ -125,6 +126,7 @@ _PERSISTED_FIELDS = {
     "exposure_match": ("fusion/exposure_match", True, "bool"),
     "stack_reverse_order": ("fusion/stack_reverse_order", False, "bool"),
     "sharpen_output": ("fusion/sharpen_output", False, "bool"),
+    "sharpen_strength": ("fusion/sharpen_strength", DEFAULT_SHARPEN_STRENGTH, "sharpen_strength"),
     "ask_load_scale": ("ui/ask_load_scale", True, "bool"),
     "load_scale_default": ("ui/load_scale_default", 1.0, "float"),
 }
@@ -192,6 +194,11 @@ def _cast(raw: Any, kind: Any, default: Any) -> Any:
             if isinstance(raw, bool):
                 return raw
             return str(raw).strip().lower() in ("true", "1", "yes", "on")
+        if kind == "sharpen_strength":
+            # QSettings reads numeric INI entries as strings after reopening.
+            if isinstance(raw, str) and raw.isdecimal():
+                raw = int(raw)
+            return validate_sharpen_strength(raw)
         # 字段表里的 kind 可能是类型也可能是其名字字符串（"str"/"float"）；
         # 直接 "str"(raw) 会 TypeError 被吞成 default——ui_theme、比例尺
         # 标定等所有字符串/浮点设置曾因此从未恢复过
@@ -401,13 +408,20 @@ def load_window_settings(window) -> None:
     if settings.contains("export/watermark_text"):
         settings.remove("export/watermark_text")
         settings.sync()
-    if getattr(window, "ui_theme", None) not in ("dark", "light"):
-        window.ui_theme = DEFAULT_THEME
     for attr, (key, default, kind) in _PERSISTED_FIELDS.items():
         if settings.contains(key):
             setattr(window, attr, _cast(settings.value(key), kind, default))
         else:
             setattr(window, attr, getattr(window, attr, default))
+    if window.theme_mode not in PALETTES and window.theme_mode != 'system':
+        window.theme_mode = DEFAULT_THEME
+    if window.font_size_mode not in (*UI_FONT_PRESETS, 'custom'):
+        window.font_size_mode = 'medium'
+    minimum, maximum = UI_FONT_RANGE
+    window.custom_font_size = max(minimum, min(maximum, window.custom_font_size))
+    if settings.value(REPORTS_CHOICE_KEY) == "unselected":
+        # Old installations saved their then-current default during ordinary saves.
+        window.auto_error_reports = True
 
     # The selectors are built later; apply only valid explicitly saved IDs.
     for key, attr, lookup in ((FUSION_METHOD_KEY, "_preferred_fusion_method", get_fusion),
@@ -448,6 +462,12 @@ def load_window_settings(window) -> None:
     if not isinstance(raw_projects, list):
         raw_projects = [raw_projects]
     window.recent_projects = [str(p) for p in raw_projects][:MAX_RECENT_PROJECTS]
+
+
+def automatic_reports_allowed(settings) -> bool:
+    """The initial checked preference takes effect after the reporting terms are accepted."""
+    return (settings.value(REPORTS_CHOICE_KEY) != "unselected"
+            and settings.value(REPORTS_AUTO_SEND_KEY, False, type=bool))
 
 
 def enable_account_default_reports(window) -> None:
@@ -515,7 +535,8 @@ def restore_default_settings(window) -> None:
     """
     settings = get_settings()
     keys = {key for key, _default, _kind in _PERSISTED_FIELDS.values()}
-    keys.update((REPORTS_CHOICE_KEY, BRIGHTNESS_BY_METHOD_KEY, METHOD_PARAMETERS_KEY,
+    keys.discard(REPORTS_AUTO_SEND_KEY)
+    keys.update((BRIGHTNESS_BY_METHOD_KEY, METHOD_PARAMETERS_KEY,
                  REGISTRATION_PARAMETERS_KEY, SMOOTHING_BY_METHOD_KEY,
                  KERNEL_BY_MODE_KEY, FUSION_METHOD_KEY, ALIGNMENT_METHOD_KEY,
                  DRAG_FORMAT_KEY, CONVERTER_FORMAT_KEY,
@@ -536,11 +557,10 @@ def restore_default_settings(window) -> None:
         for key in keys:
             settings.remove(key)
         for attr, (_key, default, _kind) in _PERSISTED_FIELDS.items():
-            setattr(window, attr, default)
+            if attr != "auto_error_reports":
+                setattr(window, attr, default)
         for name in memories:
             setattr(window, name, {})
-        # Restoring the anonymous default is an explicit choice to turn off reports.
-        settings.setValue(REPORTS_CHOICE_KEY, "chosen")
         save_window_settings(window)
         # The caller resets the visible selectors after this transaction.
         settings.remove(FUSION_METHOD_KEY)
@@ -559,9 +579,6 @@ def restore_default_settings(window) -> None:
             settings.setValue(key, value)
         settings.sync()
         raise
-    if attributes["auto_error_reports"]:
-        from ui.report_retry import discard_automatic_reports
-        discard_automatic_reports()
 
 
 
@@ -607,14 +624,14 @@ _MIN_RESTORABLE_WIDTH = 640
 _MIN_RESTORABLE_HEIGHT = 480
 
 
-def restore_window_layout(window) -> None:
+def restore_window_layout(window) -> bool:
     """Restore window geometry and splitter positions saved on last close.
 
     A saved geometry is rejected when it is unusable or off-screen. Qt stores
     whatever size the window had when it closed, and a window created at a
     tiny size (by a script, a screenshot harness, or a broken layout) would
     otherwise be restored as a sliver the user cannot grab — the app looked
-    like it failed to start.
+    like it failed to start. Return whether the right splitter was restored.
     """
     settings = get_settings()
     try:
@@ -640,9 +657,10 @@ def restore_window_layout(window) -> None:
             window.main_splitter.restoreState(main_state)
         right_state = settings.value(RIGHT_SPLITTER_KEY)
         if right_state is not None and getattr(window, "right_splitter", None) is not None:
-            window.right_splitter.restoreState(right_state)
+            return window.right_splitter.restoreState(right_state)
     except Exception:
         pass
+    return False
 
 
 def get_drag_export_format(window) -> str:

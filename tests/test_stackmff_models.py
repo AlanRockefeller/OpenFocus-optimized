@@ -32,6 +32,37 @@ def _stack(count=5, size=(64, 80)):
     return frames
 
 
+def test_v3_pooled_inter_layer_attention_equals_its_two_axis_layout():
+    """Moving one axis per transpose carries the same values as the layout it replaced."""
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+    from core.models.stackmff_v3.network import InterLayerAttention
+
+    torch.manual_seed(11)
+    block = InterLayerAttention(dim=12, num_heads=3, pool=2).eval()
+    x = torch.randn(2, 5, 8, 12, 12)                                 # B, N, h, w, C
+
+    def previous(x):
+        B, N, h, w, C = x.shape
+        xs = F.avg_pool2d(x.permute(0, 1, 4, 2, 3).reshape(B * N, C, h, w), block.pool)
+        hp, wp = xs.shape[-2], xs.shape[-1]
+        xs = xs.reshape(B, N, C, hp, wp).permute(0, 1, 3, 4, 2)
+        M = B * hp * wp
+        t = xs.permute(0, 2, 3, 1, 4).reshape(M, N, C)
+        qkv = block.qkv(block.norm1(t)).reshape(M, N, 3, block.heads, block.head_dim)
+        q, k, v = (qkv.select(2, i).permute(0, 2, 1, 3) for i in range(3))
+        o = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(M, N, C)
+        t = t + block.proj(o)
+        t = t + block.mlp(block.norm2(t))
+        y = t.reshape(B, hp, wp, N, C).permute(0, 3, 1, 2, 4)
+        delta = (y - xs).permute(0, 1, 4, 2, 3).reshape(B * N, C, hp, wp)
+        delta = F.interpolate(delta, size=(h, w), mode='bilinear', align_corners=False)
+        return x + delta.reshape(B, N, C, h, w).permute(0, 1, 3, 4, 2)
+
+    with torch.no_grad():
+        assert torch.equal(block(x), previous(x))
+
+
 def _upstream_v1(frames):
     torch = pytest.importorskip("torch")
     from core.models.stackmff_v1.network import StackMFF
@@ -185,9 +216,12 @@ def test_v2_tiled_fusion_uses_global_depth_and_source_pixels():
     frames = _stack(size=(64, 80))
     path = weights_path("stackmff_v2_final.onnx")
     depth, index = tiled_depth(_Source(frames, None, None, None), path, False,
-                               tile_size=32, tile_overlap=8, thread_count=1)
-    fused = stackmff_v2.stackmffv2_impl(
-        frames, None, path, False, tile_size=32, tile_overlap=8, thread_count=1)
+                               tile_size=32, tile_overlap=96, thread_count=1)
+    fusion = MultiFocusFusion('stackmffv2', tile_enabled=True, tile_threshold=1,
+                              tile_block_size=32, tile_overlap=96, exposure_match=False)
+    fused = fusion.fuse(frames, model_path=path, thread_count=1)
+    assert fusion.fusion_details.input_size == (80, 64)
+    assert fusion.fusion_details.tile_grid == (64, 32, 3)
     assert 0.0 <= depth.min() <= depth.max() <= 1.0
     np.testing.assert_array_equal(index, np.rint(depth * (len(frames) - 1)))
     expected = np.stack(frames)[index, np.arange(depth.shape[0])[:, None],
@@ -234,19 +268,19 @@ def test_cli_runs_both_and_rejects_depth_for_v1(tmp_path):
 
     for method in ("stackmff", "stackmffv2"):
         output = tmp_path / f"{method}.png"
-        result = run(["-i", str(source), "-o", str(output), "-m", method,
+        result = run(["-i", str(source), "-o", str(output), "--experimental", "-m", method,
                       "--cpu", "--threads", "1", "--no-exposure-match"])
         assert result.returncode == 0, result.stderr
         assert cv2.imread(str(output), cv2.IMREAD_UNCHANGED) is not None
 
     depth = tmp_path / "v1_depth.png"
-    rejected = run(["-i", str(source), "-o", str(depth), "-m", "stackmff",
+    rejected = run(["-i", str(source), "-o", str(depth), "--experimental", "-m", "stackmff",
                     "--depth-map"])
     assert rejected.returncode == 2
     assert "not available" in rejected.stderr
     assert not depth.exists()
 
     accepted = run(["-i", str(source), "-o", str(tmp_path / "v2.png"),
-                    "-m", "stackmffv2", "--depth-map", "--cpu", "--threads", "1"])
+                    "--experimental", "-m", "stackmffv2", "--depth-map", "--cpu", "--threads", "1"])
     assert accepted.returncode == 0, accepted.stderr
     assert (tmp_path / "v2_depth.png").is_file()

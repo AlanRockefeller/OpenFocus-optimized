@@ -12,6 +12,16 @@ from fusion_methods import neural_runtime
 from utils.weights import weights_path
 
 
+class _RunOptions:
+    """Stand-in for the runtime's run options that records its entries."""
+
+    def __init__(self):
+        self.entries = {}
+
+    def add_run_config_entry(self, key, value):
+        self.entries[key] = value
+
+
 def _focus_stack():
     texture = np.random.default_rng(37).integers(0, 256, (64, 80, 3), dtype=np.uint8)
     blurred = cv2.GaussianBlur(texture, (9, 9), 2)
@@ -79,7 +89,7 @@ def test_sessions_isolate_checkpoint_shape_and_directml_adapter(monkeypatch, tmp
             return ['DmlExecutionProvider', 'CPUExecutionProvider']
 
     monkeypatch.setitem(sys.modules, 'onnxruntime', SimpleNamespace(
-        SessionOptions=Options, InferenceSession=Session,
+        SessionOptions=Options, InferenceSession=Session, RunOptions=_RunOptions,
         ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0)))
     monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
     first = tmp_path / 'v1.onnx'
@@ -96,6 +106,131 @@ def test_sessions_isolate_checkpoint_shape_and_directml_adapter(monkeypatch, tmp
     monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_INDEX', 2)
     assert neural_runtime._session(str(first), (2, 64, 64), 'DIRECTML', 1) is not gpu
     assert calls[-1][1][0] == ('DmlExecutionProvider', {'device_id': 2})
+
+
+def test_cpu_sessions_plan_without_buffer_reuse_and_return_their_arena(monkeypatch, tmp_path):
+    built = {}
+
+    class Options:
+        def add_free_dimension_override_by_name(self, *args):
+            pass
+
+    class Session:
+        def __init__(self, path, sess_options, providers):
+            provider = providers[0]
+            built[provider if isinstance(provider, str) else provider[0]] = sess_options
+            self.run_options = []
+
+        def disable_fallback(self):
+            pass
+
+        def get_providers(self):
+            return ['DmlExecutionProvider', 'CPUExecutionProvider']
+
+        def run(self, outputs, inputs, run_options=None):
+            self.run_options.append(run_options)
+            return ['logits']
+
+    monkeypatch.setitem(sys.modules, 'onnxruntime', SimpleNamespace(
+        SessionOptions=Options, InferenceSession=Session, RunOptions=_RunOptions,
+        ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0)))
+    monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
+    monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_INDEX', 0)
+    model = tmp_path / 'model.onnx'
+    model.write_bytes(b'model')
+
+    cpu = neural_runtime._session(str(model), (2, 64, 64), 'CPU', 1)
+    options = built['CPUExecutionProvider']
+    assert options.enable_mem_reuse is False
+    assert not hasattr(options, 'enable_cpu_mem_arena')     # the arena stays on
+    assert cpu.run(['logits'], {}) == ['logits']
+    assert cpu.run(['logits'], {}) == ['logits']
+    # Every run asks for the arena back, not only the first.
+    assert [entry.entries for entry in cpu.session.run_options] == [
+        {'memory.enable_memory_arena_shrinkage': 'cpu:0'}] * 2
+
+    neural_runtime._session(str(model), (2, 64, 64), 'DIRECTML', 1)
+    options = built['DmlExecutionProvider']
+    assert options.enable_cpu_mem_arena is False
+    assert not hasattr(options, 'enable_mem_reuse')         # accelerators keep the default
+
+
+@pytest.mark.parametrize('name', ['stackmff_final.onnx', 'stackmff_v2_final.onnx',
+                                  'stackmff_v3_final.onnx'])
+def test_cpu_session_logits_equal_a_session_planned_with_buffer_reuse(monkeypatch, name):
+    ort = pytest.importorskip('onnxruntime')
+    monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
+    monkeypatch.setattr(neural_runtime, '_TRACED', {})
+    planes = np.random.default_rng(5).random((1, 3, 64, 128), dtype=np.float32)
+    path = weights_path(name)
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 1
+    options.enable_cpu_mem_arena = False
+    for dimension, value in zip(('layers', 'height', 'width'), planes.shape[1:]):
+        options.add_free_dimension_override_by_name(dimension, value)
+    expected = ort.InferenceSession(
+        path, sess_options=options, providers=['CPUExecutionProvider']).run(
+            ['logits'], {'input': planes})[0]
+    try:
+        session = neural_runtime._session(path, planes.shape[1:], 'CPU', 1)
+        # The second run of a shape uses the tensor layout recorded during the first.
+        for _ in range(2):
+            actual = session.run(['logits'], {'input': planes})[0]
+            assert actual.dtype == expected.dtype and actual.shape == expected.shape
+            assert actual.tobytes() == expected.tobytes()
+    finally:
+        neural_runtime._clear_sessions()
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='reads /proc/self/statm')
+def test_cpu_session_holds_its_working_set_only_while_it_runs(monkeypatch):
+    pytest.importorskip('onnxruntime')
+    import os
+    import threading
+
+    def resident():
+        with open('/proc/self/statm') as stream:
+            return int(stream.read().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+
+    def run(session):
+        """Resident growth at the highest point of one run, and after it."""
+        before = peak = resident()
+        done = threading.Event()
+
+        def watch():
+            nonlocal peak
+            while not done.is_set():
+                peak = max(peak, resident())
+                done.wait(0.001)
+
+        watcher = threading.Thread(target=watch)
+        watcher.start()
+        try:
+            session.run(['logits'], {'input': planes})
+        finally:
+            done.set()
+            watcher.join()
+        return peak - before, resident() - before
+
+    monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
+    monkeypatch.setattr(neural_runtime, '_TRACED', {})
+    shape = (8, 256, 256)
+    planes = np.random.default_rng(5).random((1, *shape), dtype=np.float32)
+    # One quarter-resolution feature tensor of the V3 network: layers x H/4 x W/4 x 48 float32.
+    tokens = shape[0] * (shape[1] // 4) * (shape[2] // 4) * 48 * 4
+    try:
+        session = neural_runtime._session(weights_path('stackmff_v3_final.onnx'), shape, 'CPU', 1)
+        run(session)
+        peak, kept = run(session)
+        # About 16 feature tensors without buffer reuse, 39 with it.
+        assert 8 * tokens < peak < 24 * tokens
+        assert kept < 4 * tokens
+        # The same session keeps its working set when a run does not ask for
+        # the arena back, which is what the limit above would catch.
+        _, kept = run(session.session)
+        assert kept > 8 * tokens
+    finally:
+        neural_runtime._clear_sessions()
 
 
 def test_accelerator_sessions_keep_two_shapes_and_evict_oldest(monkeypatch, tmp_path):
@@ -226,7 +361,7 @@ def test_traced_session_released_before_replacement(monkeypatch, tmp_path):
 
     monkeypatch.setattr(Options, 'add_free_dimension_override_by_name', remember_dimension)
     monkeypatch.setitem(sys.modules, 'onnxruntime', SimpleNamespace(
-        SessionOptions=Options, InferenceSession=make_session))
+        SessionOptions=Options, InferenceSession=make_session, RunOptions=_RunOptions))
     monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
     monkeypatch.setattr(neural_runtime, '_TRACED', {})
     monkeypatch.setattr(neural_runtime, 'operator_trace_directory', lambda: str(tmp_path))
@@ -274,7 +409,7 @@ def test_unknown_vram_does_not_erase_verified_provider_capability(monkeypatch, t
         ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0)))
     monkeypatch.setattr(neural_runtime, '_DEVICE', None)
     monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_INDEX', 0)
-    monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_NAME', '')
+    monkeypatch.setattr(neural_runtime, '_ADAPTER_NAME', '')
     for name in ('_AVAILABLE_PROVIDERS', '_HARDWARE_ADAPTERS', '_PROBE_ERRORS'):
         monkeypatch.setattr(neural_runtime, name, ())
     monkeypatch.setattr(resource_policy, 'directml_adapters', lambda: hardware)
@@ -294,15 +429,13 @@ def test_unknown_vram_does_not_erase_verified_provider_capability(monkeypatch, t
     assert diagnostics['unadmitted'] == 'DIRECTML'
     assert neural_runtime.unadmitted_accelerator() == 'DIRECTML'
     assert neural_runtime.admitted_kind('DIRECTML') == 'CPU'
-    assert neural_runtime.execution_status(
-        True, True, 'model.onnx', neural_runtime.admitted_kind('DIRECTML')) == ('CPU', 'selected')
 
 
 def test_fusion_info_does_not_borrow_another_jobs_actual_device(monkeypatch):
     from core.multi_focus_fusion import MultiFocusFusion
     monkeypatch.setattr(neural_runtime, 'resolve_device', lambda use_gpu: 'DIRECTML')
     monkeypatch.setattr(neural_runtime, '_DEVICE', 'DIRECTML')
-    monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_NAME', '')
+    monkeypatch.setattr(neural_runtime, '_ADAPTER_NAME', '')
     first = MultiFocusFusion('stackmff', use_gpu=True)
     first._actual_device = 'CPU'
     second = MultiFocusFusion('stackmffv3', use_gpu=True)
@@ -418,7 +551,7 @@ def test_registered_provider_and_discrete_adapter_failure_do_not_hide_usable_igp
         ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0)))
     monkeypatch.setattr(neural_runtime, '_DEVICE', None)
     monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_INDEX', 0)
-    monkeypatch.setattr(neural_runtime, '_DIRECTML_ADAPTER_NAME', '')
+    monkeypatch.setattr(neural_runtime, '_ADAPTER_NAME', '')
     for name in ('_AVAILABLE_PROVIDERS', '_HARDWARE_ADAPTERS', '_PROBE_ERRORS'):
         monkeypatch.setattr(neural_runtime, name, ())
     monkeypatch.setattr(resource_policy, 'directml_adapters', lambda: [
@@ -429,7 +562,8 @@ def test_registered_provider_and_discrete_adapter_failure_do_not_hide_usable_igp
     assert tried == [('CUDAExecutionProvider', 0), ('DmlExecutionProvider', 0),
                      ('DmlExecutionProvider', 1)]
     assert selected == [1]
-    assert 'Intel UHD' in neural_runtime.display_name('DIRECTML')
+    assert neural_runtime.display_name('DIRECTML') == 'DirectML (Intel UHD integrated adapter)'
+    assert neural_runtime.device_diagnostics()['adapter'] == 'Intel UHD integrated adapter'
     assert len(neural_runtime.device_diagnostics()['probe_errors']) == 2
     assert not list(tmp_path.glob('probe-*.json'))
 
@@ -469,6 +603,7 @@ def test_real_session_placement_is_profiled_once_and_cpu_placement_sticks(
 
     monkeypatch.setattr(neural_runtime, '_session', session)
     monkeypatch.setattr(neural_runtime, '_DEVICE', 'DIRECTML')
+    monkeypatch.setattr(neural_runtime, '_AVAILABLE_PROVIDERS', ('DmlExecutionProvider',))
     monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
     monkeypatch.setattr(resource_policy, 'probe_resources', lambda *_: resource_policy.ResourceSnapshot(
         available_ram=8 * 1024 ** 3, total_ram=16 * 1024 ** 3,
@@ -509,22 +644,38 @@ def test_failed_inference_removes_its_profile(monkeypatch, tmp_path):
     assert not profile.exists()
 
 
-@pytest.mark.parametrize('neural,use_gpu,checkpoint,capability,actual,actual_model,expected', [
-    (False, True, 'v3.onnx', 'DIRECTML', 'DIRECTML', 'v3.onnx', ('CPU', 'selected')),
-    (True, False, 'v3.onnx', 'DIRECTML', 'DIRECTML', 'v3.onnx', ('CPU', 'selected')),
-    (True, True, 'v3.onnx', None, None, None, (None, 'pending')),
-    (True, True, 'v3.onnx', 'DIRECTML', None, None, ('DIRECTML', 'ready')),
-    (True, True, 'v3.onnx', 'N/A', None, None, ('CPU', 'selected')),
-    (True, True, 'v3.onnx', 'DIRECTML', 'CPU', 'v3.onnx', ('CPU', 'actual')),
-    (True, True, 'v1.onnx', 'DIRECTML', 'CPU', 'v3.onnx', ('DIRECTML', 'ready')),
-    (True, True, 'v3.pth', 'DIRECTML', 'DIRECTML', 'v3.onnx', ('DIRECTML', 'actual')),
-    (True, True, 'v3.onnx', 'CUDA', 'DIRECTML', 'v3.onnx', ('CUDA', 'ready')),
-])
-def test_execution_status_separates_capability_preference_and_actual_model(
-        monkeypatch, neural, use_gpu, checkpoint, capability, actual, actual_model, expected):
-    monkeypatch.setattr(neural_runtime, '_ACTUAL_DEVICE', actual)
-    monkeypatch.setattr(neural_runtime, '_ACTUAL_CHECKPOINT', actual_model)
-    assert neural_runtime.execution_status(neural, use_gpu, checkpoint, capability) == expected
+@pytest.mark.parametrize('kind', ['CUDA', 'ROCM'])
+def test_driver_adapter_name_uses_the_configured_provider_ordinal(monkeypatch, kind):
+    import ctypes
+
+    def cuda_device(device, index):
+        assert index == 2
+        device._obj.value = 19
+        return 0
+
+    def read_name(name, size, device):
+        assert size == len(name)
+        assert device == (19 if kind == 'CUDA' else 2)
+        name.value = b' GPU model '
+        return 0
+
+    driver = SimpleNamespace(cuInit=lambda _: 0, cuDeviceGet=cuda_device,
+                             cuDeviceGetName=read_name, hipInit=lambda _: 0,
+                             hipDeviceGetName=read_name)
+    monkeypatch.setattr(ctypes, 'CDLL', lambda _: driver)
+    assert neural_runtime._driver_adapter_name(kind, 2) == 'GPU model'
+
+
+def test_device_report_retains_successful_gpu_work_after_cpu_fallback(monkeypatch):
+    monkeypatch.setattr(neural_runtime, '_DEVICE', 'CUDA')
+    monkeypatch.setattr(neural_runtime, '_ADAPTER_NAME', 'GPU model')
+    monkeypatch.setattr(neural_runtime, '_JOB_ACCELERATOR', 'CUDA')
+    monkeypatch.setattr(neural_runtime, '_ACTUAL_DEVICE', 'CPU')
+    assert neural_runtime.actual_device_report() == 'CPU + CUDA (GPU model)'
+    monkeypatch.setattr(neural_runtime, '_ACTUAL_CHECKPOINT', None)
+    monkeypatch.setattr(neural_runtime, '_FALLBACK_CPU', True)
+    neural_runtime.start_inference_job()
+    assert neural_runtime.actual_device_report() == 'CPU'
 
 
 @pytest.mark.parametrize('known', [True, False])
@@ -578,6 +729,7 @@ def test_job_probe_keeps_reported_admission_in_step_with_job_placement(monkeypat
     monkeypatch.setattr(neural_runtime, '_SESSIONS', OrderedDict())
     monkeypatch.setattr(resource_policy, 'probe_resources', probe_resources)
     monkeypatch.setattr(resource_policy, 'require_memory', lambda *_: None)
+    monkeypatch.setattr(neural_runtime, '_AVAILABLE_PROVIDERS', ('CUDAExecutionProvider',))
     # Provider selection saw the opposite of what this job's probe sees.
     monkeypatch.setattr(neural_runtime, '_UNADMITTED', 'CUDA' if probe == 'known' else None)
     neural_runtime.start_inference_job()
@@ -725,7 +877,7 @@ def test_reduced_buffers_released_at_consumption_boundaries(monkeypatch):
     def resize(*args):
         small = original_resize(*args)
         refs['small'] = weakref.ref(small)
-        refs['backing'] = weakref.ref(small.base)
+        refs['backing'] = weakref.ref(small.base) if small.base is not None else refs['small']
         return small
     def softmax(values):
         if 'small' in refs:
@@ -767,6 +919,45 @@ def test_probability_layer_cancellation_stops_next_layer(monkeypatch, stage):
                                      0.5, lambda: cancelled[0])
     assert counts == ({'resize': 1, 'gaussian': 0} if stage == 'resize'
                       else {'resize': 5, 'gaussian': 1})
+
+
+@pytest.mark.parametrize('shape', [(4, 4), (64, 192), (260, 128)])
+def test_three_quarters_resize_matches_general_triangle_filter(shape):
+    # Float32 products must be rounded before summing, including both edges.
+    h, w = shape
+    planes = np.random.default_rng(408).normal(size=(2, 3, h, 2 * w)).astype(np.float32)[..., ::2]
+    np.testing.assert_array_equal(neural_runtime._resize_three_quarters(planes),
+                                  neural_runtime._resize_triangle(planes, 0.75))
+
+
+@pytest.mark.parametrize('shape, dtype, scale, grouped', [
+    ((64, 128), np.float32, 0.75, True),
+    ((8, 10), np.float32, 0.75, False),     # width is not whole groups of four
+    ((6, 8), np.float32, 0.75, False),      # nor is this height
+    ((64, 128), np.float64, 0.75, False),
+    ((64, 128), np.float32, 0.5, False),
+])
+def test_antialias_groups_rows_only_for_whole_float32_groups(monkeypatch, shape, dtype, scale, grouped):
+    used = []
+    for name in ('_resize_three_quarters', '_resize_triangle'):
+        original = getattr(neural_runtime, name)
+        monkeypatch.setattr(neural_runtime, name,
+                            lambda *args, name=name, original=original: used.append(name) or original(*args))
+    result = neural_runtime._resize_antialias(np.ones((1, 2, *shape), dtype), scale)
+    assert used == ['_resize_three_quarters' if grouped else '_resize_triangle']
+    assert result.dtype == np.float32
+    assert result.shape == (1, 2, int(shape[0] * scale), int(shape[1] * scale))
+    np.testing.assert_allclose(result, 1, rtol=1e-6)
+
+
+def test_three_quarters_resize_stops_between_planes():
+    from core.registration import RegistrationCancelled
+    polls = []
+    with pytest.raises(RegistrationCancelled):
+        neural_runtime._resize_antialias(np.zeros((1, 3, 8, 8), np.float32), 0.75,
+                                         lambda: polls.append(1) or len(polls) > 3)
+    # Once on entry, twice for the first plane, then before the second.
+    assert len(polls) == 4
 
 
 def test_antialias_cancellation_between_output_positions(monkeypatch):
@@ -858,6 +1049,7 @@ def test_direct_v2_tiled_jobs_retry_accelerator_after_sticky_fallback(monkeypatc
             return [inputs['input'].copy()]
     monkeypatch.setattr(tiled, '_plan', lambda *args: (64, 'model', 'COREML', SimpleNamespace(native_threads=1)))
     monkeypatch.setattr(neural_runtime, '_session', lambda _p, _s, device, _t: Session(device))
+    monkeypatch.setattr(neural_runtime, '_AVAILABLE_PROVIDERS', ('CoreMLExecutionProvider',))
     monkeypatch.setattr(resource_policy, 'require_memory', lambda *_: None)
     frames = [np.zeros((128, 128, 3), np.uint8), np.full((128, 128, 3), 100, np.uint8)]
     try:
