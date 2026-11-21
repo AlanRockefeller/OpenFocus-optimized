@@ -8,8 +8,8 @@ from html import escape
 from unicodedata import category
 from urllib.parse import urlencode, urlsplit
 
-from PyQt6.QtCore import QRectF, QTimer, Qt, QUrl
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPixmap
+from PyQt6.QtCore import QEvent, QRect, QRectF, QTimer, Qt, QUrl
+from PyQt6.QtGui import QColor, QFont, QImage
 from PyQt6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -289,7 +289,7 @@ def _published_link(value, *hosts):
     return value
 
 
-def _discord_qr_pixmap(invite, size, ratio):
+def _discord_qr(invite):
     import cv2
     from PyQt6.QtSvg import QSvgRenderer
     from utils import resource_path
@@ -301,30 +301,27 @@ def _discord_qr_pixmap(invite, size, ratio):
     except cv2.error:
         return None
 
-    # Replace OpenCV's two-module border with a four-module white quiet zone.
-    modules = cv2.copyMakeBorder(encoded[2:-2, 2:-2], 4, 4, 4, 4,
-                                 cv2.BORDER_CONSTANT, value=255)
-    scale = int(size * ratio) // modules.shape[0]
-    if not scale:
-        return None
-    side = modules.shape[0] * scale
-    pixels = cv2.resize(modules, (side, side), interpolation=cv2.INTER_NEAREST)
-    pixmap = QPixmap.fromImage(QImage(pixels.data, side, side, pixels.strides[0],
-                                      QImage.Format.Format_Grayscale8))
-
     mark = QSvgRenderer(resource_path('assets', 'discord.svg'))
     if not mark.isValid():
         return None
-    # Cover only the five center modules and keep the official 4:3 proportions.
-    center = side / 2
-    inset = center - 2.5 * scale
-    painter = QPainter(pixmap)
-    painter.fillRect(QRectF(inset, inset, 5 * scale, 5 * scale), QColor('#5865F2'))
-    mark.render(painter, QRectF(center - 2 * scale, center - 1.5 * scale,
-                                4 * scale, 3 * scale))
-    painter.end()
-    pixmap.setDevicePixelRatio(ratio)
-    return pixmap
+
+    side = encoded.shape[0]
+    image = QImage(encoded.data, side, side, encoded.strides[0],
+                   QImage.Format.Format_Grayscale8).copy()
+    # Skip OpenCV's two-module border. The shared renderer adds its quiet zone.
+    modules = side - 4
+    region = QRect(2, 2, modules, modules)
+
+    def overlay(painter, target):
+        # Cover only five center modules and keep the mark's 4:3 proportions.
+        scale = target.width() / modules
+        x = target.x() + target.width() / 2
+        y = target.y() + target.height() / 2
+        painter.fillRect(QRectF(x - 2.5 * scale, y - 2.5 * scale, 5 * scale, 5 * scale),
+                         QColor('#5865F2'))
+        mark.render(painter, QRectF(x - 2 * scale, y - 1.5 * scale, 4 * scale, 3 * scale))
+
+    return image, region, overlay
 
 
 class ContactInfoDialog(QDialog):
@@ -332,17 +329,18 @@ class ContactInfoDialog(QDialog):
 
     _CONTACT_INFO_URL = f'{BASE_URL}/v1/contact-info'
     _MAX_CONTACT_INFO_BYTES = 32 * 1024
-    _DISCORD_QR_SIZE = 152
+    _QR_SIZE = 152
 
     def __init__(self, parent=None):
-        from ._community_layout import add_published_qr, community_body, community_card, community_label
+        from ._community_layout import add_published_qr, community_body, community_card, community_label, community_qr
 
         super().__init__(parent)
         self._contact_cards = QGridLayout()
         self._contact_columns = 0
         title = trans.t('dialog_contact_title')
         self.setWindowTitle(title)
-        body = community_body(self, title, trans.t('contact_welcome'), width=820, height=470)
+        self._contact_scroll, body = community_body(self, title, trans.t('contact_welcome'),
+                                                    width=880, height=470)
 
         self._contact_cards.setSpacing(body.spacing())
         body.addLayout(self._contact_cards)
@@ -363,13 +361,7 @@ class ContactInfoDialog(QDialog):
         self._discord_heading = community_label(trans.t('contact_discord_title'), 'section')
         self._discord_heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._discord.addWidget(self._discord_heading)
-        self._discord_qr = QLabel()
-        self._discord_qr.setObjectName('discord-invite')
-        self._discord_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._discord_qr.setStyleSheet('background: white;')
-        self._discord_qr.setFixedSize(self._DISCORD_QR_SIZE, self._DISCORD_QR_SIZE)
-        self._discord_qr.hide()
-        self._discord.addWidget(self._discord_qr, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._discord_qr = community_qr(self._discord, self._discord_heading.text(), 'discord-invite', self._QR_SIZE)
         self._discord_status = community_label('', 'muted')
         self._discord_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._discord.addWidget(self._discord_status)
@@ -382,9 +374,13 @@ class ContactInfoDialog(QDialog):
                             ('wechat-official-account', 'contact_wechat_official')):
             card, column = community_card()
             self._cards.append(card)
-            add_published_qr(self, column, self._requests, trans.t(label), slot, 144)
+            add_published_qr(self, column, self._requests, trans.t(label), slot, self._QR_SIZE)
             column.addStretch()
-        self._arrange_contact_cards(self.width())
+        self._contact_reflow = QTimer(self, singleShot=True)
+        self._contact_reflow.timeout.connect(self._arrange_contact_cards)
+        self._contact_scroll.viewport().installEventFilter(self)
+        self._contact_scroll.widget().installEventFilter(self)
+        self._arrange_contact_cards()
 
         # 居中显示
         if parent:
@@ -478,12 +474,12 @@ class ContactInfoDialog(QDialog):
         self._discord_link.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._discord.insertWidget(self._discord.count() - 1, self._discord_link)
         self._discord_link.show()
-        pixmap = _discord_qr_pixmap(invite, self._DISCORD_QR_SIZE, self._discord_qr.devicePixelRatioF())
-        if pixmap is None:
+        code = _discord_qr(invite)
+        if code is None:
             self._discord_status.setText(trans.t('contact_discord_qr_unavailable'))
             return
-        self._discord_qr.setPixmap(pixmap)
-        self._discord_qr.show()
+        image, region, overlay = code
+        self._discord_qr.set_code(image, source=region, overlay=overlay)
         self._discord_status.hide()
 
     def _add_detail(self, label, value):
@@ -494,12 +490,32 @@ class ContactInfoDialog(QDialog):
         label.setToolTip(f'<qt>{escape(value)}</qt>')
         self._contact_details.addWidget(label)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._arrange_contact_cards(event.size().width())
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self._contact_reflow.start()
+        return super().eventFilter(watched, event)
 
-    def _arrange_contact_cards(self, width):
-        columns = 4 if width >= 820 else 2 if width >= 500 else 1
+    def _arrange_contact_cards(self):
+        # Reserve the scrollbar width even before it appears. Reflowing can
+        # change the scroll range, but must not make the column count oscillate.
+        scroll = self._contact_scroll
+        available = scroll.maximumViewportSize().width() - scroll.verticalScrollBar().sizeHint().width()
+        minimum_widths = []
+        for index, card in enumerate(self._cards):
+            minimum = card.minimumSizeHint().width()
+            if index:
+                # QR labels can be hidden while downloading. Reserve their width.
+                margins = card.layout().contentsMargins()
+                minimum = max(minimum, self._QR_SIZE + margins.left() + margins.right()
+                              + 2 * card.frameWidth())
+            minimum_widths.append(minimum)
+        columns = 1
+        for count in (4, 2):
+            width = sum(max(minimum_widths[column::count]) for column in range(count))
+            width += (count - 1) * self._contact_cards.horizontalSpacing()
+            if width <= available:
+                columns = count
+                break
         if self._contact_columns == columns:
             return
         self._contact_columns = columns
