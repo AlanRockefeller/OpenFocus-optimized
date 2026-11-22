@@ -814,8 +814,9 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
 
     ``in_flight`` is how many tiles the caller can run at once. The plan
     grants two on the CPU when the thread budget splits evenly and a second
-    tile's working set fits beside the first at the chosen tile size. The tile
-    is never made smaller to fit a second one, and the threads are divided
+    tile's working set fits beside the first, at the chosen tile size, within
+    the comfortable RAM share that sizes concurrency elsewhere. The tile is
+    never made smaller to fit a second one, and the threads are divided
     between the tiles, so the caller's thread budget is unchanged.
     """
     if min(source_resolution_bytes, source_cache_bytes, resident_output_bytes) < 0:
@@ -831,9 +832,12 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
         # Legacy directories lack descriptor geometry/decoder information.
         source_bytes += height * width * channels * max(4, itemsize) * 2
     ceiling = ram_ceiling(snapshot)
+    comfortable = min(ceiling, ram_budget(snapshot))
     active = _active_process_budget()
     if active is not None:
         ceiling = min(ceiling, max(0, active.maximum_ram - resident_output_bytes))
+        comfortable = min(comfortable, ceiling,
+                          max(0, active.comfortable_ram - resident_output_bytes))
     if not snapshot.ram_known:
         require_memory(0, snapshot)
     from fusion_methods.neural_runtime import (UNIFIED_MEMORY_KINDS, VRAM_GATED_KINDS,
@@ -868,9 +872,10 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                     # tile adds its own crops, staging, inference and reduction.
                     second = sum(_neural_tile_terms(frames, channels, block, kind,
                                                     estimate_inference))
-                    if required + second <= ceiling:
+                    if required + second <= comfortable:
                         tiles, required, threads = 2, required + second, threads // 2
-                        reasons.append(f'two tiles in flight, {threads} thread(s) each')
+                        reasons.append('two tiles in flight, '
+                                       f"{threads} thread{'s' if threads > 1 else ''} each")
                     else:
                         reasons.append('one tile in flight: a second working set does not fit')
                 # Why a tile is smaller than requested: the first size whose

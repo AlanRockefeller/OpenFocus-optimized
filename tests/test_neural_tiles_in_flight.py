@@ -341,17 +341,44 @@ def test_the_thread_budget_is_split_only_when_it_divides_evenly(threads, expecte
     assert plan.max_in_flight * plan.native_threads == threads
 
 
-def test_a_second_tile_that_does_not_fit_keeps_one_tile_at_the_same_size():
+def _snapshot(available):
+    return policy.ResourceSnapshot(available_ram=available, total_ram=64 * GIB,
+                                   physical_cores=8, logical_cpus=16)
+
+
+def test_a_second_tile_must_fit_the_comfortable_share_at_the_same_tile_size():
     _block, one = _plan(user_threads=2)
-    reserve = 48 * GIB - one.ram_budget
-    # Room for one tile and half of another.
-    available = reserve + one.required_ram + _second_tile_bytes() // 2
+    two = one.required_ram + _second_tile_bytes()
+    # The comfortable share holds one tile and half of another; the ceiling holds both.
+    available = int((one.required_ram + _second_tile_bytes() // 2) / policy.BUDGET_RATIO)
+    assert one.required_ram <= policy.ram_budget(_snapshot(available)) < two
+    assert policy.ram_ceiling(_snapshot(available)) >= two
     block, tight = _plan(available, user_threads=2, in_flight=2)
     assert block == 1024
     assert (tight.workers, tight.max_in_flight, tight.native_threads) == (1, 1, 2)
-    assert tight.required_ram == one.required_ram <= tight.ram_budget
-    assert tight.ram_budget < one.required_ram + _second_tile_bytes()
+    assert tight.required_ram == one.required_ram
     assert 'one tile in flight' in tight.reasons[-1]
+
+    available = int(two / policy.BUDGET_RATIO) + 1
+    assert policy.ram_budget(_snapshot(available)) >= two
+    assert _plan(available, user_threads=2, in_flight=2)[1].max_in_flight == 2
+
+
+def test_a_child_job_grants_a_second_tile_from_its_comfortable_envelope():
+    _block, one = _plan(user_threads=2)
+    two = one.required_ram + _second_tile_bytes()
+    resident = 256 * 1024 ** 2
+
+    def planned(comfortable):
+        budget = policy.ProcessBudget(comfortable_ram=comfortable, maximum_ram=40 * GIB)
+        with policy.process_budget(budget):
+            return _plan(user_threads=2, in_flight=2, resident_output_bytes=resident)[1]
+
+    # Maps the render already touched are debited from the envelope.
+    assert planned(two + resident).max_in_flight == 2
+    tight = planned(two + resident - 1)
+    assert (tight.max_in_flight, tight.native_threads) == (1, 2)
+    assert tight.required_ram == one.required_ram
 
 
 def test_an_accelerator_plan_keeps_one_tile_in_flight():

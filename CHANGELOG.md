@@ -15,6 +15,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   three StackMFF models before activation.
 
 ### Changed
+- Run two StackMFF V3 tiles at a time on the CPU when the thread setting is
+  an even number and a second tile's working set fits the comfortable RAM
+  share. Each tile then infers on half the threads, so the thread setting
+  still bounds inference, and tiles are accumulated in the same order as
+  before. A last tile with nothing to run beside it runs alone on all the
+  threads. On Linux with 2 threads and 1024-pixel tiles, an ECC + V3 render
+  of 15 frames of 5216 x 3908 pixels took 354.8 s instead of 391.6 s, and its
+  peak resident memory rose from 7.9 to 11.0 GiB. With less free memory, one
+  thread or an odd thread count, tiles run one at a time as before. Output
+  pixels are unchanged.
 - Read the tiles of a tiled neural render from the frames it prepared, instead
   of copying every prepared frame into the render's frame cache a second time.
   This about halves the scratch storage those renders hold. Output pixels are
