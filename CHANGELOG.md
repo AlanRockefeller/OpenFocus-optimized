@@ -123,6 +123,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Honour the transparency key of a grayscale PNG when it is loaded for a
   render, as the preview already did. Such frames were fused as opaque.
   Other PNG layouts and grayscale PNGs without a key decode as before.
+- Refuse grayscale TIFF pages whose alpha sample is not fully opaque, as
+  for color TIFF. Such a page lost its alpha as a later frame and failed
+  with an unsupported-layout error as the first. A fully opaque gray page
+  with alpha now loads as gray, keeping 16-bit samples.
 
 ## [2.0.0]
 

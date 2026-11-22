@@ -299,6 +299,20 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
             image = cmyk_to_bgr(PILImage.fromarray(samples, 'CMYK'), path,
                                 profile_tag.value if profile_tag is not None else b'')
             return _orient_tiff_pixels(page, image)
+        if page.samplesperpixel == 2:
+            # Gray with alpha. OpenCV would drop the alpha and reduce 16-bit
+            # samples to 8 bits, so prove the page opaque and keep its gray.
+            from core.source_frames import _validate_tiff_alpha
+            _validate_tiff_alpha(page)
+            samples = page.asarray()
+            gray = np.ascontiguousarray(samples[0] if int(page.planarconfig) == 2
+                                        else samples[..., 0])
+            del samples
+            _validate_depth(path, gray.dtype)
+            if int(page.photometric) == 0:
+                gray = np.iinfo(gray.dtype).max - gray
+            image = gray if preserve_grayscale else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            return _orient_tiff_pixels(page, image)
     data = np.memmap(path, dtype=np.uint8, mode='r')
     success, decoded = cv2.imdecodemulti(data, flags=cv2.IMREAD_UNCHANGED,
                                         range=(page_index, page_index + 1))

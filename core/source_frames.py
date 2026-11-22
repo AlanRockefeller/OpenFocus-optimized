@@ -1546,8 +1546,10 @@ def _opencv_tiff_preview(page):
 
 def _validate_tiff_alpha(page, should_cancel=None):
     """Prove every alpha-bearing page is opaque before accepting its container."""
-    if page.samplesperpixel != 4:
+    samples = page.samplesperpixel
+    if samples not in (2, 4):
         return
+    alpha = samples - 1
     from core.image_loader import UnsupportedTransparency
     dtype = np.dtype(page.dtype)
     if dtype not in (np.dtype(np.uint8), np.dtype(np.uint16)):
@@ -1557,12 +1559,13 @@ def _validate_tiff_alpha(page, should_cancel=None):
         mapped = page.asarray(out='memmap')
         for y in range(0, page.imagelength, 128):
             _check_preview_cancel(should_cancel)
-            if np.min(mapped[y:y + 128, :, 3]) != opaque:
+            if np.min(mapped[y:y + 128, :, alpha]) != opaque:
                 raise UnsupportedTransparency('Transparent TIFF pages are unsupported')
         return
     # Missing optional codecs and oversized strips must use the same admitted
     # native decoder as previews. An unavailable preview cannot prove opacity.
-    if int(page.compression) == 5:
+    # OpenCV decodes a gray page without its alpha, so only tifffile can.
+    if int(page.compression) == 5 and samples == 4:
         _check_preview_cancel(should_cancel)
         preview = _opencv_tiff_preview(page)
         _check_preview_cancel(should_cancel)
@@ -1579,11 +1582,13 @@ def _validate_tiff_alpha(page, should_cancel=None):
     try:
         for segment, _position, _shape in page.segments(maxworkers=1):
             _check_preview_cancel(should_cancel)
-            if segment is not None and np.min(segment[..., 3]) != opaque:
+            if segment is not None and np.min(segment[..., alpha]) != opaque:
                 raise UnsupportedTransparency('Transparent TIFF pages are unsupported')
     except UnsupportedTransparency:
         raise
     except (ImportError, ValueError):
+        if samples == 2:
+            raise UnsupportedTransparency('TIFF alpha cannot be validated without a TIFF codec')
         _check_preview_cancel(should_cancel)
         preview = _opencv_tiff_preview(page)
         _check_preview_cancel(should_cancel)
@@ -1597,15 +1602,16 @@ def _tiff_preview(page, should_cancel=None):
     h, w = page.imagelength, page.imagewidth
     step = max(1, math.ceil(max(h, w) / PREVIEW_EDGE))
     channels = page.samplesperpixel
-    if channels not in (1, 3, 4) or page.planarconfig != 1:
+    if channels not in (1, 2, 3, 4) or page.planarconfig != 1:
         raise ValueError('Unsupported TIFF sample/planar layout')
     orientation = _tiff_orientation(page)
     from core.image_loader import validate_tiff_page, cmyk_to_bgr, tiff_palette_bgr
     path = page.parent.filehandle.path
     cmyk = validate_tiff_page(path, page)
     palette = int(page.photometric) == 3
-    if int(getattr(page, 'compression', 1)) == 5 and not (cmyk or palette):
-        # Ordinary LZW pages can use OpenCV's bundled libtiff.
+    if int(getattr(page, 'compression', 1)) == 5 and not (cmyk or palette or channels == 2):
+        # Ordinary LZW pages can use OpenCV's bundled libtiff, which reduces
+        # gray-with-alpha samples to 8 bits.
         return _opencv_tiff_preview(page)
     from core.resource_policy import require_memory
     small_bytes = math.ceil(h / step) * math.ceil(w / step) * channels * np.dtype(page.dtype).itemsize
@@ -1653,6 +1659,12 @@ def _tiff_preview(page, should_cancel=None):
         tag = page.tags.get(34675)
         profile = tag.value if tag is not None else b''
         return _orient(cmyk_to_bgr(Image.fromarray(small, 'CMYK'), path, profile), orientation)
+    if channels == 2:
+        # Gray with alpha: an opaque page previews as gray.
+        if np.any(small[:, :, 1] != np.iinfo(small.dtype).max):
+            from core.image_loader import UnsupportedTransparency
+            raise UnsupportedTransparency('Transparent TIFF pages are unsupported')
+        small, channels = small[:, :, :1], 1
     if int(page.photometric) == 0:
         small = np.iinfo(small.dtype).max - small
     if channels == 1:

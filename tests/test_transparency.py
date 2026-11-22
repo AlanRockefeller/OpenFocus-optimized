@@ -418,3 +418,49 @@ def test_other_transparent_png_layouts_decode_unchanged(tmp_path, mode):
     assert expected.shape == (8, 8, 4)
     np.testing.assert_array_equal(decode_image(str(path), allow_transparent_png=True), expected)
 
+
+def _gray_alpha_tiff(path, dtype, alpha, compression=None, photometric='minisblack'):
+    import tifffile
+    maximum = np.iinfo(dtype).max
+    pixels = np.zeros((24, 20, 2), dtype)
+    pixels[..., 0] = np.arange(20, dtype=dtype) * (maximum // 40)
+    pixels[..., 1] = maximum
+    pixels[:6, :, 1] = alpha
+    tifffile.imwrite(path, pixels, photometric=photometric, extrasamples=['unassalpha'],
+                     compression=compression)
+    return pixels
+
+
+@pytest.mark.parametrize("compression", [None, "lzw"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("first", [True, False])
+def test_transparent_gray_alpha_tiff_is_rejected(tmp_path, compression, dtype, first):
+    from core.image_loader import UnsupportedTransparency, decode_image
+    path = tmp_path / 'gray-alpha.tif'
+    _gray_alpha_tiff(path, dtype, 0, compression)
+    opaque = tmp_path / 'opaque.tif'
+    assert cv2.imwrite(str(opaque), np.full((24, 20, 3), 7, dtype))
+    paths = [str(path), str(opaque)] if first else [str(opaque), str(path)]
+    ok, message, frames, _ = ImageStackLoader().load_from_filepaths(paths)
+    assert not ok and not frames and 'PNG' in message
+    with pytest.raises(UnsupportedTransparency):
+        decode_image(str(path))
+
+
+@pytest.mark.parametrize("compression", [None, "lzw"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("photometric", ["minisblack", "miniswhite"])
+def test_opaque_gray_alpha_tiff_loads_as_gray(tmp_path, compression, dtype, photometric):
+    from core.image_loader import decode_image
+    from core.source_frames import SOURCE_CACHE, resolve_frame, scan_source
+    path = tmp_path / 'gray-alpha.tif'
+    pixels = _gray_alpha_tiff(path, dtype, np.iinfo(dtype).max, compression, photometric)
+    gray = pixels[..., 0] if photometric == 'minisblack' else np.iinfo(dtype).max - pixels[..., 0]
+    expected = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    np.testing.assert_array_equal(decode_image(str(path)), expected)
+    SOURCE_CACHE.clear()
+    frame = scan_source(str(path))[0]
+    assert frame.preview is not None
+    np.testing.assert_array_equal(resolve_frame(frame), expected)
+    ok, message, frames, _ = ImageStackLoader().load_from_filepaths([str(path), str(path)])
+    assert ok, message
