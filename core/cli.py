@@ -681,6 +681,8 @@ def _suggest_duplicates(args):
                     output.write(result + "\n")
                 if any(same_path(destination, path) for path in paths):
                     raise ValueError("--json must not overwrite an input image")
+                from utils.file_modes import apply_destination_mode
+                apply_destination_mode(temp_path, destination)
                 os.replace(temp_path, destination)
                 temp_path = None
             finally:
@@ -992,6 +994,8 @@ def _replace_text_file(path, text, prefix, before_replace=None):
             stream.write(text)
         if before_replace is not None:
             before_replace()
+        from utils.file_modes import apply_destination_mode
+        apply_destination_mode(temporary, path)
         os.replace(temporary, path)
         temporary = None
     finally:

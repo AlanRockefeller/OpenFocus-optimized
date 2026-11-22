@@ -116,6 +116,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Give saved images, projects, templates, recipes and other files OpenFocus
+  writes through a temporary file the permissions a direct write would give
+  them: an overwritten file keeps its mode, and a new file follows the umask
+  (for example 0644 instead of 0600). Crash-recovery snapshots, account data
+  and caches stay readable by the owner only.
+- Flush saved projects, templates and recipes to disk before they replace the
+  previous file, so a power loss cannot leave an empty or partial file in its
+  place. The crash-recovery snapshot is not synced, to keep the window
+  responsive after loads and renders.
 
 ## [2.0.0]
 
