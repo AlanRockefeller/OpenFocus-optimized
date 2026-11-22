@@ -182,10 +182,11 @@ by its file name.
   by name and summed across both threads, so `session.run` covers both
   inference scales and the totals are thread time, not wall time. In the
   stage tree each tile shows `runner.wait`, the time the render waited for
-  that tile's result. `slowest_tiles` still ranks tiles by the time of their
-  whole scope, which is then that wait plus reading the crops of the tiles
-  started meanwhile and accumulating the result, so two tiles that ran
-  together show as one long and one short entry. A last tile that runs alone
+  that tile's result; reading the crops of the tile started meanwhile is
+  nested under it as `resolve_region`. `slowest_tiles` still ranks tiles by
+  the time of their whole scope, which is then that wait plus accumulating
+  the result, so two tiles that ran together show as one long and one short
+  entry. A last tile that runs alone, and every tile when memory is short,
   is timed in the tree as before.
 - A stack decoded by the loader before the render is not timed; lazily decoded
   sources appear as `source_decode`. Saving is timed by the CLI only.
@@ -370,6 +371,34 @@ A worker budget includes
 completed results waiting for reduction and original-size conversion before
 resizing. Explicit spatial tiles borrow the parent's lease and keep their
 private OpenFocus child execution serial.
+
+StackMFF V3 tiles on the CPU run one at a time on all the render's threads,
+or two at a time on half the threads each when memory is plentiful. A second
+tile is extra concurrency, so the tile planner grants it the way it grants
+other workers: the fixed buffers and both tiles' working sets must fit the
+comfortable RAM share (45 % of available memory, inside the reserve-protected
+ceiling), at the requested tile size, with an even thread count. A machine
+that is short of memory keeps one tile at a time with the plan, the threads
+and the memory use it had before: when the second tile does not fit that
+share, or when the tile had to be reduced to fit memory at all. The tile is
+never reduced to make room for a second one. Crops are read and tiles
+accumulated in grid order on the calling thread either way, so output pixels
+do not depend on which was chosen. A last tile with no partner runs alone on
+all the threads. `threads.tiles_in_flight` in the render profile and
+`second_tile_refused` in the `neural_tile_plan` log event say which was
+chosen and why.
+
+Measured on Linux (i7-10875H, 62 GiB, 2 threads, 1024-pixel tiles with 256
+overlap, ECC, exposure matching, V3 soft, 15 frames of 5216 × 3908 pixels):
+with 40 GiB available, 391.6 → 354.8 s and 7.9 → 11.0 GiB of peak resident
+memory, same pixels (one pair, measured before the scheduler moved to the
+shared ordered pool; a 9-tile render of the same stack at reduced scale took
+82.1–82.7 s in the tiled stage after that move and 83.5–84.4 s before it).
+Under a 12 GiB memory limit that 9-tile render ran one tile at a time and
+matched the code before this change: 101.1 s against 101.3 s, 5.0 GiB peak
+for both, same pixels. For this frame size and 1024-pixel tiles, two tiles
+are granted from about 7 GiB of available memory for 5 frames, 18 GiB for 15
+and 38 GiB for 30.
 
 Repeated source consumption retains each immutable source's exposure gain as
 a scalar; pixels still resolve through the same admitted window and source
