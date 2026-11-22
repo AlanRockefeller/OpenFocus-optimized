@@ -314,6 +314,50 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     return image
 
+def _png_gray_key(data) -> Optional[int]:
+    """Return a grayscale PNG's tRNS key in decoded sample units, or None.
+
+    OpenCV decodes such a PNG to one channel and drops the key, which the
+    scan and the preview honour. Samples below 8 bits are decoded scaled to
+    the full 8-bit range, so the key is scaled the same way.
+    """
+    header = bytes(data[:33])
+    if len(header) < 33 or header[:8] != b'\x89PNG\r\n\x1a\n' or header[12:16] != b'IHDR':
+        return None
+    bits, colour_type = header[24], header[25]
+    if colour_type != 0 or bits not in (1, 2, 4, 8, 16):
+        return None
+    offset = 8
+    while offset + 8 <= len(data):
+        length = int.from_bytes(bytes(data[offset:offset + 4]), 'big')
+        kind = bytes(data[offset + 4:offset + 8])
+        if kind == b'tRNS':
+            if length != 2 or offset + 10 > len(data):
+                return None
+            key = int.from_bytes(bytes(data[offset + 8:offset + 10]), 'big')
+            top = (1 << bits) - 1
+            if key > top:
+                return None
+            return key if bits >= 8 else key * (255 // top)
+        if kind in (b'IDAT', b'IEND'):
+            return None
+        offset += 12 + length
+    return None
+
+
+def _apply_png_gray_key(data, gray: np.ndarray) -> np.ndarray:
+    """Give a keyed grayscale PNG its alpha; unkeyed pixels keep the gray array."""
+    key = _png_gray_key(data)
+    if key is None:
+        return gray
+    hidden = gray == key
+    if not hidden.any():
+        return gray
+    image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGRA)
+    image[:, :, 3] = np.where(hidden, 0, np.iinfo(gray.dtype).max).astype(gray.dtype)
+    return image
+
+
 def _has_transparency(image: np.ndarray) -> bool:
     from core.source_frames import SourceFrame
     if isinstance(image, SourceFrame):
@@ -440,6 +484,8 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
     unchanged = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     if unchanged is not None:
         _validate_depth(path, unchanged.dtype)
+        if ext == '.png' and unchanged.ndim == 2:
+            unchanged = _apply_png_gray_key(data, unchanged)
     if unchanged is not None and _has_transparency(unchanged):
         if allow_transparent_png and ext == '.png':
             return apply_exif_orientation(path, unchanged)

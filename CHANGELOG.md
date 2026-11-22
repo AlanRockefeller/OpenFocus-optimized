@@ -120,6 +120,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   resolution when they are loaded at half scale or less. The incomplete
   colour block on the odd edge tinted the last row or column. Even-sized
   sensors decode as before.
+- Honour the transparency key of a grayscale PNG when it is loaded for a
+  render, as the preview already did. Such frames were fused as opaque.
+  Other PNG layouts and grayscale PNGs without a key decode as before.
 
 ## [2.0.0]
 
