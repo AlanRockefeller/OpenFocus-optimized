@@ -2828,8 +2828,10 @@ class OpenFocus(QMainWindow):
             self.get_or_create_source_pixmap.cache_clear()
         self.transform_manager._invalidate_processing_results(
             clear_output_view=True, preserve_outputs=True)
-        self.transform_manager.reload_image_stack(
-            initial_index=getattr(self, "current_img_index", 0))
+        index = getattr(self, "current_display_index", 0)
+        if remove_index is not None and remove_index < index:
+            index -= 1
+        self.transform_manager.reload_image_stack(initial_index=index)
         self.statusBar().showMessage(
             trans.t('dust_applied').format(n=len(self.raw_images),
                                            t=_time.time() - t0), 5000)
