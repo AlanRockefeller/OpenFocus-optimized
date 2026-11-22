@@ -116,6 +116,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Render only the part of an ROI that lies on the image when the selection
+  starts left of or above it. The origin was clamped but the width and height
+  kept, so the render, the pasted region and the provenance covered pixels
+  outside the selection. A selection entirely outside the image now starts
+  no render and says so in the status bar.
+- Stop a leftover update-restore marker from restoring a later session. An
+  update with an empty workspace no longer leaves a marker, and a marker
+  whose snapshot is gone is removed at startup instead of waiting for the
+  next session's snapshot.
+- Restore the stack folder when undo crosses a stack load, so exports and
+  folder-based names use the restored stack's folder.
+- Keep the displayed frame after applying a flat field instead of jumping
+  to the first frame (or to the frame last restored by undo).
+- Reopen the load-scale dialog at a remembered 29%, 57% or 58% instead of
+  one percent lower.
 
 ## [2.0.0]
 
