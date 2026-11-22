@@ -206,7 +206,7 @@ stderr. `OPENFOCUS_LOG_LEVEL` selects a level before launch.
 |---|---|
 | `render_resources` | Process and available memory at the start and end of a render; CPU topology and what automatic threads resolve to |
 | `execution_plan` | Each plan: workload shape, fixed and per-worker bytes, available RAM, budget, workers, native threads, reasons |
-| `neural_tile_plan` | Requested tile, the tile that fits, its working set and the RAM ceiling |
+| `neural_tile_plan` | Requested tile, the tile that fits, its working set and the RAM ceiling; how many tiles run at once, the comfortable RAM share and why a second tile was refused |
 | `fusion_tiling` | Requested and effective tile size and overlap, tile count, workers |
 | `fusion_tile` | One line per tile: coordinates and elapsed time |
 | `scratch_selected` | The temporary directory bound to the job, bytes required and available |

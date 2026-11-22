@@ -910,7 +910,9 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                           available_ram=snapshot.available_ram, resident_output_bytes=resident_output_bytes,
                           preference=preference,
                           user_threads=user_threads, cpu_capacity=capacity,
-                          native_threads=threads, tiles_in_flight=tiles)
+                          native_threads=threads, tiles_in_flight=tiles,
+                          comfortable_ram=comfortable, per_tile_bytes=per_tile,
+                          second_tile_refused=refused)
                 return block, ExecutionPlan(
                     workers=tiles, native_threads=threads, max_in_flight=tiles,
                     ram_budget=ceiling,
