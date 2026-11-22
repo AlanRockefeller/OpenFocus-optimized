@@ -798,6 +798,28 @@ def neural_tile_bytes(frames, height, width, channels, block, kind,
     return output_bytes + source_bytes + crops + device + native_startup_bytes(kind), device
 
 
+def _tiles_in_flight(wanted, kind, threads, block, requested_block,
+                     fixed, per_tile, comfortable):
+    """Tiles to run at once on spare memory, and why a second one was refused.
+
+    A second tile is extra concurrency, so it is granted like other workers:
+    ``(comfortable - fixed) // per_tile`` must reach two. A machine that is
+    short of memory therefore keeps one tile on all the threads: when the
+    tile was reduced to fit, or one tile already needs the room above the
+    comfortable share. Two is the most that is granted, on the CPU, when the
+    thread budget splits evenly.
+    """
+    if wanted < 2 or kind != 'CPU':
+        return 1, None
+    if threads < 2 or threads % 2:
+        return 1, 'one tile in flight: the thread budget does not split evenly'
+    if block < requested_block:
+        return 1, 'one tile in flight: the tile was reduced to fit memory'
+    if comfortable - fixed < 2 * per_tile:
+        return 1, 'one tile in flight: a second working set does not fit the comfortable share'
+    return 2, None
+
+
 def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                       block_size: int, device_kind: str, estimate_inference,
                       *, directory: bool = False, itemsize: int = 1,
@@ -812,12 +834,11 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
     Already initialized maps are accounted for by the live reading, so debit
     them only from the isolated process envelope when there is one.
 
-    ``in_flight`` is how many tiles the caller can run at once. The plan
-    grants two on the CPU when the thread budget splits evenly and a second
-    tile's working set fits beside the first, at the chosen tile size, within
-    the comfortable RAM share that sizes concurrency elsewhere. The tile is
-    never made smaller to fit a second one, and the threads are divided
-    between the tiles, so the caller's thread budget is unchanged.
+    ``in_flight`` is how many tiles the caller can run at once. With plenty
+    of memory the plan grants two and divides the threads between them, so
+    the caller's thread budget is unchanged; see ``_tiles_in_flight``. The
+    tile is never made smaller to fit a second one. Otherwise the plan is the
+    one a caller that runs one tile at a time gets.
     """
     if min(source_resolution_bytes, source_cache_bytes, resident_output_bytes) < 0:
         raise ValueError('Source workspace and resident output sizes must be nonnegative')
@@ -865,19 +886,21 @@ def plan_neural_tiles(frames: int, height: int, width: int, channels: int,
                 capacity = cpu_capacity(snapshot, preference)
                 threads = max(1, min(capacity, int(user_threads))
                               if user_threads is not None and user_threads > 0 else capacity)
-                tiles = 1
                 reasons = [f'neural tile {block}px, {kind}']
-                if in_flight >= 2 and kind == 'CPU' and threads >= 2 and threads % 2 == 0:
-                    # The output and the source workspace are shared; a second
-                    # tile adds its own crops, staging, inference and reduction.
-                    second = sum(_neural_tile_terms(frames, channels, block, kind,
-                                                    estimate_inference))
-                    if required + second <= comfortable:
-                        tiles, required, threads = 2, required + second, threads // 2
-                        reasons.append('two tiles in flight, '
-                                       f"{threads} thread{'s' if threads > 1 else ''} each")
-                    else:
-                        reasons.append('one tile in flight: a second working set does not fit')
+                # The output and the source workspace are shared; each tile in
+                # flight holds its own crops, staging, inference and reduction.
+                per_tile = sum(_neural_tile_terms(frames, channels, block, kind,
+                                                  estimate_inference))
+                tiles, refused = _tiles_in_flight(
+                    in_flight, kind, threads, block, maximum,
+                    required - per_tile, per_tile, comfortable)
+                if tiles > 1:
+                    required += (tiles - 1) * per_tile
+                    threads //= tiles
+                    reasons.append(f"{tiles} tiles in flight, "
+                                   f"{threads} thread{'s' if threads > 1 else ''} each")
+                elif refused:
+                    reasons.append(refused)
                 # Why a tile is smaller than requested: the first size whose
                 # working set fits the ceiling, halving from the image clamp.
                 log_debug('neural_tile_plan', frames=frames, shape=(height, width, channels),

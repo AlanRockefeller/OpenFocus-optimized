@@ -2003,8 +2003,13 @@ class MultiFocusFusion:
         check_cancel()
         stop = threading.Event()
 
-        def stopped():
+        def runner_cancelled():
+            # A runner working ahead also stops when the scheduler is leaving.
             return stop.is_set() or (should_cancel is not None and should_cancel())
+
+        def read_crops(coords):
+            with profile.stage('resolve_region'):
+                return crop_frames(coords)
 
         def run_tile(crops, cancelled, plan):
             """Fuse one tile's crops; return it with the focus positions it reported."""
@@ -2023,89 +2028,87 @@ class MultiFocusFusion:
             return fused_tile, found[0]
 
         total = len(tile_coords)
+
+        def accumulate(index, produce):
+            """Add tile ``index``, obtained from ``produce``, to the output.
+
+            Tiles are added in grid order on the calling thread: the order of
+            the float sums, and of hard mode's overlap rule, is part of the output.
+            """
+            coords = tile_coords[index]
+            check_cancel()
+            tile_started = time.perf_counter()
+            with profile.tile(index, coords, count):
+                fused_tile, tile_focus = produce()
+                check_cancel()
+                if fused_tile is None:
+                    raise RuntimeError("Fusion returned None for a tile")
+                if fused_tile.ndim == 2:
+                    fused_tile = fused_tile[:, :, np.newaxis]
+                x0, y0, x1, y1 = coords
+                fh, fw = fused_tile.shape[:2]
+                with profile.stage('accumulate'):
+                    weight2d = self._compute_tile_weights(
+                        x0, y0, x1, y1, fw, fh, w, h, overlap)
+                    if focus is not None and (tile_focus is None or tile_focus.shape != (fh, fw)):
+                        raise RuntimeError('Fusion returned no matching focus positions for a tile')
+                    if hard_pick:
+                        # A hard result selects one source frame per pixel. In the
+                        # overlap, take the tile whose interior weight is greatest
+                        # instead of blending two independently selected pixels.
+                        existing = weight[y0:y1, x0:x1, 0]
+                        selected = weight2d > existing
+                        np.copyto(acc[y0:y1, x0:x1], fused_tile,
+                                  where=selected[:, :, None])
+                        if focus is not None:
+                            np.copyto(focus[y0:y1, x0:x1], tile_focus, where=selected, casting='unsafe')
+                        np.maximum(existing, weight2d, out=existing)
+                    else:
+                        acc[y0:y1, x0:x1] += fused_tile.astype(np.float32) * weight2d[:, :, None]
+                        weight[y0:y1, x0:x1, 0] += weight2d
+                        if focus is not None:
+                            np.multiply(tile_focus, weight2d, out=tile_focus)
+                            focus[y0:y1, x0:x1] += tile_focus
+                del fused_tile, weight2d, tile_focus
+            log_debug('fusion_tile', index=index, tiles=total, coords=coords,
+                      elapsed_ms=round((time.perf_counter() - tile_started) * 1000, 3))
+            check_cancel()
+            if progress_callback is not None:
+                progress_callback(index + 1, total)
+            check_cancel()
+
         print(f"{label} tiled fusion: {total} tiles, "
               f"{'one per call' if in_flight == 1 else f'{in_flight} in flight'} "
               f"({tile_plan.device_kind})")
         if progress_callback is not None:
             progress_callback(0, total)
-        pool = None
         if paired:
-            from collections import deque
+            # Plenty of memory: runners work on in_flight threads. The pool
+            # reads each tile's crops here, in order, and starts a tile only
+            # after the tile in_flight places before it has been accumulated,
+            # so at most in_flight tiles hold a working set.
             from contextvars import copy_context
-            pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=in_flight, thread_name_prefix='neural-tile')
-            ahead, submitted = deque(), 0
-        try:
-            for index, coords in enumerate(tile_coords):
-                check_cancel()
-                tile_started = time.perf_counter()
-                with profile.tile(index, coords, count):
-                    if index >= paired:
-                        # Every earlier tile is accumulated: no runner is working.
-                        with profile.stage('resolve_region'):
-                            crops = crop_frames(coords)
-                        fused_tile, tile_focus = run_tile(crops, should_cancel, alone_plan)
-                    else:
-                        # Crops are read here, in order. A tile's runner starts
-                        # once the tile in_flight places before it has been
-                        # accumulated, so at most in_flight tiles hold a working set.
-                        while submitted < min(paired, index + in_flight):
-                            with profile.stage('resolve_region'):
-                                crops = crop_frames(tile_coords[submitted])
-                            # The job's scratch directory and log context
-                            # are context variables: carry them to the worker.
-                            ahead.append(pool.submit(copy_context().run, run_tile, crops,
-                                                     stopped, tile_plan))
-                            submitted += 1
-                        crops = None
-                        result = ahead.popleft()
-                        with profile.stage('runner.wait'):
-                            while not result.done():
-                                check_cancel()
-                                concurrent.futures.wait((result,), timeout=0.1)
-                        fused_tile, tile_focus = result.result()
-                        del result
-                    check_cancel()
-                    if fused_tile is None:
-                        raise RuntimeError("Fusion returned None for a tile")
-                    if fused_tile.ndim == 2:
-                        fused_tile = fused_tile[:, :, np.newaxis]
-                    x0, y0, x1, y1 = coords
-                    fh, fw = fused_tile.shape[:2]
-                    with profile.stage('accumulate'):
-                        weight2d = self._compute_tile_weights(
-                            x0, y0, x1, y1, fw, fh, w, h, overlap)
-                        if focus is not None and (tile_focus is None or tile_focus.shape != (fh, fw)):
-                            raise RuntimeError('Fusion returned no matching focus positions for a tile')
-                        if hard_pick:
-                            # A hard result selects one source frame per pixel. In the
-                            # overlap, take the tile whose interior weight is greatest
-                            # instead of blending two independently selected pixels.
-                            existing = weight[y0:y1, x0:x1, 0]
-                            selected = weight2d > existing
-                            np.copyto(acc[y0:y1, x0:x1], fused_tile,
-                                      where=selected[:, :, None])
-                            if focus is not None:
-                                np.copyto(focus[y0:y1, x0:x1], tile_focus, where=selected, casting='unsafe')
-                            np.maximum(existing, weight2d, out=existing)
-                        else:
-                            acc[y0:y1, x0:x1] += fused_tile.astype(np.float32) * weight2d[:, :, None]
-                            weight[y0:y1, x0:x1, 0] += weight2d
-                            if focus is not None:
-                                np.multiply(tile_focus, weight2d, out=tile_focus)
-                                focus[y0:y1, x0:x1] += tile_focus
-                    del fused_tile, crops, weight2d, tile_focus
-                log_debug('fusion_tile', index=index, tiles=total, coords=coords,
-                          elapsed_ms=round((time.perf_counter() - tile_started) * 1000, 3))
-                check_cancel()
-                if progress_callback is not None:
-                    progress_callback(index + 1, total)
-                check_cancel()
-        finally:
-            if pool is not None:
-                # Stop the tile running ahead, and return with no thread left.
-                stop.set()
-                pool.shutdown(wait=True, cancel_futures=True)
+            from core.registration import _bounded_registration_map
+
+            # The job's log scope is a context variable: carry it to the worker.
+            work = ((copy_context(), read_crops(coords)) for coords in tile_coords[:paired])
+            with _bounded_registration_map(
+                    lambda item: item[0].run(run_tile, item[1], runner_cancelled, tile_plan),
+                    work, in_flight, should_cancel, max_in_flight=in_flight) as ahead:
+                def next_result():
+                    with profile.stage('runner.wait'):
+                        return next(ahead)
+                try:
+                    for index in range(paired):
+                        accumulate(index, next_result)
+                finally:
+                    # Leaving the pool waits for its running calls: release them first.
+                    stop.set()
+        # One tile at a time on the whole thread budget: every tile when memory
+        # is short, otherwise a last tile that has nothing to run beside it.
+        for index in range(paired, total):
+            accumulate(index, lambda: run_tile(read_crops(tile_coords[index]),
+                                               should_cancel, alone_plan))
 
         with profile.stage('normalize'):
             fused = create_frame(acc.shape, out_dtype)

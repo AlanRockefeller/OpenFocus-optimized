@@ -33,9 +33,13 @@ def _force(monkeypatch, tiles):
     return requested
 
 
-def _no_tile_threads():
-    return not [thread for thread in threading.enumerate()
-                if thread.name.startswith('neural-tile')]
+@pytest.fixture(autouse=True)
+def no_thread_left_running():
+    """Every test here must return with the tile workers joined."""
+    before = set(threading.enumerate())
+    yield
+    assert not [thread for thread in threading.enumerate()
+                if thread not in before and thread.is_alive()]
 
 
 # ---- pixels ---------------------------------------------------------------
@@ -117,7 +121,6 @@ def test_two_tiles_in_flight_give_the_pixels_of_one(monkeypatch, mode, focus, dt
         assert positions.dtype == expected.dtype and scale == expected_scale
         np.testing.assert_array_equal(positions, expected)
     assert two_progress == one_progress == [(done, tiles) for done in range(tiles + 1)]
-    assert _no_tile_threads()
 
 
 # ---- scheduling, with a stand-in runner -----------------------------------
@@ -175,7 +178,6 @@ def test_two_runners_overlap_and_a_third_waits_for_the_first_result(monkeypatch)
     # Tile k starts only after tile k - 2 was accumulated and reported.
     assert all(done >= index - 1 for index, done in started.items())
     assert progress == [(done, 6) for done in range(7)]
-    assert _no_tile_threads()
 
 
 def test_only_v3_asks_for_a_second_tile(monkeypatch):
@@ -208,7 +210,6 @@ def test_a_last_tile_without_a_partner_runs_alone_on_the_whole_budget(monkeypatc
     # It started only after both tiles before it were accumulated and reported.
     assert seen[2][3] == 2
     assert progress == [0, 1, 2, 3]
-    assert _no_tile_threads()
 
 
 def test_a_lone_tile_runs_on_the_caller_with_the_whole_budget(monkeypatch):
@@ -223,24 +224,27 @@ def test_a_lone_tile_runs_on_the_caller_with_the_whole_budget(monkeypatch):
     assert seen == [(threading.get_ident(), 1, 2)]
 
 
-def test_tile_workers_keep_the_callers_scratch_directory(monkeypatch, tmp_path):
-    """The job's scratch decision is a context variable; a new thread starts without it."""
+def test_tile_workers_keep_the_callers_scratch_directory_and_log_scope(monkeypatch, tmp_path):
+    """Both are context variables; a new thread starts without them."""
     from core import frame_storage as storage
+    from utils import logging_setup
 
     _force(monkeypatch, 2)
     seen = []
 
     def runner(_fusion, crops, _resize, **_kwargs):
         seen.append((threading.get_ident(), storage.capture_scratch(),
-                     storage.storage_directory()))
+                     storage.storage_directory(), logging_setup._context.get()))
         return crops[1]
 
-    with storage.scratch_directory(separate=True, explicit_directory=str(tmp_path)) as scratch:
+    with storage.scratch_directory(separate=True, explicit_directory=str(tmp_path)) as scratch, \
+            logging_setup.log_operation('tiles-in-flight-test') as operation:
         _tiled(runner, monkeypatch)
         expected = storage.storage_directory()
     assert expected == str(tmp_path)
     assert len(seen) == 6 and threading.get_ident() not in {ident for ident, *_ in seen}
-    assert all(state is scratch and directory == expected for _ident, state, directory in seen)
+    assert all(state is scratch and directory == expected and scope is operation
+               for _ident, state, directory, scope in seen)
 
 
 def test_cancelling_stops_both_tiles_and_leaves_no_thread(monkeypatch):
@@ -270,38 +274,20 @@ def test_cancelling_stops_both_tiles_and_leaves_no_thread(monkeypatch):
     trigger.join(timeout=30)
     assert len(set(stopped)) == 2 and threading.get_ident() not in stopped
     assert progress == [0]
-    assert _no_tile_threads()
 
 
-def test_a_failing_tile_surfaces_after_the_tiles_before_it(monkeypatch):
-    _force(monkeypatch, 2)
-    progress = []
-
-    def runner(_fusion, crops, _resize, **_kwargs):
-        if _tile_index(crops) == 1:
-            raise ValueError('tile 1 failed')
-        time.sleep(0.05)
-        return crops[1]
-
-    with pytest.raises(ValueError, match='tile 1 failed'):
-        _tiled(runner, monkeypatch,
-               progress_callback=lambda done, total: progress.append(done))
-    # Tile 0 was accumulated and reported first, as it is one tile at a time.
-    assert progress == [0, 1]
-    assert _no_tile_threads()
-
-
-def test_a_failing_tile_stops_the_tile_running_beside_it(monkeypatch):
-    """Nothing cancels the render here: only the scheduler can release tile 1."""
+@pytest.mark.parametrize('failing', [0, 1])
+def test_a_failing_tile_surfaces_at_once_and_releases_the_tile_beside_it(monkeypatch, failing):
+    """Nothing cancels the render here: only the scheduler can release the other tile."""
     _force(monkeypatch, 2)
     beside = threading.Event()
-    released, expired = [], []
+    released, expired, progress = [], [], []
 
     def runner(_fusion, crops, _resize, *, should_cancel, **_kwargs):
-        if _tile_index(crops) == 0:
-            # Fail only once tile 1 is inside its runner.
-            assert beside.wait(20), 'tile 1 never started'
-            raise ValueError('tile 0 failed')
+        if _tile_index(crops) == failing:
+            # Fail only once the other tile is inside its runner.
+            assert beside.wait(20), 'the other tile never started'
+            raise ValueError('a tile failed')
         beside.set()
         deadline = time.monotonic() + 20
         while not should_cancel():
@@ -313,11 +299,13 @@ def test_a_failing_tile_stops_the_tile_running_beside_it(monkeypatch):
         return crops[1]
 
     started = time.monotonic()
-    with pytest.raises(ValueError, match='tile 0 failed'):
-        _tiled(runner, monkeypatch, should_cancel=lambda: False)
+    with pytest.raises(ValueError, match='a tile failed'):
+        _tiled(runner, monkeypatch, should_cancel=lambda: False,
+               progress_callback=lambda done, total: progress.append(done))
     assert released == [True] and not expired
     assert time.monotonic() - started < 10
-    assert _no_tile_threads()
+    # The failure did not wait for the tile beside it, so nothing was accumulated.
+    assert progress == [0]
 
 
 # ---- shared inference state -----------------------------------------------
@@ -411,6 +399,27 @@ def test_a_second_tile_must_fit_the_comfortable_share_at_the_same_tile_size():
     available = int(two / policy.BUDGET_RATIO) + 1
     assert policy.ram_budget(_snapshot(available)) >= two
     assert _plan(available, user_threads=2, in_flight=2)[1].max_in_flight == 2
+
+
+def test_a_tile_reduced_to_fit_memory_runs_one_at_a_time():
+    """Short of memory for the requested tile: two of the smaller tile are not spare memory."""
+    from fusion_methods.neural_runtime import estimate_inference_bytes
+
+    available = int(8.5 * GIB)
+    ceiling, comfortable = policy.ram_ceiling(_snapshot(available)), policy.ram_budget(_snapshot(available))
+    shape = (15, 5216, 3908, 3)
+    requested, _ = policy.neural_tile_bytes(*shape, 1024, 'CPU', estimate_inference_bytes)
+    reduced, _ = policy.neural_tile_bytes(*shape, 512, 'CPU', estimate_inference_bytes)
+    second = sum(policy._neural_tile_terms(15, 3, 512, 'CPU', estimate_inference_bytes))
+    assert reduced <= ceiling < requested
+    assert reduced + second <= comfortable, 'two reduced tiles would fit the comfortable share'
+
+    block, plan = _plan(available, user_threads=2, in_flight=2)
+    assert block == 512
+    assert (plan.workers, plan.max_in_flight, plan.native_threads) == (1, 1, 2)
+    assert plan.required_ram == reduced
+    assert plan.reasons[-1] == 'one tile in flight: the tile was reduced to fit memory'
+    assert _plan(available, user_threads=2)[1].required_ram == reduced
 
 
 def test_a_child_job_grants_a_second_tile_from_its_comfortable_envelope():
