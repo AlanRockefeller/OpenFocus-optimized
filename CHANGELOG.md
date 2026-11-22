@@ -116,6 +116,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Decode camera-linear RAW files with an odd sensor width or height at full
+  resolution when they are loaded at half scale or less. The incomplete
+  colour block on the odd edge tinted the last row or column. Even-sized
+  sensors decode as before.
 
 ## [2.0.0]
 
