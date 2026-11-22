@@ -182,8 +182,11 @@ by its file name.
   by name and summed across both threads, so `session.run` covers both
   inference scales and the totals are thread time, not wall time. In the
   stage tree each tile shows `runner.wait`, the time the render waited for
-  that tile's result, and `slowest_tiles` ranks tiles by that wait. A last
-  tile that runs alone is timed in the tree as before.
+  that tile's result. `slowest_tiles` still ranks tiles by the time of their
+  whole scope, which is then that wait plus reading the crops of the tiles
+  started meanwhile and accumulating the result, so two tiles that ran
+  together show as one long and one short entry. A last tile that runs alone
+  is timed in the tree as before.
 - A stack decoded by the loader before the render is not timed; lazily decoded
   sources appear as `source_decode`. Saving is timed by the CLI only.
 - Peak memory is the process high-water mark (`getrusage` /

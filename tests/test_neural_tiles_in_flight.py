@@ -291,6 +291,35 @@ def test_a_failing_tile_surfaces_after_the_tiles_before_it(monkeypatch):
     assert _no_tile_threads()
 
 
+def test_a_failing_tile_stops_the_tile_running_beside_it(monkeypatch):
+    """Nothing cancels the render here: only the scheduler can release tile 1."""
+    _force(monkeypatch, 2)
+    beside = threading.Event()
+    released, expired = [], []
+
+    def runner(_fusion, crops, _resize, *, should_cancel, **_kwargs):
+        if _tile_index(crops) == 0:
+            # Fail only once tile 1 is inside its runner.
+            assert beside.wait(20), 'tile 1 never started'
+            raise ValueError('tile 0 failed')
+        beside.set()
+        deadline = time.monotonic() + 20
+        while not should_cancel():
+            if time.monotonic() > deadline:
+                expired.append(True)
+                break
+            time.sleep(0.002)
+        released.append(should_cancel())
+        return crops[1]
+
+    started = time.monotonic()
+    with pytest.raises(ValueError, match='tile 0 failed'):
+        _tiled(runner, monkeypatch, should_cancel=lambda: False)
+    assert released == [True] and not expired
+    assert time.monotonic() - started < 10
+    assert _no_tile_threads()
+
+
 # ---- shared inference state -----------------------------------------------
 
 @needs_runtime
