@@ -656,7 +656,8 @@ def test_spawned_tiled_fusion_publishes_frozen_tooltip_details(qapp, tmp_path, s
     assert not errors and len(results) == 1
     assert worker.performance_report is None
     details = worker.fusion_details
-    assert (details.input_size, details.tile_grid) == ((64, 48), (48, 24, 6))
+    # Tile 48 with overlap 24: origins 0, 16 by 0, each fused once.
+    assert (details.input_size, details.tile_grid) == ((64, 48), (48, 24, 2))
     assert dict(details.parameters) == {'kernel_size': 9}
 
     frames, image, *_ = results[0]
@@ -670,7 +671,7 @@ def test_spawned_tiled_fusion_publishes_frozen_tooltip_details(qapp, tmp_path, s
     manager._refresh_output_tooltip(0)
     tooltip = panel.output_list.item(0).toolTip()
     assert 'spatial tiles (64 × 48 px input)' in tooltip
-    assert 'Block: 48 × 48 px · Grid overlap setting: 24 px · Tile passes: 6' in tooltip
+    assert 'Block: 48 × 48 px · Grid overlap setting: 24 px · Tile passes: 2' in tooltip
     assert f'{trans.t("label_kernel_guided").rstrip(":： ")} 9' in tooltip
     assert trans.t('retouch_unexported') in tooltip
 

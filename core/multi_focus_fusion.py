@@ -216,7 +216,26 @@ def _tile_axis_starts(length, block, overlap, grid=1):
     if grid > 1:
         step = max(grid, (step // grid) * grid)
     last = ((length - block + grid - 1) // grid) * grid
-    return [min(start, last) for start in range(0, length, step)]
+    # Clamping to the last origin can repeat it; a repeated origin would fuse
+    # that row or column of tiles twice and count it twice in the blend.
+    starts = []
+    for start in range(0, length, step):
+        start = min(start, last)
+        if not starts or start != starts[-1]:
+            starts.append(start)
+    return starts
+
+
+def _effective_tile_overlap(overlap, block):
+    """Overlap the tiler applies between tiles of ``block`` pixels.
+
+    The overlap is at most half a tile. One pixel is applied as none: adjacent
+    tiles would share a single row or column where both feather ramps are
+    zero, leaving those pixels without weight, and a one-pixel band has
+    nothing to blend.
+    """
+    overlap = max(0, min(int(overlap), int(block) // 2))
+    return 0 if overlap == 1 else overlap
 
 
 # Narrowest blend band a reduced neural tile is given. On a 52-frame 20 MP
@@ -243,17 +262,27 @@ def _planned_tile_overlap(overlap, admitted_block, planned_block):
     return max(scaled, min(overlap, _PLANNED_TILE_OVERLAP_FLOOR))
 
 
-def _ai_effective_tiling(n_frames, block_size, h, w, overlap, batch_pref):
+def _ai_effective_tiling(n_frames, block_size, h, w, overlap, batch_pref,
+                         min_tile_edge=1):
     """Build a spatial grid for the admitted tile size.
 
     Batch one is the validated execution path on all devices. Larger GPU
     batches require their own numerical and device-memory qualification.
+    A runner that cannot fuse an edge tile thinner than ``min_tile_edge``
+    gets a full-size last tile ending at the image edge instead.
     """
     from fusion_methods.neural_common import ATTENTION_PAD_ALIGN
     block = max(1, min(int(block_size), int(h), int(w)))
-    overlap = max(0, min(int(overlap), block // 2))
-    ys = sorted(set(_tile_axis_starts(h, block, overlap, ATTENTION_PAD_ALIGN)))
-    xs = sorted(set(_tile_axis_starts(w, block, overlap, ATTENTION_PAD_ALIGN)))
+    overlap = _effective_tile_overlap(overlap, block)
+
+    def starts(length):
+        values = sorted(set(_tile_axis_starts(length, block, overlap, ATTENTION_PAD_ALIGN)))
+        if length - values[-1] < min_tile_edge:
+            values = sorted(set(values[:-1] + [length - block]))
+        return values
+
+    ys = starts(int(h))
+    xs = starts(int(w))
     coords = [(x, y, min(x + block, w), min(y + block, h)) for y in ys for x in xs]
     return block, 1, coords
 
@@ -1543,7 +1572,7 @@ class MultiFocusFusion:
         block_size = max(1, min(int(block_size), h, w))
         # overlap 超过半瓦会让 step 逼近 1（每像素一个瓦片，等于无限循环），
         # 用户把瓦片设小而重叠保持默认 256 时就会触发
-        overlap = max(0, min(int(overlap), block_size // 2))
+        overlap = _effective_tile_overlap(overlap, block_size)
         num_images = len(imgs) if imgs is not None else len(files)
 
         descriptor = get_fusion(algorithm)
@@ -1863,7 +1892,8 @@ class MultiFocusFusion:
                            default_weights, mode_normalizer=None,
                            should_cancel=None, progress_callback=None,
                            out_dtype=np.uint8, exposure_gains=None,
-                           thread_count=None, focus_callback=None, **kwargs):
+                           thread_count=None, focus_callback=None,
+                           min_tile_edge=1, **kwargs):
         """Admit and fuse one complete-stack tile at a time."""
         from core.image_loader import admit_image_decode, decode_image
         from core.registration import RegistrationCancelled
@@ -1928,8 +1958,8 @@ class MultiFocusFusion:
         planned_block = block_size
         overlap = _planned_tile_overlap(overlap, clamped_block, planned_block)
         block_size, _, tile_coords = _ai_effective_tiling(
-            count, block_size, h, w, overlap, self.ai_batch_size)
-        overlap = max(0, min(int(overlap), block_size // 2))
+            count, block_size, h, w, overlap, self.ai_batch_size, min_tile_edge)
+        overlap = _effective_tile_overlap(overlap, block_size)
         self._record_tile_grid(block_size, overlap, len(tile_coords))
         log_debug('fusion_tiling', method=self.algorithm, frames=count, shape=(h, w, channels),
                   block_requested=self.tile_block_size, block_after_image_clamp=clamped_block,
@@ -2081,7 +2111,9 @@ class MultiFocusFusion:
             imgs, img_dir, h, w, channels, block_size, overlap,
             label="StackMFF",
             default_weights=self.descriptor.weights or 'weights/stackmff_final.onnx',
-            **kwargs)
+            # V1 fuses tiles unpadded, and its three-quarter inference scale
+            # needs at least two pixels on each side.
+            min_tile_edge=2, **kwargs)
 
     def set_device(self, use_gpu: bool):
         """

@@ -77,6 +77,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing focus decisions for low-contrast and mixed-bit-depth inputs.
 
 ### Fixed
+- Fuse each tile of a CPU tiled render once. When the image size made the
+  last tile origin repeat (for example 1600, 2400 or 4000 pixels at the
+  default 1024-pixel tile and 256-pixel overlap), that row or column of
+  tiles was fused twice and counted twice in the blend. Those renders now
+  fuse fewer tiles, and pixels in the overlap band can differ by about one
+  level. Neural renders and other image sizes are unchanged.
+- Apply a tile overlap of 1 pixel as no overlap. Adjacent tiles shared one
+  row or column where both feather weights were zero, which rendered black
+  seams on the CPU and neural tiled paths and shifted the depth range of
+  tiled StackMFF V2. Overlap 0 and every overlap of 2 or more are unchanged.
+- Finish tiled StackMFF V1 renders whose width or height is one pixel past
+  a multiple of a 64-pixel tile at overlap 0. The last tile was one pixel
+  wide and the second inference scale failed after all other tiles had run;
+  it now ends at the image edge with the full tile size.
 - Keep checking the original file when a crop of a prepared frame is prepared
   again. A changed source could otherwise go unnoticed and its old pixels be
   used.
