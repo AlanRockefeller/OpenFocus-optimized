@@ -1034,6 +1034,7 @@ class OpenFocus(QMainWindow):
             "linear_dng_metadata": getattr(self, "linear_dng_metadata", None),
             "stack_baseline": getattr(getattr(self, "source_manager", None), "_stack_baseline", None),
             "filenames": list(self.image_filenames),
+            "folder": getattr(self, "current_folder_path", ""),
             "source_paths": list(getattr(self, "image_source_paths", [])),
             "source_exifs": list(getattr(self, "image_source_exifs", [])),
             "icc_profiles": list(getattr(self, "image_icc_profiles", [])),
@@ -1240,6 +1241,8 @@ class OpenFocus(QMainWindow):
         self.linear_dng_metadata = state.get("linear_dng_metadata")
         self.image_filenames = list(state["filenames"])
         self.image_source_paths = list(state["source_paths"])
+        if "folder" in state:
+            self.current_folder_path = state["folder"]
         if "source_exifs" in state:
             self.image_source_exifs = list(state["source_exifs"])
         self.image_icc_profiles = list(state.get("icc_profiles", []))
