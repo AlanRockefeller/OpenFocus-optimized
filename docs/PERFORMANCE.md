@@ -147,7 +147,8 @@ JSON diff.
   `mean_ms` and `max_ms`.
 - `threads`: `requested` (0 means automatic) and every value later derived from
   it: `plan_neural_tiles`, `plan_attention_inference`, `session_intra_op` (the
-  values given to ONNX Runtime) and `tile_workers` (classical tiles).
+  values given to ONNX Runtime), `tiles_in_flight` (neural tiles run at once;
+  each then gets half the threads) and `tile_workers` (classical tiles).
   `runtime.automatic_threads` shows what 0 resolves to per resource mode.
 - `tiling`: `block_requested` → `block_after_image_clamp` →
   `block_after_memory_plan` → `block_effective`; `overlap_requested` and
@@ -175,6 +176,14 @@ by its file name.
 - Stages are timed at meaningful boundaries, not inside per-frame or per-row
   loops. Neural tiles are timed individually; classical tiles run in a pool and
   appear under `concurrent`.
+- When two neural tiles run at once (`threads.tiles_in_flight` is 2), their
+  runners work on two other threads. Their stages (`runner`, `logits.full`,
+  `logits.reduced`, `session.run`, ...) then appear under `concurrent`, keyed
+  by name and summed across both threads, so `session.run` covers both
+  inference scales and the totals are thread time, not wall time. In the
+  stage tree each tile shows `runner.wait`, the time the render waited for
+  that tile's result, and `slowest_tiles` ranks tiles by that wait. A last
+  tile that runs alone is timed in the tree as before.
 - A stack decoded by the loader before the render is not timed; lazily decoded
   sources appear as `source_decode`. Saving is timed by the CLI only.
 - Peak memory is the process high-water mark (`getrusage` /

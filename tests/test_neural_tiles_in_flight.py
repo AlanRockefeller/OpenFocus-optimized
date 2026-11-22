@@ -223,6 +223,26 @@ def test_a_lone_tile_runs_on_the_caller_with_the_whole_budget(monkeypatch):
     assert seen == [(threading.get_ident(), 1, 2)]
 
 
+def test_tile_workers_keep_the_callers_scratch_directory(monkeypatch, tmp_path):
+    """The job's scratch decision is a context variable; a new thread starts without it."""
+    from core import frame_storage as storage
+
+    _force(monkeypatch, 2)
+    seen = []
+
+    def runner(_fusion, crops, _resize, **_kwargs):
+        seen.append((threading.get_ident(), storage.capture_scratch(),
+                     storage.storage_directory()))
+        return crops[1]
+
+    with storage.scratch_directory(separate=True, explicit_directory=str(tmp_path)) as scratch:
+        _tiled(runner, monkeypatch)
+        expected = storage.storage_directory()
+    assert expected == str(tmp_path)
+    assert len(seen) == 6 and threading.get_ident() not in {ident for ident, *_ in seen}
+    assert all(state is scratch and directory == expected for _ident, state, directory in seen)
+
+
 def test_cancelling_stops_both_tiles_and_leaves_no_thread(monkeypatch):
     _force(monkeypatch, 2)
     cancelled = threading.Event()
