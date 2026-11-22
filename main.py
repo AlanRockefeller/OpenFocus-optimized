@@ -4995,7 +4995,8 @@ if __name__ == "__main__":
             # Nothing to restore: do not consume the user's launch arguments
             # and do not claim a restore that did not happen.
             _log.warning("update restore requested but no valid snapshot exists")
-            # Preserve the marker so an unsuccessful restore remains retryable.
+            # The snapshot file still exists (a marker without one was
+            # already dropped): keep the marker so the restore is retryable.
             pass
 
     # Report how the previous in-place update ended (a failed swap used to
