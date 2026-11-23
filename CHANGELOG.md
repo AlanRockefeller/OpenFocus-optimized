@@ -116,6 +116,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Give each aligned frame a batch saves its own EXIF. Every frame used to
+  carry the first frame's metadata.
 - Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
   single-stack output already does.
 

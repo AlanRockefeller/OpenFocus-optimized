@@ -1452,8 +1452,13 @@ class BatchWorker(QThread):
         return max(64, int(round(widest * int(ratio) / 100.0)))
 
     def _save_image(self, path: str, image, extension: str, scale_cfg=None,
-                    watermark_cfg=None) -> bool:
-        """Commit a file and record only real, successful artifacts."""
+                    watermark_cfg=None, exif=None) -> bool:
+        """Commit a file and record only real, successful artifacts.
+
+        `exif` defaults to the stack's first frame, which the fused result
+        carries; an aligned frame passes its own.
+        """
+        exif = self._source_exif if exif is None else exif
         if self.is_cancelled:
             raise RegistrationCancelled()
         params = []
@@ -1481,7 +1486,7 @@ class BatchWorker(QThread):
                         raise RegistrationCancelled() from exc
                 path = publish_unique(
                     path,
-                    lambda staging: imwrite_auto(staging, image, params, exif=self._source_exif,
+                    lambda staging: imwrite_auto(staging, image, params, exif=exif,
                                                  icc_profile=self._source_icc_profile),
                     should_cancel=lambda: self.is_cancelled)
                 ok = True
@@ -1670,6 +1675,7 @@ class BatchWorker(QThread):
             try:
                 original_paths = [item[0] for item in stack_images_with_times]
                 export_names = [item[3] if len(item) > 3 else item[0] for item in stack_images_with_times]
+                frame_exifs = [item[4] if len(item) > 4 else None for item in stack_images_with_times]
                 if self.is_cancelled:
                     raise RegistrationCancelled()
                 if not images:
@@ -1850,9 +1856,13 @@ class BatchWorker(QThread):
                     self.aligned_stacks.append(artifact)
                     for index, image in enumerate(aligned_for_export):
                         filename = frame_export_name(export_names[index], index, output_format)
+                        exif = frame_exifs[index]
+                        if exif is None:
+                            from core.image_loader import _read_exif_bytes
+                            exif = _read_exif_bytes(original_paths[index]) if original_paths[index] else b''
                         ok = self._save_image(os.path.join(directory, filename), image,
                                               output_format, scale_cfg=stack_cfg,
-                                              watermark_cfg=stack_wm)
+                                              watermark_cfg=stack_wm, exif=exif)
                         saved.append(ok)
                         if ok:
                             artifact['files'].append(self._task_artifacts[-1])
@@ -1900,8 +1910,11 @@ class BatchWorker(QThread):
         if len(source_paths) != len(images):
             source_paths = ([None] * len(images) if self.processing_settings.get('defect_mask_path')
                             else [os.path.join(folder_path, name) for name in filenames])
-        entries = [(source_path, image, None, name)
-                   for name, image, source_path in zip(filenames, images, source_paths)]
+        exifs = tuple(getattr(self.image_loader, 'source_exifs', ()) or ())
+        if len(exifs) != len(images):
+            exifs = (None,) * len(images)
+        entries = [(source_path, image, None, name, exif)
+                   for name, image, source_path, exif in zip(filenames, images, source_paths, exifs)]
         self._process_single_stack(entries, self._get_output_path_for_single_folder(folder_path),
                                    os.path.basename(os.path.normpath(folder_path)), 0)
 

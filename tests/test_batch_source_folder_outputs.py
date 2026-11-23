@@ -30,6 +30,44 @@ def read_make(path):
         return image.getexif().get(271)
 
 
+def run_batch(folders, output_type, output_path=None, *, method='guided_filter',
+              save_aligned=False, image_format='png', **options):
+    settings = {'format': image_format, 'fusion_method': method, 'reg_methods': [],
+                'save_aligned': save_aligned}
+    settings.update(options.pop('settings', {}))
+    worker = BatchWorker([str(path) for path in folders], output_type, output_path, settings,
+                         use_gpu=False, thread_count=1, **options)
+    result = {}
+    worker.finished.connect(result.update)
+    worker.error.connect(lambda message: result.update(error=message))
+    worker.run()
+    return worker, result
+
+
+def test_batch_aligned_frames_keep_their_own_exif(qapp, tmp_path):
+    source = make_stack(tmp_path / 'stack')
+    _worker, result = run_batch([source], 'custom', str(tmp_path / 'out'),
+                                save_aligned=True, image_format='jpg')
+    assert result.get('counts', {}).get('success') == 1, result
+    assert read_make(tmp_path / 'out' / 'stack.jpg') == 'CameraOne'
+    [aligned] = result['aligned_stacks']
+    assert [read_make(path) for path in aligned['files']] == ['CameraOne', 'CameraTwo']
+
+
+def test_split_batch_aligned_frames_keep_their_own_exif(qapp, tmp_path):
+    source = make_stack(tmp_path / 'stack')
+    loader = ImageStackLoader()
+    ok, _message, entries, _names = loader.load_images_with_timestamps(str(source))
+    assert ok
+    _worker, result = run_batch([], 'custom', str(tmp_path / 'out'), method='none',
+                                image_format='jpg', import_mode='single_folder',
+                                single_folder_images_with_times=entries,
+                                settings={'frozen_stacks': loader.split_by_count(entries, 5)})
+    assert result.get('counts', {}).get('success') == 1, result
+    [aligned] = result['aligned_stacks']
+    assert [read_make(path) for path in aligned['files']] == ['CameraOne', 'CameraTwo']
+
+
 @pytest.mark.parametrize('batch', [False, True])
 def test_cli_output_keeps_the_first_frame_exif(tmp_path, monkeypatch, batch):
     # A fresh CLI process starts without the single-stack source EXIF; an
