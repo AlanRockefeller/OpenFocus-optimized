@@ -91,6 +91,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a multiple of a 64-pixel tile at overlap 0. The last tile was one pixel
   wide and the second inference scale failed after all other tiles had run;
   it now ends at the image edge with the full tile size.
+- Show the current Japanese and Spanish translation of the comparison
+  "Stopping…" status. Their locale tables listed the key twice, and the older
+  wording won. Other keys listed twice in one locale table were removed as
+  well, and a test now rejects a key listed twice.
 - Keep checking the original file when a crop of a prepared frame is prepared
   again. A changed source could otherwise go unnoticed and its old pixels be
   used.
