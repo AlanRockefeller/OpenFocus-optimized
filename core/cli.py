@@ -589,7 +589,7 @@ def _load_native_stack(paths, args):
     return images, metadata
 
 
-def _save_native(path, fused, metadata, scale_cfg=None):
+def _save_native(path, fused, metadata, scale_cfg=None, exif=None):
     from utils.linear_dng import develop_linear, write_linear_dng
 
     if os.path.splitext(path)[1].lower() == ".dng":
@@ -603,7 +603,7 @@ def _save_native(path, fused, metadata, scale_cfg=None):
                   "transforms and baseline exposure are not applied", file=sys.stderr)
         from utils.image_utils import srgb_icc_profile
         _save(path, develop_linear(fused, metadata), scale_cfg,
-              icc_profile=srgb_icc_profile())
+              icc_profile=srgb_icc_profile(), exif=exif)
 
 
 def _suggest_duplicates(args):
@@ -1283,12 +1283,13 @@ def _auto_background(args, fused):
     return result
 
 
-def _save_background_extras(args, fused_out, stacked, result, scale_cfg, icc_profile) -> List[str]:
+def _save_background_extras(args, fused_out, stacked, result, scale_cfg, icc_profile,
+                            exif=None) -> List[str]:
     """Write --save-stacked / --missing-data-map files; returns their paths."""
     written = []
     if getattr(args, "save_stacked", None):
         path = _extra_out_path(args.save_stacked, fused_out, "_stacked")
-        _save(path, stacked, scale_cfg, icc_profile)
+        _save(path, stacked, scale_cfg, icc_profile, exif=exif)
         _say(f"Saved stacked result: {path}")
         written.append(path)
     if getattr(args, "missing_data_map", None):
@@ -1334,7 +1335,8 @@ def _resolve_scale_cfg(args, paths):
     return {"px_um": px_um, "position": "bottom-right", "color": "auto"}
 
 
-def _save(path: str, fused, scale_cfg=None, icc_profile=b"") -> None:
+def _save(path: str, fused, scale_cfg=None, icc_profile=b"", exif=None) -> None:
+    """Write a result; `exif` None embeds the single-stack source EXIF."""
     from utils.image_utils import imwrite_auto
     if fused.ndim == 3 and fused.shape[2] == 4:
         if os.path.splitext(path)[1].lower() != '.png':
@@ -1346,7 +1348,7 @@ def _save(path: str, fused, scale_cfg=None, icc_profile=b"") -> None:
     if scale_cfg:
         from utils import scalebar
         fused = scalebar.burn(fused, scale_cfg)
-    if not imwrite_auto(path, fused, icc_profile=icc_profile):
+    if not imwrite_auto(path, fused, exif=exif, icc_profile=icc_profile):
         raise RuntimeError(f"Failed to write output: {path}")
 
 
@@ -1515,8 +1517,12 @@ def _run_batch(args, _emit_json=None, _allow_summary=None) -> int:
                 fused = _fuse_stack(images, folder_args)
                 images = None
             background = stacked = None
+            # Each folder's result carries its own first frame's EXIF.
+            from core.image_loader import _read_exif_bytes
+            source_exif = _read_exif_bytes(paths[0]) if paths else b""
             if args.native_raw:
-                _save_native(out_path, fused, metadata, _resolve_scale_cfg(folder_args, paths))
+                _save_native(out_path, fused, metadata, _resolve_scale_cfg(folder_args, paths),
+                             exif=source_exif)
             else:
                 from core.image_loader import common_icc_profile
                 scale_cfg = _resolve_scale_cfg(folder_args, paths)
@@ -1525,11 +1531,11 @@ def _run_batch(args, _emit_json=None, _allow_summary=None) -> int:
                     stacked = fused
                     background = _auto_background(folder_args, fused)
                     fused = background.image
-                _save(out_path, fused, scale_cfg, icc_profile)
+                _save(out_path, fused, scale_cfg, icc_profile, exif=source_exif)
             _say(f"Saved: {out_path}")
             if background is not None:
                 _save_background_extras(folder_args, out_path, stacked, background,
-                                        scale_cfg, icc_profile)
+                                        scale_cfg, icc_profile, exif=source_exif)
                 background = stacked = None
             if folder_args.depth_map:
                 _save_depth(folder_args, out_path)
