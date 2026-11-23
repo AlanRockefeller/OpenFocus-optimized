@@ -77,6 +77,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   existing focus decisions for low-contrast and mixed-bit-depth inputs.
 
 ### Fixed
+- Show the current translation of the retouch introduction in German,
+  French, Italian, Korean, Dutch, Polish, Portuguese and Russian, and of the
+  comparison "Stopping…" status in Japanese and Spanish. Each of those
+  locale tables listed the key twice, and the older wording won. Repeated
+  keys that already showed the current text were removed as well, and a
+  test now rejects a key listed twice in one locale table.
 - Keep checking the original file when a crop of a prepared frame is prepared
   again. A changed source could otherwise go unnoticed and its old pixels be
   used.
