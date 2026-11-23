@@ -1269,6 +1269,7 @@ PACK = {
     "dialog_roi_group_base": "Seleção do quadro base",
     "dialog_roi_lbl_base": "Selecione o quadro base:",
     "roi_need_images": "Carregue ao menos 2 imagens antes de usar o modo ROI.",
+    "roi_outside_image": "A região selecionada está fora da imagem. Desenhe uma nova região sobre a imagem.",
     "roi_aligning": "Alinhando...",
     "roi_ready_title": "Modo ROI pronto",
     "roi_ready_msg": "As imagens foram alinhadas com o método ECC.",

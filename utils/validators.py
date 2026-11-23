@@ -13,6 +13,21 @@ def normalize_kernel_size(value: int) -> int:
 
 
 
+def intersect_roi(x: int, y: int, width: int, height: int,
+                  image_width: int, image_height: int):
+    """Return the part of a rectangle inside the image as (x, y, w, h).
+
+    The far edges are computed before the origin is clamped, so a rectangle
+    that starts left of or above the image keeps only its visible part.
+    None means the rectangle and the image do not overlap.
+    """
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(x + width, image_width), min(y + height, image_height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
 def crop_roi(
     images: List[Any],
     roi_rect: Tuple[float, float, float, float]
@@ -28,12 +43,10 @@ def crop_roi(
         return images, None
 
     h, w = images[0].shape[:2]
-    rx = max(0, min(rx, w))
-    ry = max(0, min(ry, h))
-    if rx >= w or ry >= h or rw <= 0 or rh <= 0:
+    region = intersect_roi(rx, ry, rw, rh, w, h)
+    if region is None:
         raise ValueError(f"ROI {roi_rect} does not intersect the image {w}x{h}")
-    rw = max(1, min(rw, w - rx))
-    rh = max(1, min(rh, h - ry))
+    rx, ry, rw, rh = region
 
     cropped = []
     for img in images:

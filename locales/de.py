@@ -1269,6 +1269,7 @@ PACK = {
     "dialog_roi_group_base": "Auswahl des Basisbildes",
     "dialog_roi_lbl_base": "Basisbild wählen:",
     "roi_need_images": "Bitte mindestens 2 Bilder laden, bevor der ROI-Modus verwendet wird.",
+    "roi_outside_image": "Der gewählte Bereich liegt außerhalb des Bildes. Ziehen Sie einen neuen Bereich auf dem Bild auf.",
     "roi_aligning": "Ausrichtung…",
     "roi_ready_title": "ROI-Modus bereit",
     "roi_ready_msg": "Die Bilder wurden mit der ECC-Methode ausgerichtet.",

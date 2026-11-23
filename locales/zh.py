@@ -1282,6 +1282,7 @@ ZH = {
     "dialog_roi_group_base": "底图选择",
     "dialog_roi_lbl_base": "选择底图:",
     "roi_need_images": "请先加载至少2张图像才能使用ROI模式。",
+    "roi_outside_image": "所选区域位于图像之外。请在图像上重新框选区域。",
     "roi_aligning": "对齐中...",
     "roi_ready_title": "ROI模式就绪",
     "roi_ready_msg": "图像已使用ECC方法完成对齐。",

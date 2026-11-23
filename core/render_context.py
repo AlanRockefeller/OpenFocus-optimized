@@ -365,11 +365,11 @@ def _clamp_roi(roi_rect, shape: Tuple[int, int]) -> Optional[Tuple[int, int, int
         rx, ry, rw, rh = (int(float(v)) for v in roi_rect)
     except (TypeError, ValueError):
         return None
-    rx = max(0, min(rx, w))
-    ry = max(0, min(ry, h))
-    rw = max(1, min(rw, w - rx))
-    rh = max(1, min(rh, h - ry))
-    return rx, ry, rw, rh
+    from utils.validators import intersect_roi
+    region = intersect_roi(rx, ry, rw, rh, w, h)
+    if region is None:
+        raise ValueError(f"ROI ({rx}, {ry}, {rw}x{rh}) does not intersect the image {w}x{h}")
+    return region
 
 
 def _frame_name(names: Sequence[str], index: int) -> str:

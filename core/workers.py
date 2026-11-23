@@ -1111,12 +1111,12 @@ class RenderWorker(QThread):
         rh = int(self.roi_rect.height())
 
         h, w = image_shape[:2]
-        rx = max(0, min(rx, w))
-        ry = max(0, min(ry, h))
-        rw = max(1, min(rw, w - rx))
-        rh = max(1, min(rh, h - ry))
-
-        return rx, ry, rw, rh
+        from utils.validators import intersect_roi
+        region = intersect_roi(rx, ry, rw, rh, w, h)
+        if region is None:
+            # The render manager refuses such a selection before starting.
+            raise ValueError(f"ROI ({rx}, {ry}, {rw}x{rh}) does not intersect the image {w}x{h}")
+        return region
 
     def _fusion_progress(self):
         """Forward source preparation and tile counts with their correct stages."""

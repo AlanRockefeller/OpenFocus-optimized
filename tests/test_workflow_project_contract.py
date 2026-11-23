@@ -245,8 +245,9 @@ def test_unreconstructable_source_changes_do_not_claim_project_saved(tmp_path):
 def test_update_restore_targets_current_snapshot_not_saved_project(tmp_path, monkeypatch):
     monkeypatch.setattr(recovery, "recovery_dir", lambda: str(tmp_path))
     monkeypatch.setattr(recovery, "write_snapshot", lambda window: True)
+    # An empty workspace has no snapshot to restore, so it leaves no marker.
     assert recovery.mark_pending_restore(SimpleNamespace(project_path="older.ofproj"))
-    assert recovery.pending_restore() == ""
+    assert recovery.pending_restore() is None
 
 
 def test_update_restore_snapshot_failure_does_not_publish_marker(tmp_path, monkeypatch):
@@ -346,11 +347,13 @@ def test_cancelled_render_does_not_publish_late_success(qapp, monkeypatch):
 
 def test_recovery_marker_retains_only_nonempty_document_association(tmp_path, monkeypatch):
     monkeypatch.setattr(recovery, "recovery_dir", lambda: str(tmp_path))
-    monkeypatch.setattr(recovery, "write_snapshot", lambda window: True)
+    monkeypatch.setattr(recovery, "write_snapshot",
+                        lambda window: (tmp_path / recovery.SESSION_FILE).write_text("s") > 0)
     assert recovery.mark_pending_restore(SimpleNamespace(project_path="saved.ofproj", raw_images=[object()]))
     assert recovery.pending_restore() == "saved.ofproj"
+    # An empty workspace removes the marker instead of writing one.
     assert recovery.mark_pending_restore(SimpleNamespace(project_path="saved.ofproj", raw_images=[]))
-    assert recovery.pending_restore() == ""
+    assert recovery.pending_restore() is None
 
 
 def test_relocation_preserves_relative_folders_and_requires_confirmation(qapp, tmp_path, monkeypatch):

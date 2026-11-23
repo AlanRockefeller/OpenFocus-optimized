@@ -1269,6 +1269,7 @@ PACK = {
     "dialog_roi_group_base": "기준 프레임 선택",
     "dialog_roi_lbl_base": "기준 프레임 선택:",
     "roi_need_images": "ROI 모드를 쓰려면 먼저 이미지를 2장 이상 불러오세요.",
+    "roi_outside_image": "선택한 영역이 이미지 밖에 있습니다. 이미지 위에 새 영역을 그리세요.",
     "roi_aligning": "정렬 중...",
     "roi_ready_title": "ROI 모드 준비 완료",
     "roi_ready_msg": "ECC 방식으로 이미지를 정렬했습니다.",

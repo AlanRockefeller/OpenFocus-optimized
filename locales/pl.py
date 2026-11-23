@@ -1269,6 +1269,7 @@ PACK = {
     "dialog_roi_group_base": "Wybór klatki bazowej",
     "dialog_roi_lbl_base": "Wybierz klatkę bazową:",
     "roi_need_images": "Wczytaj co najmniej 2 obrazy przed użyciem trybu ROI.",
+    "roi_outside_image": "Zaznaczony obszar leży poza obrazem. Zaznacz nowy obszar na obrazie.",
     "roi_aligning": "Wyrównywanie...",
     "roi_ready_title": "Tryb ROI gotowy",
     "roi_ready_msg": "Obrazy zostały wyrównane metodą ECC.",
