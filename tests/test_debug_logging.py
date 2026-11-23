@@ -105,8 +105,9 @@ def test_detail_explains_tiling_planning_and_scratch_without_changing_pixels(log
         assert f"event={event} " not in quiet
         assert f"event={event} " in text
     tiling = next(line for line in text.splitlines() if "event=fusion_tiling" in line)
-    assert '"block": 64' in tiling and '"overlap": 16' in tiling and '"tiles": 12' in tiling
-    assert text.count("event=fusion_tile ") == 12
+    # 150 x 110 at 64/16: origins 0, 48, 86 by 0, 46, each fused once.
+    assert '"block": 64' in tiling and '"overlap": 16' in tiling and '"tiles": 6' in tiling
+    assert text.count("event=fusion_tile ") == 6
     # Pixels and paths stay out of these records.
     assert not any("ndarray" in line or "array(" in line for line in text.splitlines())
 
