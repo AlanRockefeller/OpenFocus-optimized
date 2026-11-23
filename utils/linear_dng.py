@@ -16,6 +16,7 @@ import numpy as np
 import rawpy
 import tifffile
 from core.resource_policy import require_memory
+from utils.file_modes import apply_destination_mode
 from PIL import Image
 
 
@@ -609,6 +610,7 @@ def _write_linear_dng_atomic(path, linear_bgr, metadata, *, should_cancel=None,
                 check_cancel()
                 _write_display_ifd(writer, display_preview)
         check_cancel()
+        apply_destination_mode(temporary, destination)
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
