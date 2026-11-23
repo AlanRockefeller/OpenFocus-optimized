@@ -492,6 +492,8 @@ def export_feedback_package(dest_path, description: str = "",
                     index.append(f"{path.name}: {len(data)} of {size} bytes" +
                                  (" (older bytes trimmed)" if len(data) < size else ""))
                 archive.writestr("diagnostic_index.txt", "\n".join(index) + "\n")
+            from utils.file_modes import apply_destination_mode
+            apply_destination_mode(temporary, dest)
             os.replace(temporary, dest)
             log_action("feedback.exported", log_files=included,
                        log_bytes=FEEDBACK_MAX_LOG_BYTES - remaining)

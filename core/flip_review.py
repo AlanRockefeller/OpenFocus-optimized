@@ -31,6 +31,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
+from utils.file_modes import apply_destination_mode
+
 REVIEW_FORMAT = "openfocus/flip-review"
 REVIEW_VERSION = 1
 SET_FORMAT = "openfocus/review-set"
@@ -376,6 +378,7 @@ def atomic_write_json(path: str, data) -> None:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        apply_destination_mode(temporary, path)
         os.replace(temporary, path)
     except BaseException:
         try:
@@ -841,6 +844,7 @@ class ReviewRecord:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
                     stream.write(export_markdown(data))
+                apply_destination_mode(temporary, path)
                 os.replace(temporary, path)
             except BaseException:
                 try:
