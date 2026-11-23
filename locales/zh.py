@@ -367,7 +367,7 @@ ZH = {
     'batch_group_split_error': '分组融合仅支持多文件夹模式，拆分模式会预加载图像栈。',
     'batch_group_range_error': '每组至少 2 帧，重叠数最多为组大小减 2。',
     'batch_group_output_error': '分组融合需要选择融合方法，且不能保存对齐帧。',
-    'batch_result_is_input': '源文件夹中的先前结果会被当作一帧参与融合：\n{path}\n请移动或删除该文件，或选择其他输出文件夹。',
+    'batch_result_is_input': '源文件夹中的先前结果会被当作一帧参与融合：\n{path}\n请移动或删除该文件。',
     'batch_group_progress': '分组阶段 {stage}：{completed} / {total}',
     "menu_open_template": "应用处理模板…",
     "menu_save_template": "保存处理模板…",

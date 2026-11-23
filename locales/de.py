@@ -328,7 +328,7 @@ PACK = {
     'batch_group_split_error': 'Gruppenfusion erfordert mehrere Ordner; der Einzelordner lädt alle Bilder.',
     'batch_group_range_error': 'Gruppengröße mindestens 2; Überlappung höchstens Gruppengröße minus 2.',
     'batch_group_output_error': 'Wählen Sie ein Fusionsverfahren und deaktivieren Sie den Export ausgerichteter Bilder.',
-    'batch_result_is_input': 'Ein früheres Ergebnis in einem Quellordner würde als Einzelbild mitverrechnet:\n{path}\nVerschieben oder löschen Sie es, oder wählen Sie einen anderen Ausgabeordner.',
+    'batch_result_is_input': 'Ein früheres Ergebnis in einem Quellordner würde als Einzelbild mitverrechnet:\n{path}\nVerschieben oder löschen Sie es.',
     'batch_group_progress': 'Gruppenphase {stage}: {completed} / {total}',
     "menu_open_template": "Verarbeitungsvorlage anwenden…",
     "menu_save_template": "Verarbeitungsvorlage speichern…",

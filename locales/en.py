@@ -369,7 +369,7 @@ EN = {
     'batch_group_split_error': 'Grouped fusion requires multiple-folder mode. Split mode preloads the stack.',
     'batch_group_range_error': 'Group size must be at least 2; overlap must be at most group size minus 2.',
     'batch_group_output_error': 'Grouped fusion requires a fusion method and cannot save aligned frames.',
-    'batch_result_is_input': 'An earlier result in a source folder would be fused as a frame:\n{path}\nMove or delete it, or choose another output folder.',
+    'batch_result_is_input': 'An earlier result in a source folder would be fused as a frame:\n{path}\nMove or delete it.',
     'batch_group_progress': 'Group stage {stage}: {completed} / {total}',
     "menu_open_template": "Apply Processing Template…",
     "menu_save_template": "Save Processing Template…",

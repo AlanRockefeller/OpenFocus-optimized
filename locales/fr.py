@@ -328,7 +328,7 @@ PACK = {
     'batch_group_split_error': 'La fusion par groupes exige plusieurs dossiers ; le découpage précharge la pile.',
     'batch_group_range_error': 'Taille au moins 2 ; chevauchement au plus égal à la taille moins 2.',
     'batch_group_output_error': 'Choisissez une fusion et désactivez l’export des images alignées.',
-    'batch_result_is_input': 'Un résultat précédent dans un dossier source serait fusionné comme une image :\n{path}\nDéplacez-le ou supprimez-le, ou choisissez un autre dossier de sortie.',
+    'batch_result_is_input': 'Un résultat précédent dans un dossier source serait fusionné comme une image :\n{path}\nDéplacez-le ou supprimez-le.',
     'batch_group_progress': 'Étape de groupes {stage} : {completed} / {total}',
     "menu_open_template": "Appliquer un modèle de traitement…",
     "menu_save_template": "Enregistrer le modèle de traitement…",

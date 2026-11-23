@@ -328,7 +328,7 @@ PACK = {
     'batch_group_split_error': 'La fusione a gruppi richiede più cartelle; la divisione precarica la pila.',
     'batch_group_range_error': 'Dimensione almeno 2; sovrapposizione al massimo dimensione meno 2.',
     'batch_group_output_error': 'Seleziona un metodo di fusione e disattiva il salvataggio delle immagini allineate.',
-    'batch_result_is_input': 'Un risultato precedente in una cartella sorgente verrebbe fuso come fotogramma:\n{path}\nSpostalo o eliminalo, oppure scegli un’altra cartella di output.',
+    'batch_result_is_input': 'Un risultato precedente in una cartella sorgente verrebbe fuso come fotogramma:\n{path}\nSpostalo o eliminalo.',
     'batch_group_progress': 'Fase gruppi {stage}: {completed} / {total}',
     "menu_open_template": "Applica modello di elaborazione…",
     "menu_save_template": "Salva modello di elaborazione…",

@@ -328,7 +328,7 @@ PACK = {
     'batch_group_split_error': 'Łączenie grupowe wymaga wielu folderów; podział wczytuje cały stos.',
     'batch_group_range_error': 'Rozmiar co najmniej 2; nakładanie najwyżej rozmiar minus 2.',
     'batch_group_output_error': 'Wybierz metodę łączenia i wyłącz zapis wyrównanych klatek.',
-    'batch_result_is_input': 'Wcześniejszy wynik w folderze źródłowym zostałby połączony jako klatka:\n{path}\nPrzenieś go lub usuń albo wybierz inny folder wyjściowy.',
+    'batch_result_is_input': 'Wcześniejszy wynik w folderze źródłowym zostałby połączony jako klatka:\n{path}\nPrzenieś go lub usuń.',
     'batch_group_progress': 'Etap grupowy {stage}: {completed} / {total}',
     "menu_open_template": "Zastosuj szablon przetwarzania…",
     "menu_save_template": "Zapisz szablon przetwarzania…",
