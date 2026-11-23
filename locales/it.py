@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Dipingi sul risultato fuso i pixel di un frame sorgente per correggere aloni o dettagli scelti male.",
     "retouch_title": "Ritocca risultato",
     "retouch_result_title": "Risultato fuso (ritocca qui)",
-    "retouch_intro": "Tieni premuto il sinistro su una tela per ingrandire; la rotella regola la potenza.",
+    "retouch_intro": "Tieni premuto il tasto sinistro su una delle due tele per ingrandire; la rotella regola la potenza. A sinistra il fotogramma di origine bloccato, a destra il risultato: dipingi a destra per copiare i pixel dall'origine.",
     "retouch_current": "Risultato attuale",
     "retouch_stack": "Pila di origine",
     "retouch_stack_hint": "Scegli il fotogramma da cui copiare i pixel; ogni miniatura mostra dove è nitido.",

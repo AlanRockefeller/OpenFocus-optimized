@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Przenieś piksele z klatki źródłowej na wynik fuzji, aby naprawić aureole lub błędnie wybrane detale.",
     "retouch_title": "Retusz wyniku",
     "retouch_result_title": "Wynik fuzji (retusz tutaj)",
-    "retouch_intro": "Przytrzymaj lewy przycisk, aby powiększyć; kółko zmienia siłę.",
+    "retouch_intro": "Przytrzymaj lewy przycisk na dowolnym płótnie, aby powiększyć; kółko zmienia siłę. Po lewej jest zablokowana klatka źródłowa, po prawej wynik — maluj po prawej, aby skopiować piksele ze źródła.",
     "retouch_current": "Bieżący wynik",
     "retouch_stack": "Stos źródłowy",
     "retouch_stack_hint": "Wybierz klatkę, z której kopiowane są piksele; każda miniatura pokazuje, gdzie jest ostra.",

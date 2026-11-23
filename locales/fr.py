@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Peignez des pixels d'une image source sur le résultat fusionné pour corriger les halos ou les détails mal choisis.",
     "retouch_title": "Retoucher le résultat",
     "retouch_result_title": "Résultat fusionné (retouche ici)",
-    "retouch_intro": "Maintenez le clic gauche sur un canevas pour agrandir ; la molette règle la puissance.",
+    "retouch_intro": "Maintenez le clic gauche sur l'un des canevas pour agrandir ; la molette règle la puissance. À gauche, l'image source verrouillée ; à droite, le résultat — peignez à droite pour copier les pixels de la source.",
     "retouch_current": "Résultat actuel",
     "retouch_stack": "Pile source",
     "retouch_stack_hint": "Choisissez l'image d'où copier les pixels ; chaque vignette montre où elle est nette.",

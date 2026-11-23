@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Schilder pixels van een bronframe op het gefuseerde resultaat om halo's of verkeerd gekozen details te herstellen.",
     "retouch_title": "Resultaat retoucheren",
     "retouch_result_title": "Fusieresultaat (hier retoucheren)",
-    "retouch_intro": "Houd links ingedrukt om te vergroten; het wiel regelt de sterkte.",
+    "retouch_intro": "Houd links ingedrukt op een van beide canvassen om te vergroten; het wiel regelt de sterkte. Links staat het vergrendelde bronbeeld, rechts het resultaat — schilder rechts om pixels uit de bron te kopiëren.",
     "retouch_current": "Huidige resultaat",
     "retouch_stack": "Bronstapel",
     "retouch_stack_hint": "Kies het beeld waaruit pixels worden gekopieerd; elke miniatuur toont waar dat beeld scherp is.",

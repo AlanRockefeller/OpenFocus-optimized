@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Pinte pixels de um quadro de origem sobre o resultado fusionado para corrigir halos ou detalhes escolhidos incorretamente.",
     "retouch_title": "Retocar resultado",
     "retouch_result_title": "Resultado fundido (retoca aqui)",
-    "retouch_intro": "Segure o botão esquerdo para ampliar; a roda ajusta a potência.",
+    "retouch_intro": "Segure o botão esquerdo em qualquer uma das telas para ampliar; a roda ajusta a potência. À esquerda fica o quadro de origem travado, à direita o resultado — pinte à direita para copiar pixels da origem.",
     "retouch_current": "Resultado atual",
     "retouch_stack": "Pilha de origem",
     "retouch_stack_hint": "Escolha o quadro de onde copiar pixels; cada miniatura mostra onde ele está nítido.",

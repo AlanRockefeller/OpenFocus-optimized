@@ -83,6 +83,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   locale tables listed the key twice, and the older wording won. Repeated
   keys that already showed the current text were removed as well, and a
   test now rejects a key listed twice in one locale table.
+- Translate the whole retouch introduction in German, French, Italian,
+  Korean, Dutch, Polish, Portuguese, Russian, Japanese and Spanish, and the
+  "Enable scale bar" option in Japanese and Spanish. They covered only the
+  magnifier, or followed older English wording.
 - Keep checking the original file when a crop of a prepared frame is prepared
   again. A changed source could otherwise go unnoticed and its old pixels be
   used.

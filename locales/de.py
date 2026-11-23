@@ -881,7 +881,7 @@ PACK = {
     "action_retouch_hint": "Pixel aus einem Quellbild auf das fusionierte Ergebnis malen, um Halos oder falsch gewählte Details zu korrigieren.",
     "retouch_title": "Ergebnis retuschieren",
     "retouch_result_title": "Fusionsergebnis (hier retuschieren)",
-    "retouch_intro": "Linksklick halten zum Vergrößern; das Rad ändert die Stärke. Links der Quellrahmen, rechts das Ergebnis.",
+    "retouch_intro": "Linke Maustaste auf einer der beiden Flächen halten, um zu vergrößern; das Mausrad ändert die Stärke. Links steht das gesperrte Quellbild, rechts das Ergebnis – rechts malen, um Pixel aus der Quelle zu kopieren.",
     "retouch_current": "Aktuelles Ergebnis",
     "retouch_stack": "Quellstapel",
     "retouch_stack_hint": "Wähle das Bild, aus dem Pixel kopiert werden; jedes Vorschaubild zeigt, wo es scharf ist.",
