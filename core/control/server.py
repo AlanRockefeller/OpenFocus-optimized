@@ -1103,7 +1103,8 @@ class ControlServer(QObject):
             raise ControlError("invalid_argument",
                                "The stack changed while the ROI was active",
                                "Reset the ROI selection and retry.")
-        if status in ("sensor_history_unsupported", "sensor_roi_unsupported"):
+        if status in ("sensor_history_unsupported", "sensor_roi_unsupported",
+                      "roi_outside_image"):
             raise ControlError("invalid_argument", manager.last_error)
         if status == "cancelled":
             raise ControlError("internal",

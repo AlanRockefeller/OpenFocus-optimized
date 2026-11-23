@@ -1581,7 +1581,7 @@ class BatchProcessingDialog(QDialog):
             probe = target if os.path.isdir(target) else os.path.dirname(os.path.abspath(target))
             if not _is_writable_dir(probe):
                 return f"{trans.t('msg_save_failed_info_write')}\n{target}"
-            return None
+            return self._existing_result_input(output_type, output_path)
 
         if output_type == "subfolder" and not (output_path or "").strip():
             return trans.t("msg_no_folder_text")
@@ -1598,7 +1598,20 @@ class BatchProcessingDialog(QDialog):
                 return f"{trans.t('msg_save_failed_info_write')}\n{target}"
             if not _is_writable_dir(target if os.path.isdir(target) else folder):
                 return f"{trans.t('msg_save_failed_info_write')}\n{target}"
-        return None
+        return self._existing_result_input(output_type, output_path)
+
+    def _existing_result_input(self, output_type: str, output_path):
+        """Message when an earlier fused result would be loaded as a frame, else None."""
+        if (self.fusion_combo.currentData() or 'none') == 'none':
+            return None
+        from utils.export_paths import batch_result_among_inputs
+        split = self.get_import_mode() == 'single_folder'
+        existing = batch_result_among_inputs(
+            () if split else self.folder_paths,
+            [[entry[0] for entry in stack] for stack in self.single_folder_stacks] if split else None,
+            output_type, output_path, self.format_combo.currentText(),
+            exclude_paths=(self.sensor_cleanup.path.text().strip(),))
+        return trans.t('batch_result_is_input').format(path=existing) if existing else None
 
 
 def _is_writable_dir(path: str) -> bool:

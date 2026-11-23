@@ -7,6 +7,7 @@ import tempfile
 import numpy as np
 
 from core.resource_policy import probe_resources, ram_budget
+from utils.file_modes import apply_destination_mode
 from utils.path_identity import same_path
 
 # The tag writer materializes channel data and nested serialized buffers.
@@ -192,6 +193,7 @@ def export_layered_tiff(path, image, context, *, icc_profile=b'', cancelled=None
             os.fsync(stream.fileno())
         _cancelled(cancelled)
         protect_sources((destination,), sources)
+        apply_destination_mode(temporary, destination)
         os.replace(temporary, destination)
     finally:
         if temporary and os.path.exists(temporary):
