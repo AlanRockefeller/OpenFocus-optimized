@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 from typing import Iterable, Optional
 
+from utils.file_modes import apply_destination_mode
+
 try:  # GUI stack; the headless CLI package runs without PyQt6
     from PyQt6.QtGui import QPixmap, QImage
 except ImportError:  # pragma: no cover - headless openfocus package
@@ -812,6 +814,7 @@ def _write_streamed_tiff(path, image, should_cancel=None, exif=None, icc_profile
             if page_specs is not None and page_index != len(page_specs):
                 raise ValueError('Fewer TIFF pages than the declared layout')
         _check_write_cancelled(should_cancel)
+        apply_destination_mode(temporary, path)
         os.replace(temporary, path)
         return True
     except (OSError, ValueError, cv2.error):
@@ -1065,6 +1068,7 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
                     metadata['icc_profile'] = profile
                 source.save(part, **metadata)
         _check_write_cancelled(should_cancel)
+        apply_destination_mode(part, path)
         os.replace(part, path)
         return True
     except ImageWriteError:

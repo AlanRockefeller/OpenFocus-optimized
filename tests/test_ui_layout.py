@@ -1225,3 +1225,29 @@ def test_flat_field_failure_keeps_the_original_stack(qapp, monkeypatch):
     assert host.raw_images is frames, "raw frames were replaced on failure"
     assert host.base_images is base, "base frames were replaced on failure"
     assert warnings
+
+
+@pytest.mark.parametrize("remove_index, expected", [(None, 2), (3, 2), (0, 1)])
+def test_flat_field_apply_keeps_the_displayed_frame(qapp, remove_index, expected):
+    """Applying a flat field reloads the stack on the frame being viewed."""
+    import numpy as np
+    from types import SimpleNamespace
+    import main as main_module
+
+    frames = [np.full((8, 8, 3), i, np.uint8) for i in range(4)]
+    reloads = []
+    host = SimpleNamespace(
+        raw_images=list(frames), base_images=[], image_filenames=list("abcd"),
+        image_source_paths=list("abcd"), image_source_exifs=[None] * 4,
+        image_icc_profiles=[None] * 4, excluded_frames=set(),
+        current_img_index=-1, current_display_index=2,
+        push_undo=lambda: None,
+        get_or_create_source_pixmap=lambda *a, **k: None,
+        transform_manager=SimpleNamespace(
+            _invalidate_processing_results=lambda **k: None,
+            reload_image_stack=lambda initial_index=0: reloads.append(initial_index)),
+        statusBar=lambda: SimpleNamespace(showMessage=lambda *a, **k: None),
+    )
+    assert main_module.OpenFocus.apply_flat_field_to_stack(
+        host, object(), remove_index=remove_index, prepared=(frames, None))
+    assert reloads == [expected]

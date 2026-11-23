@@ -47,7 +47,7 @@ def test_scaled_bayer_admits_before_unpack_and_preserves_oriented_size(
     events = []
 
     class Sensor:
-        sizes = SimpleNamespace(raw_width=103, raw_height=99, width=103, height=99,
+        sizes = SimpleNamespace(raw_width=104, raw_height=98, width=104, height=98,
                                 pixel_aspect=1.0, flip=flip)
         raw_type = rawpy.RawType.Flat
         raw_pattern = np.array([[0, 1], [3, 2]], np.uint8)
@@ -66,17 +66,17 @@ def test_scaled_bayer_admits_before_unpack_and_preserves_oriented_size(
         def postprocess(self, **kwargs):
             assert kwargs['half_size']
             assert kwargs['no_auto_scale'] and kwargs['output_color'] == rawpy.ColorSpace.raw
-            shape = (52, 50, 3) if flip else (50, 52, 3)
+            shape = (52, 49, 3) if flip else (49, 52, 3)
             return np.full(shape, 500, np.uint16)
 
     monkeypatch.setattr(rawpy, 'RawPy', Sensor)
     monkeypatch.setattr(linear_dng, '_camera_identity', lambda *_args: ('Example', 'Camera'))
     def admit(amount):
         if events == ['open']:
-            assert amount == 103 * 99 * 16
+            assert amount == 104 * 98 * 16
             events.append('admit')
         elif events == ['open', 'admit', 'unpack']:
-            assert amount == 103 * 99 * 24
+            assert amount == 104 * 98 * 24
             events.append('post_admit')
     monkeypatch.setattr(linear_dng, 'require_memory', admit)
     image, metadata = linear_dng.load_linear_raw(path, .22)
@@ -84,6 +84,36 @@ def test_scaled_bayer_admits_before_unpack_and_preserves_oriented_size(
     assert np.all(image == round(500 * 65535 / 1000))
     assert metadata.camera_model == 'Camera'
     assert events == ['open', 'admit', 'unpack', 'post_admit']
+
+
+@pytest.mark.parametrize('shape', [(99, 104), (100, 103)])
+def test_odd_sized_bayer_keeps_the_full_decode_at_half_scale(tmp_path, shape):
+    """An odd edge holds an incomplete 2x2 block, which half-size decoding
+    would develop with a colour missing along the last row or column."""
+    from core.image_loader import _downscale_page
+    from tests.test_raw_input import _gradient, _write_bayer_dng
+
+    path = str(tmp_path / 'sensor.dng')
+    _write_bayer_dng(path, _gradient(*shape))
+    full, _ = linear_dng.load_linear_raw(path, 1.0)
+    half, _ = linear_dng.load_linear_raw(path, 0.5)
+    np.testing.assert_array_equal(half, _downscale_page(full, 0.5))
+    assert half[:, -1].min() > 1000 and half[-1].min() > 1000
+
+
+def test_even_sized_bayer_still_decodes_at_half_size(tmp_path):
+    from core.image_loader import _downscale_page
+    from tests.test_raw_input import _gradient, _write_bayer_dng
+
+    path = str(tmp_path / 'sensor.dng')
+    _write_bayer_dng(path, _gradient(100, 104))
+    full, _ = linear_dng.load_linear_raw(path, 1.0)
+    half, _ = linear_dng.load_linear_raw(path, 0.5)
+    expected = _downscale_page(full, 0.5)
+    # Half-size decoding interpolates differently from the full decode.
+    assert half.shape == expected.shape == (50, 52, 3)
+    assert not np.array_equal(half, expected)
+    assert np.abs(half.astype(np.int32) - expected).max() < 400
 
 
 def test_dng_round_trip_opens_in_libraw_and_preserves_linear_pixels(tmp_path, camera_metadata):

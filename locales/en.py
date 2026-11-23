@@ -1282,6 +1282,7 @@ EN = {
     "dialog_roi_group_base": "Base Frame Selection",
     "dialog_roi_lbl_base": "Select Base Frame:",
     "roi_need_images": "Please load at least 2 images before using ROI mode.",
+    "roi_outside_image": "The selected region is outside the image. Draw a new region on the image.",
     "roi_aligning": "Aligning...",
     "roi_ready_title": "ROI Mode Ready",
     "roi_ready_msg": "Images have been aligned using ECC method.",

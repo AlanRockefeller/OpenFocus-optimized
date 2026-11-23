@@ -1270,6 +1270,7 @@ PACK = {
     "dialog_roi_group_base": "Keuze basisframe",
     "dialog_roi_lbl_base": "Kies basisframe:",
     "roi_need_images": "Laad minstens 2 afbeeldingen voordat je de ROI-modus gebruikt.",
+    "roi_outside_image": "Het geselecteerde gebied ligt buiten de afbeelding. Teken een nieuw gebied op de afbeelding.",
     "roi_aligning": "Uitlijnen...",
     "roi_ready_title": "ROI-modus gereed",
     "roi_ready_msg": "De afbeeldingen zijn uitgelijnd met de ECC-methode.",

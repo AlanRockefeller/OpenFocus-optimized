@@ -5,6 +5,8 @@ import errno
 import logging
 import tempfile
 
+from utils.file_modes import apply_default_mode
+
 
 def _rename_noreplace(source, destination):
     """Use the platform's atomic no-replace rename when links are unavailable."""
@@ -36,6 +38,9 @@ def publish_unique(path, writer, *, start=2, should_cancel=None):
     try:
         if writer(staging) is False:
             raise OSError('Image encoding or writing failed')
+        # mkstemp made the staging file owner-only; a new export gets the
+        # mode a plain open() would have given it.
+        apply_default_mode(staging)
         if should_cancel and should_cancel():
             raise InterruptedError('Export cancelled')
         number = start

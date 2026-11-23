@@ -329,3 +329,17 @@ def test_preset_keyboard_edit_and_layout(qapp):
         assert not dialog.preset_buttons['2K'].isChecked()
     finally:
         dialog.reject()
+
+
+@pytest.mark.parametrize('percent', [29, 57, 58])
+def test_remembered_percentage_reopens_at_the_same_value(qapp, percent):
+    from dialogs.settings import DownsampleDialog
+
+    dialog = DownsampleDialog(initial_scale=percent / 100)
+    try:
+        assert dialog.slider.value() == percent
+        assert dialog.spinbox.value() == percent
+        assert dialog.get_scale_factor() == percent / 100
+        assert not dialog.preset_scale_label.text()
+    finally:
+        dialog.reject()

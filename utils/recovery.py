@@ -89,7 +89,8 @@ def write_snapshot(window) -> bool:
         os.makedirs(recovery_dir(), exist_ok=True)
         document = {"version": 1, "project_path": str(getattr(window, "project_path", "") or ""),
                     "dirty": bool(getattr(window, "_project_dirty", False))}
-        ok, _err = save_project(window, session_path(), recovery_document=document)
+        ok, _err = save_project(window, session_path(), recovery_document=document,
+                                private=True)
         return bool(ok)
     except Exception:
         return False
@@ -117,19 +118,23 @@ def mark_pending_restore(window) -> bool:
     """Snapshot the session and ask the next launch to restore it silently.
 
     Restore the freshly written snapshot; the marker retains only the saved
-    document association. An empty workspace has no project restore target.
+    document association. An empty workspace has nothing to restore and
+    leaves no marker: one left without a snapshot would restore whatever
+    session a later launch saves.
     """
     try:
         if not write_snapshot(window):
             # A snapshot that did not reach disk must not be promised as a
             # restore target: the relaunched build would reopen stale state.
             return False
+        if not getattr(window, "raw_images", None):
+            clear_pending_restore()
+            return True
         os.makedirs(recovery_dir(), exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=recovery_dir(), suffix=".pending.tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(str(getattr(window, "project_path", "") or "")
-                        if getattr(window, "raw_images", None) else "")
+                f.write(str(getattr(window, "project_path", "") or ""))
             os.replace(temporary, pending_restore_path())
         except BaseException:
             try:
@@ -144,10 +149,17 @@ def mark_pending_restore(window) -> bool:
 
 def pending_restore():
     """None when no update-restart is pending; otherwise the project path to
-    reopen ('' means "restore the session snapshot")."""
+    reopen ('' means "restore the session snapshot").
+
+    A marker whose snapshot no longer exists is removed: kept, it would
+    silently restore the snapshot of whichever session exits next.
+    """
     try:
         path = pending_restore_path()
         if not os.path.isfile(path):
+            return None
+        if not os.path.isfile(session_path()):
+            clear_pending_restore()
             return None
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             return f.read().strip()

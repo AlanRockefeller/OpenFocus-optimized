@@ -188,7 +188,7 @@ class DownsampleDialog(QDialog):
         # detail, so the slider stops where the images on hand end.
         self._max_scale = min(1.0, max(0.01, float(max_scale)))
         self.max_percent = max(1, min(100, int(round(self._max_scale * 100))))
-        self.scale_percent = min(max(1, int(initial_scale * 100)), self.max_percent)
+        self.scale_percent = min(max(1, int(round(initial_scale * 100))), self.max_percent)
         self._dimensions = base_dimensions
         self._base_scale = self._max_scale if base_dimensions else 1.0
         self._source_name = ''
