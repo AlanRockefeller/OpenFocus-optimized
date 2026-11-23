@@ -134,6 +134,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   previous file, so a power loss cannot leave an empty or partial file in its
   place. The crash-recovery snapshot is not synced, to keep the window
   responsive after loads and renders.
+- Decode camera-linear RAW files with an odd sensor width or height at full
+  resolution when they are loaded at half scale or less. The incomplete
+  colour block on the odd edge tinted the last row or column. Even-sized
+  sensors decode as before.
+- Honour the transparency key of a grayscale PNG when it is loaded for a
+  render, as the preview already did. Such frames were fused as opaque.
+  Other PNG layouts and grayscale PNGs without a key decode as before.
+- Refuse grayscale TIFF pages whose alpha sample is not fully opaque, as
+  for color TIFF. Such a page lost its alpha as a later frame and failed
+  with an unsupported-layout error as the first. A fully opaque gray page
+  with alpha now loads as gray, keeping 16-bit samples.
 
 ## [2.0.0]
 
