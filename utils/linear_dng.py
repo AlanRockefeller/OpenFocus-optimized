@@ -16,6 +16,7 @@ import numpy as np
 import rawpy
 import tifffile
 from core.resource_policy import require_memory
+from utils.file_modes import apply_destination_mode
 from PIL import Image
 
 
@@ -431,10 +432,13 @@ def load_linear_raw(path, scale_factor=1.0, *, before_decode=None):
         require_memory(width * height * 16)
         raw.unpack()
         # Bayer half-size decoding combines each sensor block before demosaic.
-        # Other mosaics and LinearRaw DNGs keep the full-resolution path.
+        # Other mosaics and LinearRaw DNGs keep the full-resolution path, as
+        # do odd sizes: the block on an odd edge is incomplete and decodes
+        # with a colour missing, which would tint the last row or column.
         pattern = raw.raw_pattern if raw.raw_type == rawpy.RawType.Flat else None
         half_size = (scale_factor <= 0.5 and pattern is not None
-                     and np.shape(pattern) == (2, 2))
+                     and np.shape(pattern) == (2, 2)
+                     and sizes.width % 2 == 0 and sizes.height % 2 == 0)
         if half_size:
             output_width, output_height = sizes.width, sizes.height
             if aspect < 1:
@@ -606,6 +610,7 @@ def _write_linear_dng_atomic(path, linear_bgr, metadata, *, should_cancel=None,
                 check_cancel()
                 _write_display_ifd(writer, display_preview)
         check_cancel()
+        apply_destination_mode(temporary, destination)
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):

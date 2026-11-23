@@ -2149,6 +2149,8 @@ class GifSaverWorker(QThread):
                     writer.write(b';')
                 if self.is_cancelled:
                     raise RegistrationCancelled()
+                from utils.file_modes import apply_destination_mode
+                apply_destination_mode(temporary, self.file_path)
                 os.replace(temporary, self.file_path)
                 temporary = None
                 self.finished_signal.emit(True, self.file_path)

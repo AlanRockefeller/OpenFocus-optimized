@@ -89,7 +89,8 @@ def write_snapshot(window) -> bool:
         os.makedirs(recovery_dir(), exist_ok=True)
         document = {"version": 1, "project_path": str(getattr(window, "project_path", "") or ""),
                     "dirty": bool(getattr(window, "_project_dirty", False))}
-        ok, _err = save_project(window, session_path(), recovery_document=document)
+        ok, _err = save_project(window, session_path(), recovery_document=document,
+                                private=True)
         return bool(ok)
     except Exception:
         return False
