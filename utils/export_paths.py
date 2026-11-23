@@ -142,3 +142,64 @@ def derived_aligned_source(name: str) -> str:
     stem = os.path.splitext(os.path.basename(name.replace('\\', '/')))[0]
     match = _ALIGNED_SUFFIX.match(stem)
     return match.group('stem') if match else ''
+
+
+def batch_output_dir(source_folder: str, output_type: str, output_path) -> str:
+    """Folder a batch task writes its results into; it is not created here."""
+    if output_type == 'subfolder':
+        root = os.path.realpath(source_folder)
+        output_dir = os.path.realpath(os.path.join(root, output_path))
+        if os.path.isabs(output_path) or os.path.commonpath((root, output_dir)) != root:
+            raise ValueError('Output subfolder must be inside the source folder')
+        return output_dir
+    if output_type == 'same':
+        return source_folder
+    return output_path
+
+
+def batch_result_among_inputs(folders, stacks, output_type, output_path, extension,
+                              exclude_paths=()) -> str:
+    """Return a fused result the batch would write that is already one of its frames.
+
+    A result written into a source folder (the "same folder" option, or an
+    output folder that is also a source) is listed with that folder's frames
+    on the next run, so it would be fused into the new result. `folders` are
+    the folders of a multiple-folder batch; `stacks` holds the frame paths of
+    each split stack instead. Only exact paths are compared. Returns '' when
+    no planned result is an input.
+    """
+    from utils.path_identity import same_path
+    extension = str(extension or 'png').lstrip('.').lower()
+    exclude = [path for path in exclude_paths if path]
+    planned, inputs = [], []
+    if stacks is not None:
+        inputs = [path for stack in stacks for path in stack if path]
+        source = os.path.dirname(stacks[0][0]) if stacks and stacks[0] else ''
+        try:
+            output_dir = batch_output_dir(source, output_type, output_path)
+        except ValueError:
+            return ''
+        if not source or not output_dir:
+            return ''
+        name = os.path.basename(source)
+        planned = [os.path.join(output_dir, f'{name}_{index + 1:03d}.{extension}')
+                   for index in range(len(stacks))]
+    else:
+        from core.image_loader import ImageStackLoader
+        loader = ImageStackLoader()
+        for folder in folders:
+            if not os.path.isdir(folder):
+                continue
+            inputs += [path for _name, path in loader.folder_image_files(folder, exclude)]
+            try:
+                output_dir = batch_output_dir(folder, output_type, output_path)
+            except ValueError:
+                continue
+            if not output_dir:
+                continue
+            name = os.path.basename(os.path.normpath(folder))
+            planned.append(os.path.join(output_dir, f'{name}.{extension}'))
+    for result in planned:
+        if os.path.isfile(result) and any(same_path(result, path) for path in inputs):
+            return result
+    return ''

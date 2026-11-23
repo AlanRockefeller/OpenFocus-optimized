@@ -160,6 +160,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to the first frame (or to the frame last restored by undo).
 - Reopen the load-scale dialog at a remembered 29%, 57% or 58% instead of
   one percent lower.
+- Refuse a batch whose fused result already exists among its input frames,
+  for example after an earlier run with "Same folder" output, instead of
+  fusing the earlier result into the new one as an extra frame. A result one
+  folder of a run writes into another source folder is no longer loaded as a
+  frame of that folder.
+- Give each aligned frame a batch saves its own EXIF. Every frame used to
+  carry the first frame's metadata.
+- Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
+  single-stack output already does.
 
 ## [2.0.0]
 
