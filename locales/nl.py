@@ -328,6 +328,7 @@ PACK = {
     'batch_group_split_error': 'Groepsfusie vereist meerdere mappen; splitsen laadt de stapel vooraf.',
     'batch_group_range_error': 'Groepsgrootte minimaal 2; overlap maximaal groepsgrootte min 2.',
     'batch_group_output_error': 'Kies een fusiemethode en schakel export van uitgelijnde beelden uit.',
+    'batch_result_is_input': 'Een eerder resultaat in een bronmap zou als beeld worden meegefuseerd:\n{path}\nVerplaats of verwijder het, of kies een andere uitvoermap.',
     'batch_group_progress': 'Groepsfase {stage}: {completed} / {total}',
     "menu_open_template": "Verwerkingssjabloon toepassen…",
     "menu_save_template": "Verwerkingssjabloon opslaan…",

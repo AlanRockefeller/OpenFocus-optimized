@@ -328,6 +328,7 @@ PACK = {
     'batch_group_split_error': '그룹 합성은 여러 폴더 모드가 필요합니다. 분할 모드는 스택을 미리 읽습니다.',
     'batch_group_range_error': '그룹 크기는 2 이상, 겹침은 그룹 크기보다 2 이상 작아야 합니다.',
     'batch_group_output_error': '합성 방법을 선택하고 정렬된 프레임 저장을 끄세요.',
+    'batch_result_is_input': '원본 폴더에 있는 이전 결과가 프레임으로 합성됩니다:\n{path}\n파일을 옮기거나 삭제하거나 다른 출력 폴더를 선택하세요.',
     'batch_group_progress': '그룹 단계 {stage}: {completed} / {total}',
     "menu_open_template": "처리 템플릿 적용…",
     "menu_save_template": "처리 템플릿 저장…",

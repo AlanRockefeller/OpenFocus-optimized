@@ -44,6 +44,110 @@ def run_batch(folders, output_type, output_path=None, *, method='guided_filter',
     return worker, result
 
 
+def test_same_folder_rerun_refuses_the_earlier_result(qapp, tmp_path):
+    source = make_stack(tmp_path / 'stack')
+    _worker, first = run_batch([source], 'same')
+    assert first.get('counts', {}).get('success') == 1, first
+    assert (source / 'stack.png').is_file()
+
+    _worker, second = run_batch([source], 'same')
+    assert 'error' in second, second
+    assert str(source / 'stack.png') in second['error']
+    assert sorted(path.name for path in source.iterdir()) == ['img1.jpg', 'img2.jpg', 'stack.png']
+
+
+def test_split_same_folder_rerun_refuses_the_earlier_result(qapp, tmp_path):
+    source = make_stack(tmp_path / 'stack')
+
+    def split_run():
+        loader = ImageStackLoader()
+        ok, _message, entries, _names = loader.load_images_with_timestamps(str(source))
+        assert ok
+        return run_batch([], 'same', import_mode='single_folder',
+                         single_folder_images_with_times=entries,
+                         settings={'frozen_stacks': loader.split_by_count(entries, 5)})
+
+    _worker, first = split_run()
+    assert first.get('counts', {}).get('success') == 1, first
+    assert (source / 'stack_001.png').is_file()
+    _worker, second = split_run()
+    assert 'error' in second, second
+    assert str(source / 'stack_001.png') in second['error']
+    assert not (source / 'stack_001_2.png').exists()
+
+
+def test_result_written_into_a_later_source_folder_is_not_fused_there(qapp, tmp_path):
+    first = make_stack(tmp_path / 'first')
+    second = make_stack(tmp_path / 'second')
+    worker = BatchWorker([str(first), str(second)], 'custom', str(second),
+                         {'format': 'png', 'fusion_method': 'guided_filter', 'reg_methods': []},
+                         use_gpu=False, thread_count=1)
+    loaded = []
+    original = worker.image_loader.load_from_folder
+
+    def recording(folder, *args, **kwargs):
+        outcome = original(folder, *args, **kwargs)
+        loaded.append(sorted(outcome[3]))
+        return outcome
+
+    worker.image_loader.load_from_folder = recording
+    result = {}
+    worker.finished.connect(result.update)
+    worker.error.connect(lambda message: result.update(error=message))
+    worker.run()
+    assert result.get('counts', {}).get('success') == 2, result
+    assert loaded == [['img1.jpg', 'img2.jpg'], ['img1.jpg', 'img2.jpg']]
+    assert sorted(path.name for path in second.iterdir()) == [
+        'first.png', 'img1.jpg', 'img2.jpg', 'second.png']
+
+
+def _dialog_stub(folders=(), stacks=(), method='guided_filter', image_format='PNG'):
+    from dialogs.batch import BatchProcessingDialog
+    stub = SimpleNamespace(
+        folder_paths=[str(path) for path in folders],
+        single_folder_stacks=[list(stack) for stack in stacks],
+        single_folder_folder_path=str(Path(stacks[0][0][0]).parent) if stacks else '',
+        fusion_combo=SimpleNamespace(currentData=lambda: method),
+        format_combo=SimpleNamespace(currentText=lambda: image_format),
+        sensor_cleanup=SimpleNamespace(path=SimpleNamespace(text=lambda: '')),
+        get_import_mode=lambda: 'single_folder' if stacks else 'multiple_folders')
+    for name in ('_source_output_folders', '_existing_result_input'):
+        setattr(stub, name, getattr(BatchProcessingDialog, name).__get__(stub))
+    return stub
+
+
+@pytest.mark.parametrize('output_type', ['same', 'custom'])
+def test_batch_dialog_refuses_a_result_that_is_already_an_input(qapp, tmp_path, output_type):
+    from dialogs.batch import BatchProcessingDialog
+    source = make_stack(tmp_path / 'stack')
+    output_path = str(source) if output_type == 'custom' else None
+    stub = _dialog_stub([source])
+    assert BatchProcessingDialog._validate_output_target(stub, output_type, output_path) is None
+    _write_frame(source / 'stack.png', 10, 'Earlier')
+    problem = BatchProcessingDialog._validate_output_target(stub, output_type, output_path)
+    assert problem and str(source / 'stack.png') in problem
+    # Without fusion only aligned-frame folders are written; a JPG plan does
+    # not reach the PNG either.
+    assert BatchProcessingDialog._validate_output_target(
+        _dialog_stub([source], method='none'), output_type, output_path) is None
+    assert BatchProcessingDialog._validate_output_target(
+        _dialog_stub([source], image_format='JPG'), output_type, output_path) is None
+
+
+def test_batch_dialog_refuses_an_earlier_split_result(qapp, tmp_path):
+    from dialogs.batch import BatchProcessingDialog
+    source = make_stack(tmp_path / 'stack')
+    _write_frame(source / 'stack_001.png', 10, 'Earlier')
+    loader = ImageStackLoader()
+    ok, _message, entries, _names = loader.load_images_with_timestamps(str(source))
+    assert ok and len(entries) == 3
+    stub = _dialog_stub(stacks=loader.split_by_count(entries, 5))
+    problem = BatchProcessingDialog._validate_output_target(stub, 'same', None)
+    assert problem and str(source / 'stack_001.png') in problem
+    assert BatchProcessingDialog._validate_output_target(
+        stub, 'subfolder', 'results') is None
+
+
 def test_batch_aligned_frames_keep_their_own_exif(qapp, tmp_path):
     source = make_stack(tmp_path / 'stack')
     _worker, result = run_batch([source], 'custom', str(tmp_path / 'out'),

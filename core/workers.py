@@ -1537,6 +1537,7 @@ class BatchWorker(QThread):
                 else:
                     tasks = [(os.path.basename(os.path.normpath(path)), path)
                              for path in self.folder_paths]
+                self._refuse_earlier_result_as_input(stacks if split else None)
                 total = len(tasks)
                 for index, (name, data) in enumerate(tasks):
                     task = {'name': name, 'status': 'not_started', 'artifacts': [], 'failures': []}
@@ -1592,6 +1593,26 @@ class BatchWorker(QThread):
             except Exception as exc:
                 operation.fail()
                 self.error.emit(str(exc))
+
+    def _refuse_earlier_result_as_input(self, stacks):
+        """Stop before any work when a planned result is already an input frame.
+
+        An earlier run's result in a source folder would otherwise be fused
+        into the new one as an extra frame.
+        """
+        method = self.processing_settings.get('fusion_method')
+        if not method or method == 'none':
+            return
+        from utils.export_paths import batch_result_among_inputs
+        existing = batch_result_among_inputs(
+            () if stacks is not None else self.folder_paths,
+            [[item[0] for item in stack] for stack in stacks] if stacks is not None else None,
+            self.output_type, self.output_path, self.processing_settings.get('format', 'png'),
+            exclude_paths=(self.processing_settings.get('flat_field_path', ''),
+                           self.processing_settings.get('defect_mask_path', '')))
+        if existing:
+            from locales import trans
+            raise ValueError(trans.t('batch_result_is_input').format(path=existing))
 
     def _split_images_for_processing(self):
         """分割单文件夹中的图像"""
@@ -1897,7 +1918,8 @@ class BatchWorker(QThread):
             thread_count=self.thread_count,
             resource_preference=getattr(self, 'resource_preference', 'balanced'),
             exclude_paths=[self.processing_settings.get('flat_field_path', ''),
-                           self.processing_settings.get('defect_mask_path', '')])
+                           self.processing_settings.get('defect_mask_path', ''),
+                           *self.written_paths])
         if self.is_cancelled:
             raise RegistrationCancelled()
         if getattr(self.image_loader, 'failed_count', 0):
@@ -1947,7 +1969,8 @@ class BatchWorker(QThread):
                  if os.path.splitext(name)[1].lower() in self.image_loader.SUPPORTED_FORMATS]
         files = self.image_loader._drop_derived_aligned_copies(files)
         from utils.path_identity import same_path
-        references = (settings.get('flat_field_path', ''), settings.get('defect_mask_path', ''))
+        references = (settings.get('flat_field_path', ''), settings.get('defect_mask_path', ''),
+                      *self.written_paths)
         files = [(name, path) for name, path in files if not any(
             same_path(path, reference) for reference in references if reference)]
         files.sort(key=lambda item: natural_sort_key(item[0]))
@@ -2062,15 +2085,8 @@ class BatchWorker(QThread):
         self.written_paths.append(self._task_artifacts[-1])
 
     def _get_output_path_for_single_folder(self, source_folder_path):
-        if self.output_type == 'subfolder':
-            root = os.path.realpath(source_folder_path)
-            output_dir = os.path.realpath(os.path.join(root, self.output_path))
-            if os.path.isabs(self.output_path) or os.path.commonpath((root, output_dir)) != root:
-                raise ValueError('Output subfolder must be inside the source folder')
-        elif self.output_type == 'same':
-            output_dir = source_folder_path
-        else:
-            output_dir = self.output_path
+        from utils.export_paths import batch_output_dir
+        output_dir = batch_output_dir(source_folder_path, self.output_type, self.output_path)
         os.makedirs(output_dir, exist_ok=True)
         return output_dir
 

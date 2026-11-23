@@ -116,6 +116,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Refuse a batch whose fused result already exists among its input frames,
+  for example after an earlier run with "Same folder" output, instead of
+  fusing the earlier result into the new one as an extra frame. A result one
+  folder of a run writes into another source folder is no longer loaded as a
+  frame of that folder.
 - Give each aligned frame a batch saves its own EXIF. Every frame used to
   carry the first frame's metadata.
 - Keep the first frame's EXIF in CLI batch results (`--output-dir`), as

@@ -328,6 +328,7 @@ PACK = {
     'batch_group_split_error': 'A fusão em grupos requer várias pastas; a divisão pré-carrega a pilha.',
     'batch_group_range_error': 'Tamanho mínimo 2; sobreposição máxima tamanho menos 2.',
     'batch_group_output_error': 'Escolha um método de fusão e desative a exportação de imagens alinhadas.',
+    'batch_result_is_input': 'Um resultado anterior em uma pasta de origem seria fundido como quadro:\n{path}\nMova ou exclua o arquivo, ou escolha outra pasta de saída.',
     'batch_group_progress': 'Etapa de grupos {stage}: {completed} / {total}',
     "menu_open_template": "Aplicar modelo de processamento…",
     "menu_save_template": "Salvar modelo de processamento…",
