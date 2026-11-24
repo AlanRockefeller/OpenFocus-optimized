@@ -338,6 +338,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carry the first frame's metadata.
 - Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
   single-stack output already does.
+- Stop reporting an unhandled exception and writing a crash file when a
+  standard message-box or dialog button is clicked. Diagnostic history
+  checked the click position with a Qt method that PyQt allows only on
+  buttons created from Python; those clicks are now recorded from the
+  button's clicked signal.
 
 ## [2.0.0]
 

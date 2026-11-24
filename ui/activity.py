@@ -27,6 +27,20 @@ def _is_canvas(widget):
         cls.__module__ == 'dialogs.retouch' and cls.__name__ == '_RetouchCanvas')
 
 
+def _release_hits(button, point):
+    """Whether a left release at ``point`` will click ``button``.
+
+    ``hitButton`` is protected, and PyQt only calls protected methods on
+    objects created from Python. Buttons that Qt creates itself, such as the
+    standard buttons of QMessageBox and QDialogButtonBox, raise RuntimeError;
+    their clicked signal then records the click instead of a pre-log.
+    """
+    try:
+        return button.hitButton(point)
+    except RuntimeError:
+        return False
+
+
 def _identifier(obj):
     """Use code-owned attribute names or structural positions, never widget text."""
     parts = []
@@ -261,7 +275,7 @@ class _ActivityLogger(QObject):
             elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
                 pressed = obj in self._pressed
                 self._pressed.discard(obj)
-                if pressed and obj.isEnabled() and obj.hitButton(event.position().toPoint()):
+                if pressed and obj.isEnabled() and _release_hits(obj, event.position().toPoint()):
                     self._connect(obj)
                     self._prelogged.add(obj)
                     value = obj.isChecked() if obj.isChecked() and obj.autoExclusive() else not obj.isChecked()
