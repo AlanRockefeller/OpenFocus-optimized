@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from core import multi_focus_fusion as mff
+from core.source_frames import resolve_frame
 from core.multi_focus_fusion import (MultiFocusFusion, _ai_effective_tiling,
                                      _tile_axis_starts, is_ai_fusion_available)
 
@@ -107,7 +108,8 @@ def _neural(monkeypatch, frames, block, overlap, *, algorithm='stackmffv3', mode
 
     def first_frame(_fusion, crops, _resize, **_kwargs):
         shapes.append(crops[0].shape[:2])
-        return crops[0]
+        # Streamed tiles hand the runner lazy crops; a runner reads their pixels.
+        return resolve_frame(crops[0])
 
     runner, resolve = fusion.descriptor.runner, mff.resolve_runner
     monkeypatch.setattr(mff, 'resolve_runner', lambda name: (
@@ -150,7 +152,7 @@ def test_moved_edge_tile_soft_blend_and_hard_pick(monkeypatch):
         choices = iter([0, 1, 0, 1, 1, 0])
 
         def predict(_fusion, crops, _resize, **_kwargs):
-            return crops[next(choices)]
+            return resolve_frame(crops[next(choices)])
 
         out, shapes = _neural(monkeypatch, frames, 64, 0, mode=mode, min_tile_edge=2,
                               predict=predict)
