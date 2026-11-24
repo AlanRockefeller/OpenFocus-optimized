@@ -32,6 +32,8 @@ _logger = logging.getLogger("openfocus")
 _logger.addHandler(logging.NullHandler())
 _lock = threading.RLock()
 _handler = None
+# Propagation the logger had before setup_logging turned it off; restored on shutdown.
+_propagate_before_setup = None
 _directory = None
 _session_marker = None
 _session_started = False
@@ -184,7 +186,7 @@ def setup_logging(log_dir=None, level=None) -> Path:
     OPENFOCUS_LOG_DIR and OPENFOCUS_LOG_LEVEL override the defaults for support
     and development. An unwritable directory must not prevent image processing.
     """
-    global _handler, _directory, _session_started, _runtime_level
+    global _handler, _directory, _session_started, _runtime_level, _propagate_before_setup
     with _lock:
         directory = Path(log_dir) if log_dir is not None else logs_dir()
         selected_level = _resolve_level(level)
@@ -209,6 +211,7 @@ def setup_logging(log_dir=None, level=None) -> Path:
         _logger.addHandler(handler)
         _handler = handler
         _logger.setLevel(selected_level)
+        _propagate_before_setup = _logger.propagate
         _logger.propagate = False
         _session_started = False
         _prune_old_logs(directory)
@@ -216,13 +219,20 @@ def setup_logging(log_dir=None, level=None) -> Path:
 
 
 def shutdown_logging() -> None:
-    """Close only OpenFocus's handler; leave embedding/test handlers intact."""
-    global _handler, _directory, _session_started, _runtime_level
+    """Close only OpenFocus's handler; leave embedding/test handlers intact.
+
+    Propagation returns to its state before setup_logging, so records from
+    ``openfocus.*`` loggers reach embedding and test handlers again.
+    """
+    global _handler, _directory, _session_started, _runtime_level, _propagate_before_setup
     with _lock:
         if _handler is not None:
             _logger.removeHandler(_handler)
             _handler.close()
             _handler = None
+        if _propagate_before_setup is not None:
+            _logger.propagate = _propagate_before_setup
+            _propagate_before_setup = None
         _directory = None
         _session_started = False
         _runtime_level = None

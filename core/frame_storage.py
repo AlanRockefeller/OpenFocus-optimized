@@ -1,6 +1,5 @@
 """Independent snapshots and bounded RAM scratch whose lifetime follows views."""
 import errno
-import logging
 import os
 import math
 import operator
@@ -15,6 +14,8 @@ import threading
 
 
 import numpy as np
+
+from utils.logging_setup import get_logger
 
 _storage_directory = None
 _storage_notice_lock = threading.Lock()
@@ -258,14 +259,14 @@ def _usable_storage_directory():
             notify = _storage_fallback_notifier if first_notice else None
             _storage_notice_path = directory
         if first_notice:
-            logging.getLogger(__name__).warning(
+            get_logger(__name__).warning(
                 'Temporary directory %s is unavailable; using %s: %s',
                 directory, fallback, exc)
         if notify is not None:
             try:
                 notify(directory, str(exc), fallback)
             except RuntimeError:
-                logging.getLogger(__name__).exception('Could not display temporary-directory warning')
+                get_logger(__name__).exception('Could not display temporary-directory warning')
         return fallback
     with _storage_notice_lock:
         _storage_notice_path = None

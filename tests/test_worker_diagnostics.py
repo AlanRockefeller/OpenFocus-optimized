@@ -287,7 +287,10 @@ def test_successful_video_load_after_corrupt_image_is_not_a_failure(tmp_path, di
     assert abs(means[0] - 60) <= 3 and abs(means[1] - 100) <= 3, means
     assert means[0] < means[1]
     assert results[0][2][0].dtype == np.uint8
-    admitted = next(record for record in diagnostics if record.event == 'stack_load.admitted')
+    # The corrupt image's preview warning reaches the session logger too.
+    assert any(record.levelname == 'WARNING' and 'Source preview failed' in record.getMessage()
+               for record in diagnostics)
+    admitted = next(record for record in diagnostics if getattr(record, 'event', None) == 'stack_load.admitted')
     assert _details(admitted) == {}
     assert str(video) not in admitted.getMessage()
     _assert_outcome(diagnostics, "stack_load", "completed")
@@ -307,7 +310,7 @@ def test_effective_fusion_records_order_and_reference_without_source_paths(diagn
     with log_operation('test_fusion') as operation:
         log_effective_fusion(fusion, frames, origin='render', thread_count=3,
                               sharpen_output=True)
-    record = next(record for record in diagnostics if record.event == 'fusion.effective')
+    record = next(record for record in diagnostics if getattr(record, 'event', None) == 'fusion.effective')
     details = _details(record)
     assert record.operation_id == operation.operation_id
     assert details['settings']['fusion_parameters'] == {'radius': 2}
@@ -326,6 +329,6 @@ def test_effective_fusion_exposure_reference_for_unsorted_method(diagnostics):
 
     fusion = SimpleNamespace(algorithm='dct', sort_mode='desc', exposure_match=True)
     log_effective_fusion(fusion, _frames(), origin='batch')
-    details = _details(next(record for record in diagnostics if record.event == 'fusion.effective'))
+    details = _details(next(record for record in diagnostics if getattr(record, 'event', None) == 'fusion.effective'))
     assert details['fusion_order'] == [0, 1]
     assert details['exposure_reference_index'] == 1

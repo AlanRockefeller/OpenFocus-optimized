@@ -1,6 +1,5 @@
 """Optional job-local OpenCL implementation of audited CPU INTER_AREA paths."""
 import ctypes
-import logging
 import math
 import os
 import sys
@@ -8,6 +7,8 @@ from threading import Lock
 
 import cv2
 import numpy as np
+
+from utils.logging_setup import get_logger
 
 
 # OpenCV 5.0.0 modules/imgproc/src/resize.cpp, computeResizeAreaTab and
@@ -308,7 +309,7 @@ class ExactAreaGpu:
                 if self.frames_resized == 0:
                     from fusion_methods._openfocus_gpu import opencl_device_name
                     self.device_name = opencl_device_name(self._device)
-                    logging.getLogger(__name__).info('ECC working-frame resize on %s', self.device_name)
+                    get_logger(__name__).info('ECC working-frame resize on %s', self.device_name)
                 self.frames_resized += 1
                 return output
             except RegistrationCancelled:
@@ -334,5 +335,5 @@ class ExactAreaGpu:
                 self._context = None
                 self._queue = None
                 self._kernels = None
-                logging.getLogger(__name__).info('ECC area resize using CPU: %s', exc)
+                get_logger(__name__).info('ECC area resize using CPU: %s', exc)
                 return None

@@ -547,8 +547,8 @@ def save_project(window, path: str, *, recovery_document=None,
         try:
             _retire_owned_files(old_owned - retained)
         except OSError:
-            import logging
-            logging.getLogger(__name__).warning("Could not retire old project sidecars", exc_info=True)
+            from utils.logging_setup import get_logger
+            get_logger(__name__).warning("Could not retire old project sidecars", exc_info=True)
         return True, path
     except (OSError, TypeError, ValueError) as exc:
         return False, str(exc)

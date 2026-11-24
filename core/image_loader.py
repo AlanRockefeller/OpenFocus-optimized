@@ -1613,8 +1613,8 @@ class ImageStackLoader:
                                 from locales import trans
                                 return False, trans.t('transparent_desktop_unsupported').format(path=path), [], []
                             failed += 1
-                            import logging
-                            logging.getLogger(__name__).warning('Source preview failed path=%s: %s', path, error)
+                            from utils.logging_setup import get_logger
+                            get_logger(__name__).warning('Source preview failed path=%s: %s', path, error)
                         else:
                             for frame_exif, frame_icc in metadata:
                                 if not exif:

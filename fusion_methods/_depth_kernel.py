@@ -6,7 +6,6 @@ same in-memory compilation path.
 """
 from contextlib import contextmanager
 import errno
-import logging
 import os
 import pickle
 import time
@@ -14,6 +13,7 @@ from threading import Lock
 
 from core.algorithm_adapters import DEPTH_KERNEL_STARTUP_BYTES
 from core.resource_policy import require_memory
+from utils.logging_setup import get_logger
 
 
 require_memory(DEPTH_KERNEL_STARTUP_BYTES)
@@ -91,7 +91,7 @@ class _GuardedCache:
             try:
                 return getattr(self._cache, method)(*args)
             except (OSError, EOFError, pickle.UnpicklingError) as exc:
-                logging.getLogger(__name__).debug('Numba cache unavailable: %s', exc)
+                get_logger(__name__).debug('Numba cache unavailable: %s', exc)
                 return None
 
     def load_overload(self, *args):
