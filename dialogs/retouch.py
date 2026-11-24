@@ -785,12 +785,24 @@ class _AutoBackgroundDialog(QDialog):
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(SPACE["sm"])
+        self.progress.setRange(0, 1000)
         working.addWidget(self.progress)
+        # A separate bar animates while no fraction is known. Qt's style sheet
+        # progress bar stops a busy animation only when it draws a non-empty
+        # chunk, so switching one bar from busy to a value below one pixel kept
+        # it animating; hiding this bar stops its animation instead.
+        self.busy_progress = QProgressBar()
+        self.busy_progress.setTextVisible(False)
+        self.busy_progress.setFixedHeight(SPACE["sm"])
+        self.busy_progress.setRange(0, 0)
+        self.busy_progress.hide()
+        working.addWidget(self.busy_progress)
         self.selection_label = QLabel()
         self.selection_label.setWordWrap(True)
         working.addWidget(self.selection_label)
         self.progress_box.hide()
-        layout.addWidget(self.progress_box)
+        # Stay compact at the top when the window manager keeps the options height.
+        layout.addWidget(self.progress_box, 0, Qt.AlignmentFlag.AlignTop)
         buttons = QHBoxLayout()
         self.run_button = QPushButton(trans.t("retouch_auto_bg_run"))
         self.run_button.setProperty("controlId", "auto_background_run")
@@ -857,11 +869,13 @@ class _AutoBackgroundDialog(QDialog):
         stage = trans.t(self._STAGES.get(message, "retouch_auto_bg_applying"))
         self.stage_label.setText(stage)
         self.progress.setAccessibleName(stage)
-        if fraction <= 0 or message == "waiting for processing":
-            self.progress.setRange(0, 0)
+        self.busy_progress.setAccessibleName(stage)
+        busy = fraction <= 0 or message == "waiting for processing"
+        self.busy_progress.setVisible(busy)
+        self.progress.setVisible(not busy)
+        if busy:
             self.lbl_progress.clear()
         else:
-            self.progress.setRange(0, 1000)
             self.progress.setValue(round(fraction * 1000))
             self.lbl_progress.setText(f"{int(fraction * 100)}%" if fraction >= 0.01 else "<1%")
 
@@ -897,8 +911,9 @@ class _AutoBackgroundDialog(QDialog):
         if self.worker is not None:
             self.worker.requestInterruption()
             self.stage_label.setText(trans.t("depth_cancelling"))
-            self.progress.setAccessibleName(self.stage_label.text())
-            self.progress.setRange(0, 0)
+            self.busy_progress.setAccessibleName(self.stage_label.text())
+            self.progress.hide()
+            self.busy_progress.show()
             self.lbl_progress.clear()
             self.cancel_button.setEnabled(False)
         else:
