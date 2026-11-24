@@ -967,8 +967,10 @@ any additional aligned or corrected frames. With the directory left on
 its frame cache and staging) and chooses a volume with room for that before any
 stage starts: the system temporary directory, otherwise a writable fixed local
 disk, starting with the disk that holds the images. On a disk it uses an
-`OpenFocus-scratch` folder at the drive root, never the folder that holds the
-images. On Linux, a RAM-backed temporary directory (tmpfs) is used for a render
+`OpenFocus-scratch` folder at the drive root. When the user cannot write the
+drive root, it uses the per-user cache folder instead (`~/.cache/OpenFocus/scratch`
+on Linux) if that folder is on the same disk. It never uses the folder that
+holds the images. On Linux, a RAM-backed temporary directory (tmpfs) is used for a render
 larger than a quarter of the computer's memory only when no disk has room,
 because its files occupy memory. The log records the chosen folder. An
 explicitly selected directory stays in the settings. If it becomes unavailable,

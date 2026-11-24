@@ -101,3 +101,18 @@ def user_data_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
     return base / "OpenFocus"
+
+
+def user_cache_dir() -> Path:
+    """Per-user cache root for OpenFocus (data that may be deleted at any time)."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or "")
+        if not base.is_absolute():
+            base = Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or "")
+        if not base.is_absolute():
+            base = Path.home() / ".cache"
+    return base / "OpenFocus"

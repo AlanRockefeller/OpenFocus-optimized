@@ -444,19 +444,82 @@ def test_render_binds_scratch_for_the_whole_job_before_its_stages(qapp, monkeypa
     assert scratch and scratch[0]['directory'] == bound and scratch[0]['goal_bytes'] > 1024 * 1024
 
 
+def test_render_without_a_whole_job_volume_leaves_selection_to_its_stages(
+        qapp, monkeypatch, tmp_path):
+    import cv2
+    from core import source_frames
+    from core.source_frames import scan_source
+    path = tmp_path / 'frame.tif'
+    assert cv2.imwrite(str(path), np.full((40, 56, 3), 1000, np.uint16))
+    frames = [scan_source(str(path))[0]]
+
+    def no_volume(*args, **kwargs):
+        raise frame_storage.ScratchSpaceError(str(tmp_path), 0, 0)
+    monkeypatch.setattr(source_frames, 'select_frame_scratch', no_volume)
+    worker = workers.RenderWorker(frames, algorithm='openfocus_b', alignment='ecc',
+                                  exposure_match=True, use_gpu=False, thread_count=1)
+    monkeypatch.setattr(worker, '_run_admitted_body',
+                        lambda: frame_storage.capture_scratch().directory)
+    warnings = []
+    monkeypatch.setattr(workers.logger, 'warning', lambda message, *args, **kwargs: warnings.append(message))
+    with frame_storage.scratch_directory():
+        assert worker._run_admitted() is None
+    assert any('whole render' in message for message in warnings)
+
+
+def _deny_folder(monkeypatch, folder):
+    """Make creating ``folder`` fail as on a volume root the user cannot write."""
+    original = os.makedirs
+    def makedirs(path, *args, **kwargs):
+        if os.path.abspath(path) == os.path.abspath(folder):
+            raise PermissionError(13, 'Permission denied', str(path))
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'makedirs', makedirs)
+
+
 def test_unwritable_alternative_is_skipped(monkeypatch, tmp_path):
     from core.source_frames import materialize_frames
     default, alternative = _fake_volumes(monkeypatch, tmp_path, 0, 10000)
-    original = frame_storage._volume_scratch_parent
-    def denied(candidate):
-        # An unwritable volume root refuses the app scratch folder.
-        if candidate == str(alternative):
-            raise PermissionError('denied')
-        return original(candidate)
-    monkeypatch.setattr(frame_storage, '_volume_scratch_parent', denied)
+    _deny_folder(monkeypatch, _app_folder(alternative))
+    monkeypatch.setattr(frame_storage, '_user_scratch_folder', lambda: None)
     with pytest.raises(frame_storage.ScratchSpaceError):
         materialize_frames([np.zeros((4, 4), np.uint8)])
     assert not list(default.iterdir()) and not list(alternative.iterdir())
+
+
+def test_unwritable_volume_root_uses_the_user_cache_folder_on_that_volume(monkeypatch, tmp_path):
+    # Photos under a root-owned mount (such as /home), and a RAM-backed /tmp too
+    # small for the job: the user's cache folder on the photo volume holds it.
+    default, volume = _fake_volumes(monkeypatch, tmp_path, 100, 10000)
+    photos = volume / 'alan' / 'Pictures'
+    photos.mkdir(parents=True)
+    source = photos / 'frame.tif'
+    source.write_bytes(b'x')
+    user = volume / 'alan' / '.cache' / 'OpenFocus' / 'scratch'
+    _deny_folder(monkeypatch, _app_folder(volume))
+    monkeypatch.setattr(frame_storage, '_user_scratch_folder', lambda: str(user))
+    monkeypatch.setattr(frame_storage, '_ram_backed', lambda path: path == str(default))
+    monkeypatch.setattr(frame_storage, '_ram_backed_limit', lambda: 500)
+    with frame_storage.scratch_directory():
+        chosen = frame_storage.select_scratch(0, [str(source)], preferred_size=1000)
+        assert os.path.dirname(chosen) == str(user)
+        assert sorted(p.name for p in photos.iterdir()) == ['frame.tif']
+    assert not os.path.exists(_app_folder(volume)) and not os.listdir(user)
+
+
+def test_user_cache_folder_on_another_volume_is_not_used(monkeypatch, tmp_path):
+    default, volume = _fake_volumes(monkeypatch, tmp_path, 0, 10000)
+    user = tmp_path / 'elsewhere' / 'scratch'
+    user.parent.mkdir()
+    _deny_folder(monkeypatch, _app_folder(volume))
+    monkeypatch.setattr(frame_storage, '_user_scratch_folder', lambda: str(user))
+    real_volume = frame_storage._scratch_volume
+    monkeypatch.setattr(frame_storage, '_scratch_volume',
+                        lambda path: 'other' if str(path).startswith(str(tmp_path / 'elsewhere'))
+                        else real_volume(path))
+    with frame_storage.scratch_directory(), pytest.raises(frame_storage.ScratchSpaceError):
+        frame_storage.select_scratch(1000)
+    assert not user.exists()
 
 
 @pytest.mark.parametrize('operation', ['fusion', 'registration', 'retained'])

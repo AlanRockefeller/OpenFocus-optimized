@@ -210,7 +210,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   times. On Linux, a RAM-backed temporary directory (tmpfs) is now used for a
   job larger than a quarter of the computer's memory only after the disk
   volumes. Automatic scratch on a disk goes to an `OpenFocus-scratch` folder at
-  the drive root instead of a folder next to the source images. The setting's
+  the drive root, or to the per-user cache folder (`~/.cache/OpenFocus/scratch`
+  on Linux) when the root is not writable and that folder is on the same disk,
+  instead of a folder next to the source images. The setting's
   empty choice is now labelled **Automatic**, and each render logs the
   directory it chose (`render.scratch`).
 

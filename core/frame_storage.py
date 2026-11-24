@@ -351,9 +351,9 @@ def _scratch_candidates(explicit, source_paths):
     if explicit is not None:
         return
     mounts = _local_mounts()
-    # Prefer a source's fixed local volume. Scratch goes to an app folder at
-    # the volume root (see _volume_scratch_parent), never into the folder
-    # that holds the user's images.
+    # Prefer a source's fixed local volume. Scratch goes to an app folder on
+    # that volume (see _volume_scratch_parents), never into the folder that
+    # holds the user's images.
     for source in source_paths:
         source = os.path.normcase(os.path.abspath(source))
         for mount in sorted(mounts, key=len, reverse=True):
@@ -372,11 +372,53 @@ def _scratch_candidates(explicit, source_paths):
 SCRATCH_FOLDER_NAME = 'OpenFocus-scratch'
 
 
-def _volume_scratch_parent(candidate):
-    """Create (if needed) and return the app scratch folder on ``candidate``."""
-    parent = os.path.join(candidate, SCRATCH_FOLDER_NAME)
-    os.makedirs(parent, exist_ok=True)
-    return parent
+def _user_scratch_folder():
+    """The per-user scratch folder in the platform's cache location, or None."""
+    try:
+        from utils.app_paths import user_cache_dir
+        return os.fspath(user_cache_dir() / 'scratch')
+    except (OSError, RuntimeError, KeyError):
+        return None
+
+
+def _existing_ancestor(path):
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+    return path
+
+
+def _volume_scratch_parents(candidate):
+    """Folders that may hold a job's scratch on ``candidate``'s volume, in order.
+
+    First the app folder at the volume root. A volume whose root the user
+    cannot write (a root-owned Linux mount such as /home) can still hold
+    scratch in the per-user cache folder when that folder is on the same
+    volume. Never the folder that holds the source images.
+    """
+    yield os.path.join(candidate, SCRATCH_FOLDER_NAME)
+    user = _user_scratch_folder()
+    ancestor = _existing_ancestor(user) if user is not None else None
+    if ancestor is None:
+        return
+    volume = _scratch_volume(candidate)
+    if volume is not None and _scratch_volume(ancestor) == volume:
+        yield user
+
+
+def _create_job_directory(candidate):
+    """Create this job's scratch folder on ``candidate``'s volume and return it."""
+    error = None
+    for parent in _volume_scratch_parents(candidate):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            return tempfile.mkdtemp(prefix='openfocus-', dir=parent)
+        except OSError as exc:
+            error = exc
+    raise error
 
 
 def _ram_backed(path):
@@ -605,8 +647,7 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
                     os.unlink(probe)
                     state.directory = candidate
                 else:
-                    state.directory = tempfile.mkdtemp(
-                        prefix='openfocus-', dir=_volume_scratch_parent(candidate))
+                    state.directory = _create_job_directory(candidate)
                     from core.scratch_registry import register
                     register(state.directory)
                     state.owned = True
