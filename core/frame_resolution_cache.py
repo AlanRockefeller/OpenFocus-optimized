@@ -267,18 +267,6 @@ def _staging_floor(frames):
     return max(64 * 1024 * 1024, _largest_frame_bytes(frames))
 
 
-def cache_scratch_goal(frames, mandatory_bytes=0):
-    """Free bytes a render's frame cache asks of its scratch volume, or 0.
-
-    The same total ScopedCache admits against the bound directory: every lazy
-    frame, the pipeline's mandatory staging and one frame of staging floor.
-    """
-    need = _frame_need(frames)
-    if need <= 0:
-        return 0
-    return need + max(0, int(mandatory_bytes or 0)) + _staging_floor(frames)
-
-
 def entry_kind(frame):
     """Classify a cache key for performance counters (never for admission)."""
     from functools import partial

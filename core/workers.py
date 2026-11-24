@@ -649,13 +649,16 @@ class RenderWorker(QThread):
 
     def _run_admitted(self):
         from core.algorithms import alignment_steps
-        from core.frame_resolution_cache import (cache_scratch_goal, mandatory_staging_bytes,
+        from core.frame_resolution_cache import (mandatory_staging_bytes, planned_cache_bytes,
                                                  render_scope)
         steps = len(alignment_steps(self.alignment)) if self.alignment else 0
         mandatory = mandatory_staging_bytes(
             self.raw_images, alignment_steps=steps,
             exposure_match=self.exposure_match, deferred=bool(self._defer_warps))
-        self._bind_job_scratch(cache_scratch_goal(self.raw_images, mandatory))
+        # What ScopedCache will admit against the bound directory: its plan
+        # plus the pipeline's mandatory staging. RAM-only renders plan nothing.
+        planned, _ = planned_cache_bytes(self.raw_images)
+        self._bind_job_scratch(planned + mandatory if planned else 0)
         with render_scope(self.raw_images, mandatory_bytes=mandatory,
                           should_cancel=lambda: self.is_cancelled), \
                 performance_profile.current().stage('render', resources=True):
