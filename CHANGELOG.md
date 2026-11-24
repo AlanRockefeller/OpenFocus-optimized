@@ -25,6 +25,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while the browser is open.
 - Verify desktop email sign-in in your browser, then confirm the email link on
   your phone or computer to sign in automatically on the desktop.
+- Add developer tooling for sample focus stacks published outside OpenFocus:
+  a versioned manifest, a verified download cache, a packer with a metadata
+  check, and `tools/sample_stacks.py`; see [Sample stacks](docs/SAMPLE_STACKS.md).
+- Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
 ### Changed
 - Build desktop packages and platform wheels with C++17 CPU kernels for
@@ -263,6 +267,77 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Let users cancel a stuck video import or close its scale dialog. Video
   decoding runs in a separate process so another import can start in the
   same session.
+- Fuse each tile of a CPU tiled render once. When the image size made the
+  last tile origin repeat (for example 1600, 2400 or 4000 pixels at the
+  default 1024-pixel tile and 256-pixel overlap), that row or column of
+  tiles was fused twice and counted twice in the blend. Those renders now
+  fuse fewer tiles, and pixels in the overlap band can differ by about one
+  level. Neural renders and other image sizes are unchanged.
+- Apply a tile overlap of 1 pixel as no overlap. Adjacent tiles shared one
+  row or column where both feather weights were zero, which rendered black
+  seams on the CPU and neural tiled paths and shifted the depth range of
+  tiled StackMFF V2. Overlap 0 and every overlap of 2 or more are unchanged.
+- Finish tiled StackMFF V1 renders whose width or height is one pixel past
+  a multiple of a 64-pixel tile at overlap 0. The last tile was one pixel
+  wide and the second inference scale failed after all other tiles had run;
+  it now ends at the image edge with the full tile size.
+- Show the current Japanese and Spanish translation of the comparison
+  "Stopping…" status. Their locale tables listed the key twice, and the older
+  wording won. Other keys listed twice in one locale table were removed as
+  well, and a test now rejects a key listed twice.
+- Use the default tile size when a project, or a value saved in the
+  preferences, sets a tile smaller than the 64-pixel minimum, and reject such
+  a template. A 0- or 1-pixel tile split each frame into millions of tiles,
+  and opening the project saved the value for later sessions.
+- Report a project file that is not valid UTF-8 as unreadable instead of
+  raising an unhandled error from File > Open.
+- Resolve a relative source folder in a project file against the project's
+  own folder instead of the current working directory.
+- Refuse to save a project over one of the stack's source images.
+- Give saved images, projects, templates, recipes and other files OpenFocus
+  writes through a temporary file the permissions a direct write would give
+  them: an overwritten file keeps its mode, and a new file follows the umask
+  (for example 0644 instead of 0600). Crash-recovery snapshots, account data
+  and caches stay readable by the owner only.
+- Flush saved projects, templates and recipes to disk before they replace the
+  previous file, so a power loss cannot leave an empty or partial file in its
+  place. The crash-recovery snapshot is not synced, to keep the window
+  responsive after loads and renders.
+- Decode camera-linear RAW files with an odd sensor width or height at full
+  resolution when they are loaded at half scale or less. The incomplete
+  colour block on the odd edge tinted the last row or column. Even-sized
+  sensors decode as before.
+- Honour the transparency key of a grayscale PNG when it is loaded for a
+  render, as the preview already did. Such frames were fused as opaque.
+  Other PNG layouts and grayscale PNGs without a key decode as before.
+- Refuse grayscale TIFF pages whose alpha sample is not fully opaque, as
+  for color TIFF. Such a page lost its alpha as a later frame and failed
+  with an unsupported-layout error as the first. A fully opaque gray page
+  with alpha now loads as gray, keeping 16-bit samples.
+- Render only the part of an ROI that lies on the image when the selection
+  starts left of or above it. The origin was clamped but the width and height
+  kept, so the render, the pasted region and the provenance covered pixels
+  outside the selection. A selection entirely outside the image now starts
+  no render and says so in the status bar.
+- Stop a leftover update-restore marker from restoring a later session. An
+  update with an empty workspace no longer leaves a marker, and a marker
+  whose snapshot is gone is removed at startup instead of waiting for the
+  next session's snapshot.
+- Restore the stack folder when undo crosses a stack load, so exports and
+  folder-based names use the restored stack's folder.
+- Keep the displayed frame after applying a flat field instead of jumping
+  to the first frame (or to the frame last restored by undo).
+- Reopen the load-scale dialog at a remembered 29%, 57% or 58% instead of
+  one percent lower.
+- Refuse a batch whose fused result already exists among its input frames,
+  for example after an earlier run with "Same folder" output, instead of
+  fusing the earlier result into the new one as an extra frame. A result one
+  folder of a run writes into another source folder is no longer loaded as a
+  frame of that folder.
+- Give each aligned frame a batch saves its own EXIF. Every frame used to
+  carry the first frame's metadata.
+- Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
+  single-stack output already does.
 
 ## [2.0.0]
 

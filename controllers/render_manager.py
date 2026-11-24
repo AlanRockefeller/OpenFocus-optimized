@@ -12,6 +12,7 @@ from utils.image_utils import cv2_to_pixmap
 from utils.output_sharpen import DEFAULT_SHARPEN_STRENGTH
 from core.multi_focus_fusion import is_ai_fusion_available
 from core.render_context import RegistrationDetails, build_render_context
+from utils.validators import intersect_roi
 from core.render_process import RenderProcessWorker
 from dialogs import ROIRenderOptionsDialog  # Import the new dialog
 from locales import trans
@@ -1190,13 +1191,26 @@ class RenderManager:
             if roi_rect is not None:
                 use_roi_aligned_images = True
                 names = list(stack_filenames)
-                roi = (window.lbl_result_img.get_roi_rect()
-                       if hasattr(window.lbl_result_img, "get_roi_rect")
-                       else None)
-                roi_size = (int(roi.width()), int(roi.height())) if roi else None
                 base = (window.roi_aligned_images[0]
                         if getattr(window, "roi_aligned_images", None) else None)
                 output_size = (base.shape[1], base.shape[0]) if base is not None else None
+                region = (intersect_roi(int(roi_rect.x()), int(roi_rect.y()),
+                                        int(roi_rect.width()), int(roi_rect.height()),
+                                        *output_size)
+                          if output_size is not None else None)
+                if output_size is not None and region is None:
+                    # Nothing of the selection lies on the image: no ROI render.
+                    message = trans.t("roi_outside_image")
+                    self._start_status = "roi_outside_image"
+                    self.last_state = "error"
+                    self.last_error = message
+                    self.last_result = None
+                    self._restore_ui_controls()
+                    self._abort_compare_run()
+                    window.statusBar().showMessage(message, 8000)
+                    return
+                roi_size = ((region[2], region[3]) if region is not None
+                            else (int(roi_rect.width()), int(roi_rect.height())))
                 if roi_choice is not None:
                     roi_mode = str(roi_choice.get("mode", "crop"))
                     if roi_mode not in ("crop", "paste"):

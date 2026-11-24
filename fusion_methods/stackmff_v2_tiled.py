@@ -314,8 +314,8 @@ def _tiled_depth_under_lease(source, model_path, use_gpu, should_cancel=None,
     block = max(block, min(common.ATTENTION_PAD_ALIGN, h, w))
     if block >= common.ATTENTION_PAD_ALIGN:
         block = (block // common.ATTENTION_PAD_ALIGN) * common.ATTENTION_PAD_ALIGN
-    overlap = max(0, min(int(tile_overlap), block // 2))
-    from core.multi_focus_fusion import _tile_axis_starts
+    from core.multi_focus_fusion import _effective_tile_overlap, _tile_axis_starts
+    overlap = _effective_tile_overlap(tile_overlap, block)
     ys = sorted(set(_tile_axis_starts(h, block, overlap, common.ATTENTION_PAD_ALIGN)))
     xs = sorted(set(_tile_axis_starts(w, block, overlap, common.ATTENTION_PAD_ALIGN)))
     total = len(xs) * len(ys)

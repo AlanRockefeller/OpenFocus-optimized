@@ -456,6 +456,83 @@ def test_saved_registration_parameters_are_complete(tmp_path):
     assert target.registration_parameters_for("openfocus") == source.registration_parameters_for("openfocus")
 
 
+@pytest.mark.parametrize("block", [0, 1, 63, -5])
+def test_project_tile_size_below_minimum_falls_back_to_default(tmp_path, block):
+    # A 0- or 1-pixel tile from a hand-edited project would split a
+    # 4000x3000 frame into millions of tiles, and apply_project saves the
+    # value into the preferences for every later session.
+    from constants import TILE_BLOCK_SIZE
+    paths = _make_stack(str(tmp_path / "stack"), n=1)
+    project = tmp_path / "tiles.ofproj"
+    project.write_text(json.dumps({
+        "openfocus_project": 4, "sources": paths,
+        "settings": {"tile_block_size": block, "tile_overlap": 256}}), encoding="utf-8")
+    ok, error, state = project_file.validate_project(str(project))
+    assert ok, error
+    assert state["settings"]["tile_block_size"] == TILE_BLOCK_SIZE
+    assert project_file.load_template(str(project))["tile_block_size"] == TILE_BLOCK_SIZE
+
+
+def test_project_keeps_the_smallest_allowed_tile_size(tmp_path):
+    from constants import TILE_BLOCK_MIN
+    paths = _make_stack(str(tmp_path / "stack"), n=1)
+    project = tmp_path / "tiles.ofproj"
+    project.write_text(json.dumps({
+        "openfocus_project": 4, "sources": paths,
+        "settings": {"tile_block_size": TILE_BLOCK_MIN, "tile_overlap": 32}}), encoding="utf-8")
+    ok, error, state = project_file.validate_project(str(project))
+    assert ok, error
+    assert state["settings"]["tile_block_size"] == TILE_BLOCK_MIN
+    assert state["settings"]["tile_overlap"] == 32
+
+
+@pytest.mark.parametrize("block", [1, 63])
+def test_template_rejects_tile_size_below_minimum(block):
+    with pytest.raises(ValueError, match="tile_block_size"):
+        project_file.validate_template_settings({"tile_block_size": block, "tile_overlap": 0})
+    from constants import TILE_BLOCK_MIN
+    assert project_file.validate_template_settings(
+        {"tile_block_size": TILE_BLOCK_MIN, "tile_overlap": 0})["tile_block_size"] == TILE_BLOCK_MIN
+
+
+def test_non_utf8_project_reports_a_read_error(tmp_path):
+    project = tmp_path / "bad.ofproj"
+    project.write_bytes(b'{"openfocus_project": 4, "sources": ["\xff"]}')
+    ok, error, state = project_file.validate_project(str(project))
+    assert not ok and error.startswith("cannot read project") and state == {}
+
+
+def test_relative_source_folder_resolves_against_the_project(tmp_path, monkeypatch):
+    # A hand-edited project records folders relative to itself; a same-named
+    # frame under the current working directory must not be bound instead.
+    project_dir = tmp_path / "project"
+    _make_stack(str(project_dir / "frames"), n=1)
+    decoy = tmp_path / "cwd"
+    _make_stack(str(decoy / "frames"), n=1)
+    monkeypatch.chdir(decoy)
+    project = project_dir / "relative.ofproj"
+    project.write_text(json.dumps({
+        "openfocus_project": 4, "sources": ["f0.png"], "source_folders": ["frames"],
+        "settings": {}}), encoding="utf-8")
+    ok, error, state = project_file.validate_project(str(project))
+    assert ok, error
+    assert state["resolved_sources"] == [str(project_dir / "frames" / "f0.png")]
+
+
+def test_save_project_refuses_to_overwrite_a_source_frame(tmp_path):
+    paths = _make_stack(str(tmp_path / "stack"), n=2)
+    before = open(paths[1], "rb").read()
+    window = _window(paths, str(tmp_path / "stack"))
+    ok, error = project_file.save_project(window, paths[1])
+    assert not ok and "source" in error.lower()
+    assert open(paths[1], "rb").read() == before
+    # another spelling of the same file is refused too
+    spelled = os.path.join(str(tmp_path), "stack", ".", "f1.png")
+    assert not project_file.save_project(window, spelled)[0]
+    assert open(paths[1], "rb").read() == before
+    assert project_file.save_project(window, str(tmp_path / "stack" / "session.ofproj"))[0]
+
+
 @pytest.mark.parametrize('document', ['project', 'template'])
 @pytest.mark.parametrize('scale', [None, 'dual'])
 def test_stackmff_scale_in_saved_settings(tmp_path, document, scale):

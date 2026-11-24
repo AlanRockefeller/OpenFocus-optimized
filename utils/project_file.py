@@ -15,10 +15,14 @@ import tempfile
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
+from utils.file_modes import (apply_default_directory_mode, apply_default_mode,
+                              apply_destination_mode)
+
 from core.algorithms import (fusion_algorithms, registration_algorithms, get_fusion, get_registration,
                              migrate_openfocus_parameters, resolve_fusion_parameters,
                              resolve_registration_parameters)
 from utils.output_sharpen import DEFAULT_SHARPEN_STRENGTH, validate_sharpen_strength
+from constants import TILE_BLOCK_MIN, TILE_BLOCK_SIZE
 
 PROJECT_SUFFIX = ".ofproj"
 FORMAT_VERSION = 4
@@ -57,7 +61,9 @@ def validate_template_settings(settings, *, old_parameters=False):
         value = settings.get(key)
         if value is None and key == "reg_downscale_width":
             continue
-        if key in settings and (type(value) is not int or value < (0 if key in ("thread_count", "tile_overlap") else 1)):
+        minimum = (0 if key in ("thread_count", "tile_overlap")
+                   else TILE_BLOCK_MIN if key == "tile_block_size" else 1)
+        if key in settings and (type(value) is not int or value < minimum):
             raise ValueError(f"invalid {key}")
     if settings.get("tile_overlap", 0) >= settings.get("tile_block_size", 1024):
         raise ValueError("tile overlap must be smaller than the tile size")
@@ -78,6 +84,9 @@ def atomic_json_write(path, data):
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2, allow_nan=False)
             stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        apply_destination_mode(temporary, path)
         os.replace(temporary, path)
     except BaseException:
         try:
@@ -423,7 +432,7 @@ def remove_project_snapshot(path):
     _retire_owned_files(owned)
 
 
-def _persist_pathless_sources(window, state, project_path, created, directories):
+def _persist_pathless_sources(window, state, project_path, created, directories, private=False):
     """Create a private generation for in-memory and foreign-owned sources."""
     import numpy as np
     from utils.frame_pixels import run_pixel_worker
@@ -447,6 +456,8 @@ def _persist_pathless_sources(window, state, project_path, created, directories)
             raise OSError("Project sidecar directory is a symbolic link")
         directory = tempfile.mkdtemp(prefix="generation-", dir=root)
         directories.add(directory)
+        if not private:
+            apply_default_directory_mode(directory)
         paths = {}
         for index, image, source, pathless in pending:
             fd, destination = tempfile.mkstemp(suffix=".tif", dir=directory)
@@ -457,6 +468,8 @@ def _persist_pathless_sources(window, state, project_path, created, directories)
                     raise OSError("Cannot preserve project source: " + destination)
             else:
                 shutil.copyfile(source, destination)
+            if not private:
+                apply_default_mode(destination)
             paths[index] = (destination, pathless)
         return paths
     paths = run_pixel_worker(window, "OpenFocus project", persist)
@@ -472,13 +485,23 @@ def _persist_pathless_sources(window, state, project_path, created, directories)
     state.update(sources=sources, source_folders=folders, frame_order=order)
 
 
-def save_project(window, path: str, *, recovery_document=None) -> Tuple[bool, str]:
-    """Write the current session state to an .ofproj file."""
+def save_project(window, path: str, *, recovery_document=None,
+                 private=False) -> Tuple[bool, str]:
+    """Write the current session state to an .ofproj file.
+
+    ``private`` keeps the file and its sidecars readable by the owner only
+    (the crash-recovery snapshot) and skips the disk sync, which would
+    otherwise run on the GUI thread after every load and render. A project
+    the user saves gets the mode a plain ``open()`` would give it.
+    """
     if not getattr(window, "raw_images", []):
         return False, "no images loaded"
     limitations = getattr(window, "unrecoverable_source_changes", [])
     if limitations:
         return False, "Export the processed source stack before saving a project: " + "; ".join(limitations)
+    from utils.path_identity import same_path
+    if any(same_path(path, source) for source in getattr(window, "image_source_paths", None) or ()):
+        return False, "Cannot overwrite a source image"
     created, directories = set(), set()
     committed = False
     old_owned = _owned_sidecars(path)
@@ -487,7 +510,7 @@ def save_project(window, path: str, *, recovery_document=None) -> Tuple[bool, st
         if recovery_document is not None:
             _validate_recovery_document(recovery_document)
             state["recovery_document"] = dict(recovery_document)
-        _persist_pathless_sources(window, state, path, created, directories)
+        _persist_pathless_sources(window, state, path, created, directories, private)
         _validate_source_transforms(state.get("source_transforms", []), state["scale_factor"])
         missing = [source for source in state["sources"] if not os.path.isfile(source)]
         if missing:
@@ -508,6 +531,11 @@ def save_project(window, path: str, *, recovery_document=None) -> Tuple[bool, st
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                if not private:
+                    f.flush()
+                    os.fsync(f.fileno())
+            if not private:
+                apply_destination_mode(tmp, path)
             os.replace(tmp, path)
         except BaseException:
             try:
@@ -547,7 +575,8 @@ def _resolve_sources(state: Dict[str, Any], project_dir: str, *, should_cancel=N
         candidates = [recorded] if os.path.isabs(recorded) else []
         if not os.path.isabs(recorded):
             if i < len(recorded_folders) and recorded_folders[i]:
-                candidates.append(os.path.join(str(recorded_folders[i]), name))
+                # A relative folder is relative to the project, not the CWD.
+                candidates.append(os.path.join(project_dir, str(recorded_folders[i]), name))
             candidates.append(os.path.join(project_dir, recorded))
         hit = next((c for c in candidates if c and _project_source_exists(c, should_cancel)), None)
         if hit is None:
@@ -578,7 +607,7 @@ def validate_project(path: str, source_root: Optional[str] = None, *, require_so
     try:
         with open(path, encoding="utf-8") as f:
             state = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError covers JSON and UTF-8 errors
         return False, f"cannot read project: {exc}", {}
     if not isinstance(state, dict) or "openfocus_project" not in state:
         return False, "not an OpenFocus project file", {}
@@ -695,6 +724,10 @@ def validate_project(path: str, source_root: Optional[str] = None, *, require_so
         return False, str(exc), {}
     _num("thread_count", int, 4)
     _num("tile_block_size", int, 1024)
+    if settings["tile_block_size"] < TILE_BLOCK_MIN:
+        # Smaller tiles than Advanced Settings allows split a frame into
+        # millions of tiles, and apply_project saves the value for later sessions.
+        settings["tile_block_size"] = TILE_BLOCK_SIZE
     _num("tile_overlap", int, 256)
     _num("tile_threshold", int, 2048)
     _num("reg_downscale_width", int, 1024)

@@ -13,6 +13,7 @@ import numpy as np
 from PyQt6.QtCore import QSignalBlocker, QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
 from utils.file_dialogs import FileDialog
+from utils.file_modes import apply_destination_mode
 from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -345,6 +346,7 @@ class DepthProductExportWorker(QThread):
                     self.failed.emit("cancelled")
                     return
                 protect_sources((self.path,), self.source_paths)
+                apply_destination_mode(part, self.path)
                 os.replace(part, self.path)
                 part = None
                 self.ok.emit({"files": [self.path]})

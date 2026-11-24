@@ -86,6 +86,20 @@ def test_thread_default_migration_preserves_saved_caps(qapp, clean_settings, sav
     assert window.thread_count == (0 if saved_threads is None else saved_threads)
 
 
+@pytest.mark.parametrize("saved", [0, 1, 63, "0"])
+def test_saved_tile_size_below_minimum_uses_default(qapp, clean_settings, saved):
+    from types import SimpleNamespace
+    from constants import TILE_BLOCK_MIN, TILE_BLOCK_SIZE
+    from utils.settings_store import get_settings, load_window_settings
+    get_settings().setValue("rendering/tile_block_size", saved)
+    window = SimpleNamespace()
+    load_window_settings(window)
+    assert window.tile_block_size == TILE_BLOCK_SIZE
+    get_settings().setValue("rendering/tile_block_size", TILE_BLOCK_MIN)
+    load_window_settings(window)
+    assert window.tile_block_size == TILE_BLOCK_MIN
+
+
 def test_recent_files_cap(qapp, clean_settings):
     from utils.settings_store import load_window_settings, add_recent_file, MAX_RECENT_FILES
 

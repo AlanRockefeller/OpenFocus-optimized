@@ -387,6 +387,20 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
             image = cmyk_to_bgr(PILImage.fromarray(samples, 'CMYK'), path,
                                 profile_tag.value if profile_tag is not None else b'')
             return _orient_tiff_pixels(page, image)
+        if page.samplesperpixel == 2:
+            # Gray with alpha. OpenCV would drop the alpha and reduce 16-bit
+            # samples to 8 bits, so prove the page opaque and keep its gray.
+            from core.source_frames import _validate_tiff_alpha
+            _validate_tiff_alpha(page)
+            samples = page.asarray()
+            gray = np.ascontiguousarray(samples[0] if int(page.planarconfig) == 2
+                                        else samples[..., 0])
+            del samples
+            _validate_depth(path, gray.dtype)
+            if int(page.photometric) == 0:
+                gray = np.iinfo(gray.dtype).max - gray
+            image = gray if preserve_grayscale else cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            return _orient_tiff_pixels(page, image)
         stored = _stored_tiff_layout(page) if page_index >= 0 else None
         # Read from the same file handle used to inspect the strip layout.
         image = _read_stored_tiff_page(tif.filehandle, stored) if stored is not None else None
@@ -405,6 +419,50 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
     if image.ndim == 3 and image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     return image
+
+def _png_gray_key(data) -> Optional[int]:
+    """Return a grayscale PNG's tRNS key in decoded sample units, or None.
+
+    OpenCV decodes such a PNG to one channel and drops the key, which the
+    scan and the preview honour. Samples below 8 bits are decoded scaled to
+    the full 8-bit range, so the key is scaled the same way.
+    """
+    header = bytes(data[:33])
+    if len(header) < 33 or header[:8] != b'\x89PNG\r\n\x1a\n' or header[12:16] != b'IHDR':
+        return None
+    bits, colour_type = header[24], header[25]
+    if colour_type != 0 or bits not in (1, 2, 4, 8, 16):
+        return None
+    offset = 8
+    while offset + 8 <= len(data):
+        length = int.from_bytes(bytes(data[offset:offset + 4]), 'big')
+        kind = bytes(data[offset + 4:offset + 8])
+        if kind == b'tRNS':
+            if length != 2 or offset + 10 > len(data):
+                return None
+            key = int.from_bytes(bytes(data[offset + 8:offset + 10]), 'big')
+            top = (1 << bits) - 1
+            if key > top:
+                return None
+            return key if bits >= 8 else key * (255 // top)
+        if kind in (b'IDAT', b'IEND'):
+            return None
+        offset += 12 + length
+    return None
+
+
+def _apply_png_gray_key(data, gray: np.ndarray) -> np.ndarray:
+    """Give a keyed grayscale PNG its alpha; unkeyed pixels keep the gray array."""
+    key = _png_gray_key(data)
+    if key is None:
+        return gray
+    hidden = gray == key
+    if not hidden.any():
+        return gray
+    image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGRA)
+    image[:, :, 3] = np.where(hidden, 0, np.iinfo(gray.dtype).max).astype(gray.dtype)
+    return image
+
 
 def _has_transparency(image: np.ndarray) -> bool:
     from core.source_frames import SourceFrame
@@ -583,6 +641,8 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
     unchanged = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     if unchanged is not None:
         _validate_depth(path, unchanged.dtype)
+        if ext == '.png' and unchanged.ndim == 2:
+            unchanged = _apply_png_gray_key(data, unchanged)
     if unchanged is not None and _has_transparency(unchanged):
         if allow_transparent_png and ext == '.png':
             return apply_exif_orientation(path, unchanged)
@@ -1393,6 +1453,18 @@ class ImageStackLoader:
         self.linear_dng_metadata = metadata
         return True, f"Loaded {len(images)} image(s)", images, [os.path.basename(p) for p in paths]
 
+    def folder_image_files(self, folder_path: str, exclude_paths=()) -> List[Tuple[str, str]]:
+        """(name, path) of the frames `load_from_folder` reads, in listing order."""
+        from utils.path_identity import same_path
+        image_files = []
+        for filename in os.listdir(folder_path):
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in self.SUPPORTED_FORMATS and not any(
+                    same_path(os.path.join(folder_path, filename), excluded) for excluded in exclude_paths):
+                full_path = os.path.join(folder_path, filename)
+                image_files.append((filename, full_path))
+        return self._drop_derived_aligned_copies(image_files)
+
     def load_from_folder(self, folder_path: str, scale_factor: float = 1.0, *,
                          thread_count: int = 0,
                          resource_preference: str = "balanced", exclude_paths=(),
@@ -1402,15 +1474,7 @@ class ImageStackLoader:
         if not os.path.isdir(folder_path):
             return False, "Selected path is not a valid directory", [], []
 
-        from utils.path_identity import same_path
-        image_files = []
-        for filename in os.listdir(folder_path):
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in self.SUPPORTED_FORMATS and not any(
-                    same_path(os.path.join(folder_path, filename), excluded) for excluded in exclude_paths):
-                full_path = os.path.join(folder_path, filename)
-                image_files.append((filename, full_path))
-        image_files = self._drop_derived_aligned_copies(image_files)
+        image_files = self.folder_image_files(folder_path, exclude_paths)
 
         if not image_files:
             return False, "No supported image files found in the folder", [], []

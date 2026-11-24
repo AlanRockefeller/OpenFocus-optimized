@@ -417,9 +417,12 @@ class TestPendingRestore:
         monkeypatch.setattr(recovery, "recovery_dir", lambda: str(tmp_path))
         assert recovery.pending_restore() is None
 
+        monkeypatch.setattr(recovery, "write_snapshot", lambda window: (
+            tmp_path / recovery.SESSION_FILE).write_text("snapshot", encoding="utf-8") > 0)
+
         class _Window:
             project_path = ""
-            raw_images = []
+            raw_images = [object()]
 
         assert recovery.mark_pending_restore(_Window()) is True
         assert recovery.pending_restore() == ""
@@ -438,7 +441,7 @@ class TestPendingRestore:
             raw_images = []
 
         assert recovery.mark_pending_restore(_Window()) is True
-        assert recovery.pending_restore() == ""
+        assert recovery.pending_restore() is None
         assert not snapshot.exists()
 
 

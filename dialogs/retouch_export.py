@@ -8,6 +8,7 @@ from PyQt6.QtCore import QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
 
 from locales import trans
+from utils.file_modes import apply_destination_mode
 
 
 class _MissingDataExportWorker(QThread):
@@ -56,6 +57,8 @@ class _MissingDataExportWorker(QThread):
                     record["existed"] = os.path.lexists(target)
                     if record["existed"] and not os.path.isfile(target):
                         raise OSError(f"Unsupported export target: {target}")
+                    # Before the target moves aside: a replaced map keeps its mode.
+                    apply_destination_mode(record["temporary"], target)
                     directory = os.path.dirname(os.path.abspath(target))
                     descriptor, backup = tempfile.mkstemp(
                         prefix=".openfocus-map-backup-", dir=directory)

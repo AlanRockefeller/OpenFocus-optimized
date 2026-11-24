@@ -1423,6 +1423,8 @@ def _save_registration(images, output_path, filenames, should_cancel):
             if not imwrite_auto(temporary, image):
                 raise OSError(f"Could not save aligned frame: {name}")
             _check_cancel(should_cancel)
+            from utils.file_modes import apply_destination_mode
+            apply_destination_mode(temporary, destination)
             os.replace(temporary, destination)
         finally:
             if os.path.exists(temporary):

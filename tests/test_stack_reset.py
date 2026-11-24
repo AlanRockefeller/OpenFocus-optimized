@@ -237,6 +237,31 @@ def test_undo_after_stack_replacement_restores_original_baseline(monkeypatch, re
     assert w.raw_images[0] is first and w.image_filenames == ["first"]
 
 
+def test_undo_across_a_load_restores_the_stack_folder(monkeypatch):
+    import main
+    w, _ = host(monkeypatch)
+    first, second = (np.full((3, 3), i, np.uint8) for i in (1, 2))
+    w._capture_scalebar_state = lambda: {}
+    w._capture_parameter_state = lambda: {}
+    w._capture_stack_state = main.OpenFocus._capture_stack_state.__get__(w)
+    w._restore_stack_state = main.OpenFocus._restore_stack_state.__get__(w)
+    w._refresh_undo_actions = lambda: None
+    w._show_status_message = lambda *_: None
+    w.current_folder_path = "first_folder"
+    load(w, [first], ["first"], ["first"])
+    w._undo_stack[:] = [w._capture_stack_state()]
+    w.current_folder_path = "second_folder"
+    load(w, [second], ["second"], ["second"])
+    main.OpenFocus.undo(w)
+    assert w.raw_images[0] is first
+    assert w.current_folder_path == "first_folder"
+    state = w._capture_stack_state()
+    state.pop("folder")
+    w.current_folder_path = "kept"
+    w._restore_stack_state(state)
+    assert w.current_folder_path == "kept"
+
+
 @pytest.mark.parametrize("change", ["load", "append", "clear"])
 def test_source_membership_changes_mark_saved_project_dirty(monkeypatch, change):
     import main

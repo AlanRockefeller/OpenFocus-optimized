@@ -13,6 +13,8 @@ import zipfile
 
 import numpy as np
 
+from utils.file_modes import apply_destination_mode
+
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_POINTS = 250000
 MAX_OPERATIONS = 100000
@@ -172,6 +174,7 @@ def save_checkpoint(doc, path, cancelled=None):
         _check_provenance(doc, doc._provenance, cancelled)
         if cancelled is not None and cancelled():
             raise ValueError('Retouch checkpoint saving cancelled')
+        apply_destination_mode(temp, destination)
         os.replace(temp, destination)
     finally:
         if os.path.exists(temp):

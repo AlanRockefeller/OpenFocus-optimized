@@ -2059,6 +2059,39 @@ def test_render_start_reports_sensor_cleanup_validation(server, control_window, 
     assert control_window.btn_render.isEnabled()
 
 
+@pytest.mark.parametrize('rect', [(40, 2, 10, 10), (-30, 2, 10, 10)])
+def test_render_start_refuses_an_roi_outside_the_image(server, control_window, monkeypatch, rect):
+    from PyQt6.QtCore import QRectF
+    from locales import trans
+
+    monkeypatch.setattr(control_window, 'current_fusion_method', lambda: 'dct')
+    monkeypatch.setattr(control_window, 'current_alignment_method', lambda: 'none')
+    manager = control_window.render_manager
+    monkeypatch.setattr(manager, '_alignment_key', lambda *a, **k: 'key')
+    frames = [np.zeros((16, 16, 3), np.uint8) for _ in range(2)]
+    control_window.raw_images = frames
+    control_window.image_filenames = ['a.tif', 'b.tif']
+    control_window.excluded_frames = set()
+    control_window.roi_mode_active = True
+    control_window.roi_aligned_images = frames
+    control_window.roi_source_revision = getattr(control_window, 'source_revision', 0)
+    control_window.roi_included_indices = [0, 1]
+    control_window.roi_reg_downscale_width = control_window.reg_downscale_width
+    control_window.roi_alignment_key = 'key'
+    control_window.lbl_result_img.set_roi_rect(QRectF(*rect))
+    try:
+        response = call(server, 'render.start', roi_mode='crop', roi_base_index=0)
+        assert response['error']['code'] == 'invalid_argument'
+        assert response['error']['message'] == trans.t('roi_outside_image')
+        assert manager.worker is None
+        assert control_window.btn_render.isEnabled()
+        assert control_window.statusBar().currentMessage() == trans.t('roi_outside_image')
+    finally:
+        control_window.lbl_result_img.set_roi_rect(None)
+        control_window.roi_mode_active = False
+        control_window.roi_aligned_images = []
+
+
 def test_render_start_reports_confirmation_without_a_modal(server, control_window,
                                                            monkeypatch):
     monkeypatch.setattr(control_window, "current_fusion_method", lambda: "stackmffv3")
