@@ -338,6 +338,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carry the first frame's metadata.
 - Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
   single-stack output already does.
+- Write the messages of eleven processing modules to the session log. They
+  used loggers outside the `openfocus` namespace, whose file handler does not
+  pass records on, so OpenFocus B's GPU fallback warnings and full-GPU-depth
+  decisions, the ECC GPU resize device, OpenCL Lanczos4 warp diagnostics,
+  source preview and temporary-directory warnings, and background fill
+  diagnostics never reached the log or a report bundle. Closing the session log now also restores the logger's propagation,
+  so embedding and test handlers receive these records again.
 
 ## [2.0.0]
 

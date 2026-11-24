@@ -31,7 +31,6 @@ incremental peak before any analysis arrays are allocated.
 from __future__ import annotations
 
 import contextvars
-import logging
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
@@ -39,7 +38,9 @@ from typing import Callable, Optional, Sequence
 import cv2
 import numpy as np
 
-log = logging.getLogger(__name__)
+from utils.logging_setup import get_logger
+
+log = get_logger(__name__)
 
 PRESETS = ("auto", "soft", "sharp")
 MAX_SUBJECT_DEFAULT = 0.90

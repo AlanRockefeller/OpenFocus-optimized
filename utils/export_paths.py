@@ -2,10 +2,10 @@
 import os
 import re
 import errno
-import logging
 import tempfile
 
 from utils.file_modes import apply_default_mode
+from utils.logging_setup import get_logger
 
 
 def _rename_noreplace(source, destination):
@@ -75,7 +75,7 @@ def publish_unique(path, writer, *, start=2, should_cancel=None):
             except OSError:
                 if not published:
                     raise
-                logging.getLogger(__name__).warning(
+                get_logger(__name__).warning(
                     'Published export but could not remove staging file %s', staging,
                     exc_info=True)
 

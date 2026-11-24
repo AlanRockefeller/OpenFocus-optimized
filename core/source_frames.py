@@ -9,7 +9,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import cache, partial
 from io import BytesIO
-import logging
 import math
 import mmap
 import os
@@ -23,8 +22,9 @@ from PIL import Image
 
 from core.frame_storage import is_mapped_frame, store_frame
 from utils.image_utils import read_image_exif
+from utils.logging_setup import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 PREVIEW_EDGE = 768
 PREVIEW_DECODE_BUDGET = 32 * 1024 * 1024
 _DEFAULT_PIL_THUMBNAIL = Image.Image.thumbnail

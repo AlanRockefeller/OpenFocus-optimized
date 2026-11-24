@@ -2,10 +2,11 @@
 import atexit
 from concurrent.futures import ThreadPoolExecutor, wait
 import contextvars
-import logging
 from threading import Event, Lock
 
 import numpy as np
+
+from utils.logging_setup import get_logger
 
 _device_lock = Lock()
 _cache_lock = Lock()
@@ -299,7 +300,7 @@ class GpuError(RuntimeError):
 
 def log_fallback(error):
     reason = error.__cause__ or error
-    logging.getLogger(__name__).warning('OpenFocus GPU fallback to CPU: %s', reason)
+    get_logger(__name__).warning('OpenFocus GPU fallback to CPU: %s', reason)
 
 
 def device_status(gpu):
@@ -591,7 +592,7 @@ class Merge:
         vram_need = pixels * 24 + max_src_bytes + axes_bytes + 16 * 1024 * 1024
         largest_alloc = max(pixels * 8, max_src_bytes, max(height, width) * 8 * 8)
         if host_staging > host_budget or largest_alloc > int(self.device.max_mem_alloc_size):
-            logging.getLogger(__name__).info('OpenFocus full GPU depth exceeds the job memory budget')
+            get_logger(__name__).info('OpenFocus full GPU depth exceeds the job memory budget')
             return None
 
         class CallbackFailure(BaseException):
@@ -610,20 +611,20 @@ class Merge:
                 # Device allocations share the same physical RAM as staging.
                 host_staging += vram_need
                 if host_staging > host_budget or vram_need > int(self.device.global_mem_size):
-                    logging.getLogger(__name__).info('OpenFocus full GPU depth exceeds unified memory budget')
+                    get_logger(__name__).info('OpenFocus full GPU depth exceeds unified memory budget')
                     return None
             else:
                 from dataclasses import replace
                 memory = _free_vram(self.device)
                 if memory is None:
-                    logging.getLogger(__name__).info('OpenFocus full GPU depth has no verified free VRAM reading')
+                    get_logger(__name__).info('OpenFocus full GPU depth has no verified free VRAM reading')
                     return None
                 snapshot = replace(resource_policy.probe_resources(),
                                    free_vram=memory[0], total_vram=memory[1])
                 vram_cap = min(int(self.device.global_mem_size) // 2,
                                resource_policy.vram_budget(snapshot))
                 if vram_need > vram_cap:
-                    logging.getLogger(__name__).info('OpenFocus full GPU depth exceeds the free VRAM budget')
+                    get_logger(__name__).info('OpenFocus full GPU depth exceeds the free VRAM budget')
                     return None
             try:
                 depth_prog, depth_k, filt_k, resamp_k, tiled = _get_or_build_depth_program(

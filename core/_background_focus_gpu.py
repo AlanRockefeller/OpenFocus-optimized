@@ -1,13 +1,13 @@
 """Band-limited OpenCL order statistics for float32 background focus energies."""
-import logging
 
 import numpy as np
 
 from fusion_methods._openfocus_gpu import (
     GpuError, _device, _device_lock, _free_vram, opencl_device_name,
 )
+from utils.logging_setup import get_logger
 
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 _PROGRAM_CACHE = {}
 
 _KERNEL = r'''

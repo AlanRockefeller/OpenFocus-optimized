@@ -60,6 +60,39 @@ def test_repeated_setup_preserves_detailed_session_records(log_folder):
     assert json.loads(action.split("event=unicode_action ", 1)[1])["path"] == "试验/a b=c\nsecond line"
 
 
+def test_processing_module_records_reach_the_session_log(log_folder):
+    from fusion_methods._openfocus_gpu import GpuError, log_fallback
+    log_fallback(GpuError("probe device lost"))
+    text = logs.session_log_excerpt()
+    line = next(line for line in text.splitlines() if "probe device lost" in line)
+    assert "WARNING" in line
+    assert "openfocus.fusion_methods._openfocus_gpu: OpenFocus GPU fallback to CPU" in line
+
+
+def test_shutdown_restores_propagation_to_embedding_handlers(log_folder):
+    import logging
+    owner = logging.getLogger("openfocus")
+    assert owner.propagate is False
+    logs.shutdown_logging()
+    assert owner.propagate is True
+    logs.setup_logging()
+    assert owner.propagate is False
+
+
+def test_application_modules_log_inside_the_openfocus_namespace():
+    """Bare module loggers bypass the session log, whose handler does not propagate."""
+    root = Path(__file__).resolve().parents[1]
+    paths = [root / "main.py"]
+    for folder in ("controllers", "core", "dialogs", "fusion_methods", "ui", "utils", "widgets"):
+        paths.extend(sorted((root / folder).rglob("*.py")))
+    offenders = []
+    for path in paths:
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if re.search(r"logging\.getLogger\(\s*__name__\s*\)", line):
+                offenders.append(f"{path.relative_to(root)}:{number}")
+    assert not offenders, "use utils.logging_setup.get_logger(__name__): " + ", ".join(offenders)
+
+
 def test_concurrent_and_nested_tasks_keep_their_own_context(log_folder):
     barrier = threading.Barrier(2)
     logger = logs.get_logger(__name__)

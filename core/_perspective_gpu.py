@@ -1,6 +1,5 @@
 """Bounded, optional OpenCL Lanczos4 warping for large 8-bit and 16-bit frames."""
 import ctypes
-import logging
 import math
 import os
 from collections import Counter
@@ -12,6 +11,7 @@ import numpy as np
 
 from core._ecc_area_gpu import _cpu_contract
 from fusion_methods._openfocus_gpu import _device, _device_cache_key, _free_vram, opencl_device_name
+from utils.logging_setup import get_logger
 
 _MIN_PIXELS = 1024 * 1024
 _BAND_ROWS = (512, 256, 128, 64, 32, 16)
@@ -23,7 +23,7 @@ _MAX_WORKSPACE_BYTES = 64 * 1024 ** 2
 _HALO = 8
 _queue_lock = Lock()
 _program = None
-_log = logging.getLogger(__name__)
+_log = get_logger(__name__)
 
 # The coordinates are quantized before interpolation, as in OpenCV's
 # warpPerspective/remap. OpenCV sums an interior sample one source row at a

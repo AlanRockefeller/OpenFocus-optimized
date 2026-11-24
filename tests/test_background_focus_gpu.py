@@ -37,7 +37,7 @@ def test_camera_focus_matches_numpy_on_multiple_device_bands(dtype, frames, monk
     monkeypatch.setattr(bf, '_GPU_FOCUS_MIN_BYTES', 0)
     # Cross a transfer boundary within an image row, including a short tail.
     monkeypatch.setattr(gpu, '_band_pixels', lambda *args: 157)
-    caplog.set_level(logging.INFO, logger=gpu.__name__)
+    caplog.set_level(logging.INFO, logger=gpu.log.name)
     rng = np.random.default_rng(44)
     gray = []
     for _ in range(frames):
@@ -161,7 +161,7 @@ def test_opencl_sync_failure_falls_back_and_rebuilds_queue(monkeypatch, caplog):
     expected = _reference(gray)
     monkeypatch.setattr(bf, '_GPU_FOCUS_MIN_BYTES', 0)
     monkeypatch.setattr(gpu, '_PROGRAM_CACHE', {})
-    caplog.set_level(logging.INFO, logger=gpu.__name__)
+    caplog.set_level(logging.INFO, logger=gpu.log.name)
 
     class FailedFinishQueue(cl.CommandQueue):
         def finish(self):
