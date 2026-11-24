@@ -741,6 +741,34 @@ class SourceFrame:
         return store_frame(self.full_resolution())
 
 
+# ProcessedFrame instances whose full-resolution pixels a render wants to see
+# as they are produced (keyed by identity; ProcessedFrame compares by identity).
+_resolution_observers = {}
+_resolution_observers_lock = threading.Lock()
+
+
+@contextmanager
+def observe_full_resolutions(frames, observer):
+    """Call ``observer(frame, pixels)`` whenever a listed frame resolves in full.
+
+    Lets a later per-frame measurement reuse pixels another pass already
+    resolved, instead of resolving every frame again. Only ProcessedFrame
+    entries are observed; the observer runs on the resolving thread, must not
+    mutate or retain the pixels, and is removed when the context exits.
+    """
+    tracked = [frame for frame in frames if isinstance(frame, ProcessedFrame)]
+    with _resolution_observers_lock:
+        for frame in tracked:
+            _resolution_observers[frame] = observer
+    try:
+        yield
+    finally:
+        with _resolution_observers_lock:
+            for frame in tracked:
+                if _resolution_observers.get(frame) is observer:
+                    del _resolution_observers[frame]
+
+
 @dataclass(frozen=True, eq=False)
 class ProcessedFrame:
     """Repeatable per-frame processing, resolved only by a pixel consumer.
@@ -798,6 +826,15 @@ class ProcessedFrame:
         this frame nor its processed sources: for an intermediate whose only
         later reader is a cached consumer.
         """
+        image = self._resolve_full(should_cancel=should_cancel, cache_result=cache_result,
+                                   store_result=store_result)
+        observer = _resolution_observers.get(self) if _resolution_observers else None
+        if observer is not None:
+            observer(self, image)
+        return image
+
+    def _resolve_full(self, *, should_cancel, cache_result, store_result):
+        """Body of full_resolution, before resolution observers run."""
         from core.registration import RegistrationCancelled
         def cancelled():
             return ((should_cancel is not None and should_cancel()) or

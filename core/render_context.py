@@ -17,6 +17,7 @@ one full-size mask per frame.
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field, fields
@@ -31,6 +32,9 @@ from core.source_frames import (
     SourceFrame as LazySourceFrame, ProcessedFrame, crop_frame, resolve_frame, store_preview,
     without_retained_pixels,
 )
+from utils.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True, eq=False)
@@ -210,10 +214,83 @@ class RenderedDepth:
     valid_mask: Optional[np.ndarray] = None
 
 
-def render_alignment_mask(frames, crop, should_cancel):
-    """Capture the intersection in the index domain while render pixels are available."""
+class AlignmentMaskCollector:
+    """Fold each aligned frame's border-fill mask while fusion resolves it.
+
+    ``render_alignment_mask`` otherwise resolves every aligned frame again after
+    fusion only to find the fill a warp left at the border. Observing the frames
+    (``source_frames.observe_full_resolutions``) measures the same pixels when a
+    fusion pass resolves them. The fold is an intersection, so the order frames
+    arrive in does not matter. A frame whose measurement fails is left for the
+    post-fusion pass; only cancellation reaches the resolving caller.
+    """
+
+    def __init__(self, frames, should_cancel=None):
+        self.frames = list(frames)
+        self._positions = {}
+        for index, frame in enumerate(self.frames):
+            self._positions.setdefault(id(frame), []).append(index)
+        self._should_cancel = should_cancel
+        self._lock = threading.Lock()
+        self._mask = None
+        self.seen = set()
+
+    def __call__(self, frame, pixels):
+        positions = self._positions.get(id(frame))
+        if not positions:
+            return
+        with self._lock:
+            if positions[0] in self.seen:
+                return
+        from core.registration import RegistrationCancelled
+        try:
+            valid = _alignment_valid_mask(pixels, should_cancel=self._should_cancel)
+        except RegistrationCancelled:
+            raise
+        except Exception:
+            # Measuring is an optimization: the post-fusion pass covers this frame.
+            logger.debug('alignment mask deferred for frame %d', positions[0], exc_info=True)
+            return
+        with self._lock:
+            if positions[0] in self.seen:
+                return
+            if valid is not None:
+                if self._mask is None:
+                    try:
+                        mask = create_frame(valid.shape, np.bool_)
+                    except (MemoryError, OSError):
+                        logger.debug('alignment mask deferred for frame %d', positions[0],
+                                     exc_info=True)
+                        return
+                    mask[:] = valid
+                    self._mask = mask
+                else:
+                    np.logical_and(self._mask, valid, out=self._mask)
+            self.seen.update(positions)
+
+    def take(self):
+        """Return the folded mask (or None) and the frame positions it covers."""
+        with self._lock:
+            mask, seen = self._mask, set(self.seen)
+            self._mask = None
+            return mask, seen
+
+
+def render_alignment_mask(frames, crop, should_cancel, collector=None):
+    """Capture the intersection in the index domain while render pixels are available.
+
+    With a ``collector`` that observed ``frames`` during fusion (full frame only),
+    frames it already measured are not resolved again.
+    """
     mask = None
-    for frame in frames:
+    seen = set()
+    frames = list(frames)
+    if (collector is not None and crop is None and len(collector.frames) == len(frames)
+            and all(a is b for a, b in zip(collector.frames, frames))):
+        mask, seen = collector.take()
+    for index, frame in enumerate(frames):
+        if index in seen:
+            continue
         pixels = resolve_frame(frame, should_cancel=should_cancel)
         if crop is not None:
             x, y, w, h = crop

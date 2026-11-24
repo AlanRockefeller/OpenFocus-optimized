@@ -3,6 +3,7 @@ from typing import Optional
 from functools import partial
 from dataclasses import replace
 from PyQt6.QtCore import QThread, pyqtSignal
+import contextlib
 import time
 import os
 import cv2
@@ -841,7 +842,18 @@ class RenderWorker(QThread):
             focus_region = ({'depth_crop': roi_rect_int}
                             if full_frame_roi and not self.preview and self.algorithm in _RENDER_DEPTH_METHODS
                             else {})
-            with profile.stage('fusion', resources=True):
+            # A retained depth map records where every aligned frame has pixels.
+            # Measure each frame while fusion resolves it, so the mask step below
+            # does not resolve the whole stack again.
+            collector = None
+            observing = contextlib.nullcontext()
+            if (registration_performed and roi_rect_int is None and not self.preview
+                    and self.algorithm in _RENDER_DEPTH_METHODS):
+                from core.render_context import AlignmentMaskCollector
+                from core.source_frames import observe_full_resolutions
+                collector = AlignmentMaskCollector(processed_images, lambda: self.is_cancelled)
+                observing = observe_full_resolutions(processed_images, collector)
+            with profile.stage('fusion', resources=True), observing:
                 fusion_result, device_name = self._run_fusion(
                     fusion_images, should_cancel=lambda: self.is_cancelled,
                     progress_callback=self._fusion_progress(), **focus_region)
@@ -849,8 +861,10 @@ class RenderWorker(QThread):
                     (roi_rect_int is not None and self.is_images_aligned)):
                 from core.render_context import render_alignment_mask
                 try:
-                    self.rendered_depth['valid_mask'] = render_alignment_mask(
-                        processed_images, roi_rect_int, lambda: self.is_cancelled)
+                    with profile.stage('alignment_mask'):
+                        self.rendered_depth['valid_mask'] = render_alignment_mask(
+                            processed_images, roi_rect_int, lambda: self.is_cancelled,
+                            collector=collector)
                 except (MemoryError, OSError):
                     logger.warning('could not retain aligned focus validity', exc_info=True)
                     self.rendered_depth = None

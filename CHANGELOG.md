@@ -15,6 +15,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   three StackMFF models before activation.
 
 ### Changed
+- Find where aligned frames have pixels for a desktop render's retained depth
+  map while fusion resolves those frames, instead of resolving every aligned
+  frame again after fusion. Without a frame cache that pass decoded and warped
+  the whole stack a further time: 714 s of a 2,639 s OpenFocus B render of 110
+  Olympus ORF files with ECC alignment. The mask is unchanged; a frame that
+  fusion did not resolve, or whose measurement fails, is still measured after
+  fusion. ROI renders keep the post-fusion pass.
 - Read the tiles of a tiled neural render from the frames it prepared, instead
   of copying every prepared frame into the render's frame cache a second time.
   This about halves the scratch storage those renders hold. Output pixels are
