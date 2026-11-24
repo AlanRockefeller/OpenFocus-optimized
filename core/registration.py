@@ -333,7 +333,7 @@ def _compute_valid_region_from_transforms(H_matrices, img_shape, margin=2):
 # ========== 单应性对齐算法实现（非线性） ==========
 
 
-def _align_homography_impl(input_source, output_path=None, img_filenames=None, downscale_width=1600, thread_count: int = 4, should_cancel=None, failure_policy='continue', *, defer_warps=False, plan_callback=None, dispatch_callback=None, accelerate_warp=False):
+def _align_homography_impl(input_source, output_path=None, img_filenames=None, downscale_width=1600, thread_count: int = 4, should_cancel=None, failure_policy='continue', *, defer_warps=False, plan_callback=None, dispatch_callback=None, accelerate_warp=True):
     """
     商业级图像对齐算法优化版
     特性：
@@ -554,7 +554,7 @@ class _JpegEccPreparation:
     workspace_bytes: int
 
 
-def _plan_jpeg_ecc(source, downscale_width):
+def _plan_jpeg_ecc(source, downscale_width, *, metadata_only=False):
     """Plan direct grayscale decoding for a full-size JPEG source."""
     from core.source_frames import SourceFrame, _jpeg_full_buffer_bytes
 
@@ -565,20 +565,26 @@ def _plan_jpeg_ecc(source, downscale_width):
     height, width, scale = _ecc_resize_geometry(source.shape, downscale_width)
     if scale >= 1.0 or min(height, width) < 1:
         return None
-    from PIL import Image
-
-    try:
-        with Image.open(source.path) as header:
-            if header.format != 'JPEG' or header.mode not in ('L', 'RGB'):
-                return None
-            raw_width, raw_height = header.size
-            bands = len(header.getbands())
-    except (OSError, Image.DecompressionBombError):
-        return None
-
     rotated = source.orientation in (5, 6, 7, 8)
-    if (raw_height, raw_width) != (source.shape[:2][::-1] if rotated else source.shape[:2]):
-        return None
+    geometry = source.shape[:2][::-1] if rotated else source.shape[:2]
+    if metadata_only:
+        bands = source._jpeg_components
+        if bands not in (1, 3):
+            return None
+        raw_height, raw_width = geometry
+    else:
+        from PIL import Image
+
+        try:
+            with Image.open(source.path) as header:
+                if header.format != 'JPEG' or header.mode not in ('L', 'RGB'):
+                    return None
+                raw_width, raw_height = header.size
+                bands = len(header.getbands())
+        except (OSError, Image.DecompressionBombError):
+            return None
+        if (raw_height, raw_width) != geometry:
+            return None
     requested_width, requested_height = (height, width) if rotated else (width, height)
     for divisor, flag in ((8, cv2.IMREAD_REDUCED_GRAYSCALE_8),
                           (4, cv2.IMREAD_REDUCED_GRAYSCALE_4),
@@ -1511,7 +1517,7 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None, *,
                         reference_frame=1, rotation=0., magnification=3.,
                         defer_warps=False, plan_callback=None, dispatch_callback=None):
     """Wide detector using the verified search and sampling behavior."""
-    from core.openfocus_alignment import estimate_alignment_plan
+    from core.openfocus_alignment import _alignment_spill_bytes, estimate_alignment_plan
     images = input_source
     if isinstance(input_source, str):
         from dataclasses import replace
@@ -1537,7 +1543,11 @@ def _align_openfocus_impl(input_source, output_path=None, img_filenames=None, *,
     cache_reads = cache.reuse_only() if large_stack and isinstance(cache, ScopedCache) else nullcontext()
     source_reads = without_source_cache_growth() if large_stack else nullcontext()
     with scratch_directory():
-        select_frame_scratch(images, should_cancel=should_cancel)
+        height, width = images[0].shape[:2]
+        select_frame_scratch(
+            images, working_size=_alignment_spill_bytes(height, width, len(images), reference_frame),
+            should_cancel=should_cancel,
+        )
         try:
             with cache_reads, source_reads:
                 plan = estimate_alignment_plan(images, max_shift_ratio=max_shift_ratio,
@@ -1573,6 +1583,12 @@ def _ecc_resize_geometry(shape, downscale_width):
     return (round(h * scale), round(w * scale), scale) if scale < 1.0 else (h, w, scale)
 
 
+def _ecc_solve_bytes(pixels):
+    # An unsuccessful native solve can retry with OpenCV, whose homography
+    # solver needs a Jacobian, grids, gradients and masks of this geometry.
+    return (30 * 4 + 4) * pixels + 128 * 1024
+
+
 @dataclass(frozen=True)
 class _EccStageBudget:
     workers: int
@@ -1580,19 +1596,20 @@ class _EccStageBudget:
     prepare_bytes: int
     solve_bytes: int
     jpeg_inputs: dict[int, _JpegEccPreparation]
+    accelerate_ecc: bool = True
 
 
 def _plan_deferred_ecc(images, downscale_width, accelerate_ecc, preference, thread_count,
                        should_cancel):
     from core.openfocus_alignment import _hash_scratch_bytes, _is_bgr_rev
-    from core.resource_policy import cpu_capacity, probe_resources, require_memory
+    from core.resource_policy import cpu_capacity, probe_resources, ram_ceiling, require_memory
     from core.source_frames import frame_resolution_bytes, is_direct_rgb_tiff
 
     if accelerate_ecc:
-        from core._ecc_area_gpu import _AXIS
+        from core._ecc_area_gpu import _AXIS, _TILE_ROWS
 
     width = _ecc_width(images[0].shape, downscale_width)
-    max_pixels = prepare_bytes = 0
+    max_pixels = prepare_bytes = prepare_bytes_cpu = 0
     jpeg_inputs = {}
     for frame in images:
         _check_cancel(should_cancel)
@@ -1602,7 +1619,9 @@ def _plan_deferred_ecc(images, downscale_width, accelerate_ecc, preference, thre
         jpeg = _plan_jpeg_ecc(frame, width)
         if jpeg is not None:
             jpeg_inputs[id(frame)] = jpeg
-            prepare_bytes = max(prepare_bytes, jpeg.workspace_bytes, 2 * pixels + 64 * 1024)
+            req = max(jpeg.workspace_bytes, 2 * pixels + 64 * 1024)
+            prepare_bytes = max(prepare_bytes, req)
+            prepare_bytes_cpu = max(prepare_bytes_cpu, req)
             continue
         channels = frame.shape[2] if frame.ndim == 3 else 1
         itemsize = frame.dtype.itemsize
@@ -1617,36 +1636,47 @@ def _plan_deferred_ecc(images, downscale_width, accelerate_ecc, preference, thre
                   else frame.nbytes)
         color, gray = pixels * channels * itemsize, pixels * itemsize
         prepare = max(decode, decoded + _hash_scratch_bytes(frame), 2 * gray + 64 * 1024)
+        prepare_cpu = prepare
         if scale < 1.0:
-            # INTER_AREA uses axis tables and a pair of accumulator rows. Also
-            # allow the accelerated path its pageable transfer staging (at
-            # most one input and output stripe) plus its coefficient tables.
+            # INTER_AREA uses axis tables and a pair of accumulator rows. The
+            # OpenCL path stages bounded _TILE_ROWS stripes rather than full
+            # frames, and gracefully falls back if that headroom is absent.
             resize_scratch = 32 * (sum(frame.shape[:2]) + h + w * channels)
+            prepare_cpu = max(prepare, decoded + packed + color + resize_scratch, color + gray)
             if accelerate_ecc:
-                resize_scratch = max(resize_scratch,
-                                     frame.nbytes + color + _AXIS.itemsize * (h + w))
+                stripe_src_rows = min(frame.shape[0], math.ceil(_TILE_ROWS / max(scale, 1e-6)) + 2)
+                gpu_stripe = (
+                    min(frame.nbytes, stripe_src_rows * frame.shape[1] * channels * itemsize)
+                    + min(color, _TILE_ROWS * w * channels * itemsize)
+                    + _AXIS.itemsize * (h + w)
+                )
+                resize_scratch = max(resize_scratch, gpu_stripe)
             prepare = max(prepare, decoded + packed + color + resize_scratch, color + gray)
         else:
             prepare = max(prepare, decoded + packed + gray)
+            prepare_cpu = prepare
         prepare_bytes = max(prepare_bytes, prepare)
+        prepare_bytes_cpu = max(prepare_bytes_cpu, prepare_cpu)
 
     # Each prepared float32 plane can retain its lower-resolution pyramid levels.
     gray_bytes = 6 * max_pixels
-    # OpenCV's homography ECC uses an eight-plane Jacobian, float grids,
-    # warped/zero-mean images and gradients, masks and Jacobian temporaries.
-    # Allow 30 float planes for live buffers and expression temporaries, four
-    # byte masks and native tile scratch. Count the input planes separately.
-    solve_bytes = (30 * 4 + 4) * max_pixels + 128 * 1024
+    solve_bytes = _ecc_solve_bytes(max_pixels)
     snapshot = probe_resources()
+    ceiling_ram = ram_ceiling(snapshot)
+    if (accelerate_ecc
+            and 2 * gray_bytes + max(prepare_bytes, solve_bytes) > ceiling_ram
+            and 2 * gray_bytes + max(prepare_bytes_cpu, solve_bytes) <= ceiling_ram):
+        accelerate_ecc = False
+        prepare_bytes = prepare_bytes_cpu
     ram = require_memory(2 * gray_bytes + max(prepare_bytes, solve_bytes), snapshot)
     ceiling = cpu_capacity(snapshot, preference)
     if thread_count is not None and thread_count > 0:
         ceiling = min(ceiling, int(thread_count))
     # Reserve a window for all the prepared inputs. With that window full,
     # either all solvers or at least one preparation must fit on its own.
-    workers = min(ceiling, len(images) - 1,
-                  (ram - gray_bytes) // (solve_bytes + gray_bytes),
-                  (ram - gray_bytes - prepare_bytes) // gray_bytes)
+    workers = max(1, min(ceiling, len(images) - 1,
+                         (ram - gray_bytes) // (solve_bytes + gray_bytes),
+                         (ram - gray_bytes - prepare_bytes) // gray_bytes))
     task_bytes = ram - (workers + 1) * gray_bytes
     log_action('registration_plan', method='ecc', frames=len(images), shape=images[0].shape,
                workers=workers, native_threads=1, ram_budget=ram, vram_budget=0,
@@ -1654,14 +1684,14 @@ def _plan_deferred_ecc(images, downscale_width, accelerate_ecc, preference, thre
                prepare_bytes=prepare_bytes,
                solve_bytes=solve_bytes, retained_gray_bytes=(workers + 1) * gray_bytes,
                reduced_jpeg_frames=len(jpeg_inputs))
-    return _EccStageBudget(workers, task_bytes, prepare_bytes, solve_bytes, jpeg_inputs)
+    return _EccStageBudget(workers, task_bytes, prepare_bytes, solve_bytes, jpeg_inputs, accelerate_ecc)
 
 
 
 def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscale_width=1000,
                     thread_count: int = 4, should_cancel=None, use_gpu: bool = False,
                     failure_policy='continue', *, defer_warps=False, plan_callback=None,
-                    accelerate_ecc=False, stage_budget=None, dispatch_callback=None):
+                    accelerate_ecc=True, stage_budget=None, dispatch_callback=None):
     """
     基于 ECC (增强相关系数) 的高精度图像栈对齐算法
     适用于：显微摄影、微距摄影中伴随呼吸效应的图像栈
@@ -1676,8 +1706,9 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
     if len(images) < 2:
         return images
 
+    accelerate_resize = accelerate_ecc and (stage_budget is None or stage_budget.accelerate_ecc)
     area_gpu = None
-    if accelerate_ecc:
+    if accelerate_resize:
         from core._ecc_area_gpu import ExactAreaGpu
         area_gpu = ExactAreaGpu(should_cancel=should_cancel)
 
@@ -1887,42 +1918,44 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
                     recent_pairs.popitem(last=False)
         return result
 
-    if max_workers == 1:
-        pair_transforms = []
-        profile = _profile()
-        for pair in pairs():
-            _check_cancel(should_cancel)
-            if profile.enabled:
-                with profile.stage('registration.estimate'):
+    from contextlib import closing, nullcontext
+    with closing(area_gpu) if area_gpu is not None else nullcontext():
+        if max_workers == 1:
+            pair_transforms = []
+            profile = _profile()
+            for pair in pairs():
+                _check_cancel(should_cancel)
+                if profile.enabled:
+                    with profile.stage('registration.estimate'):
+                        transform = _compute_pair_transform(pair)
+                else:
                     transform = _compute_pair_transform(pair)
-            else:
-                transform = _compute_pair_transform(pair)
-            _check_cancel(should_cancel)
-            pair_transforms.append(transform)
-            del pair  # Release the old gray before decoding the next frame.
-    else:
-        def prepare_frame(image):
-            with deferred_warp_threads(1):
-                return preprocess(image)
+                _check_cancel(should_cancel)
+                pair_transforms.append(transform)
+                del pair  # Release the old gray before decoding the next frame.
+        else:
+            def prepare_frame(image):
+                with deferred_warp_threads(1):
+                    return preprocess(image)
 
-        def estimate_pair(index, previous, current):
-            return _compute_pair_transform((index, previous[0], current[0], scale_of[0],
-                                            previous[2], current[2]))
+            def estimate_pair(index, previous, current):
+                return _compute_pair_transform((index, previous[0], current[0], scale_of[0],
+                                                previous[2], current[2]))
 
-        scale_of = []
+            scale_of = []
 
-        def remember_scale(index, prepared):
-            if index == 0:
-                scale_of.append(prepared[1])
+            def remember_scale(index, prepared):
+                if index == 0:
+                    scale_of.append(prepared[1])
 
-        pair_transforms, prepared_identities = _prepare_and_estimate_pairs(
-            images, prepare_frame, estimate_pair, max_workers, should_cancel,
-            on_prepared=remember_scale, budget=stage_budget)
-        source_identities.extend(prepared_identities)
+            pair_transforms, prepared_identities = _prepare_and_estimate_pairs(
+                images, prepare_frame, estimate_pair, max_workers, should_cancel,
+                on_prepared=remember_scale, budget=stage_budget)
+            source_identities.extend(prepared_identities)
 
-    if area_gpu is not None:
-        log_action('registration_ecc_resize', device=area_gpu.device_name or 'CPU',
-                   gpu_resizes=area_gpu.frames_resized, frames=len(images))
+        if area_gpu is not None:
+            log_action('registration_ecc_resize', device=area_gpu.device_name or 'CPU',
+                       gpu_resizes=area_gpu.frames_resized, frames=len(images))
 
     trajectory_failed = False
     for idx, (warp_matrix, cc) in enumerate(pair_transforms, start=1):
@@ -2025,7 +2058,8 @@ def _align_ecc_impl(input_source, output_path=None, img_filenames=None, downscal
         if dispatch_callback is not None:
             dispatch_callback('ecc', estimation='CPU', warp=warp_device,
                 resize_accelerator=area_gpu.device_name if area_gpu and area_gpu.frames_resized else None,
-                resize_fallback=bool(area_gpu and area_gpu.fell_back))
+                resize_fallback=bool((accelerate_ecc and not accelerate_resize)
+                                     or (area_gpu and area_gpu.fell_back)))
         return aligned_images
 
     def warp_task(args):
@@ -2209,7 +2243,7 @@ class ImageRegistration:
     
     def __init__(self, method='homography', downscale_width=1024,
                  max_shift_ratio=None, brightness_reference='first',
-                 use_gpu=False, parameters=None, *, defer_warps=False, accelerate_ecc=False):
+                 use_gpu=False, parameters=None, *, defer_warps=False, accelerate_ecc=True):
         from core.algorithms import (alignment_steps, registration_parameter_specs,
                                      resolve_registration_parameters)
         self.method = method
@@ -2262,6 +2296,8 @@ class ImageRegistration:
 
         with heavy_job(should_cancel), scratch_directory():
             _check_cancel(should_cancel)
+            from core.source_frames import SOURCE_CACHE
+            SOURCE_CACHE.adapt_to_memory()
             self.alignment_plan = None
             self._perspective_stages = []
             self._dispatch.clear()

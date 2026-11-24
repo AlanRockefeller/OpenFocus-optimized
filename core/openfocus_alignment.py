@@ -5,6 +5,8 @@ identities, never decoded frame stacks.
 """
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextvars import copy_context
+from contextlib import nullcontext
 import hashlib
 import math
 import mmap
@@ -16,7 +18,7 @@ import numpy as np
 
 from core import resource_policy
 from core import _alignment_kernels as _native_kernels
-from core.source_frames import resolve_frame
+from core.source_frames import resolve_frame, without_source_cache_growth
 from core.registration_errors import AlignmentEstimationError, RejectedAlignmentFrame
 
 _F32 = np.float32
@@ -392,20 +394,33 @@ def _validate_internal_float(image, should_cancel):
     _check_cancel(should_cancel)
 
 
-def _alignment_gray16(image, should_cancel):
+def _alloc_alignment_plane(shape, dtype, *, spillable: bool = False):
+    """Allocate an array or spill-capable transient plane when memory is tight."""
+    dt = np.dtype(dtype)
+    if spillable:
+        from core.frame_storage import create_transient_frame
+        return create_transient_frame(shape, dt)
+    return np.empty(shape, dtype=dt)
+
+
+def _alignment_gray16(image, should_cancel, *, spillable: bool = False):
     if image.dtype.kind != 'f':
-        return _gray16(image, should_cancel)
+        return _gray16(image, should_cancel, spillable=spillable)
     _validate_internal_float(image, should_cancel)
-    gray = np.empty(image.shape[:2], np.uint16)
+    gray = _alloc_alignment_plane(image.shape[:2], np.uint16, spillable=spillable)
     take = min(image.shape[2], 3) if image.ndim == 3 else 1
-    for start in range(0, len(image), 128):
+    rows = max(1, min(128, _HASH_CHUNK_BYTES // (image.shape[1] * take * 10)))
+    for start in range(0, len(image), rows):
         _check_cancel(should_cancel)
-        band = image[start:start + 128]
+        band = image[start:start + rows]
         # Recover native code values from normalize_fuse_input's 0..255
         # floats before taking the same truncated equal-channel mean.
         color = band[:, :, :take] if image.ndim == 3 else band
-        codes = np.rint(color.astype(np.float64) * 257.).astype(np.uint16)
-        gray[start:start + 128] = (
+        scaled = color.astype(np.float64)
+        scaled *= 257.
+        np.rint(scaled, out=scaled)
+        codes = scaled.astype(np.uint16)
+        gray[start:start + rows] = (
             codes.sum(axis=2, dtype=np.uint32) // take if image.ndim == 3 else codes
         )
     _check_cancel(should_cancel)
@@ -455,9 +470,9 @@ def estimate_translation_bytes(sources):
             + w * 1024 + 256 * 256 * 128)
 
 
-def _gray16(image, should_cancel):
+def _gray16(image, should_cancel, *, spillable: bool = False):
     _check_cancel(should_cancel)
-    gray = np.empty(image.shape[:2], dtype=np.uint16)
+    gray = _alloc_alignment_plane(image.shape[:2], np.uint16, spillable=spillable)
     if _native_kernels.available() and image.ndim in (2, 3):
         kernel_rows = (_native_kernels.gray16_u8_rows if image.dtype == np.uint8 else
                        _native_kernels.gray16_u16_rows if image.dtype == np.uint16 else None)
@@ -911,11 +926,11 @@ _ONE_F32 = F32(1.0)
 _FLIP = np.uint32(0x80000000)
 _BIG = F32(1.0e6)
 
-def fast_downsize(img, should_cancel=None):
+def fast_downsize(img, should_cancel=None, *, spillable=False):
     """2x2 mean (sum+2)>>2, ceil dimensions and edge tail."""
     h, w = img.shape
     oh = (h + 1) // 2
-    out = np.empty((oh, (w + 1) // 2), np.uint16)
+    out = _alloc_alignment_plane((oh, (w + 1) // 2), np.uint16, spillable=spillable)
     if _native_kernels.available() and img.dtype == np.uint16 and img.ndim == 2:
         _run_row_bands(
             oh, 128, should_cancel, _native_kernels.fast_downsize_u16_rows, img, out,
@@ -932,12 +947,12 @@ def fast_downsize(img, should_cancel=None):
     return out
 
 
-def build_pyramid(img, min_dim=16, should_cancel=None):
+def build_pyramid(img, min_dim=16, should_cancel=None, *, spillable=False):
     """CreatePyramid semantics: while min(w,h) >= min_dim: append(half)."""
     lev = [np.ascontiguousarray(img, dtype=np.uint16)]
     while min(lev[-1].shape) >= min_dim:
         _check_cancel(should_cancel)
-        lev.append(fast_downsize(lev[-1], should_cancel))
+        lev.append(fast_downsize(lev[-1], should_cancel, spillable=spillable))
     return lev
 
 def gpu_params(f8):
@@ -1645,19 +1660,43 @@ def alignment_resolution_bytes(frame):
     return math.prod(shape) * dtype.itemsize + shape[1] * (channels * 64 + 256)
 
 
-def estimate_alignment_bytes(sources):
-    """Anchor/previous gray, two pyramids, current decode and bounded scoring."""
+def _alignment_stack_geometry(sources):
     if not sources:
         raise ValueError('Alignment requires at least one source')
     h, w = _alignment_geometry(sources[0])[0][:2]
     for source in sources:
         if _alignment_geometry(source)[0][:2] != (h, w):
             raise ValueError('Alignment sources must have equal shapes in both spatial axes')
-    return (h * w * 16 + max(_decode_bytes(frame) for frame in sources)
-            + w * 1024 + 16 * 1024 * 1024)
+    return h, w
 
 
-def _warp_alignment(image, f8, should_cancel):
+def _alignment_memory(height, width, decode_peak, plane_limit=None):
+    planes = height * width * 16
+    if plane_limit is not None:
+        planes = min(planes, plane_limit)
+    return planes + decode_peak + width * 1024 + 16 * 1024 * 1024
+
+
+def _alignment_spill_bytes(height, width, count, reference_frame):
+    plane = height * width * 2
+    if count == 1:
+        return plane
+    # A retained anchor overlaps the current pair only on a longer chain.
+    pyramids = 3 if count > 3 and reference_frame not in (1, count) else 2
+    reduced = 0
+    while min(height, width) >= 64:
+        height, width = (height + 1) // 2, (width + 1) // 2
+        reduced += height * width * 2
+    return (pyramids + 1) * plane + pyramids * reduced
+
+
+def estimate_alignment_bytes(sources):
+    """Anchor/previous gray, two pyramids, current decode and bounded scoring."""
+    h, w = _alignment_stack_geometry(sources)
+    return _alignment_memory(h, w, max(_decode_bytes(frame) for frame in sources))
+
+
+def _warp_alignment(image, f8, should_cancel, *, spillable: bool = False):
     tx, ty, cx, cy, rotation, mx, my, _ = f8
     _check_cancel(should_cancel)
     if tx == cx and ty == cy and rotation == 0 and mx == 1 and my == 1:
@@ -1669,7 +1708,8 @@ def _warp_alignment(image, f8, should_cancel):
     _check_cancel(should_cancel)
     fields = gpu_params(f8)
     h, w = image.shape[:2]
-    output = np.empty_like(image)
+    output = (_alloc_alignment_plane(image.shape, image.dtype, spillable=True)
+              if spillable else np.empty_like(image))
     if (_native_kernels.available() and image.ndim in (2, 3)
             and image.dtype in (np.uint8, np.uint16, np.float32, np.float64)):
         if _is_bgr_rev(image):
@@ -1921,6 +1961,15 @@ def alignment_valid_mask(transform, *, should_cancel=None):
     return mask
 
 
+def _alignment_pixels_equal(first, second, should_cancel):
+    for start in range(0, len(first), 128):
+        _check_cancel(should_cancel)
+        band = slice(start, start + 128)
+        if not np.array_equal(first[band], second[band]):
+            return False
+    return True
+
+
 def estimate_alignment_plan(sources, *, max_shift_ratio=.05, reference_frame=1,
                             rotation=0., magnification=3., should_cancel=None,
                             progress_callback=None, failure_policy='fail'):
@@ -1942,24 +1991,63 @@ def estimate_alignment_plan(sources, *, max_shift_ratio=.05, reference_frame=1,
         raise ValueError('magnification must be finite and in [0, 100) percent')
     if failure_policy not in ('fail', 'continue'):
         raise ValueError('Invalid alignment failure policy')
-    needed = estimate_alignment_bytes(sources)
+    h, w = _alignment_stack_geometry(sources)
+    decode_peak = max(_decode_bytes(frame) for frame in sources)
+    needed = _alignment_memory(h, w, decode_peak)
     if not isinstance(reference_frame, (int, np.integer)) or not 1 <= reference_frame <= len(sources):
         raise ValueError(f'OpenFocus reference frame {reference_frame} is outside the stack of {len(sources)} frames')
-    h, w = sources[0].shape[:2]
-    resource_policy.plan_execution(resource_policy.Workload(
-        algorithm='openfocus_alignment', frames=len(sources), height=h, width=w,
-        fixed_bytes=needed, per_worker_bytes=0, outer_tasks=1), user_threads=1)
+    low_ram_spill = False
+    try:
+        plan = resource_policy.plan_execution(resource_policy.Workload(
+            algorithm='openfocus_alignment', frames=len(sources), height=h, width=w,
+            fixed_bytes=needed, per_worker_bytes=0, outer_tasks=1), user_threads=1)
+    except resource_policy.ResourceLimitError:
+        import gc
+        from core.source_frames import SOURCE_CACHE
+        from utils.logging_setup import log_action
+
+        snap = resource_policy.probe_memory()
+        ceiling_now = resource_policy.ram_ceiling(snap)
+        if ceiling_now <= 0:
+            raise
+        SOURCE_CACHE.clear()
+        gc.collect()
+        snap = resource_policy.probe_memory()
+        ceiling_now = resource_policy.ram_ceiling(snap)
+        if ceiling_now <= 0:
+            raise
+        plane_cap = resource_policy.frame_ram_budget(snap)
+        min_needed = _alignment_memory(h, w, decode_peak, plane_cap)
+        if min_needed > ceiling_now:
+            raise
+        plan = resource_policy.plan_execution(resource_policy.Workload(
+            algorithm='openfocus_alignment', frames=len(sources), height=h, width=w,
+            fixed_bytes=min_needed, per_worker_bytes=0, outer_tasks=1), user_threads=1)
+        low_ram_spill = True
+        log_action('openfocus_alignment_low_ram_degrade',
+                   required_bytes=min_needed, budget_bytes=ceiling_now)
+    host_budget = getattr(plan, 'ram_budget', 0) or 0
+    gray_bytes = int(h) * int(w) * 2
+    use_prefetch = (
+        not low_ram_spill
+        and len(sources) >= 2
+        and _alignment_workers(h * w, min_items=1) > 1
+        and (needed + decode_peak + gray_bytes) <= host_budget
+    )
     ref = reference_frame - 1
+    has_right_chain = 0 < ref < len(sources) - 1
     order = (ref, *range(ref - 1, -1, -1), *range(ref + 1, len(sources)))
     transforms = [None] * len(sources)
     previous = anchor = None
     prev_pyr = anchor_pyr = None
     previous_index = ref
-    for done, index in enumerate(order):
-        _check_cancel(should_cancel)
-        frame = sources[index]
-        image = resolve_frame(frame)
-        _check_cancel(should_cancel)
+
+    def prepare_source(source_index, cancelled):
+        _check_cancel(cancelled)
+        frame = sources[source_index]
+        with without_source_cache_growth() if low_ram_spill else nullcontext():
+            image = resolve_frame(frame, should_cancel=cancelled)
+        _check_cancel(cancelled)
         if not isinstance(image, np.ndarray) or _alignment_geometry(image) != _alignment_geometry(frame):
             raise ValueError('Alignment source metadata does not match decoded pixels')
         if image.ndim == 3 and image.shape[2] == 4:
@@ -1968,54 +2056,95 @@ def estimate_alignment_plan(sources, *, max_shift_ratio=.05, reference_frame=1,
                 raise UnsupportedTransparency('Registration of transparent images is unsupported')
         path, page, file_stamp = _source_file_identity(frame)
         identity = SourceFingerprint(tuple(image.shape), image.dtype.str,
-            _pixel_digest(image, should_cancel, source=frame), path, page, file_stamp, _source_context(frame))
+            _pixel_digest(image, cancelled, source=frame), path, page, file_stamp,
+            _source_context(frame))
         identity.validate_file()
-        gray = _alignment_gray16(image, should_cancel)
+        gray = _alignment_gray16(image, cancelled, spillable=low_ram_spill)
         del image
-        if ref > 0 and index == ref + 1:
-            previous, previous_index = anchor, ref
-            prev_pyr = anchor_pyr
-        pair = np.array(_IDENTITY_F8, np.float32)
-        rounds, failure = 0, ''
-        curr_pyr = None
-        if index != ref and (ratio or rotation or magnification) and not np.array_equal(previous, gray):
-            if prev_pyr is None:
-                prev_pyr = build_pyramid(previous, 64, should_cancel)
-            if index == ref - 1 and previous_index == ref and ref > 0:
-                anchor_pyr = prev_pyr
-            curr_pyr = build_pyramid(gray, 64, should_cancel)
+        return identity, gray
+
+    def iter_prepared():
+        if not use_prefetch:
+            for source_index in order:
+                _check_cancel(should_cancel)
+                yield prepare_source(source_index, should_cancel)
+            return
+        stop = threading.Event()
+
+        def cancelled():
+            return stop.is_set() or (should_cancel is not None and should_cancel())
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='openfocus-align-io') as pool:
+            pending = pool.submit(copy_context().run, prepare_source, order[0], cancelled)
             try:
-                pair, rounds = align_pair_wide(previous, gray, h_pct=ratio * 100,
-                    v_pct=ratio * 100, rot_deg=rotation, mag_pct=magnification,
-                    should_cancel=should_cancel, initial_f8=transforms[previous_index].f8,
-                    _a_pyr=prev_pyr, _b_pyr=curr_pyr)
-            except AlignmentEstimationError as error:
-                if failure_policy == 'fail':
-                    failure = RejectedAlignmentFrame('OpenFocus', index, str(error))
-                    failure.completed_transforms = tuple(t for t in transforms if t is not None)
-                    raise failure from error
-                failure = str(error)
-                pair = np.array(_IDENTITY_F8, np.float32)
-        total = pair.copy()
-        if (not failure and previous_index != ref
-                and transforms[previous_index].failure):
-            failure = 'reference alignment fell back'
-        transform = AlignmentTransform(index, tuple(float(v) for v in total),
-            tuple(float(v) for v in pair), identity, previous_index, rounds, failure)
-        transforms[index] = transform
-        previous = _warp_alignment(gray, total, should_cancel)
-        if previous is gray:
-            prev_pyr = curr_pyr
-        else:
-            prev_pyr = None
-        del curr_pyr
-        if index == ref and ref > 0:
-            anchor = previous
-            anchor_pyr = prev_pyr
-        del gray
-        previous_index = index
-        if progress_callback is not None:
-            progress_callback(done + 1, len(sources))
+                for pos in range(len(order)):
+                    while not pending.done():
+                        _check_cancel(should_cancel)
+                        wait((pending,), timeout=0.05)
+                    _check_cancel(should_cancel)
+                    prepared = pending.result()
+                    pending = None
+                    if pos + 1 < len(order):
+                        pending = pool.submit(copy_context().run, prepare_source, order[pos + 1], cancelled)
+                    yield prepared
+                    del prepared
+            finally:
+                stop.set()
+                if pending is not None:
+                    pending.cancel()
+
+    prepared_stream = iter_prepared()
+    try:
+        for done, index in enumerate(order):
+            _check_cancel(should_cancel)
+            if has_right_chain and index == ref + 1:
+                previous, previous_index = anchor, ref
+                prev_pyr = anchor_pyr
+            identity, gray = next(prepared_stream)
+            pair = np.array(_IDENTITY_F8, np.float32)
+            rounds, failure = 0, ''
+            curr_pyr = None
+            if (index != ref and (ratio or rotation or magnification)
+                    and not _alignment_pixels_equal(previous, gray, should_cancel)):
+                if prev_pyr is None:
+                    prev_pyr = build_pyramid(previous, 64, should_cancel, spillable=low_ram_spill)
+                if has_right_chain and index == ref - 1 and previous_index == ref:
+                    anchor_pyr = prev_pyr
+                curr_pyr = build_pyramid(gray, 64, should_cancel, spillable=low_ram_spill)
+                try:
+                    pair, rounds = align_pair_wide(previous, gray, h_pct=ratio * 100,
+                        v_pct=ratio * 100, rot_deg=rotation, mag_pct=magnification,
+                        should_cancel=should_cancel, initial_f8=transforms[previous_index].f8,
+                        _a_pyr=prev_pyr, _b_pyr=curr_pyr)
+                except AlignmentEstimationError as error:
+                    if failure_policy == 'fail':
+                        failure = RejectedAlignmentFrame('OpenFocus', index, str(error))
+                        failure.completed_transforms = tuple(t for t in transforms if t is not None)
+                        raise failure from error
+                    failure = str(error)
+                    pair = np.array(_IDENTITY_F8, np.float32)
+            total = pair.copy()
+            if (not failure and previous_index != ref
+                    and transforms[previous_index].failure):
+                failure = 'reference alignment fell back'
+            transform = AlignmentTransform(index, tuple(float(v) for v in total),
+                tuple(float(v) for v in pair), identity, previous_index, rounds, failure)
+            transforms[index] = transform
+            previous = _warp_alignment(gray, total, should_cancel, spillable=low_ram_spill)
+            if previous is gray:
+                prev_pyr = curr_pyr
+            else:
+                prev_pyr = None
+            del curr_pyr
+            if index == ref and has_right_chain:
+                anchor = previous
+                anchor_pyr = prev_pyr
+            del gray
+            previous_index = index
+            if progress_callback is not None:
+                progress_callback(done + 1, len(sources))
+    finally:
+        prepared_stream.close()
     _check_cancel(should_cancel)
     return AlignmentPlan(tuple(transforms), ref, order, ratio, needed, failure_policy,
                          rotation, magnification)

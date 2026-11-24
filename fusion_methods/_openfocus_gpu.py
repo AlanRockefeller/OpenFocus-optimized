@@ -1,8 +1,13 @@
 """Bounded OpenCL depth activity and ordered merge for OpenFocus B."""
 import atexit
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 import contextvars
+import hashlib
 import logging
+import os
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import Event, Lock
 
 import numpy as np
@@ -19,6 +24,7 @@ _nvml_atexit_registered = False
 _MERGE_KERNEL_NAMES = (
     'activity', 'merge', 'merge_u8_i64', 'merge_u16_u16', 'merge_u8_u16',
     'merge_bgr_rev', 'merge_u8_i64_bgr_rev', 'merge_u16_u16_bgr_rev', 'merge_u8_u16_bgr_rev',
+    'merge_out_u8',
 )
 _DEPTH_KERNEL_NAMES = (
     'gray_u8', 'gray_u16', 'detail_pool', 'detail_smooth', 'detail_select',
@@ -67,6 +73,40 @@ class _PreviewPlaneReader:
             return None
         return self._pixels
 
+    def close(self):
+        _release_buffers(self._buffer)
+        self._buffer = None
+
+
+def _release_buffers(*items):
+    """Explicitly release any OpenCL buffer objects without raising."""
+    seen = set()
+
+    def _walk(item):
+        if item is None:
+            return
+        if isinstance(item, dict):
+            for value in item.values():
+                _walk(value)
+            return
+        if isinstance(item, (list, tuple)):
+            for value in item:
+                _walk(value)
+            return
+        release = getattr(item, 'release', None)
+        if callable(release):
+            obj_id = id(item)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            try:
+                release()
+            except Exception:
+                pass
+
+    for entry in items:
+        _walk(entry)
+
 
 def _prepare_gpu_upload(array, dtype=None):
     """Return (contiguous_host_buffer, bgr_rev) without copying reversed RGB views."""
@@ -88,25 +128,137 @@ def _supports_tiled_transpose(device):
             and getattr(device, 'local_mem_size', 16 * 17 * 2) >= 16 * 17 * 2)
 
 
+def _opencl_cache_dir() -> Path | None:
+    """Return the persistent directory for compiled OpenCL binaries."""
+    try:
+        override = os.environ.get('OPENFOCUS_OPENCL_CACHE_DIR')
+        if override:
+            path = Path(override)
+        else:
+            local = (os.environ.get('LOCALAPPDATA') or os.environ.get('XDG_CACHE_HOME')
+                     or (Path.home() / '.cache'))
+            path = Path(local) / 'OpenFocus' / 'opencl_cache'
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        return None
+
+
+def _program_cache_path(device, source: str, options=None) -> Path | None:
+    cache_dir = _opencl_cache_dir()
+    if cache_dir is None:
+        return None
+    opts = tuple(str(opt) for opt in options) if options else ()
+    platform = getattr(device, 'platform', None)
+    key = '|'.join((
+        str(getattr(device, 'name', '')),
+        str(getattr(device, 'vendor', '')),
+        str(getattr(device, 'driver_version', '')),
+        str(getattr(device, 'version', '')),
+        str(getattr(platform, 'name', '')),
+        str(getattr(platform, 'vendor', '')),
+        str(getattr(platform, 'version', '')),
+        str(opts),
+        os.environ.get('PYOPENCL_BUILD_OPTIONS', ''),
+    )).encode('utf-8', errors='replace')
+    digest = hashlib.sha256(key + b'\0' + source.encode('utf-8')).hexdigest()
+    return cache_dir / f'{digest}.clbin'
+
+
+def _build_cached_program(cl, device, context, source, *, options=None):
+    """Build an OpenCL program using an on-disk binary cache keyed by device/driver/source."""
+    build_opts = list(options) if options else []
+    cache_path = _program_cache_path(device, source, build_opts)
+    can_binary = (
+        cache_path is not None
+        and hasattr(cl, 'program_info')
+        and hasattr(cl.program_info, 'BINARIES')
+    )
+    if can_binary:
+        try:
+            blob = cache_path.read_bytes()
+            if blob:
+                prg = cl.Program(context, [device], [blob])
+                return prg.build(options=build_opts) if build_opts else prg.build()
+        except Exception:
+            pass  # Missing, unreadable, or stale cache entries are rebuilt from source.
+    prg = cl.Program(context, source)
+    program = prg.build(options=build_opts) if build_opts else prg.build()
+    if can_binary:
+        tmp_path = None
+        try:
+            binaries = program.get_info(cl.program_info.BINARIES)
+            if isinstance(binaries, (list, tuple)) and binaries:
+                blob = binaries[0]
+                if isinstance(blob, (bytes, bytearray)) and blob:
+                    with NamedTemporaryFile(dir=cache_path.parent, prefix=cache_path.stem,
+                                            suffix='.tmp', delete=False) as stream:
+                        tmp_path = Path(stream.name)
+                        stream.write(blob)
+                    tmp_path.replace(cache_path)
+        except Exception:
+            pass
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return program
+
+
 def _build_filter_program(cl, device, context, extra_source, *, options=None):
     """Build the program and return whether its transpose can launch tiled."""
     tiled = _supports_tiled_transpose(device)
     source = _TRANSPOSE_TILED_K if tiled else _TRANSPOSE_NAIVE_K
-    program = cl.Program(context, _FILTER_K_BODY + source + extra_source).build(options=options)
+    program = _build_cached_program(
+        cl, device, context, _FILTER_K_BODY + source + extra_source, options=options,
+    )
     if tiled:
         group_size = cl.Kernel(program, 'transpose_u16').get_work_group_info(
             cl.kernel_work_group_info.WORK_GROUP_SIZE, device,
         )
         if group_size < 256:
-            program = cl.Program(
-                context, _FILTER_K_BODY + _TRANSPOSE_NAIVE_K + extra_source,
-            ).build(options=options)
+            program = _build_cached_program(
+                cl, device, context, _FILTER_K_BODY + _TRANSPOSE_NAIVE_K + extra_source,
+                options=options,
+            )
             tiled = False
     return program, tiled
 
 
-def _iter_prefetched(items, prepare_fn, *, enabled: bool, should_cancel=None):
-    """Yield (index, prepare_fn(index, item, cancelled)) with at most 1 frame prefetched."""
+def _prefetch_window(host_budget: int, host_staging: int, frame_bytes: int, count: int,
+                     *, max_slots: int = 3, thread_count=None) -> int:
+    """Return bounded background prefetch depth permitted by host memory headroom."""
+    if thread_count is None:
+        from fusion_methods._openfocus_execution import _current
+        job = _current.get()
+        thread_count = getattr(job, 'thread_count', None)
+    if count < 2 or thread_count == 1 or frame_bytes <= 0:
+        return 0
+    if host_staging + frame_bytes > host_budget:
+        return 0
+    headroom = max(0, int(host_budget) - int(host_staging))
+    cpu_cap = max(1, (os.cpu_count() or 2) // 2)
+    slot_cap = min(int(max_slots), cpu_cap)
+    if thread_count is not None and thread_count > 0:
+        slot_cap = min(slot_cap, thread_count - 1)
+    return max(0, min(slot_cap, int(headroom // int(frame_bytes)), int(count) - 1))
+
+
+def _wait_event(event, cancel=None) -> None:
+    """Wait on an OpenCL event if present and cancel-check before and after."""
+    if cancel is not None:
+        cancel()
+    if event is not None and hasattr(event, 'wait'):
+        event.wait()
+    if cancel is not None:
+        cancel()
+
+
+def _iter_prefetched(items, prepare_fn, *, enabled: bool, should_cancel=None,
+                     max_in_flight: int = 1):
+    """Yield (index, prepare_fn(index, item, cancelled)) with bounded background prefetch."""
     from fusion_methods.openfocus_ab import _check_cancel
     from fusion_methods._openfocus_execution import _current, _worker_native_limit
 
@@ -116,7 +268,8 @@ def _iter_prefetched(items, prepare_fn, *, enabled: bool, should_cancel=None):
     job = _current.get() if enabled else None
     if job is not None and job.thread_count == 1:
         enabled = False
-    if not enabled or total < 2:
+    slots = max(0, min(int(max_in_flight), total - 1)) if enabled else 0
+    if slots <= 0 or total < 2:
         for index, item in enumerate(items):
             _check_cancel(should_cancel)
             result = prepare_fn(index, item, should_cancel)
@@ -135,24 +288,30 @@ def _iter_prefetched(items, prepare_fn, *, enabled: bool, should_cancel=None):
         return pool.submit(ctx.run, prepare_fn, index, items[index], cancelled)
 
     _check_cancel(should_cancel)
-    with ThreadPoolExecutor(max_workers=1, initializer=_worker_native_limit) as pool:
-        future = None
+    workers = min(slots, 3)
+    with ThreadPoolExecutor(max_workers=workers, initializer=_worker_native_limit) as pool:
+        pending = deque()
+        next_submit = 0
         try:
-            future = submit_item(pool, 0)
+            while next_submit < min(slots, total):
+                pending.append(submit_item(pool, next_submit))
+                next_submit += 1
             for index in range(total):
+                future = pending[0]
                 while not future.done():
                     _check_cancel(should_cancel)
                     wait((future,), timeout=0.05)
                 _check_cancel(should_cancel)
+                pending.popleft()
                 result = future.result()
-                future = None
-                if index + 1 < total:
-                    future = submit_item(pool, index + 1)
+                while next_submit < total and len(pending) < slots:
+                    pending.append(submit_item(pool, next_submit))
+                    next_submit += 1
                 yield index, result
                 del result
         finally:
             stop.set()
-            if future is not None:
+            for future in pending:
                 future.cancel()
 
 
@@ -174,7 +333,7 @@ def _get_or_build_merge_program(cl, device):
             return _PROGRAM_CACHE[1:]
         ctx = cl.Context(devices=[device])
         queue = cl.CommandQueue(ctx, device=device)
-        program = cl.Program(ctx, _MERGE_KERNEL).build()
+        program = _build_cached_program(cl, device, ctx, _MERGE_KERNEL)
         kernels = {name: cl.Kernel(program, name) for name in _MERGE_KERNEL_NAMES}
         _PROGRAM_CACHE = (key, ctx, queue, program, kernels)
         _DEPTH_PROGRAM_CACHE = None
@@ -254,10 +413,48 @@ DEFINE_MERGE(merge_bgr_rev, ushort, long, 1, 1)
 DEFINE_MERGE(merge_u8_i64_bgr_rev, uchar, long, 1, 1)
 DEFINE_MERGE(merge_u16_u16_bgr_rev, ushort, ushort, 0, 1)
 DEFINE_MERGE(merge_u8_u16_bgr_rev, uchar, ushort, 0, 1)
+
+__kernel void merge_out_u8(__global const ushort *acc, __global uchar *dst,
+                           const ulong offset, const ulong count)
+{
+    size_t i = get_global_id(0);
+    if (i < count) dst[i] = (uchar)(acc[offset + i] >> 8);
+}
 '''
 
 
+def _device_rank(device, index):
+    try:
+        unified = bool(getattr(device, 'host_unified_memory', False))
+    except Exception:
+        unified = False
+    try:
+        mem = int(getattr(device, 'global_mem_size', 0))
+    except Exception:
+        mem = 0
+    try:
+        cus = int(getattr(device, 'max_compute_units', 0))
+    except Exception:
+        cus = 0
+    return (0 if unified else 1, mem, cus, -index)
+
+
+def _is_weak_integrated_gpu(device) -> bool:
+    """Return True for low-CU unified-memory GPUs slower than multi-core native CPU."""
+    try:
+        unified = bool(getattr(device, 'host_unified_memory', False))
+        cus = int(getattr(device, 'max_compute_units', 0) or 0)
+    except Exception:
+        return False
+    if not unified or cus <= 0 or cus > 8 or (os.cpu_count() or 0) < 8:
+        return False
+    from core._native import native_available
+    return native_available()
+
+
 def _device(cl):
+    candidates = []
+    index = 0
     for platform in cl.get_platforms():
         try:
             devices = platform.get_devices(device_type=cl.device_type.GPU)
@@ -266,8 +463,13 @@ def _device(cl):
         for device in devices:
             if (device.type & cl.device_type.GPU and device.available
                     and device.compiler_available):
-                return device
-    return None
+                if _is_weak_integrated_gpu(device):
+                    continue
+                candidates.append((index, device))
+                index += 1
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _device_rank(item[1], item[0]))[1]
 
 
 def opencl_device_name(device):
@@ -494,11 +696,18 @@ class Merge:
             self.merge_u8_i64_bgr_rev_kernel = kernels['merge_u8_i64_bgr_rev']
             self.merge_u16_u16_bgr_rev_kernel = kernels['merge_u16_u16_bgr_rev']
             self.merge_u8_u16_bgr_rev_kernel = kernels['merge_u8_u16_bgr_rev']
+            self.merge_out_u8_kernel = kernels['merge_out_u8']
             self.depth_program = None
             self._merge_acc = None
             self._merge_depth = None
             self._merge_src = None
             self._merge_src_bytes = 0
+            self._merge_src_alt = None
+            self._merge_src_alt_bytes = 0
+            self._merge_slot_events = [None, None]
+            self._merge_slot_hosts = [None, None]
+            self._merge_slot = 0
+            self._merge_ping_pong = False
             self._merge_u16_depth = False
             self._merge_needs_drain = False
             self.rows = rows
@@ -608,8 +817,9 @@ class Merge:
         try:
             if self.device.host_unified_memory:
                 # Device allocations share the same physical RAM as staging.
+                vram_cap = int(self.device.global_mem_size)
                 host_staging += vram_need
-                if host_staging > host_budget or vram_need > int(self.device.global_mem_size):
+                if host_staging > host_budget or vram_need > vram_cap:
                     logging.getLogger(__name__).info('OpenFocus full GPU depth exceeds unified memory budget')
                     return None
             else:
@@ -630,14 +840,28 @@ class Merge:
                     self.cl, self.device, self.context,
                 )
                 self.depth_program = depth_prog
-                prefetch = (host_staging + source_peak <= host_budget)
+                prefetch_slots = _prefetch_window(
+                    host_budget, host_staging, source_peak, len(frames),
+                )
+                extra_host = max(max_src_bytes, pixels * 2)
+                unified_extra_vram = max_src_bytes if self.device.host_unified_memory else 0
+                ping_pong = (
+                    len(frames) >= 2
+                    and (host_staging + prefetch_slots * source_peak + 2 * extra_host
+                         + unified_extra_vram) <= host_budget
+                    and (vram_need + max_src_bytes) <= vram_cap
+                )
                 engine = _GpuB(
                     self, img_resize, depth_kernels=depth_k, filter_kernels=filt_k,
                     resample_kernels=resamp_k, tiled_transpose=tiled,
                 )
-                return engine.depth(frames, kernel_size, smoothing, feather, shape,
-                                    len(frames), should_cancel, progress, prefetch=prefetch,
-                                    live_preview=live_preview)
+                engine._prefetch_slots = prefetch_slots
+                engine._ping_pong = ping_pong
+                return engine.depth(
+                    frames, kernel_size, smoothing, feather, shape, len(frames),
+                    should_cancel, progress, prefetch=prefetch_slots > 0,
+                    live_preview=live_preview,
+                )
             except CallbackFailure as exc:
                 self._drain_queue()
                 raise exc.__cause__
@@ -653,6 +877,7 @@ class Merge:
             self.release()
 
     def activity(self, gray, fine, output):
+        gb = fb = ob = None
         try:
             cl = self.cl
             source = np.ascontiguousarray(gray, dtype=np.uint16)
@@ -669,6 +894,8 @@ class Merge:
                 _invalidate_program_cache()
             self._drain_queue()
             raise GpuError('OpenCL GPU depth activity failed') from exc
+        finally:
+            _release_buffers(gb, fb, ob)
         output[...] = result
 
     def begin_merge(self, depth, shape, should_cancel):
@@ -692,9 +919,16 @@ class Merge:
             return False
         self.acquire(should_cancel)
         try:
+            extra_src = pixels * channels * 2
+            ping_pong = False
             if self.device.host_unified_memory:
                 admitted = (required + host_staging <= host
                             and required <= int(self.device.global_mem_size))
+                ping_pong = (
+                    admitted
+                    and (required + extra_src + host_staging + extra_src <= host)
+                    and (required + extra_src <= int(self.device.global_mem_size))
+                )
             else:
                 memory = _free_vram(self.device)
                 snapshot = (None if memory is None else
@@ -704,6 +938,11 @@ class Merge:
                                 resource_policy.vram_budget(snapshot))
                             if snapshot is not None else 0)
                 admitted = (snapshot is not None and required + 16 * 1024 * 1024 <= vram_cap)
+                ping_pong = (
+                    admitted
+                    and (required + extra_src + 16 * 1024 * 1024 <= vram_cap)
+                    and (host_staging + extra_src <= host)
+                )
             if not admitted:
                 self.release()
                 return False
@@ -711,6 +950,12 @@ class Merge:
             codes = np.ascontiguousarray(depth, dtype=np.uint16 if u16_depth else np.int64)
             self._merge_src = None
             self._merge_src_bytes = 0
+            self._merge_src_alt = None
+            self._merge_src_alt_bytes = 0
+            self._merge_slot_events = [None, None]
+            self._merge_slot_hosts = [None, None]
+            self._merge_slot = 0
+            self._merge_ping_pong = ping_pong
             self._merge_needs_drain = False
             self._merge_depth = cl.Buffer(self.context, cl.mem_flags.READ_ONLY |
                                           cl.mem_flags.COPY_HOST_PTR, hostbuf=codes)
@@ -723,14 +968,31 @@ class Merge:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
                 _invalidate_program_cache()
             self._drain_queue()
-            self._merge_acc = self._merge_depth = self._merge_src = None
-            self._merge_src_bytes = 0
+            _release_buffers(self._merge_acc, self._merge_depth, self._merge_src,
+                             getattr(self, '_merge_src_alt', None))
+            self._merge_acc = self._merge_depth = self._merge_src = self._merge_src_alt = None
+            self._merge_src_bytes = self._merge_src_alt_bytes = 0
+            self._merge_slot_events = [None, None]
+            self._merge_slot_hosts = [None, None]
+            self._merge_slot = 0
+            self._merge_ping_pong = False
             self._merge_u16_depth = False
             self._merge_needs_drain = False
             self.release()
             if not isinstance(exc, Exception):
                 raise
             raise GpuError('OpenCL GPU merge allocation failed') from exc
+
+    def _flush_merge_slots(self):
+        events = getattr(self, '_merge_slot_events', None)
+        hosts = getattr(self, '_merge_slot_hosts', None)
+        if events is not None:
+            for slot in (0, 1):
+                if events[slot] is not None:
+                    _wait_event(events[slot])
+                    events[slot] = None
+                if hosts is not None:
+                    hosts[slot] = None
 
     def resident_frame(self, frame, index, count, scale):
         try:
@@ -745,34 +1007,57 @@ class Merge:
                 rev_attr = 'merge_u8_i64_bgr_rev_kernel' if is_u8 else 'kernel_bgr_rev'
                 norm_attr = 'merge_u8_i64_kernel' if is_u8 else 'kernel'
             kern = getattr(self, rev_attr if bgr_rev else norm_attr)
-            if self._merge_src is None or self._merge_src_bytes != image.nbytes:
-                self._merge_src = None
-                self._merge_src_bytes = 0
-                self._merge_src = cl.Buffer(
+            ping_pong = bool(getattr(self, '_merge_ping_pong', False))
+            slot = self._merge_slot if ping_pong else 0
+            if ping_pong:
+                self._merge_slot ^= 1
+                if self._merge_slot_events[slot] is not None:
+                    _wait_event(self._merge_slot_events[slot])
+                    self._merge_slot_events[slot] = None
+                    self._merge_slot_hosts[slot] = None
+            src_attr = '_merge_src' if slot == 0 else '_merge_src_alt'
+            bytes_attr = '_merge_src_bytes' if slot == 0 else '_merge_src_alt_bytes'
+            src_buf = getattr(self, src_attr, None)
+            src_bytes = getattr(self, bytes_attr, 0)
+            if src_buf is None or src_bytes != image.nbytes:
+                _release_buffers(src_buf)
+                setattr(self, src_attr, None)
+                setattr(self, bytes_attr, 0)
+                src_buf = cl.Buffer(
                     self.context, cl.mem_flags.READ_ONLY, max(1, image.nbytes),
                 )
-                self._merge_src_bytes = image.nbytes
+                setattr(self, src_attr, src_buf)
+                setattr(self, bytes_attr, image.nbytes)
             self._merge_needs_drain = True
-            upload = cl.enqueue_copy(self.queue, self._merge_src, image, is_blocking=False)
+            upload = cl.enqueue_copy(self.queue, src_buf, image, is_blocking=False)
             height, width = self._merge_shape[:2]
             channels = 1 if image.ndim == 2 else image.shape[2]
             event = kern(self.queue, (height * width,), None, self._merge_acc,
-                         self._merge_src, self._merge_depth, np.int32(width),
+                         src_buf, self._merge_depth, np.int32(width),
                          np.int32(channels), np.int32(65535 // max(1, count - 1)),
                          np.int32(index), np.int32(scale), np.int32(index == 0))
-            event.wait()
-            del upload
-            self._merge_needs_drain = False
+            if ping_pong and event is not None and hasattr(event, 'wait'):
+                self._merge_slot_events[slot] = event
+                self._merge_slot_hosts[slot] = (image, upload)
+            else:
+                event.wait()
+                del upload
+                self._merge_needs_drain = False
             self.used = True
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
                 _invalidate_program_cache()
             self._drain_queue()
+            if getattr(self, '_merge_slot_events', None) is not None:
+                self._merge_slot_events = [None, None]
+            if getattr(self, '_merge_slot_hosts', None) is not None:
+                self._merge_slot_hosts = [None, None]
             self._merge_needs_drain = False
             raise GpuError('OpenCL GPU merge failed') from exc
 
     def finish_merge(self, result):
         try:
+            self._flush_merge_slots()
             direct = (isinstance(result, np.ndarray)
                       and result.dtype == np.uint16
                       and result.shape == tuple(self._merge_shape)
@@ -780,25 +1065,72 @@ class Merge:
                       and result.flags.writeable)
             output = result if direct else np.empty(self._merge_shape, dtype=np.uint16)
             self.cl.enqueue_copy(self.queue, output, self._merge_acc, is_blocking=True)
+            self._merge_needs_drain = False
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
                 _invalidate_program_cache()
             self._drain_queue()
+            self._merge_needs_drain = False
             raise GpuError('OpenCL GPU merge download failed') from exc
         if not direct:
             result[...] = output
 
+    def finish_merge_u8(self, output):
+        dst_buf = None
+        try:
+            self._flush_merge_slots()
+            _release_buffers(self._merge_src, self._merge_src_alt)
+            self._merge_src = self._merge_src_alt = None
+            self._merge_src_bytes = self._merge_src_alt_bytes = 0
+            direct = (isinstance(output, np.ndarray)
+                      and output.dtype == np.uint8
+                      and output.shape == tuple(self._merge_shape)
+                      and output.flags.c_contiguous
+                      and output.flags.writeable)
+            dest = output if direct else np.empty(self._merge_shape, dtype=np.uint8)
+            flat = dest.reshape(-1)
+            total = int(flat.size)
+            chunk_bytes = min(max(1, total), 8 * 1024 * 1024)
+            dst_buf = self.cl.Buffer(self.context, self.cl.mem_flags.WRITE_ONLY, chunk_bytes)
+            kern = self.merge_out_u8_kernel
+            self._merge_needs_drain = True
+            for start in range(0, total, chunk_bytes):
+                region = flat[start:min(start + chunk_bytes, total)]
+                kern(self.queue, (region.size,), None, self._merge_acc, dst_buf,
+                     np.uint64(start), np.uint64(region.size))
+                self.cl.enqueue_copy(self.queue, region, dst_buf, is_blocking=True)
+            self._merge_needs_drain = False
+        except Exception as exc:
+            if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
+                _invalidate_program_cache()
+            self._drain_queue()
+            self._merge_needs_drain = False
+            raise GpuError('OpenCL GPU merge download failed') from exc
+        finally:
+            _release_buffers(dst_buf)
+        if not direct:
+            output[...] = dest
+
     def end_merge(self):
         if getattr(self, '_merge_needs_drain', False):
             self._drain_queue()
-        self._merge_acc = self._merge_depth = self._merge_src = None
-        self._merge_src_bytes = 0
+        if getattr(self, '_merge_slot_events', None) is not None:
+            self._merge_slot_events = [None, None]
+        if getattr(self, '_merge_slot_hosts', None) is not None:
+            self._merge_slot_hosts = [None, None]
+        _release_buffers(self._merge_acc, self._merge_depth, self._merge_src,
+                         getattr(self, '_merge_src_alt', None))
+        self._merge_acc = self._merge_depth = self._merge_src = self._merge_src_alt = None
+        self._merge_src_bytes = self._merge_src_alt_bytes = 0
+        self._merge_slot = 0
+        self._merge_ping_pong = False
         self._merge_u16_depth = False
         self._merge_needs_drain = False
         self.release()
 
     def band(self, accumulator, image, depth, index, step, scale, first):
         """Merge a band transactionally; failure leaves the accumulator intact."""
+        ab = ib = db = None
         try:
             cl = self.cl
             # Initial accumulation is deliberately not read from an
@@ -824,6 +1156,8 @@ class Merge:
                 _invalidate_program_cache()
             self._drain_queue()
             raise GpuError('OpenCL GPU merge failed') from exc
+        finally:
+            _release_buffers(ab, ib, db)
         accumulator[...] = result
 
 
@@ -1301,33 +1635,40 @@ class _ExpandDepth(_HalfResample):
             return b
         H, W = src_shape
         OH, OW = int(dst_shape[0]), int(dst_shape[1])
-        vb = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, OH * W * 4)
-        vix = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                             hostbuf=pad(v.indices))
-        vw = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                            hostbuf=pad(v.weights))
-        vc = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                            hostbuf=v.counts.astype(np.int64))
-        self.kernels['vert'](self.q, (W, OH), None, depth_buf, vb, vix, vw, vc,
-                             np.int32(OH), np.int32(W))
-        ob = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, OH * OW * 2)
-        hix = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                             hostbuf=pad(h.indices))
-        hw = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                            hostbuf=pad(h.weights))
-        hc = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                            hostbuf=h.counts.astype(np.int64))
-        self.kernels['horiz'](self.q, (OW, OH), None, vb, ob, hix, hw, hc,
-                              np.int32(OH), np.int32(OW), np.int32(W))
-        self.q.finish()
-        out = create_transient_frame((OH, OW), np.uint16)
-        self.cl.enqueue_copy(self.q, out, ob, is_blocking=True)
-        return out
+        vb = vix = vw = vc = ob = hix = hw = hc = None
+        try:
+            vb = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, OH * W * 4)
+            vix = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                 hostbuf=pad(v.indices))
+            vw = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                hostbuf=pad(v.weights))
+            vc = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                hostbuf=v.counts.astype(np.int64))
+            self.kernels['vert'](self.q, (W, OH), None, depth_buf, vb, vix, vw, vc,
+                                 np.int32(OH), np.int32(W))
+            ob = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, OH * OW * 2)
+            hix = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                 hostbuf=pad(h.indices))
+            hw = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                hostbuf=pad(h.weights))
+            hc = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                hostbuf=h.counts.astype(np.int64))
+            self.kernels['horiz'](self.q, (OW, OH), None, vb, ob, hix, hw, hc,
+                                  np.int32(OH), np.int32(OW), np.int32(W))
+            self.q.finish()
+            out = create_transient_frame((OH, OW), np.uint16)
+            self.cl.enqueue_copy(self.q, out, ob, is_blocking=True)
+            return out
+        finally:
+            _release_buffers(vb, vix, vw, vc, ob, hix, hw, hc)
 
     def run(self, depth, shape):
         ib = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
                             hostbuf=np.ascontiguousarray(depth))
-        return self.run_buf(ib, depth.shape, shape)
+        try:
+            return self.run_buf(ib, depth.shape, shape)
+        finally:
+            _release_buffers(ib)
 
 
 class _GpuB:
@@ -1353,16 +1694,17 @@ class _GpuB:
         self.expand = _ExpandDepth(cl, ctx, q, mf, pk, kernels=resample_kernels)
         self._cbuf = {}
 
-    def _source_buffer(self, nbytes):
-        # Each frame finishes the queue before the next upload. Mixed source
-        # layouts can therefore share one allocation, growing it when needed.
-        capacity, buf = self._cbuf.get('src_in', (0, None))
+    def _source_buffer(self, nbytes, slot=0):
+        # Ping-pong frames alternate across slots so the next host upload
+        # never collides with an in-flight kernel reading the prior slot.
+        key = f'src_in_{slot}'
+        capacity, buf = self._cbuf.get(key, (0, None))
         if buf is None or nbytes > capacity:
-            self._cbuf.pop('src_in', None)
+            self._cbuf.pop(key, None)
             del buf
             capacity = max(1, nbytes)
             buf = self.cl.Buffer(self.ctx, self.mf.READ_ONLY, capacity)
-            self._cbuf['src_in'] = capacity, buf
+            self._cbuf[key] = capacity, buf
         return buf
 
     # -- per-frame stages -------------------------------------------------
@@ -1387,10 +1729,10 @@ class _GpuB:
         host_gray = np.ascontiguousarray(gray, dtype=np.uint16)
         return False, host_gray, 1, False
 
-    def _gray_into(self, prepared, gray_buf, height, width):
+    def _gray_into(self, prepared, gray_buf, height, width, slot=0):
         is_raw, host_buf, channels, is_u8 = prepared
         if is_raw:
-            ib = self._source_buffer(host_buf.nbytes)
+            ib = self._source_buffer(host_buf.nbytes, slot=slot)
             upload = self.cl.enqueue_copy(self.q, ib, host_buf, is_blocking=False)
             kern = self.kernels['gray_u8' if is_u8 else 'gray_u16']
             kern(self.q, (width, height), None, ib, gray_buf,
@@ -1403,6 +1745,8 @@ class _GpuB:
     # -- depth_map equivalent ---------------------------------------------
     def depth(self, frames, kernel_size, smoothing, feather, shape, count,
               should_cancel, progress_callback=None, *, prefetch=False, live_preview=None):
+        prefetch_slots = getattr(self, '_prefetch_slots', 1 if prefetch else 0)
+        ping_pong = bool(getattr(self, '_ping_pong', False))
         from fusion_methods.openfocus_depth import _snap_lut
         from fusion_methods.openfocus_ab import _check_cancel
 
@@ -1425,22 +1769,27 @@ class _GpuB:
 
         completed = False
         prepared_iter = None
+        reader = None
+        allocated = []
         try:
-            gray_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, height * width * 2)
-            pb = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            sb = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            d_best_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            d_second_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            d_winner_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            half_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            fine_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            act_raw_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            act_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            best_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            depth_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
-            votes_buf = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes)
+            def _alloc(buf):
+                allocated.append(buf)
+                return buf
 
-            reader = None
+            gray_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, height * width * 2))
+            pb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            sb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            d_best_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            d_second_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            d_winner_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            half_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            fine_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            act_raw_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            act_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            best_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            depth_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            votes_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+
             if live_preview is not None:
                 reader = _PreviewPlaneReader(self.cl, self.ctx, self.q,
                                              self.kernels['sample_focus_plane'], (oh, ow), np.uint16)
@@ -1448,12 +1797,21 @@ class _GpuB:
             def prepare(_index, frame, cancelled):
                 return self._prepare_gray_input(frame, cancelled, height, width)
 
+            effective_slots = max(1, int(prefetch_slots)) if prefetch else 0
             prepared_iter = _iter_prefetched(
                 frames, prepare, enabled=prefetch, should_cancel=should_cancel,
+                max_in_flight=max(1, effective_slots),
             )
+            slot_events = [None, None]
+            slot_hosts = [None, None]
             for idx, prepared in prepared_iter:
+                slot = idx & 1 if ping_pong else 0
+                if slot_events[slot] is not None:
+                    _wait_event(slot_events[slot], cancel)
+                    slot_events[slot] = None
+                    slot_hosts[slot] = None
                 cancel()
-                upload = self._gray_into(prepared, gray_buf, height, width)
+                upload = self._gray_into(prepared, gray_buf, height, width, slot=slot)
                 cancel()
                 self.kernels['detail_pool'](self.q, (ow, oh), None, gray_buf, pb,
                                             np.int32(height), np.int32(width),
@@ -1475,25 +1833,47 @@ class _GpuB:
                     self.kernels['init_activity'](self.q, (m,), None, act_buf, depth_buf,
                                                   votes_buf, np.uint32(count), np.int32(m))
                     self.cl.enqueue_copy(self.q, d_best_buf, sb)
-                    self.kernels['init_detail'](self.q, (m,), None, d_second_buf, d_winner_buf,
-                                                np.int32(m))
+                    last_event = self.kernels['init_detail'](
+                        self.q, (m,), None, d_second_buf, d_winner_buf, np.int32(m),
+                    )
                 else:
                     self.kernels['select_activity'](self.q, (m,), None, act_buf, best_buf,
                                                     depth_buf, votes_buf, np.uint16(code),
                                                     np.uint32(count), np.int32(m))
-                    self.kernels['detail_select'](self.q, (m,), None, sb, d_best_buf,
-                                                  d_second_buf, d_winner_buf, np.uint16(code),
-                                                  np.int32(m))
-                self.q.finish()
-                if reader is not None and live_preview.ready():
-                    cancel()
-                    sample = reader.read(depth_buf, live_preview)
-                    if sample is not None:
-                        live_preview.show_positions(sample, idx, count, step * (count - 1),
-                                                    sampled=True)
-                del upload, prepared
+                    last_event = self.kernels['detail_select'](
+                        self.q, (m,), None, sb, d_best_buf, d_second_buf, d_winner_buf,
+                        np.uint16(code), np.int32(m),
+                    )
+                if ping_pong and last_event is not None and hasattr(last_event, 'wait'):
+                    slot_events[slot] = last_event
+                    slot_hosts[slot] = (prepared, upload)
+                    if reader is not None and live_preview.ready():
+                        _wait_event(last_event, cancel)
+                        slot_events[slot] = None
+                        slot_hosts[slot] = None
+                        sample = reader.read(depth_buf, live_preview)
+                        if sample is not None:
+                            live_preview.show_positions(sample, idx, count, step * (count - 1),
+                                                        sampled=True)
+                else:
+                    self.q.finish()
+                    if reader is not None and live_preview.ready():
+                        cancel()
+                        sample = reader.read(depth_buf, live_preview)
+                        if sample is not None:
+                            live_preview.show_positions(sample, idx, count, step * (count - 1),
+                                                        sampled=True)
+                    del upload, prepared
                 if progress_callback is not None:
                     progress_callback(idx, count)
+
+            if ping_pong:
+                for slot in (0, 1):
+                    if slot_events[slot] is not None:
+                        _wait_event(slot_events[slot], cancel)
+                        slot_events[slot] = None
+                    slot_hosts[slot] = None
+                self.q.finish()
 
             cancel()
             self.kernels['detail_confidence'](self.q, (m,), None, best_buf, d_best_buf,
@@ -1513,8 +1893,8 @@ class _GpuB:
             lut = (65535.0 * np.sqrt(np.clip((positions - lo) / span, 0, 1))
                    ).astype(np.float32)
 
-            lb = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                hostbuf=lut)
+            lb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                       hostbuf=lut))
             guide_buf = pb
             self.kernels['guide'](self.q, (m,), None, best_buf, lb, guide_buf, np.int32(m))
             smooth = np.float32(np.float32(smoothing) * np.float32(0.75)
@@ -1533,8 +1913,8 @@ class _GpuB:
             half_step = step >> 1
             if half_step:
                 sl = _snap_lut(feather).astype(np.int64)
-                sb_lut = self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                        hostbuf=sl)
+                sb_lut = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                               hostbuf=sl))
                 self.kernels['snap'](self.q, (m,), None, depth_buf, sb_lut,
                                      np.int32(step), np.int32(m))
             self.kernels['apply_detail'](self.q, (m,), None, depth_buf, d_second_buf,
@@ -1547,6 +1927,17 @@ class _GpuB:
                 self.gpu._drain_queue()
             if prepared_iter is not None:
                 prepared_iter.close()
+            if reader is not None:
+                reader.close()
+            _release_buffers(
+                allocated,
+                self._cbuf,
+                self.filt._bufs,
+                self.half._cache,
+                self.half._scratch,
+                self.expand._cache,
+                self.expand._scratch,
+            )
             self._cbuf.clear()
             self.filt._bufs.clear()
             self.half._cache.clear()
