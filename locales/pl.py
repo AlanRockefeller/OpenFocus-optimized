@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "Maksymalny",
     "advanced_resource_hint": "Zrównoważony zostawia zapas dla pulpitu; Responsywny zużywa mniej CPU i pamięci; Maksymalny używa wszystkiego, na co pozwala maszyna. Żaden nie zmienia obrazu.",
     "advanced_storage_directory": "Folder tymczasowy",
-    "advanced_storage_default": "Domyślny systemowy",
+    "advanced_storage_default": "Automatyczny",
     "advanced_storage_browse": "Przeglądaj…",
     "advanced_storage_invalid": "Nie można użyć tego folderu tymczasowego: {error}",
     'storage_low_title': 'Mało miejsca na dane tymczasowe',

@@ -326,6 +326,11 @@ def test_failed_load_does_not_restore_over_newer_stack(qapp, monkeypatch, cancel
     assert loader.image_paths == ['replacement'] and loader.px_size_um == 9
 
 
+def _app_folder(volume):
+    """The app scratch folder automatic placement creates on a volume."""
+    return os.path.join(str(volume), frame_storage.SCRATCH_FOLDER_NAME)
+
+
 def _fake_volumes(monkeypatch, tmp_path, default_available, alternative_available):
     default, alternative = tmp_path / 'default', tmp_path / 'alternative'
     default.mkdir()
@@ -348,7 +353,7 @@ def test_default_uses_alternative_and_releases_views(monkeypatch, tmp_path):
     with frame_storage.scratch_directory():
         mapped = materialize_frames(pixels, staging_bytes=96, prefer_ram=False)
         directory = os.path.dirname(mapped[0].filename)
-        assert os.path.dirname(directory) == str(alternative)
+        assert os.path.dirname(directory) == _app_folder(alternative)
         assert all(os.path.dirname(frame.filename) == directory for frame in mapped)
         np.testing.assert_array_equal(mapped[0], pixels[0])
         view = mapped[0][:]
@@ -372,15 +377,83 @@ def test_explicit_directory_never_falls_back(monkeypatch, tmp_path):
     assert not list(default.iterdir()) and not list(alternative.iterdir())
 
 
+@pytest.mark.parametrize('goal,expected', [(50, 'default'), (1000, 'alternative')])
+def test_ram_backed_temp_is_ranked_after_disk_for_large_jobs(monkeypatch, tmp_path, goal, expected):
+    default, alternative = _fake_volumes(monkeypatch, tmp_path, 5000, 5000)
+    monkeypatch.setattr(frame_storage, '_ram_backed', lambda path: path == str(default))
+    monkeypatch.setattr(frame_storage, '_ram_backed_limit', lambda: 100)
+    with frame_storage.scratch_directory():
+        chosen = frame_storage.select_scratch(0, preferred_size=goal)
+    if expected == 'default':
+        assert chosen == str(default)
+    else:
+        # Both volumes fit; the RAM-backed default waits behind the disk.
+        assert os.path.dirname(chosen) == _app_folder(alternative)
+
+
+def test_explicit_ram_backed_directory_is_still_used(monkeypatch, tmp_path):
+    default, alternative = _fake_volumes(monkeypatch, tmp_path, 5000, 5000)
+    monkeypatch.setattr(frame_storage, '_ram_backed', lambda path: True)
+    monkeypatch.setattr(frame_storage, '_ram_backed_limit', lambda: 100)
+    frame_storage.configure_storage_directory(default)
+    try:
+        with frame_storage.scratch_directory():
+            assert frame_storage.select_scratch(0, preferred_size=1000) == str(default)
+    finally:
+        frame_storage.configure_storage_directory(None)
+
+
+def test_source_volume_scratch_goes_to_its_app_folder_not_the_source_folder(monkeypatch, tmp_path):
+    volume = tmp_path / 'volume'
+    photos = volume / 'photos'
+    photos.mkdir(parents=True)
+    source = photos / 'frame.tif'
+    source.write_bytes(b'x')
+    monkeypatch.setattr(frame_storage, '_default_is_local', lambda path: False)
+    monkeypatch.setattr(frame_storage, '_local_mounts', lambda: [str(volume)])
+    monkeypatch.setattr(frame_storage, '_space', lambda path: (None, 0, 10000))
+    with frame_storage.scratch_directory():
+        chosen = frame_storage.select_scratch(0, [str(source)], preferred_size=100)
+        assert os.path.dirname(chosen) == _app_folder(volume)
+        assert sorted(p.name for p in photos.iterdir()) == ['frame.tif']
+    # The job folder is removed; the app folder stays for the next job.
+    assert os.path.isdir(_app_folder(volume)) and not os.listdir(_app_folder(volume))
+
+
+def test_render_binds_scratch_for_the_whole_job_before_its_stages(qapp, monkeypatch, tmp_path):
+    import cv2
+    from core.source_frames import scan_source
+    paths = []
+    for value in (1000, 2000):
+        path = tmp_path / f'frame{value}.tif'
+        assert cv2.imwrite(str(path), np.full((40, 56, 3), value, np.uint16))
+        paths.append(path)
+    frames = [scan_source(str(path))[0] for path in paths]
+    # Room for registration's few frames, not for the render's frame cache.
+    default, alternative = _fake_volumes(monkeypatch, tmp_path, 1024 * 1024, 1024 ** 4)
+    events = []
+    monkeypatch.setattr(workers, 'log_action', lambda event, **details: events.append((event, details)))
+    worker = workers.RenderWorker(frames, algorithm='openfocus_b', alignment='ecc',
+                                  exposure_match=True, use_gpu=False, thread_count=1)
+    monkeypatch.setattr(worker, '_run_admitted_body',
+                        lambda: frame_storage.capture_scratch().directory)
+    with frame_storage.scratch_directory():
+        bound = worker._run_admitted()
+    assert os.path.dirname(bound) == _app_folder(alternative)
+    scratch = [details for event, details in events if event == 'render.scratch']
+    assert scratch and scratch[0]['directory'] == bound and scratch[0]['goal_bytes'] > 1024 * 1024
+
+
 def test_unwritable_alternative_is_skipped(monkeypatch, tmp_path):
     from core.source_frames import materialize_frames
     default, alternative = _fake_volumes(monkeypatch, tmp_path, 0, 10000)
-    original = frame_storage.tempfile.mkdtemp
-    def denied(*args, **kwargs):
-        if kwargs.get('dir') == str(alternative):
+    original = frame_storage._volume_scratch_parent
+    def denied(candidate):
+        # An unwritable volume root refuses the app scratch folder.
+        if candidate == str(alternative):
             raise PermissionError('denied')
-        return original(*args, **kwargs)
-    monkeypatch.setattr(frame_storage.tempfile, 'mkdtemp', denied)
+        return original(candidate)
+    monkeypatch.setattr(frame_storage, '_volume_scratch_parent', denied)
     with pytest.raises(frame_storage.ScratchSpaceError):
         materialize_frames([np.zeros((4, 4), np.uint8)])
     assert not list(default.iterdir()) and not list(alternative.iterdir())
@@ -434,7 +507,7 @@ def test_bounded_workspace_hint_precedes_ram_only_fallback(monkeypatch, tmp_path
     default, alternative = _fake_volumes(monkeypatch, tmp_path, 3, 1000)
     with frame_storage.scratch_directory():
         directory = frame_storage.select_scratch(0, preferred_size=10000, working_size=500)
-        assert os.path.dirname(directory) == str(alternative)
+        assert os.path.dirname(directory) == _app_folder(alternative)
         result = frame_storage.create_frame((2, 2), np.uint16)
         result[:] = [[7, 257], [1001, 65535]]
         np.testing.assert_array_equal(result, [[7, 257], [1001, 65535]])
@@ -509,7 +582,7 @@ def test_optional_estimate_prefers_larger_volume_without_rejecting_explicit(monk
     default, alternative = _fake_volumes(monkeypatch, tmp_path, 100, 1000)
     with frame_storage.scratch_directory():
         chosen = frame_storage.select_scratch(50, preferred_size=500)
-        assert os.path.dirname(chosen) == str(alternative)
+        assert os.path.dirname(chosen) == _app_folder(alternative)
     frame_storage.configure_storage_directory(default)
     with frame_storage.scratch_directory():
         assert frame_storage.select_scratch(50, preferred_size=500) == str(default)
@@ -531,7 +604,7 @@ def test_independent_scopes_keep_their_own_directory(monkeypatch, tmp_path):
             return selected
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         first, second = list(pool.map(job, (50, 200)))
-    assert first == str(default) and os.path.dirname(second) == str(alternative)
+    assert first == str(default) and os.path.dirname(second) == _app_folder(alternative)
 
 
 def test_unavailable_saved_directory_falls_back_and_recovers(monkeypatch, tmp_path):
@@ -593,7 +666,7 @@ def test_preview_keeps_alternative_directory_alive(monkeypatch, tmp_path):
     with frame_storage.scratch_directory():
         directory = frame_storage.select_scratch(4)
         preview = store_preview(np.zeros((2, 2), np.uint8))
-    assert os.path.dirname(directory) == str(alternative)
+    assert os.path.dirname(directory) == _app_folder(alternative)
     assert os.path.exists(preview.path)
     del preview
     gc.collect()
@@ -627,7 +700,7 @@ def test_import_preview_respects_available_temporary_storage(monkeypatch, tmp_pa
     assert ok, message
     preview_path = frames[0].preview.path
     directory = os.path.dirname(preview_path)
-    assert os.path.dirname(directory) == str(alternative)
+    assert os.path.dirname(directory) == _app_folder(alternative)
     np.testing.assert_array_equal(display_image(frames[0]), pixels)
     assert not list(default.iterdir())
     del frames, loader
@@ -654,7 +727,7 @@ def test_unsafe_default_is_not_selected_automatically(monkeypatch, tmp_path):
     monkeypatch.setattr(frame_storage, '_default_is_local', lambda path: False)
     with frame_storage.scratch_directory():
         chosen = frame_storage.select_scratch(16)
-        assert os.path.dirname(chosen) == str(alternative)
+        assert os.path.dirname(chosen) == _app_folder(alternative)
     assert not list(default.iterdir())
 
 
@@ -695,7 +768,7 @@ def test_cancelled_materialization_cleans_alternative(monkeypatch, tmp_path):
         else:
             raise AssertionError('cancellation did not stop materialization')
     gc.collect()
-    assert os.path.dirname(directory) == str(alternative)
+    assert os.path.dirname(directory) == _app_folder(alternative)
     assert not os.path.exists(directory)
 
 
@@ -739,6 +812,8 @@ def test_linux_recognizes_fixed_mounts_and_rejects_network_or_removable(monkeypa
     assert frame_storage._default_is_local('/run/temp')
     assert not frame_storage._default_is_local('/media/USB/tmp')
     assert not frame_storage._default_is_local('/mnt/network/tmp')
+    assert frame_storage._ram_backed('/run/temp/openfocus')
+    assert not frame_storage._ram_backed('/media/Drive One/tmp')
 
 
 def test_macos_recognizes_internal_fixed_volumes_only(monkeypatch):

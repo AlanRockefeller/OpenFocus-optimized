@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "Maximal",
     "advanced_resource_hint": "Équilibré garde de la marge pour le bureau ; Réactif utilise moins de CPU et de mémoire ; Maximal utilise tout ce que la machine permet. Aucun ne change l'image.",
     "advanced_storage_directory": "Dossier temporaire",
-    "advanced_storage_default": "Valeur système par défaut",
+    "advanced_storage_default": "Automatique",
     "advanced_storage_browse": "Parcourir…",
     "advanced_storage_invalid": "Impossible d’utiliser ce dossier temporaire : {error}",
     'storage_low_title': 'Espace de stockage temporaire insuffisant',

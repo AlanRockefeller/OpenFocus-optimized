@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "Maximaal",
     "advanced_resource_hint": "Gebalanceerd houdt ruimte voor de desktop; Responsief gebruikt minder CPU en geheugen; Maximaal gebruikt alles wat de machine toestaat. Geen ervan verandert het beeld.",
     "advanced_storage_directory": "Tijdelijke map",
-    "advanced_storage_default": "Systeemstandaard",
+    "advanced_storage_default": "Automatisch",
     "advanced_storage_browse": "Bladeren…",
     "advanced_storage_invalid": "Deze tijdelijke map kan niet worden gebruikt: {error}",
     'storage_low_title': 'Weinig tijdelijke opslagruimte',

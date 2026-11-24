@@ -131,6 +131,21 @@ def _local_mounts():
     return []
 
 
+def _mount_of(path):
+    """Linux (mount point, filesystem type) of the mount holding ``path``, or None."""
+    path = os.path.realpath(path)
+    best = None
+    with open('/proc/self/mountinfo', encoding='utf-8') as stream:
+        for line in stream:
+            before, after = line.split(' - ', 1)
+            mount = before.split()[4]
+            for encoded, char in (('\\040', ' '), ('\\011', '\t'), ('\\012', '\n'), ('\\134', '\\')):
+                mount = mount.replace(encoded, char)
+            if os.path.commonpath((path, mount)) == mount and (best is None or len(mount) > len(best[0])):
+                best = (mount, after.split()[0])
+    return best
+
+
 def _default_is_local(path):
     """Reject system temp overrides on network or removable volumes."""
     if sys.platform == 'win32':
@@ -140,17 +155,8 @@ def _default_is_local(path):
         return bool(kernel.GetVolumePathNameW(os.path.abspath(path), volume, len(volume))
                     and kernel.GetDriveTypeW(volume.value) == 3)
     if sys.platform.startswith('linux'):
-        path = os.path.realpath(path)
-        best = None
         try:
-            with open('/proc/self/mountinfo', encoding='utf-8') as stream:
-                for line in stream:
-                    before, after = line.split(' - ', 1)
-                    mount = before.split()[4]
-                    for encoded, char in (('\\040', ' '), ('\\011', '\t'), ('\\012', '\n'), ('\\134', '\\')):
-                        mount = mount.replace(encoded, char)
-                    if os.path.commonpath((path, mount)) == mount and (best is None or len(mount) > len(best[0])):
-                        best = (mount, after.split()[0])
+            best = _mount_of(path)
             if best is None:
                 return False
             if best[1] in ('tmpfs', 'ramfs', 'overlay'):
@@ -345,7 +351,9 @@ def _scratch_candidates(explicit, source_paths):
     if explicit is not None:
         return
     mounts = _local_mounts()
-    # Prefer a source's fixed local volume, not an arbitrary source folder.
+    # Prefer a source's fixed local volume. Scratch goes to an app folder at
+    # the volume root (see _volume_scratch_parent), never into the folder
+    # that holds the user's images.
     for source in source_paths:
         source = os.path.normcase(os.path.abspath(source))
         for mount in sorted(mounts, key=len, reverse=True):
@@ -353,12 +361,59 @@ def _scratch_candidates(explicit, source_paths):
             try:
                 if (os.path.commonpath((source, root)) == root
                         and os.stat(source).st_dev == os.stat(mount).st_dev):
-                    yield os.path.dirname(source)
                     yield mount
                     break
             except (OSError, ValueError):
                 pass
     yield from mounts
+
+
+# Folder created at a volume root to hold one directory per scratch job.
+SCRATCH_FOLDER_NAME = 'OpenFocus-scratch'
+
+
+def _volume_scratch_parent(candidate):
+    """Create (if needed) and return the app scratch folder on ``candidate``."""
+    parent = os.path.join(candidate, SCRATCH_FOLDER_NAME)
+    os.makedirs(parent, exist_ok=True)
+    return parent
+
+
+def _ram_backed(path):
+    """Whether ``path`` lives on a RAM filesystem (Linux tmpfs or ramfs)."""
+    if not sys.platform.startswith('linux'):
+        return False
+    try:
+        best = _mount_of(path)
+    except (OSError, ValueError, IndexError):
+        return False
+    return best is not None and best[1] in ('tmpfs', 'ramfs')
+
+
+def _ram_backed_limit():
+    """Largest scratch goal still placed first on a RAM filesystem: a quarter of RAM.
+
+    Files there occupy the memory that scratch exists to relieve, and the
+    stage budgets would count them a second time as used RAM.
+    """
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 4
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _ordered_candidates(explicit, source_paths, goal):
+    """Scratch candidates in preference order for a job that may need ``goal`` bytes.
+
+    A RAM-backed system temporary directory stays first for small jobs and
+    moves behind disk-backed local volumes once the goal exceeds
+    ``_ram_backed_limit()``. An explicit directory is never reordered.
+    """
+    candidates = list(_scratch_candidates(explicit, source_paths))
+    if explicit is not None or goal is None or goal <= _ram_backed_limit():
+        return candidates
+    ram = [candidate for candidate in candidates if _ram_backed(candidate)]
+    return [candidate for candidate in candidates if candidate not in ram] + ram
 
 
 def _scratch_volume(directory):
@@ -449,7 +504,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
         best = (default, None)
         for target in sorted({goal, minimum}, reverse=True):
             seen = set()
-            for candidate in _scratch_candidates(None, source_paths):
+            for candidate in _ordered_candidates(None, source_paths, goal):
                 identity = os.path.normcase(os.path.abspath(candidate))
                 if identity in seen:
                     continue
@@ -521,8 +576,6 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
         return state.directory
     default = state.explicit_directory or tempfile.gettempdir()
 
-    def candidates():
-        return _scratch_candidates(state.explicit_directory, source_paths)
     best = (default, None)
     # Optional staging and bounded-workspace estimates guide placement without
     # rejecting RAM-only work or jobs that fit the known required allocation.
@@ -530,6 +583,9 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
     if state.explicit_directory is None:
         goals = sorted({size, *(max(size, hint) for hint in
                         (preferred_size, working_size) if hint is not None)}, reverse=True)
+
+    def candidates():
+        return _ordered_candidates(state.explicit_directory, source_paths, goals[0])
     for goal in goals:
         seen = set()
         for candidate in candidates():
@@ -549,7 +605,8 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
                     os.unlink(probe)
                     state.directory = candidate
                 else:
-                    state.directory = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
+                    state.directory = tempfile.mkdtemp(
+                        prefix='openfocus-', dir=_volume_scratch_parent(candidate))
                     from core.scratch_registry import register
                     register(state.directory)
                     state.owned = True

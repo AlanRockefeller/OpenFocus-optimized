@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "Максимальный",
     "advanced_resource_hint": "Сбалансированный оставляет запас для рабочего стола; Отзывчивый использует меньше CPU и памяти; Максимальный использует всё, что позволяет машина. Ни один не меняет изображение.",
     "advanced_storage_directory": "Временная папка",
-    "advanced_storage_default": "Системная по умолчанию",
+    "advanced_storage_default": "Автоматически",
     "advanced_storage_browse": "Обзор…",
     "advanced_storage_invalid": "Не удалось использовать эту временную папку: {error}",
     'storage_low_title': 'Мало места для временных данных',

@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "Maximal",
     "advanced_resource_hint": "Ausgeglichen lässt Reserve für den Desktop; Reaktionsschnell nutzt weniger CPU und Speicher; Maximal nutzt alles, was der Rechner erlaubt. Keiner ändert das Bild.",
     "advanced_storage_directory": "Temporäres Verzeichnis",
-    "advanced_storage_default": "Systemstandard",
+    "advanced_storage_default": "Automatisch",
     "advanced_storage_browse": "Durchsuchen…",
     "advanced_storage_invalid": "Dieses temporäre Verzeichnis kann nicht verwendet werden: {error}",
     'storage_low_title': 'Wenig temporärer Speicherplatz',

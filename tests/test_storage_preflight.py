@@ -85,7 +85,7 @@ def test_automatic_assessment_skips_unwritable_candidate(tmp_path, monkeypatch):
     real_mkdtemp = frame_storage.tempfile.mkdtemp
 
     def mkdtemp(*args, **kwargs):
-        if kwargs.get('dir') == str(unwritable):
+        if str(kwargs.get('dir', '')).startswith(str(unwritable)):
             raise PermissionError('unwritable')
         return real_mkdtemp(*args, **kwargs)
 
@@ -95,7 +95,7 @@ def test_automatic_assessment_skips_unwritable_candidate(tmp_path, monkeypatch):
     assert assessment['status'] == 'advisory'
     with frame_storage.scratch_directory():
         selected = frame_storage.select_scratch(0, preferred_size=GIB)
-        assert os.path.dirname(selected) == str(fallback)
+        assert os.path.dirname(selected) == os.path.join(str(fallback), frame_storage.SCRATCH_FOLDER_NAME)
 
 
 def test_automatic_assessment_searches_all_candidates_for_placement_goal(tmp_path, monkeypatch):
@@ -111,7 +111,7 @@ def test_automatic_assessment_searches_all_candidates_for_placement_goal(tmp_pat
     assert assessment['status'] == 'ok'
     with frame_storage.scratch_directory():
         selected = frame_storage.select_scratch(0, preferred_size=2 * GIB)
-        assert os.path.dirname(selected) == str(large)
+        assert os.path.dirname(selected) == os.path.join(str(large), frame_storage.SCRATCH_FOLDER_NAME)
 
 
 def test_automatic_assessment_ignores_later_full_volume(tmp_path, monkeypatch):
@@ -127,7 +127,7 @@ def test_automatic_assessment_ignores_later_full_volume(tmp_path, monkeypatch):
     assert assessment['directory'] == str(roomy)
     with frame_storage.scratch_directory():
         selected = frame_storage.select_scratch(GIB, preferred_size=4 * GIB)
-        assert os.path.dirname(selected) == str(roomy)
+        assert os.path.dirname(selected) == os.path.join(str(roomy), frame_storage.SCRATCH_FOLDER_NAME)
 
 
 @pytest.mark.parametrize('same_volume', [True, False])
@@ -161,7 +161,7 @@ def test_automatic_assessment_warns_about_volume_selected_at_runtime(tmp_path, m
     assert assessment['directory'] == str(small)
     with frame_storage.scratch_directory() as scratch:
         selected = frame_storage.select_scratch(0, preferred_size=GIB)
-        assert os.path.dirname(selected) == str(small)
+        assert os.path.dirname(selected) == os.path.join(str(small), frame_storage.SCRATCH_FOLDER_NAME)
 
 
 def test_untiled_dct_output_estimate_never_causes_critical(tmp_path, monkeypatch):

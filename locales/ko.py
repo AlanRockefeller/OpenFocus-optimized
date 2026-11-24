@@ -1074,7 +1074,7 @@ PACK = {
     "advanced_resource_maximum": "최대",
     "advanced_resource_hint": "균형은 데스크톱을 위한 여유를 남깁니다. 응답 우선은 CPU와 메모리를 적게 쓰고, 최대는 시스템이 허용하는 만큼 사용합니다. 모두 이미지 결과는 바꾸지 않습니다.",
     "advanced_storage_directory": "임시 폴더",
-    "advanced_storage_default": "시스템 기본값",
+    "advanced_storage_default": "자동",
     "advanced_storage_browse": "찾아보기…",
     "advanced_storage_invalid": "이 임시 폴더를 사용할 수 없습니다: {error}",
     'storage_low_title': '임시 저장 공간 부족',

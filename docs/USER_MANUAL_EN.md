@@ -962,9 +962,15 @@ methods, enable **Experimental features** in Advanced Settings or pass
 
 
 For large stacks, leave space in the temporary directory for source frames and
-any additional aligned or corrected frames. If no directory is specified,
-OpenFocus estimates needs from known inputs and scratch data. If the system
-temporary disk lacks space, it may consider writable fixed local disks. An
+any additional aligned or corrected frames. With the directory left on
+**Automatic**, a render first estimates everything it may store (source frames,
+its frame cache and staging) and chooses a volume with room for that before any
+stage starts: the system temporary directory, otherwise a writable fixed local
+disk, starting with the disk that holds the images. On a disk it uses an
+`OpenFocus-scratch` folder at the drive root, never the folder that holds the
+images. On Linux, a RAM-backed temporary directory (tmpfs) is used for a render
+larger than a quarter of the computer's memory only when no disk has room,
+because its files occupy memory. The log records the chosen folder. An
 explicitly selected directory stays in the settings. If it becomes unavailable,
 OpenFocus warns and temporarily uses the system temporary directory; each new
 job retries the saved choice. A full selected disk is not replaced automatically.
