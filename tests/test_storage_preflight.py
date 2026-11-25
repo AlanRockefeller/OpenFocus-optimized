@@ -101,6 +101,61 @@ def test_automatic_assessment_skips_unwritable_candidate(tmp_path, monkeypatch):
         assert os.path.dirname(selected) == os.path.join(str(fallback), frame_storage.SCRATCH_FOLDER_NAME)
 
 
+def _closed_root_volume(tmp_path, monkeypatch, small_free=5 * GIB):
+    """A small volume, then a large one whose root refuses new folders but whose
+    per-user cache folder accepts a job, as for a root-owned /home mount."""
+    small, volume = tmp_path / 'small', tmp_path / 'volume'
+    small.mkdir()
+    (volume / 'home').mkdir(parents=True)
+    user = volume / 'home' / '.cache' / 'OpenFocus' / 'scratch'
+    closed = {str(volume), os.path.join(str(volume), frame_storage.SCRATCH_FOLDER_NAME)}
+    real_mkdtemp = frame_storage.tempfile.mkdtemp
+
+    def mkdtemp(*args, **kwargs):
+        if str(kwargs.get('dir', '')) in closed:
+            raise PermissionError('volume root is closed')
+        return real_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(frame_storage.tempfile, 'mkdtemp', mkdtemp)
+    monkeypatch.setattr(frame_storage, '_user_scratch_folder', lambda: str(user))
+    monkeypatch.setattr(frame_storage, '_storage_directory', None)
+    monkeypatch.setattr(frame_storage, '_scratch_candidates',
+                        lambda explicit, paths: iter([str(small), str(volume)]))
+    monkeypatch.setattr(frame_storage, '_space', _fake_space(
+        {str(small): small_free, str(volume): 60 * GIB}))
+    return small, volume, user
+
+
+def _assert_probes_left_nothing(*volumes):
+    for volume in volumes:
+        assert not (volume / frame_storage.SCRATCH_FOLDER_NAME).exists()
+    assert not (volumes[-1] / 'home' / '.cache').exists()
+
+
+def test_assessment_follows_the_render_to_the_user_cache_folder(tmp_path, monkeypatch):
+    small, volume, user = _closed_root_volume(tmp_path, monkeypatch)
+    assessment = frame_storage.assess_scratch(0, 3 * GIB, GIB, placement_goal=20 * GIB)
+    assert (assessment['directory'], assessment['status']) == (str(volume), 'ok')
+    _assert_probes_left_nothing(small, volume)
+    with frame_storage.scratch_directory():
+        selected = frame_storage.select_scratch(0, preferred_size=20 * GIB)
+        assert os.path.dirname(selected) == str(user)
+
+
+def test_assessment_without_a_goal_counts_a_volume_reached_through_the_user_cache_folder(
+        tmp_path, monkeypatch):
+    small, volume, _ = _closed_root_volume(tmp_path, monkeypatch)
+    other_job = small / frame_storage.SCRATCH_FOLDER_NAME / 'openfocus-other'
+    other_job.mkdir(parents=True)
+    assessment = frame_storage.assess_scratch(0, 3 * GIB, GIB)
+    # Only the large volume fits, so the outcome depends on which one the render picks.
+    assert (assessment['directory'], assessment['status']) == (None, 'unknown')
+    assert other_job.is_dir()  # A folder the probe found is left alone.
+    other_job.parent.joinpath('openfocus-other').rmdir()
+    other_job.parent.rmdir()
+    _assert_probes_left_nothing(small, volume)
+
+
 def test_automatic_assessment_searches_all_candidates_for_placement_goal(tmp_path, monkeypatch):
     small, large = tmp_path / 'small', tmp_path / 'large'
     small.mkdir(), large.mkdir()

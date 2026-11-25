@@ -421,6 +421,35 @@ def _create_job_directory(candidate):
     raise error
 
 
+def _probe_job_directory(candidate):
+    """Raise OSError unless ``_create_job_directory(candidate)`` would succeed.
+
+    Creates and removes a job folder in the first parent that accepts one.
+    Parent folders the probe had to create are removed again, so assessing a
+    volume leaves no app folder at its root.
+    """
+    error = None
+    for parent in _volume_scratch_parents(candidate):
+        missing = []
+        folder = os.path.abspath(parent)
+        while not os.path.exists(folder) and os.path.dirname(folder) != folder:
+            missing.append(folder)
+            folder = os.path.dirname(folder)
+        try:
+            os.makedirs(parent, exist_ok=True)
+            os.rmdir(tempfile.mkdtemp(prefix='openfocus-', dir=parent))
+            return
+        except OSError as exc:
+            error = exc
+        finally:
+            for folder in missing:
+                try:
+                    os.rmdir(folder)
+                except OSError:
+                    break
+    raise error
+
+
 def _ram_backed(path):
     """Whether ``path`` lives on a RAM filesystem (Linux tmpfs or ramfs)."""
     if not sys.platform.startswith('linux'):
@@ -524,8 +553,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
                     if candidate == default:
                         validate_storage_directory(candidate)
                     else:
-                        probe = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
-                        os.rmdir(probe)
+                        _probe_job_directory(candidate)
                 except OSError:
                     continue
                 candidates.append((candidate, usage, reserve, available, _scratch_volume(candidate)))
@@ -566,8 +594,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
                     if candidate == default:
                         validate_storage_directory(candidate)
                     else:
-                        probe = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
-                        os.rmdir(probe)
+                        _probe_job_directory(candidate)
                     chosen = candidate
                     break
                 except OSError:
