@@ -1363,7 +1363,7 @@ def test_openfocus_a_background_rows_avx2_vs_scalar_bit_exact(monkeypatch, w, dt
         frames = [np.ascontiguousarray(f[:, :, ::-1])[:, :, ::-1] for f in frames]
 
     def run():
-        return openfocus_a.openfocus_a_impl(frames, thread_count=2)
+        return openfocus_a.openfocus_a_impl(frames, thread_count=2, use_gpu=False)
 
     simd, scalar = _scalar_and_simd(mod, run)
     np.testing.assert_array_equal(simd, scalar)
