@@ -738,3 +738,306 @@ def test_ecc_preserves_scalar_variance_cutoff_decision() -> None:
     assert scalar_ok and simd_ok
     assert simd_cc == pytest.approx(scalar_cc, abs=1e-8)
     np.testing.assert_allclose(simd_warp, scalar_warp, rtol=0, atol=1e-7)
+
+
+def _scalar_and_simd(mod, run):
+    try:
+        mod.set_force_scalar(False)
+        simd = run()
+        mod.set_force_scalar(True)
+        scalar = run()
+    finally:
+        mod.set_force_scalar(False)
+    return simd, scalar
+
+
+@pytest.mark.parametrize("guided", [False, True])
+@pytest.mark.parametrize("shape", [(8, 8), (9, 17), (16, 31), (33, 64), (40, 129), (70, 33)])
+def test_depth_axis_iir_rows_avx2_vs_scalar_bit_exact(guided, shape):
+    """The horizontal recurrence advances eight rows per vector."""
+    mod = _require_avx2()
+    h, w = shape
+    rng = np.random.default_rng(900 + h * 131 + w + (7 if guided else 0))
+    src = rng.integers(0, 65536, shape, dtype=np.uint16)
+    edges = np.where(rng.random(shape) < 0.5, 0, 65535).astype(np.uint16)
+    guide = rng.integers(0, 65536, shape, dtype=np.uint16)
+
+    def run():
+        results = []
+        for plane in (src, edges):
+            for threads in (1, 3):
+                if guided:
+                    # Weights above 2048 leave the uint16 history range.
+                    for tm, tl in ((1024, 256), (2048, 2048), (0, 2048), (3000, 100)):
+                        out = np.empty_like(plane)
+                        mod.of_depth_axis_iir(plane, guide, out, 0, 0, tm, tl, 5, 1, threads)
+                        results.append(out)
+                else:
+                    for q, t in ((3072, 512), (4000, 48), (0, 2048), (70000, 3)):
+                        out = np.empty_like(plane)
+                        mod.of_depth_axis_iir(plane, None, out, q, t, 0, 0, 3, 1, threads)
+                        in_place = plane.copy()
+                        mod.of_depth_axis_iir(in_place, None, in_place, q, t, 0, 0, 3, 1, threads)
+                        results += [out, in_place]
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_depth_axis_iir_rows_keep_row_views_and_overlaps_exact():
+    mod = _require_avx2()
+    rng = np.random.default_rng(907)
+    tall = rng.integers(0, 65536, (36, 40), dtype=np.uint16)
+
+    def run():
+        strided = np.zeros_like(tall)
+        mod.of_depth_axis_iir(tall[::2], None, strided[::2], 3072, 512, 0, 0, 3, 1, 2)
+        # Output shifted one row against its source: only the scalar order is defined.
+        shifted = tall.copy()
+        mod.of_depth_axis_iir(shifted[:-1], None, shifted[1:], 3072, 512, 0, 0, 3, 1, 1)
+        return strided, shifted
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_activity_normalised_difference_matches_integer_division():
+    """The vector path divides in float and corrects; the result is a floor quotient."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(911)
+    special = np.array([0, 1, 2, 9, 10, 11, 254, 255, 256, 655, 656, 1310, 32767, 32768,
+                        65279, 65280, 65534, 65535], dtype=np.uint16)
+    values = np.concatenate([special, rng.integers(0, 65536, 238, dtype=np.uint16)])
+    gray = np.ascontiguousarray(np.broadcast_to(values[:, None], (values.size, values.size)))
+    fine = np.ascontiguousarray(np.broadcast_to(values[None, :], (values.size, values.size)))
+
+    def run():
+        out = np.empty_like(gray)
+        mod.of_activity_rows(gray, fine, out, 0, gray.shape[0])
+        in_place = fine.copy()
+        mod.of_activity_rows(gray, in_place, in_place, 0, gray.shape[0])
+        detail = np.empty((gray.shape[0] // 2, gray.shape[1] // 2), dtype=np.uint16)
+        mod.of_detail_rows(gray + fine // 3, detail, 0)
+        return out, in_place, detail
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+    v = gray.astype(np.int64)
+    mean = fine.astype(np.int64)
+    divisor = 10 + (np.maximum(v, mean) * 100) // 65535
+    expected = np.minimum(65535, (110 * np.abs(v - mean)) // divisor)
+    np.testing.assert_array_equal(simd[0], expected.astype(np.uint16))
+
+
+@pytest.mark.parametrize("w", [7, 8, 9, 23, 64, 131])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_gray_rows_rgb_sum_avx2_vs_scalar_bit_exact(w, dtype):
+    mod = _require_avx2()
+    rng = np.random.default_rng(920 + w)
+    h = 9
+    hi = 256 if dtype == np.uint8 else 65536
+    rgb = rng.integers(0, hi, (h, w, 3), dtype=dtype)
+    rgb[0] = hi - 1
+    scale = 256 if dtype == np.uint8 else 1
+
+    def run():
+        results = []
+        for depth_color in (False, True):
+            for out_dtype in (np.uint16, np.int32):
+                out = np.empty((h, w), dtype=out_dtype)
+                mod.of_gray_rows(rgb, out, 0, h, scale, depth_color)
+                results.append(out)
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+    total = rgb.astype(np.int64).sum(axis=2)
+    np.testing.assert_array_equal(simd[1], (total // 3) * scale)
+    np.testing.assert_array_equal(simd[3], (total * scale * 85) >> 8)
+
+
+@pytest.mark.parametrize("kind", ["random", "bright", "maximum"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_exposure_mean_avx2_vs_scalar_bit_exact(kind, dtype):
+    """Bright wide rows exceed the exactly summable range and fall back per row."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(930)
+    top = 255 if dtype == np.uint8 else 65535
+    means_simd, means_scalar = [], []
+    for shape in ((17, 33, 3), (6, 5184, 3), (5, 2049, 3)):
+        if kind == "random":
+            image = rng.integers(0, top + 1, shape, dtype=dtype)
+        elif kind == "bright":
+            image = rng.integers(top - top // 8, top + 1, shape, dtype=dtype)
+        else:
+            image = np.full(shape, top, dtype=dtype)
+
+        def run():
+            values = []
+            for normalize in (False, True):
+                for threads in (1, 3):
+                    values.append(mod.of_exposure_mean(image, normalize, threads))
+                    values.append(mod.of_exposure_mean(image[:, :, ::-1], normalize, threads))
+                    values.append(mod.of_exposure_mean(np.ascontiguousarray(image[:, :, 0]), normalize, threads))
+            return values
+
+        simd, scalar = _scalar_and_simd(mod, run)
+        means_simd += simd
+        means_scalar += scalar
+    assert means_simd == means_scalar
+
+
+def test_merge_first_frame_copy_matches_scaled_source():
+    from core import _native
+
+    mod = _native.load_native()
+    assert mod is not None
+    rng = np.random.default_rng(940)
+    depth = np.zeros((9, 21), dtype=np.uint16)
+    for dtype, scale in ((np.uint8, 256), (np.uint16, 1)):
+        rgb = rng.integers(0, np.iinfo(dtype).max + 1, (9, 21, 3), dtype=dtype)
+        for source in (rgb, rgb[:, :, ::-1], np.ascontiguousarray(rgb[:, :, 0])):
+            acc = np.full(source.shape, 7, dtype=np.uint16)
+            mod.of_merge_rows(acc, source, depth, 0, 100, 2, 7, scale, True, False)
+            expected = np.full(source.shape, 7, dtype=np.uint16)
+            expected[2:7] = source[2:7].astype(np.uint16) * scale
+            np.testing.assert_array_equal(acc, expected)
+
+
+@pytest.mark.parametrize("target", [(31, 47), (64, 130), (17, 9)])
+def test_linear_resample_columns_avx2_vs_scalar_bit_exact(target):
+    """Two-tap linear columns never repeat, so they use the general tap path."""
+    from fusion_methods._openfocus_resample import _axis_plan
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(950 + target[1])
+    source = rng.integers(0, 65536, (23, 37), dtype=np.uint16)
+    vertical = _axis_plan(source.shape[0], target[0], linear=True)
+    horizontal = _axis_plan(source.shape[1], target[1], linear=True)
+
+    def run():
+        out = np.empty(target, dtype=np.uint16)
+        mod.of_resample_rows_u16(
+            source, out, vertical.indices, vertical.weights, vertical.counts,
+            horizontal.indices, horizontal.weights, horizontal.counts, 0, target[0])
+        return out
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    np.testing.assert_array_equal(simd, scalar)
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_alignment_rgb_warps_avx2_vs_scalar_bit_exact(dtype):
+    """Edge columns, rotations and reversed channels around the paired-sample path."""
+    import math
+
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(960)
+    h, w = 37, 53
+    image = rng.integers(0, np.iinfo(dtype).max + 1, (h, w, 3), dtype=dtype)
+    gray = np.ascontiguousarray(image[:, :, 1])
+
+    def similarity(shift_x, shift_y, degrees, scale):
+        cx, cy = w * 0.5, h * 0.5
+        cos = scale * math.cos(math.radians(degrees))
+        sin = scale * math.sin(math.radians(degrees))
+        return (cx + shift_x, cy + shift_y, cx, cy, sin, sin, cos, cos)
+
+    def run():
+        results = []
+        for spec in ((0.0, 0.0, 0.0, 1.0), (3.3, -2.7, 0.03, 1.002), (-9.5, 4.25, -1.9, 0.97),
+                     (0.5, 0.5, 2.0, 1.03), (60.0, 0.0, 0.0, 1.0), (1.0, -1.0, 45.0, 1.3)):
+            transform = similarity(*spec)
+            for kernel, source in ((ak.warp_alignment_int_rows, image),
+                                   (ak.warp_alignment_int_rows_bgr_rev, image),
+                                   (ak.warp_alignment_int_rows, gray)):
+                out = np.full(source.shape, 7, dtype=dtype)
+                kernel(source, out, *transform, 0, h)
+                results.append(out)
+            region = np.full((h - 5, w - 7, 3), 7, dtype=dtype)
+            ak.warp_alignment_region_int_rows(image, region, h, w, 0, 3, 2, *transform, 0, h - 5)
+            results.append(region)
+        for dx, dy in ((0.0, 0.0), (0.5, 0.5), (-3.25, 7.75), (-0.999, 0.001), (w + 3.0, 0.0)):
+            for kernel, source in ((ak.warp_int_rows, image), (ak.warp_int_rows_bgr_rev, image),
+                                   (ak.warp_int_rows, gray)):
+                out = np.full(source.shape, 7, dtype=dtype)
+                kernel(source, out, dx, dy, 0, h)
+                results.append(out)
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("grid", [(3, 2), (8, 5), (12, 9), (17, 3)])
+def test_alignment_score_flat_grid_avx2_vs_scalar_bit_exact(grid):
+    """Sample grids are scored as one padded list, including rejected samples."""
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(970 + grid[0])
+    h, w = 97, 131
+    reference = rng.integers(0, 65536, (h, w), dtype=np.uint16)
+    moved = np.roll(reference, (1, -2), (0, 1))
+    xs = np.linspace(0, w - 1, grid[0]).round().astype(np.float32)
+    ys = np.linspace(0, h - 1, grid[1]).round().astype(np.float32)
+    samples = np.ascontiguousarray(reference[ys.astype(np.int64)[:, None], xs.astype(np.int64)[None, :]])
+    count = 19
+    p08 = rng.normal(0, 0.02, count).astype(np.float32)
+    p0c = rng.normal(0, 0.02, count).astype(np.float32)
+    p18 = (1 + rng.normal(0, 0.02, count)).astype(np.float32)
+    p1c = (1 + rng.normal(0, 0.02, count)).astype(np.float32)
+    tx = (w / 2 + rng.normal(0, 6, count)).astype(np.float32)
+    ty = (h / 2 + rng.normal(0, 6, count)).astype(np.float32)
+    tx[0] = -5000.0
+    cx = np.full(count, w / 2, dtype=np.float32)
+    cy = np.full(count, h / 2, dtype=np.float32)
+    order = np.arange(count, dtype=np.int64)
+
+    def run():
+        ssum = np.zeros(count, dtype=np.int64)
+        ssq = np.zeros(count, dtype=np.int64)
+        cnt = np.zeros(count, dtype=np.int64)
+        ak.score_chunk_u16_slice(samples, moved, xs, ys, p08, p0c, p18, p1c, tx, ty, cx, cy,
+                                 order, 0, count, ssum, ssq, cnt)
+        return ssum, ssq, cnt
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+    assert simd[2][0] == 0
+    assert simd[2].max() > 0
+
+
+@pytest.mark.parametrize("crop", [9, 33, 64, 200])
+def test_alignment_refine_level_avx2_vs_scalar_bit_exact(crop):
+    """Residual sums are exact integers, so the vector kernel must not move the minimum."""
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(980 + crop)
+    h, w = 97, 131
+    reference = rng.integers(0, 65536, (h, w), dtype=np.uint16)
+    moved = np.roll(reference, (1, -2), (0, 1))
+
+    def run():
+        results = []
+        for c_dx, c_dy, half, step in ((0.0, 0.0, 3.0, 1.0), (2.0, -1.0, 2.0, 0.5),
+                                       (30.0, -25.0, 2.0, 0.5), (0.3, 0.7, 1.0, 0.125)):
+            for a, b in ((reference, moved), (moved, reference), (reference, np.zeros_like(moved))):
+                results.append(ak.refine_level(a, b, c_dx, c_dy, half, step, crop))
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    assert simd == scalar
+    # The exact shift lies inside the first search window in both directions.
+    assert simd[0] == (2.0, -1.0, True)
+    assert simd[1] == (-2.0, 1.0, True)

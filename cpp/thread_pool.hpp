@@ -28,11 +28,15 @@ inline int clamp_threads(int num_threads, int64_t num_tasks) {
     return capped;
 }
 
-template <typename Fn>
-inline void parallel_bands(
+// Runs fn(start, stop, state) over [0, total) in bands. Each worker builds one
+// state with make_state() and reuses it for every band it takes, so scratch
+// buffers are allocated once per worker instead of once per band.
+template <typename MakeState, typename Fn>
+inline void parallel_bands_stateful(
     int64_t total,
     int64_t band,
     int num_threads,
+    MakeState&& make_state,
     Fn&& fn,
     const std::atomic<bool>* cancel_flag = nullptr
 ) {
@@ -50,10 +54,11 @@ inline void parallel_bands(
     };
 
     if (workers <= 1) {
+        auto state = make_state();
         for (int64_t start = 0; start < total; start += step) {
             check_cancel();
             const int64_t stop = std::min<int64_t>(total, start + step);
-            fn(start, stop);
+            fn(start, stop, state);
         }
         check_cancel();
         return;
@@ -66,6 +71,7 @@ inline void parallel_bands(
 
     auto worker_loop = [&]() {
         try {
+            auto state = make_state();
             while (!failed.load(std::memory_order_relaxed)) {
                 if (cancel_flag != nullptr && cancel_flag->load(std::memory_order_relaxed)) {
                     throw CancelRequested();
@@ -76,7 +82,7 @@ inline void parallel_bands(
                 }
                 const int64_t start = task_idx * step;
                 const int64_t stop = std::min<int64_t>(total, start + step);
-                fn(start, stop);
+                fn(start, stop, state);
             }
         } catch (...) {
             failed.store(true, std::memory_order_relaxed);
@@ -102,6 +108,21 @@ inline void parallel_bands(
         std::rethrow_exception(first_error);
     }
     check_cancel();
+}
+
+template <typename Fn>
+inline void parallel_bands(
+    int64_t total,
+    int64_t band,
+    int num_threads,
+    Fn&& fn,
+    const std::atomic<bool>* cancel_flag = nullptr
+) {
+    parallel_bands_stateful(
+        total, band, num_threads,
+        []() { return 0; },
+        [&fn](int64_t start, int64_t stop, int&) { fn(start, stop); },
+        cancel_flag);
 }
 
 }  // namespace openfocus

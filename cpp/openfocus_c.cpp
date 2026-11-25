@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC optimize("no-math-errno")
@@ -72,6 +73,14 @@ void down_horizontal_impl(
     const bool fast_src_3c = (channels == 3 && ix_stop > 1 && source.ndim == 3
                               && source.stride[2] == 1 && source.stride[1] == 3
                               && scratch.stride[2] == 1 && scratch.stride[1] == 3);
+    std::unique_ptr<float[]> raw_as_f32;
+    if constexpr (ScaledRaw) {
+        if (fast_src_3c && ix_stop >= 4 && simd::use_avx2()) {
+            // One spare element: the kernel's last vector load reads one past the row.
+            raw_as_f32.reset(new float[static_cast<size_t>(width * 3 + 1)]);
+            raw_as_f32[static_cast<size_t>(width * 3)] = 0.0f;
+        }
+    }
 
     for (int64_t row = 0; row < rows; ++row) {
         const int64_t y = row + origin;
@@ -104,6 +113,13 @@ void down_horizontal_impl(
                         }
                     }
                 }
+            } else if (raw_as_f32) {
+                // Convert the row once; each sample feeds two output pixels.
+                const void* sr = (source.itemsize == 1)
+                    ? static_cast<const void*>(static_cast<const uint8_t*>(source.data) + y * source.stride[0])
+                    : static_cast<const void*>(static_cast<const uint16_t*>(source.data) + y * source.stride[0]);
+                simd::raw_row_to_f32_scaled_avx2(sr, source.itemsize == 1, raw_as_f32.get(), width * 3, factor);
+                simd::pyr_down_horiz_f32_3c_row_avx2(raw_as_f32.get(), h_row, ix_stop, kD0, kD1);
             } else if (source.itemsize == 1) {
                 const uint8_t* sr = static_cast<const uint8_t*>(source.data) + y * source.stride[0];
                 for (int64_t x = 1; x < ix_stop; ++x) {

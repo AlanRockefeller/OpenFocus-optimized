@@ -191,6 +191,16 @@ void warp_translation_row_packed(
     const int32_t* ix, const int32_t* jx, const uint32_t* fx, const uint8_t* inv_x,
     uint32_t gy, uint32_t fy
 ) {
+    if (channels == 3 && simd::use_avx2() && image.shape[1] >= 3
+            && image.shape[1] <= std::numeric_limits<int32_t>::max()) {
+        const int64_t item = image.itemsize;
+        const auto* sb = static_cast<const uint8_t*>(image.data);
+        simd::align_warp_translation_rgb_row_avx2(
+            sb + iy_b * image.stride[0] * item, sb + jy_b * image.stride[0] * item, item == 1,
+            static_cast<uint8_t*>(out.data) + oy * out.stride[0] * item, rw,
+            ix, jx, fx, inv_x, fy, bgr_rev, image.shape[1]);
+        return;
+    }
     if (image.itemsize == 1) {
         const auto* sb = static_cast<const uint8_t*>(image.data);
         const auto* r0 = sb + iy_b * image.stride[0];
@@ -601,10 +611,28 @@ std::tuple<float, float, bool> of_align_refine_level_cpp(
     std::vector<float> dys(static_cast<size_t>(total_cand));
 
     const int threads = (total_cand >= 4 && n * n >= 4096) ? 4 : 1;
-    parallel_bands(total_cand, 1, threads, [&](int64_t s0, int64_t s1) {
-        std::vector<int32_t> ix_arr(static_cast<size_t>(n)), jx_arr(static_cast<size_t>(n));
-        std::vector<uint32_t> fx_arr(static_cast<size_t>(n));
-        std::vector<uint8_t> inv_x_arr(static_cast<size_t>(n));
+    // Residuals are integers below 2^16, so while n * n * 65535^2 stays under
+    // 2^53 the double sums below are exact and integer sums give the same value.
+    const bool exact_integer_sums = a_sx == 1 && b_sx == 1 && n >= 8
+        && n * n <= (int64_t{1} << 21) && simd::use_avx2();
+    struct RefineScratch {
+        std::vector<int32_t> ix, jx, weights;
+        std::vector<uint32_t> fx;
+        std::vector<uint8_t> inv_x;
+    };
+    parallel_bands_stateful(total_cand, 1, threads, [n]() {
+        RefineScratch scratch;
+        scratch.ix.resize(static_cast<size_t>(n));
+        scratch.jx.resize(static_cast<size_t>(n));
+        scratch.weights.resize(static_cast<size_t>(n));
+        scratch.fx.resize(static_cast<size_t>(n));
+        scratch.inv_x.resize(static_cast<size_t>(n));
+        return scratch;
+    }, [&](int64_t s0, int64_t s1, RefineScratch& scratch) {
+        std::vector<int32_t>& ix_arr = scratch.ix;
+        std::vector<int32_t>& jx_arr = scratch.jx;
+        std::vector<uint32_t>& fx_arr = scratch.fx;
+        std::vector<uint8_t>& inv_x_arr = scratch.inv_x;
         for (int64_t idx = s0; idx < s1; ++idx) {
             const int32_t oy = static_cast<int32_t>(idx / count);
             const int32_t ox = static_cast<int32_t>(idx % count);
@@ -620,7 +648,66 @@ std::tuple<float, float, bool> of_align_refine_level_cpp(
                 inv_x_arr[static_cast<size_t>(xx)] = inv ? 1 : 0;
             }
             double ssum = 0.0, ssq = 0.0;
-            for (int64_t yy = cy; yy < cy + n; ++yy) {
+            if (exact_integer_sums) {
+                // The longest run of valid columns that sample consecutive
+                // sources goes through the vector kernel, eight at a time.
+                int64_t run_lo = 0;
+                while (run_lo < n && inv_x_arr[static_cast<size_t>(run_lo)]) {
+                    ++run_lo;
+                }
+                int64_t run_hi = run_lo;
+                while (run_hi < n && !inv_x_arr[static_cast<size_t>(run_hi)]
+                       && jx_arr[static_cast<size_t>(run_hi)] == ix_arr[static_cast<size_t>(run_hi)] + 1
+                       && ix_arr[static_cast<size_t>(run_hi)]
+                           == ix_arr[static_cast<size_t>(run_lo)] + static_cast<int32_t>(run_hi - run_lo)) {
+                    scratch.weights[static_cast<size_t>(run_hi)] = static_cast<int32_t>(
+                        (256u - fx_arr[static_cast<size_t>(run_hi)]) | (fx_arr[static_cast<size_t>(run_hi)] << 16u));
+                    ++run_hi;
+                }
+                run_hi = run_lo + ((run_hi - run_lo) & ~int64_t{7});
+                int64_t isum = 0, isq = 0;
+                for (int64_t yy = cy; yy < cy + n; ++yy) {
+                    const float ycoord = (static_cast<float>(yy) + static_cast<float>(pad)) - dy;
+                    int32_t iy = 0, jy = 0;
+                    uint32_t fy = 0;
+                    bool inv_y = false;
+                    axis_pad_sample(ycoord, h, pad, iy, jy, fy, inv_y);
+                    const uint32_t gy = 256u - fy;
+                    const uint16_t* ar = ab + yy * a.stride[0] + cx;
+                    const uint16_t* br0 = bb + iy * b.stride[0];
+                    const uint16_t* br1 = bb + jy * b.stride[0];
+                    const auto plain_columns = [&](int64_t first, int64_t last) {
+                        for (int64_t xx_i = first; xx_i < last; ++xx_i) {
+                            uint32_t sample = 0;
+                            if (!inv_y && !inv_x_arr[static_cast<size_t>(xx_i)]) {
+                                const uint32_t fx = fx_arr[static_cast<size_t>(xx_i)];
+                                const uint32_t gx = 256u - fx;
+                                const int32_t ix = ix_arr[static_cast<size_t>(xx_i)];
+                                const int32_t jx = jx_arr[static_cast<size_t>(xx_i)];
+                                const uint32_t top = static_cast<uint32_t>(br0[ix]) * gx + static_cast<uint32_t>(br0[jx]) * fx;
+                                const uint32_t bot = static_cast<uint32_t>(br1[ix]) * gx + static_cast<uint32_t>(br1[jx]) * fx;
+                                sample = (top * gy + bot * fy) >> 16u;
+                            }
+                            const int64_t diff = static_cast<int64_t>(ar[xx_i]) - static_cast<int64_t>(sample);
+                            isum += diff;
+                            isq += diff * diff;
+                        }
+                    };
+                    if (inv_y || run_hi <= run_lo) {
+                        plain_columns(0, n);
+                        continue;
+                    }
+                    plain_columns(0, run_lo);
+                    const int32_t first_source = ix_arr[static_cast<size_t>(run_lo)];
+                    simd::align_refine_dense_row_avx2(
+                        ar + run_lo, br0 + first_source, br1 + first_source,
+                        scratch.weights.data() + run_lo, run_hi - run_lo, fy, &isum, &isq);
+                    plain_columns(run_hi, n);
+                }
+                ssum = static_cast<double>(isum);
+                ssq = static_cast<double>(isq);
+            }
+            for (int64_t yy = cy; !exact_integer_sums && yy < cy + n; ++yy) {
                 const float ycoord = (static_cast<float>(yy) + static_cast<float>(pad)) - dy;
                 int32_t iy = 0, jy = 0;
                 uint32_t fy = 0;

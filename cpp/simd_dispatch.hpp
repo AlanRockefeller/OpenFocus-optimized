@@ -32,18 +32,35 @@ void pyr_level0_weights_3c_f32_from_raw_avx2(
     float factor, float w0, float w1, float w2, float w3, float w4, float point_one,
     float w_scale, bool y_border);
 
+// Vertical recurrences over one strip of `cols` columns. `first` holds the
+// forward history (h * cols values) and `acc` the running state (cols values);
+// both are caller scratch and need no initialisation.
 void depth_axis_iir_y_unguided_avx2(
     const uint16_t* src, int64_t src_sy,
     uint16_t* out, int64_t out_sy,
     int64_t h, int64_t left, int64_t cols, int64_t cnt,
-    uint32_t q, uint32_t t);
+    uint32_t q, uint32_t t, uint16_t* first, uint32_t* acc);
 
 void depth_axis_iir_y_guided_avx2(
     const uint16_t* src, int64_t src_sy,
     const uint16_t* guide, int64_t guide_sy,
     uint16_t* out, int64_t out_sy,
     int64_t h, int64_t left, int64_t cols, int64_t cnt,
-    uint32_t tm, uint32_t tl);
+    uint32_t tm, uint32_t tl, uint32_t* first, uint32_t* acc);
+
+// Horizontal recurrences over `rows` rows (a multiple of eight) starting at
+// src/out. `work` holds kDepthIirX*WorkPerColumn uint16 values per column.
+constexpr int64_t kDepthIirXUnguidedWorkPerColumn = 64;
+constexpr int64_t kDepthIirXGuidedWorkPerColumn = 48;
+
+void depth_axis_iir_x_unguided_avx2(
+    const uint16_t* src, int64_t src_sy, uint16_t* out, int64_t out_sy,
+    int64_t w, int64_t rows, int64_t cnt, uint32_t q, uint32_t t, uint16_t* work);
+
+void depth_axis_iir_x_guided_avx2(
+    const uint16_t* src, int64_t src_sy, const uint16_t* guide, int64_t guide_sy,
+    uint16_t* out, int64_t out_sy,
+    int64_t w, int64_t rows, int64_t cnt, uint32_t tm, uint32_t tl, uint16_t* work);
 
 void select_a_combine_m2_to_m5_avx2(
     const uint32_t* da2, const uint32_t* db2, uint32_t* m2, uint32_t wy2, uint32_t fy2,
@@ -58,6 +75,15 @@ void select_a_response_pairs_avx2(
     const uint32_t* m2, const uint32_t* m3,
     const uint32_t* m4, const uint32_t* m5,
     int32_t* response, int64_t full_pairs);
+
+// Exact integer sums of a packed row.
+uint64_t sum_u8_row_avx2(const uint8_t* p, int64_t n);
+uint64_t sum_u16_row_avx2(const uint16_t* p, int64_t n);
+
+// Sum of double(float(v) * (255 / 65535)) over a row. Returns true and writes
+// the sum when it is provably identical to adding the terms one by one;
+// returns false when the row must be summed in scalar order instead.
+bool sum_u16_normalized_row_avx2(const uint16_t* p, int64_t n, double* out);
 
 void quantize_f32_to_u16_row_avx2(
     const float* sr, uint16_t* dr, int64_t elems, float scale_f32);
@@ -129,8 +155,26 @@ void pyr_up_horiz_3c_row_avx2(
     const float* sr, float* dr, int64_t ix_start, int64_t pair_stop,
     float e0, float e1, float e2, float e3);
 
+// dst[i] = float(src[i]) * factor for a packed uint8 or uint16 row.
+void raw_row_to_f32_scaled_avx2(
+    const void* src, bool is_u8, float* dst, int64_t elems, float factor);
+
 void pyr_down_horiz_f32_3c_row_avx2(
     const float* sr, float* h_row, int64_t ix_stop, float d0, float d1);
+
+// One row of a packed three-channel translation warp. row0/row1 are the two
+// source rows of src_w pixels; ix/jx/fx/inv_x are the per-column samples.
+void align_warp_translation_rgb_row_avx2(
+    const void* row0, const void* row1, bool is_u8, void* out_row, int64_t rw,
+    const int32_t* ix, const int32_t* jx, const uint32_t* fx, const uint8_t* inv_x,
+    uint32_t fy, bool bgr_rev, int64_t src_w);
+
+// Adds the sum and the sum of squares of a_row[k] - bilinear(b)[k] for `count`
+// columns (a multiple of eight, at most 262144) whose sources are consecutive:
+// column k blends b_row[k] and b_row[k + 1] with weights[k] = gx | fx << 16.
+void align_refine_dense_row_avx2(
+    const uint16_t* a_row, const uint16_t* b_row0, const uint16_t* b_row1,
+    const int32_t* weights, int64_t count, uint32_t fy, int64_t* sum, int64_t* sq);
 
 void align_valid_mask_row_avx2(
     uint8_t* mr, int64_t w,
@@ -186,6 +230,14 @@ void resample_u16_horiz_rep_row_avx2_fma(
     int64_t first, int64_t nrep,
     const int32_t* h_idx_first, const float* h_w_first,
     int64_t h_taps, int64_t hi_sy, int64_t hw_sy);
+
+// Arbitrary tap tables. Writes whole blocks of eight columns in [x0, x1) while
+// every column of a block uses exactly h_taps taps, and returns the first
+// column it left untouched. Requires FMA.
+int64_t resample_u16_horiz_taps_row_avx2_fma(
+    const float* row_buf, uint16_t* orow, int64_t x0, int64_t x1,
+    const int32_t* h_idx, int64_t hi_sy, const float* h_w, int64_t hw_sy,
+    const int32_t* h_cnt, int64_t h_taps);
 
 void activity_row_u16_avx2(
     const uint16_t* gr, const uint16_t* fr, uint16_t* orow, int64_t w);

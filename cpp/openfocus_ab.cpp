@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 namespace openfocus {
@@ -34,6 +35,21 @@ inline uint16_t normalized_diff_u16(int64_t value, int64_t mean) {
     const int64_t num = 110LL * std::abs(value - mean);
     const int64_t res = (num * kActivityReciprocals[static_cast<size_t>(denom)]) >> 32;
     return static_cast<uint16_t>(res < 65535LL ? res : 65535LL);
+}
+
+// True when two h x w uint16 planes (row strides in elements, either sign)
+// share any byte.
+inline bool row_ranges_overlap(const uint16_t* a, int64_t a_sy, const uint16_t* b, int64_t b_sy,
+                               int64_t h, int64_t w) {
+    if (h <= 0 || w <= 0) {
+        return false;
+    }
+    const auto extent = [h, w](int64_t sy) {
+        return static_cast<uint64_t>(((h - 1) * (sy < 0 ? -sy : sy) + w) * int64_t{sizeof(uint16_t)});
+    };
+    const uint16_t* a_low = a_sy < 0 ? a + (h - 1) * a_sy : a;
+    const uint16_t* b_low = b_sy < 0 ? b + (h - 1) * b_sy : b;
+    return byte_ranges_overlap(a_low, extent(a_sy), b_low, extent(b_sy));
 }
 
 inline int64_t read_int(const ArrayView& v, int64_t y, int64_t x, int64_t c = 0) {
@@ -380,6 +396,170 @@ int select_a_no_bg_packed_row(
         }
     }
     return state;
+}
+
+// Three-channel OpenFocus A selection with background statistics, the same
+// per-pixel sequence as the generic loop in of_select_rows_a_cpp but on typed
+// rows. Background pixels hold three weighted sums, the weight total, and the
+// packed response statistics.
+template <typename SrcT, typename DstT>
+int select_a_background_row(
+    int32_t* b_row, const int32_t* response, int64_t width,
+    const SrcT* irow, int64_t is1, int64_t is2,
+    DstT* orow, int64_t os1, int64_t os2,
+    float* bg_row, uint32_t* st_row, int64_t bsx, int64_t bsc,
+    int64_t scale, bool first, int state
+) {
+    for (int64_t x = 0; x < width; ++x) {
+        const int64_t prev = first ? 0 : static_cast<int64_t>(b_row[x]);
+        if (!first && prev == kAMaxResponse) {
+            continue;
+        }
+        int64_t sc = response[x];
+        if (sc > kAMaxResponse) {
+            sc = kAMaxResponse;
+        }
+        const bool take = first || sc > prev;
+        const bool collect = prev < kABlendLimit && sc < kABlendLimit;
+        if (collect) {
+            state = kABackground;
+        } else if (state == kASaturated && sc != kAMaxResponse) {
+            state = kASharp;
+        }
+        if (!(collect || take)) {
+            continue;
+        }
+        float factor = 1.0f;
+        float weight = 0.0f;
+        float* bg = bg_row + x * bsx;
+        if (collect) {
+            const uint32_t cur_code = static_cast<uint32_t>(sc >> 4);
+            uint32_t* stat = st_row + x * bsx + 4 * bsc;
+            float* total = bg + 3 * bsc;
+            if (first) {
+                *stat = cur_code;
+                weight = (sc != 0) ? 1.0f : 0.0f;
+                *total = weight;
+            } else {
+                const uint32_t packed = *stat;
+                uint32_t minimum = packed & 4095u;
+                uint32_t second = packed >> 12u;
+                if (sc == 0) {
+                    if (minimum) {
+                        *stat = second << 12u;
+                    }
+                    continue;
+                }
+                if (take) {
+                    second = static_cast<uint32_t>(prev >> 4);
+                    const float ratio = static_cast<float>(prev) / static_cast<float>(sc);
+                    factor = ratio * ratio;
+                    factor *= factor;
+                    weight = 1.0f;
+                    *total = *total * factor + weight;
+                } else {
+                    if (cur_code > second) {
+                        second = cur_code;
+                    }
+                    const float ratio = static_cast<float>(sc) / static_cast<float>(prev);
+                    weight = ratio * ratio;
+                    weight *= weight;
+                    *total += weight;
+                }
+                if (cur_code < minimum) {
+                    minimum = cur_code;
+                }
+                *stat = (second << 12u) | minimum;
+            }
+        }
+        const SrcT* sp = irow + x * is1;
+        DstT* dp = orow + x * os1;
+        for (int64_t ch = 0; ch < 3; ++ch) {
+            const int64_t val = static_cast<int64_t>(sp[ch * is2]) * scale;
+            if (collect) {
+                float weighted = static_cast<float>(val) * weight;
+                if (!first) {
+                    weighted = bg[ch * bsc] * factor + weighted;
+                }
+                bg[ch * bsc] = weighted;
+            }
+            if (take) {
+                dp[ch * os2] = static_cast<DstT>(val);
+            }
+        }
+        if (take) {
+            b_row[x] = static_cast<int32_t>(sc);
+        }
+    }
+    return state;
+}
+
+// Samples of one row are adjacent in memory (packed channels, unit steps).
+inline bool rows_are_packed(const ArrayView& v) {
+    if (v.ndim == 2) {
+        return v.stride[1] == 1;
+    }
+    return v.stride[2] == 1 && v.stride[1] == v.shape[2];
+}
+
+template <typename SrcT, typename DstT>
+void copy_scaled_rows_typed(const ArrayView& dst, const ArrayView& src,
+                            int64_t start, int64_t stop, int64_t elems, uint32_t scale) {
+    const SrcT* sb = static_cast<const SrcT*>(src.data);
+    DstT* db = static_cast<DstT*>(dst.data);
+    for (int64_t y = start; y < stop; ++y) {
+        const SrcT* sr = sb + y * src.stride[0];
+        DstT* dr = db + y * dst.stride[0];
+        if (scale == 1u && sizeof(SrcT) == sizeof(DstT)) {
+            std::memcpy(dr, sr, static_cast<size_t>(elems) * sizeof(DstT));
+            continue;
+        }
+        for (int64_t i = 0; i < elems; ++i) {
+            // Only the low bits survive the store, so 32-bit wraparound is exact.
+            dr[i] = static_cast<DstT>(static_cast<uint32_t>(sr[i]) * scale);
+        }
+    }
+}
+
+// dst[y, ...] = src[y, ...] * scale for packed integer rows of equal shape.
+// Returns false when the layout needs the generic accessors.
+bool copy_scaled_rows(const ArrayView& dst, const ArrayView& src,
+                      int64_t start, int64_t stop, int64_t scale) {
+    if (src.is_float || dst.is_float || src.ndim != dst.ndim
+            || (src.itemsize != 1 && src.itemsize != 2)
+            || (dst.itemsize != 2 && dst.itemsize != 4)
+            || !rows_are_packed(src) || !rows_are_packed(dst)
+            || src.shape[1] != dst.shape[1]
+            || (src.ndim == 3 && src.shape[2] != dst.shape[2])) {
+        return false;
+    }
+    const int64_t elems = dst.shape[1] * (dst.ndim == 3 ? dst.shape[2] : 1);
+    if (start >= stop || elems <= 0) {
+        return true;
+    }
+    // Overlapping planes keep the element-by-element order of the generic path.
+    const auto low_address = [start, stop](const ArrayView& v) {
+        const int64_t y = v.stride[0] < 0 ? stop - 1 : start;
+        return static_cast<const uint8_t*>(v.data) + y * v.stride[0] * v.itemsize;
+    };
+    const auto extent = [start, stop, elems](const ArrayView& v) {
+        const int64_t sy = v.stride[0] < 0 ? -v.stride[0] : v.stride[0];
+        return static_cast<uint64_t>(((stop - start - 1) * sy + elems) * v.itemsize);
+    };
+    if (byte_ranges_overlap(low_address(src), extent(src), low_address(dst), extent(dst))) {
+        return false;
+    }
+    const uint32_t scale32 = static_cast<uint32_t>(scale);
+    if (src.itemsize == 1 && dst.itemsize == 2) {
+        copy_scaled_rows_typed<uint8_t, uint16_t>(dst, src, start, stop, elems, scale32);
+    } else if (src.itemsize == 1) {
+        copy_scaled_rows_typed<uint8_t, int32_t>(dst, src, start, stop, elems, scale32);
+    } else if (dst.itemsize == 2) {
+        copy_scaled_rows_typed<uint16_t, uint16_t>(dst, src, start, stop, elems, scale32);
+    } else {
+        copy_scaled_rows_typed<uint16_t, int32_t>(dst, src, start, stop, elems, scale32);
+    }
+    return true;
 }
 
 }  // namespace
@@ -922,6 +1102,41 @@ int of_select_rows_a_cpp(
             uint32_t* st_row = bg_u32 + local_y * background.stride[0];
             const int64_t bsx = background.stride[1];
             const int64_t bsc = background.stride[2];
+            if (has_bg && channels == 3 && image.ndim == 3 && output.ndim == 3
+                    && background.ndim == 3 && background.shape[2] == 5
+                    && background.itemsize == 4
+                    && !image.is_float && !output.is_float
+                    && (image.itemsize == 1 || image.itemsize == 2)
+                    && (output.itemsize == 2 || output.itemsize == 4)) {
+                const int64_t is1 = image.stride[1], is2 = image.stride[2];
+                const int64_t os1 = output.stride[1], os2 = output.stride[2];
+                if (image.itemsize == 1 && output.itemsize == 2) {
+                    state = select_a_background_row<uint8_t, uint16_t>(
+                        b_row, response.data(), width,
+                        static_cast<const uint8_t*>(image.data) + y * image.stride[0], is1, is2,
+                        static_cast<uint16_t*>(output.data) + y * output.stride[0], os1, os2,
+                        bg_row, st_row, bsx, bsc, scale, first, state);
+                } else if (image.itemsize == 1) {
+                    state = select_a_background_row<uint8_t, int32_t>(
+                        b_row, response.data(), width,
+                        static_cast<const uint8_t*>(image.data) + y * image.stride[0], is1, is2,
+                        static_cast<int32_t*>(output.data) + y * output.stride[0], os1, os2,
+                        bg_row, st_row, bsx, bsc, scale, first, state);
+                } else if (output.itemsize == 2) {
+                    state = select_a_background_row<uint16_t, uint16_t>(
+                        b_row, response.data(), width,
+                        static_cast<const uint16_t*>(image.data) + y * image.stride[0], is1, is2,
+                        static_cast<uint16_t*>(output.data) + y * output.stride[0], os1, os2,
+                        bg_row, st_row, bsx, bsc, scale, first, state);
+                } else {
+                    state = select_a_background_row<uint16_t, int32_t>(
+                        b_row, response.data(), width,
+                        static_cast<const uint16_t*>(image.data) + y * image.stride[0], is1, is2,
+                        static_cast<int32_t*>(output.data) + y * output.stride[0], os1, os2,
+                        bg_row, st_row, bsx, bsc, scale, first, state);
+                }
+                continue;
+            }
             for (int64_t x = 0; x < width; ++x) {
                 const int64_t prev = first ? 0 : static_cast<int64_t>(b_row[x]);
                 if (!first && prev == kAMaxResponse) {
@@ -1094,16 +1309,29 @@ void of_depth_axis_iir_cpp(
     if (axis == 0) {
         const int64_t band = 64;
         const int threads = (h * w >= 65536) ? num_threads : 1;
-        openfocus::parallel_bands(w, band, threads, [&](int64_t left, int64_t right) {
+        // The forward history of a strip is as large as the strip itself, so
+        // each worker allocates it once and reuses it for all of its strips.
+        struct StripScratch {
+            std::unique_ptr<uint16_t[]> first16;
+            std::unique_ptr<uint32_t[]> first32;
+            uint32_t acc[64];
+        };
+        openfocus::parallel_bands_stateful(w, band, threads, []() { return StripScratch{}; },
+                                           [&](int64_t left, int64_t right, StripScratch& scratch) {
             const int64_t cols = right - left;
+            uint32_t* const acc = scratch.acc;
             if (guide == nullptr) {
+                if (!scratch.first16) {
+                    scratch.first16.reset(new uint16_t[static_cast<size_t>(h * band)]);
+                }
+                uint16_t* const first = scratch.first16.get();
                 if (simd::use_avx2() && cols >= 8) {
-                    simd::depth_axis_iir_y_unguided_avx2(src, src_sy, out, out_sy, h, left, cols, cnt, q, t);
+                    simd::depth_axis_iir_y_unguided_avx2(
+                        src, src_sy, out, out_sy, h, left, cols, cnt, q, t, first, acc);
                     return;
                 }
                 const uint32_t t16 = t * 16u;
-                std::vector<uint16_t> first(static_cast<size_t>(h) * cols);
-                std::vector<uint32_t> acc(static_cast<size_t>(cols), 0u);
+                std::fill(acc, acc + cols, 0u);
                 for (int64_t y = 0; y < cnt; ++y) {
                     const uint16_t* sr = src + y * src_sy + left;
                     for (int64_t c = 0; c < cols; ++c) {
@@ -1117,7 +1345,7 @@ void of_depth_axis_iir_cpp(
                 }
                 for (int64_t y = 0; y < h; ++y) {
                     const uint16_t* sr = src + y * src_sy + left;
-                    uint16_t* fr = first.data() + y * cols;
+                    uint16_t* fr = first + y * cols;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t inn = static_cast<uint32_t>(sr[c]) * t16;
                         const uint32_t st = (acc[c] + 2048u + inn) >> 12u;
@@ -1125,13 +1353,13 @@ void of_depth_axis_iir_cpp(
                         acc[c] = st * q + inn;
                     }
                 }
-                const uint16_t* last_fr = first.data() + (h - 1) * cols;
+                const uint16_t* last_fr = first + (h - 1) * cols;
                 for (int64_t c = 0; c < cols; ++c) {
                     acc[c] = (static_cast<uint32_t>(last_fr[c]) << 4u) * t_plus_q;
                 }
                 for (int64_t y = h - 1; y >= 0; --y) {
                     const uint16_t* sr = src + y * src_sy + left;
-                    const uint16_t* fr = first.data() + y * cols;
+                    const uint16_t* fr = first + y * cols;
                     uint16_t* orow = out + y * out_sy + left;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t inn = static_cast<uint32_t>(sr[c]) * t16;
@@ -1141,12 +1369,16 @@ void of_depth_axis_iir_cpp(
                     }
                 }
             } else {
+                if (!scratch.first32) {
+                    scratch.first32.reset(new uint32_t[static_cast<size_t>(h * band)]);
+                }
+                uint32_t* const first = scratch.first32.get();
                 if (simd::use_avx2() && cols >= 8) {
-                    simd::depth_axis_iir_y_guided_avx2(src, src_sy, guide, guide_sy, out, out_sy, h, left, cols, cnt, tm, tl);
+                    simd::depth_axis_iir_y_guided_avx2(
+                        src, src_sy, guide, guide_sy, out, out_sy, h, left, cols, cnt, tm, tl, first, acc);
                     return;
                 }
-                std::vector<uint32_t> first(static_cast<size_t>(h) * cols);
-                std::vector<uint32_t> acc(static_cast<size_t>(cols), 0u);
+                std::fill(acc, acc + cols, 0u);
                 for (int64_t y = 0; y < cnt; ++y) {
                     const uint16_t* sr = src + y * src_sy + left;
                     for (int64_t c = 0; c < cols; ++c) {
@@ -1160,7 +1392,7 @@ void of_depth_axis_iir_cpp(
                 {
                     const uint16_t* sr0 = src + left;
                     const uint16_t* gr0 = guide + left;
-                    uint32_t* fr0 = first.data();
+                    uint32_t* fr0 = first;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t v = sr0[c];
                         const uint32_t s = gr0[c];
@@ -1174,7 +1406,7 @@ void of_depth_axis_iir_cpp(
                     const uint16_t* sr = src + y * src_sy + left;
                     const uint16_t* pr = src + (y - 1) * src_sy + left;
                     const uint16_t* gr = guide + y * guide_sy + left;
-                    uint32_t* fr = first.data() + y * cols;
+                    uint32_t* fr = first + y * cols;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t v = sr[c];
                         const uint32_t p = pr[c];
@@ -1185,7 +1417,7 @@ void of_depth_axis_iir_cpp(
                         fr[c] = (st + 4u) >> 4u;
                     }
                 }
-                const uint32_t* last_fr = first.data() + (h - 1) * cols;
+                const uint32_t* last_fr = first + (h - 1) * cols;
                 for (int64_t c = 0; c < cols; ++c) {
                     acc[c] = last_fr[c] << 4u;
                 }
@@ -1194,7 +1426,7 @@ void of_depth_axis_iir_cpp(
                     const int64_t yt = h - 1;
                     const uint16_t* sr = src + yt * src_sy + left;
                     const uint16_t* gr = guide + yt * guide_sy + left;
-                    const uint32_t* fr = first.data() + yt * cols;
+                    const uint32_t* fr = first + yt * cols;
                     uint16_t* orow = out + yt * out_sy + left;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t v = sr[c];
@@ -1210,7 +1442,7 @@ void of_depth_axis_iir_cpp(
                     const uint16_t* sr = src + y * src_sy + left;
                     const uint16_t* pr = src + (y + 1) * src_sy + left;
                     const uint16_t* gr = guide + y * guide_sy + left;
-                    const uint32_t* fr = first.data() + y * cols;
+                    const uint32_t* fr = first + y * cols;
                     uint16_t* orow = out + y * out_sy + left;
                     for (int64_t c = 0; c < cols; ++c) {
                         const uint32_t v = sr[c];
@@ -1227,15 +1459,61 @@ void of_depth_axis_iir_cpp(
         return;
     }
 
-    // Horizontal (axis == 1): each row is independent -> keep row history in L1-sized per-thread buffer, zero transpose.
-    const int64_t row_band = 16;
+    // Horizontal (axis == 1): rows are independent. The AVX2 path advances
+    // eight rows per vector; leftover rows use the scalar recurrence.
+    const int64_t row_band = 32;
     const int threads = (h * w >= 65536) ? num_threads : 1;
-    openfocus::parallel_bands(h, row_band, threads, [&](int64_t start, int64_t stop) {
+    const bool in_place = (src == out && src_sy == out_sy);
+    bool simd_rows = simd::use_avx2() && w >= 8 && h >= 8;
+    if (simd_rows) {
+        if (guide == nullptr) {
+            // Updating src in place is well defined; any other overlap is not.
+            simd_rows = in_place || !row_ranges_overlap(src, src_sy, out, out_sy, h, w);
+        } else {
+            // History is kept as uint16, which is exact while the blend
+            // coefficients stay within [0, 4096].
+            simd_rows = tm <= 2048u && tl <= 2048u
+                && !row_ranges_overlap(src, src_sy, out, out_sy, h, w)
+                && !row_ranges_overlap(guide, guide_sy, out, out_sy, h, w);
+        }
+    }
+    struct RowScratch {
+        std::unique_ptr<uint16_t[]> work;
+        std::unique_ptr<uint16_t[]> first16;
+        std::unique_ptr<uint32_t[]> first32;
+    };
+    openfocus::parallel_bands_stateful(h, row_band, threads, []() { return RowScratch{}; },
+                                       [&](int64_t start, int64_t stop, RowScratch& scratch) {
+        int64_t y = start;
+        const int64_t simd_count = simd_rows ? ((stop - start) & ~int64_t{7}) : 0;
+        if (simd_count > 0) {
+            if (!scratch.work) {
+                const int64_t per_column = (guide == nullptr)
+                    ? simd::kDepthIirXUnguidedWorkPerColumn : simd::kDepthIirXGuidedWorkPerColumn;
+                scratch.work.reset(new uint16_t[static_cast<size_t>(per_column * w)]);
+            }
+            if (guide == nullptr) {
+                simd::depth_axis_iir_x_unguided_avx2(
+                    src + y * src_sy, src_sy, out + y * out_sy, out_sy,
+                    w, simd_count, cnt, q, t, scratch.work.get());
+            } else {
+                simd::depth_axis_iir_x_guided_avx2(
+                    src + y * src_sy, src_sy, guide + y * guide_sy, guide_sy,
+                    out + y * out_sy, out_sy, w, simd_count, cnt, tm, tl, scratch.work.get());
+            }
+            y += simd_count;
+        }
+        if (y >= stop) {
+            return;
+        }
         if (guide == nullptr) {
             const uint32_t t16 = t * 16u;
             const uint32_t t_plus_q = t + q;
-            std::vector<uint16_t> first(static_cast<size_t>(w));
-            for (int64_t y = start; y < stop; ++y) {
+            if (!scratch.first16) {
+                scratch.first16.reset(new uint16_t[static_cast<size_t>(w)]);
+            }
+            uint16_t* const first16 = scratch.first16.get();
+            for (; y < stop; ++y) {
                 const uint16_t* sr = src + y * src_sy;
                 uint16_t* orow = out + y * out_sy;
                 uint64_t sum = 0;
@@ -1246,20 +1524,23 @@ void of_depth_axis_iir_cpp(
                 for (int64_t x = 0; x < w; ++x) {
                     const uint32_t inn = static_cast<uint32_t>(sr[x]) * t16;
                     const uint32_t st = (acc + 2048u + inn) >> 12u;
-                    first[x] = static_cast<uint16_t>((st + 4u) >> 4u);
+                    first16[x] = static_cast<uint16_t>((st + 4u) >> 4u);
                     acc = st * q + inn;
                 }
-                acc = (static_cast<uint32_t>(first[w - 1]) << 4u) * t_plus_q;
+                acc = (static_cast<uint32_t>(first16[w - 1]) << 4u) * t_plus_q;
                 for (int64_t x = w - 1; x >= 0; --x) {
                     const uint32_t inn = static_cast<uint32_t>(sr[x]) * t16;
                     const uint32_t st = (acc + 2048u + inn) >> 12u;
-                    orow[x] = static_cast<uint16_t>((((st + 3u) >> 4u) + 1u + static_cast<uint32_t>(first[x])) >> 1u);
+                    orow[x] = static_cast<uint16_t>((((st + 3u) >> 4u) + 1u + static_cast<uint32_t>(first16[x])) >> 1u);
                     acc = st * q + inn;
                 }
             }
         } else {
-            std::vector<uint32_t> first(static_cast<size_t>(w));
-            for (int64_t y = start; y < stop; ++y) {
+            if (!scratch.first32) {
+                scratch.first32.reset(new uint32_t[static_cast<size_t>(w)]);
+            }
+            uint32_t* const first32 = scratch.first32.get();
+            for (; y < stop; ++y) {
                 const uint16_t* sr = src + y * src_sy;
                 const uint16_t* gr = guide + y * guide_sy;
                 uint16_t* orow = out + y * out_sy;
@@ -1274,7 +1555,7 @@ void of_depth_axis_iir_cpp(
                     const uint32_t amt = ((65536u - s) * tl + s * tm) >> 16u;
                     const uint32_t st = ((4096u - 2u * amt) * acc + 2048u + (v + v) * (amt << 4u)) >> 12u;
                     acc = st;
-                    first[0] = (st + 4u) >> 4u;
+                    first32[0] = (st + 4u) >> 4u;
                 }
                 for (int64_t x = 1; x < w; ++x) {
                     const uint32_t v = sr[x];
@@ -1283,13 +1564,13 @@ void of_depth_axis_iir_cpp(
                     const uint32_t amt = ((65536u - s) * tl + s * tm) >> 16u;
                     const uint32_t st = ((4096u - 2u * amt) * acc + 2048u + (v + p) * (amt << 4u)) >> 12u;
                     acc = st;
-                    first[x] = (st + 4u) >> 4u;
+                    first32[x] = (st + 4u) >> 4u;
                 }
-                acc = first[w - 1] << 4u;
+                acc = first32[w - 1] << 4u;
                 {
                     const int64_t x = w - 1;
                     const uint32_t v = sr[x];
-                    const uint32_t p = first[x];
+                    const uint32_t p = first32[x];
                     const uint32_t s = gr[x];
                     const uint32_t amt = ((65536u - s) * tl + s * tm) >> 16u;
                     const uint32_t st = ((4096u - 2u * amt) * acc + 2048u + (v + p) * (amt << 4u)) >> 12u;
@@ -1303,7 +1584,7 @@ void of_depth_axis_iir_cpp(
                     const uint32_t amt = ((65536u - s) * tl + s * tm) >> 16u;
                     const uint32_t st = ((4096u - 2u * amt) * acc + 2048u + (v + p) * (amt << 4u)) >> 12u;
                     acc = st;
-                    orow[x] = static_cast<uint16_t>((((st + 3u) >> 4u) + 1u + first[x]) >> 1u);
+                    orow[x] = static_cast<uint16_t>((((st + 3u) >> 4u) + 1u + first32[x]) >> 1u);
                 }
             }
         }
@@ -1320,8 +1601,10 @@ void of_activity_rows_cpp(const uint16_t* gray, int64_t g_sy,
         const uint16_t* gr = gray + y * g_sy;
         const uint16_t* fr = fine + y * f_sy;
         uint16_t* orow = out + y * o_sy;
-        if (use_simd && !byte_ranges_overlap(orow, row_bytes, gr, row_bytes)
-                     && !byte_ranges_overlap(orow, row_bytes, fr, row_bytes)) {
+        // Each block is loaded before it is stored, so writing a row over one
+        // of its own inputs is exact; only a shifted overlap needs the scalar order.
+        if (use_simd && (orow == gr || !byte_ranges_overlap(orow, row_bytes, gr, row_bytes))
+                     && (orow == fr || !byte_ranges_overlap(orow, row_bytes, fr, row_bytes))) {
             simd::activity_row_u16_avx2(gr, fr, orow, w);
         } else {
             for (int64_t x = 0; x < w; ++x) {
@@ -1728,6 +2011,7 @@ void of_resample_rows_u16_cpp(
     std::vector<float> row_buf(static_cast<size_t>(sw));
     std::vector<float> sums_buf(static_cast<size_t>(std::max<int64_t>(0, last - first)));
     const bool use_fma = simd::use_avx2_fma();
+    const bool use_taps_simd = use_fma && h_taps >= 1;
 
     for (int64_t y = start; y < stop; ++y) {
         std::fill(row_buf.begin(), row_buf.end(), 0.0f);
@@ -1746,26 +2030,30 @@ void of_resample_rows_u16_cpp(
             }
         }
         uint16_t* orow = out + y * o_sy;
-        for (int64_t x = 0; x < first; ++x) {
-            float acc = 0.0f;
-            const int32_t hc = h_cnt[x];
-            const int32_t* hi = h_idx + x * hi_sy;
-            const float* hw = h_w + x * hw_sy;
-            for (int32_t t = 0; t < hc; ++t) {
-                acc = std::fmaf(hw[t], row_buf[hi[t]], acc);
+        // Columns outside the repeated run: eight at a time while their tap
+        // counts are full, one at a time otherwise.
+        const auto plain_columns = [&](int64_t x, const int64_t stop_x) {
+            while (x < stop_x) {
+                if (use_taps_simd) {
+                    x = simd::resample_u16_horiz_taps_row_avx2_fma(
+                        row_buf.data(), orow, x, stop_x, h_idx, hi_sy, h_w, hw_sy, h_cnt, h_taps);
+                    if (x >= stop_x) {
+                        break;
+                    }
+                }
+                float acc = 0.0f;
+                const int32_t hc = h_cnt[x];
+                const int32_t* hi = h_idx + x * hi_sy;
+                const float* hw = h_w + x * hw_sy;
+                for (int32_t t = 0; t < hc; ++t) {
+                    acc = std::fmaf(hw[t], row_buf[hi[t]], acc);
+                }
+                orow[x] = store_f32_code(acc);
+                ++x;
             }
-            orow[x] = store_f32_code(acc);
-        }
-        for (int64_t x = last; x < ow; ++x) {
-            float acc = 0.0f;
-            const int32_t hc = h_cnt[x];
-            const int32_t* hi = h_idx + x * hi_sy;
-            const float* hw = h_w + x * hw_sy;
-            for (int32_t t = 0; t < hc; ++t) {
-                acc = std::fmaf(hw[t], row_buf[hi[t]], acc);
-            }
-            orow[x] = store_f32_code(acc);
-        }
+        };
+        plain_columns(0, first);
+        plain_columns(last, ow);
         if (last > first) {
             const int64_t nrep = last - first;
             if (use_fma && nrep >= 8) {
@@ -1801,6 +2089,9 @@ void of_merge_rows_cpp(
 ) {
     const int64_t width = accumulator.shape[1];
     if (first) {
+        if (copy_scaled_rows(accumulator, image, start, stop, scale)) {
+            return;
+        }
         if (image.ndim == 2) {
             for (int64_t y = start; y < stop; ++y) {
                 for (int64_t x = 0; x < width; ++x) {
