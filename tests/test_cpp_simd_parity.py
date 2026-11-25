@@ -1382,6 +1382,100 @@ def test_openfocus_a_background_rows_avx2_vs_scalar_bit_exact(monkeypatch, w, dt
     np.testing.assert_array_equal(simd, scalar)
 
 
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_alignment_gray_warps_keep_overlapping_output_exact(dtype):
+    """One-channel warps whose output is the source shifted by a column or a row."""
+    import math
+
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    h, w = 9, 17
+    # Distinct values per row and column, so every scalar write that a later read sees shows.
+    backing = (np.arange((h + 1) * (w + 1)).reshape(h + 1, w + 1) * 37 % (np.iinfo(dtype).max + 1)).astype(dtype)
+
+    def similarity(shift_x, shift_y, degrees, scale):
+        cx, cy = w * 0.5, h * 0.5
+        cos = scale * math.cos(math.radians(degrees))
+        sin = scale * math.sin(math.radians(degrees))
+        return (cx + shift_x, cy + shift_y, cx, cy, sin, sin, cos, cos)
+
+    def run():
+        results = []
+        for dx, dy in ((0.0, 0.0), (0.5, 0.25), (-1.0, 0.0)):
+            for place in ("same", "right", "left", "below"):
+                b = backing.copy()
+                src, dst = {"same": (b[:h, :w], b[:h, :w]), "right": (b[:h, :w], b[:h, 1:]),
+                            "left": (b[:h, 1:], b[:h, :w]), "below": (b[:h, :w], b[1:, :w])}[place]
+                ak.warp_int_rows(src, dst, dx, dy, 0, h)
+                results.append(b)
+        for spec in ((0.0, 0.0, 0.0, 1.0), (0.5, -0.25, 0.5, 1.004)):
+            for place in ("same", "right"):
+                b = backing.copy()
+                src, dst = (b[:h, :w], b[:h, :w]) if place == "same" else (b[:h, :w], b[:h, 1:])
+                ak.warp_alignment_int_rows(src, dst, *similarity(*spec), 0, h)
+                results.append(b)
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_openfocus_a_background_rows_keep_overlapping_buffers_exact(dtype):
+    """Best, source, output and background rows that share bytes keep the scalar order."""
+    from fusion_methods._openfocus_kernels import select_rows
+    from fusion_methods._openfocus_pixels import frame_gray_codes
+    from fusion_methods.openfocus_a import _hard_pyramid
+
+    mod = _require_avx2()
+    h, w = 5, 24
+    frames = _background_frames(np.random.default_rng(4700 + np.dtype(dtype).itemsize), h, w, dtype, 3)
+    scale = 256 if dtype == np.uint8 else 1
+    item = np.dtype(dtype).itemsize
+    row = (w + 2) * 6 * 4  # bytes per row of every view laid over the shared buffer
+
+    def run():
+        results = []
+        for place in ("best over source", "best over output", "best over background",
+                      "background over output", "output over source"):
+            if place == "output over source" and dtype != np.uint16:
+                continue
+            buf = np.zeros(3 * h * row + 64, np.uint8)
+            own = {
+                "best": np.ndarray((h, w), np.int32, buf, 0, (row, 4)),
+                "output": np.ndarray((h, w, 3), np.uint16, buf, h * row, (row, 6, 2)),
+                "background": np.ndarray((h, w, 5), np.float32, buf, 2 * h * row, (row, 20, 4)),
+            }
+            best, output, background = own["best"], own["output"], own["background"]
+            source_at = None
+            if place == "best over source":
+                source_at = 0
+            elif place == "best over output":
+                best = np.ndarray((h, w), np.int32, buf, h * row + 4, (row, 4))
+            elif place == "best over background":
+                best = np.ndarray((h, w), np.int32, buf, 2 * h * row + 8, (row, 4))
+            elif place == "background over output":
+                background = np.ndarray((h, w, 5), np.float32, buf, h * row + 8, (row, 20, 4))
+            else:
+                source_at = h * row + 6
+            states = []
+            for index, frame in enumerate(frames):
+                if source_at is None:
+                    image = frame
+                else:
+                    image = np.ndarray((h, w, 3), dtype, buf, source_at, (row, 3 * item, item))
+                    image[:] = frame
+                gray = frame_gray_codes(np.ascontiguousarray(image), None, None)
+                half_gray, laplacians, levels = _hard_pyramid(gray, 8, None, lambda cancelled: None)
+                response = np.empty(w, np.int32)
+                states.append(select_rows(image, gray, half_gray, laplacians, levels, response, best,
+                                          output, 0, h, scale, index == 0, background))
+            results += [buf.copy(), np.asarray(states)]
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
 def test_alignment_score_keeps_sums_stored_over_inputs_exact():
     """A sum stored over the grid or its coordinates changes what later candidates read."""
     mod = _require_avx2()
