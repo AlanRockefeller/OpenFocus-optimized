@@ -9,11 +9,30 @@ from PyQt6.QtGui import QAction, QIcon, QKeySequence, QDragEnterEvent, QDropEven
 from utils.file_dialogs import FileDialog
 from PyQt6.QtWidgets import QListWidgetItem, QMenu, QMessageBox, QDialog
 
-from core.workers import StackLoadWorker
-from dialogs import DownsampleDialog
 from utils import show_message_box, show_warning_box
 from ui import styles as ui_styles
 from locales import trans
+
+_LAZY_IMPORTS = {
+    'StackLoadWorker': ('core.workers', 'StackLoadWorker'),
+    'DownsampleDialog': ('dialogs', 'DownsampleDialog'),
+}
+
+
+def _resolve_lazy(name: str):
+    value = globals().get(name)
+    if value is not None:
+        return value
+    module_name, attr = _LAZY_IMPORTS[name]
+    value = getattr(__import__(module_name, fromlist=[attr]), attr)
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str):
+    if name in _LAZY_IMPORTS:
+        return _resolve_lazy(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class StackReviewWorker(QThread):
@@ -65,6 +84,11 @@ class SourceManager(QObject):
         self._review_notice_timer.setSingleShot(True)
         self._review_notice_timer.setInterval(5000)
         self._review_notice_timer.timeout.connect(self._expire_review_notice)
+        self._render_prewarm_timer = QTimer(self)
+        self._render_prewarm_timer.setSingleShot(True)
+        self._render_prewarm_timer.setInterval(400)
+        self._render_prewarm_timer.timeout.connect(self._start_render_prewarm)
+        self._render_prewarm_stack = None
         self._stack_baseline = None
         window.linear_dng_metadata = None
         self._review_error = ""
@@ -463,7 +487,7 @@ class SourceManager(QObject):
                 show_warning_box(window, trans.t("msg_load_failed"), message)
             return True
 
-        self._load_worker = StackLoadWorker(
+        self._load_worker = _resolve_lazy('StackLoadWorker')(
             window.image_loader, folder=folder, video=video,
             filepaths=filepaths, scale=scale,
             thread_count=getattr(window, "thread_count", 0),
@@ -694,6 +718,27 @@ class SourceManager(QObject):
         self._show_load_status()
         worker.start()
 
+    def _start_render_prewarm(self) -> None:
+        from PyQt6 import sip
+
+        window = self.window
+        stack = self._render_prewarm_stack
+        self._render_prewarm_stack = None
+        if (isinstance(window, QObject) and sip.isdeleted(window)) or getattr(window, "_shutting_down", False):
+            return
+        if (os.environ.get("QT_QPA_PLATFORM") == "offscreen"
+                or os.environ.get("OPENFOCUS_DISABLE_PERSISTENT_RENDER_WORKER")):
+            return
+        render = getattr(window, "render_manager", None)
+        if (render is None or getattr(render, "_closing", False) or self._reset_busy()
+                or getattr(render, "_pending_storage", None) is not None):
+            return
+        if stack != (getattr(self, "_load_generation", 0), id(window.raw_images),
+                     getattr(window, "source_revision", 0)):
+            return
+        from core.render_process import prewarm_persistent_worker
+        prewarm_persistent_worker()
+
     def _finish_load_worker(self, worker) -> None:
         if self._load_worker is worker:
             self._load_worker = None
@@ -702,6 +747,12 @@ class SourceManager(QObject):
                 if widget is not None:
                     widget.hide()
             self._start_queued_render(worker)
+            if (getattr(worker, "_load_applied", False)
+                    and os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+                    and not os.environ.get("OPENFOCUS_DISABLE_PERSISTENT_RENDER_WORKER")):
+                self._render_prewarm_stack = (getattr(self, "_load_generation", 0),
+                                              id(worker._load_stack), worker._load_revision)
+                self._render_prewarm_timer.start()
         worker.deleteLater()
 
     def _start_queued_render(self, worker) -> None:
@@ -848,7 +899,7 @@ class SourceManager(QObject):
         if not getattr(window, "ask_load_scale", True):
             return float(getattr(window, "load_scale_default", 1.0) or 1.0)
         current_scale = getattr(window, "current_scale_factor", 1.0)
-        dlg = DownsampleDialog(window, initial_scale=current_scale,
+        dlg = _resolve_lazy('DownsampleDialog')(window, initial_scale=current_scale,
                                show_dont_ask=True, source_paths=paths,
                                source_folder=folder, source_video=video,
                                linear_raw=linear_raw)
@@ -914,8 +965,11 @@ class SourceManager(QObject):
 
         # 同一文件夹再次导入按"重新加载"处理：追加只会得到帧数翻倍的
         # 重复栈（恢复会话后再导入、拖同一文件夹两次都触发过）
-        same_folder = (os.path.normcase(os.path.abspath(folder_path)) == os.path.normcase(
-            os.path.abspath(getattr(window, "current_folder_path", "") or "")))
+        current_folder = getattr(window, "current_folder_path", "") or ""
+        same_folder = bool(current_folder) and (
+            os.path.normcase(os.path.abspath(folder_path))
+            == os.path.normcase(os.path.abspath(current_folder))
+        )
         if same_folder and getattr(window, "linear_dng_metadata", None) is not None:
             linear_raw = True
         else:

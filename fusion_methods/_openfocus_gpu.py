@@ -7,6 +7,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import sys
 from tempfile import NamedTemporaryFile
 from threading import Event, Lock
 
@@ -15,7 +16,9 @@ import numpy as np
 from core.frame_storage import async_upload_view
 
 _device_lock = Lock()
+_context_lock = Lock()
 _cache_lock = Lock()
+_SHARED_CONTEXT = None
 _PROGRAM_CACHE = None
 _DEPTH_PROGRAM_CACHE = None
 
@@ -327,13 +330,40 @@ def _device_cache_key(device):
     )
 
 
+def _get_shared_context(cl, device):
+    """Share the selected device's context while each stage owns its queue."""
+    global _SHARED_CONTEXT
+    key = _device_cache_key(device)
+    factory = cl.Context
+    with _context_lock:
+        if _SHARED_CONTEXT is not None:
+            cached_key, cached_cl, cached_factory, cached_device, context = _SHARED_CONTEXT
+            if (cached_key == key and cached_cl is cl and cached_factory is factory
+                    and (key[0] is not None or cached_device is device)):
+                return context
+        try:
+            context = factory(devices=[device])
+        except TypeError:
+            context = factory([device])
+        _SHARED_CONTEXT = (key, cl, factory, device, context)
+        return context
+
+
+def _invalidate_shared_context(context):
+    global _SHARED_CONTEXT
+    if context is not None:
+        with _context_lock:
+            if _SHARED_CONTEXT is not None and _SHARED_CONTEXT[-1] is context:
+                _SHARED_CONTEXT = None
+
+
 def _get_or_build_merge_program(cl, device):
     global _PROGRAM_CACHE, _DEPTH_PROGRAM_CACHE
     key = _device_cache_key(device)
     with _cache_lock:
-        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key:
+        ctx = _get_shared_context(cl, device)
+        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key and _PROGRAM_CACHE[1] is ctx:
             return _PROGRAM_CACHE[1:]
-        ctx = cl.Context(devices=[device])
         queue = cl.CommandQueue(ctx, device=device)
         program = _build_cached_program(cl, device, ctx, _MERGE_KERNEL)
         kernels = {name: cl.Kernel(program, name) for name in _MERGE_KERNEL_NAMES}
@@ -359,11 +389,12 @@ def _get_or_build_depth_program(cl, device, context):
         return program, depth_kernels, filter_kernels, resample_kernels, tiled
 
 
-def _invalidate_program_cache():
+def _invalidate_program_cache(context=None):
     global _PROGRAM_CACHE, _DEPTH_PROGRAM_CACHE
     with _cache_lock:
         _PROGRAM_CACHE = None
         _DEPTH_PROGRAM_CACHE = None
+        _invalidate_shared_context(context)
 
 _MERGE_KERNEL = r'''
 __kernel void activity(__global const ushort *gray, __global const ushort *fine,
@@ -628,41 +659,276 @@ def _nvml_free_vram(device):
         return None
 
 
+def _fp32_build_options(cl, device):
+    """Pass correctly rounded FP32 divide/sqrt only when advertised by the device."""
+    try:
+        rounded = cl.device_fp_config.CORRECTLY_ROUNDED_DIVIDE_SQRT
+        single_fp = device.single_fp_config
+    except Exception:
+        return []
+    if (isinstance(rounded, int) and not isinstance(rounded, bool) and rounded > 0
+            and isinstance(single_fp, int) and not isinstance(single_fp, bool)
+            and single_fp >= 0 and (single_fp & rounded) == rounded):
+        return ['-cl-fp32-correctly-rounded-divide-sqrt']
+    return []
+
+
+def _dxgi_free_vram(device):
+    """Read free/total DXGI LOCAL budget for a unique matching physical adapter."""
+    if sys.platform != 'win32':
+        return None
+    try:
+        vid = int(getattr(device, 'vendor_id', 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if vid <= 0:
+        return None
+    from core import resource_policy
+
+    try:
+        dev_mem = int(getattr(device, 'global_mem_size', 0) or 0)
+    except (TypeError, ValueError):
+        dev_mem = 0
+    dev_name = str(getattr(device, 'name', '') or '').strip().lower()
+
+    try:
+        adapters = resource_policy._dxgi_adapter_budgets(vid)
+    except Exception:
+        return None
+
+    identity = _opencl_dxgi_identity(device)
+    if identity is not None:
+        luid, node_mask = identity
+        # The DXGI budget probe covers node 0 on the matched adapter.
+        if node_mask != 1:
+            return None
+        return next((reading for adap_luid, _, _, reading in adapters if adap_luid == luid), None)
+
+    seen_luids = set()
+    exact_matches = []
+    mem_matches = []
+    for luid, name, dedicated, reading in adapters:
+        if luid in seen_luids:
+            continue
+        seen_luids.add(luid)
+        if dev_name and name.strip().lower() == dev_name:
+            exact_matches.append(reading)
+        elif dev_mem > 0 and dedicated > 0 and abs(dedicated - dev_mem) <= max(512 * 1024**2, dev_mem // 8):
+            mem_matches.append(reading)
+    matches = exact_matches or mem_matches
+    return matches[0] if len(matches) == 1 else None
+
+
+def _opencl_device_query(device):
+    """Query extension fields through the ICD that owns a PyOpenCL device."""
+    import ctypes
+
+    try:
+        import pyopencl as cl
+    except ImportError:
+        return None
+
+    try:
+        if not isinstance(device, cl.Device) or 'cl_khr_icd' not in device.platform.extensions.split():
+            return None
+        handle = device.int_ptr
+        if not handle:
+            return None
+        # cl_khr_icd puts the dispatch table at the front of a device ID.
+        # clGetDeviceInfo is the fourth member of cl_icd_dispatch.
+        table = ctypes.cast(handle, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        convention = ctypes.WINFUNCTYPE if sys.platform == 'win32' else ctypes.CFUNCTYPE
+        get_info = convention(ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t,
+                              ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t))(table[3])
+    except (cl.Error, AttributeError, TypeError, ValueError):
+        return None
+
+    def read_info(field, result):
+        size = ctypes.sizeof(result)
+        written = ctypes.c_size_t()
+        return (get_info(handle, field, size, ctypes.byref(result), ctypes.byref(written)) == 0
+                and written.value == size)
+
+    return read_info
+
+
+def _opencl_dxgi_identity(device):
+    """Return the reported Windows adapter LUID and its device-node mask."""
+    if 'cl_khr_device_uuid' not in getattr(device, 'extensions', '').split():
+        return None
+    query = _opencl_device_query(device)
+    if query is None:
+        return None
+    import ctypes
+
+    valid = ctypes.c_uint32()
+    # CL_DEVICE_LUID_VALID_KHR, CL_DEVICE_LUID_KHR, CL_DEVICE_NODE_MASK_KHR.
+    if not query(0x106C, valid) or not valid.value:
+        return None
+    luid = (ctypes.c_uint32 * 2)()
+    if not query(0x106D, luid):
+        return None
+    node_mask = ctypes.c_uint32()
+    return tuple(luid), node_mask.value if query(0x106E, node_mask) else 0
+
+
+def _opencl_pci_address(device):
+    """Return (domain, bus, slot, function), with domain unknown on AMD's older extension."""
+    if not sys.platform.startswith('linux'):
+        return None
+    import ctypes
+
+    try:
+        extensions = device.extensions.split()
+    except Exception:
+        return None
+    khr = 'cl_khr_pci_bus_info' in extensions
+    amd = 'cl_amd_device_attribute_query' in extensions
+    if not (khr or amd):
+        return None
+
+    query = _opencl_device_query(device)
+    if query is None:
+        return None
+
+    if khr:
+        address = (ctypes.c_uint32 * 4)()
+        # CL_DEVICE_PCI_BUS_INFO_KHR
+        if query(0x410F, address):
+            domain, bus, slot, function = address
+            if bus <= 0xff and slot <= 0x1f and function <= 7:
+                return domain, bus, slot, function
+    if amd:
+        class AmdTopology(ctypes.Structure):
+            _fields_ = [('type', ctypes.c_uint32), ('unused', ctypes.c_uint8 * 17),
+                        ('bus', ctypes.c_uint8), ('slot', ctypes.c_uint8), ('function', ctypes.c_uint8)]
+
+        topology = AmdTopology()
+        # CL_DEVICE_TOPOLOGY_AMD and CL_DEVICE_TOPOLOGY_TYPE_PCIE_AMD
+        if (query(0x4037, topology)
+                and topology.type == 1 and topology.slot <= 0x1f and topology.function <= 7):
+            return None, topology.bus, topology.slot, topology.function
+    return None
+
+
+def _drm_counter(device_path, name, base=10):
+    try:
+        return int((device_path / name).read_text(encoding='ascii'), base)
+    except (OSError, ValueError):
+        return None
+
+
+def _linux_drm_free_vram(device, *, drm_root='/sys/class/drm'):
+    """Read free/total bytes from the matching amdgpu adapter's sysfs VRAM counters."""
+    try:
+        if int(getattr(device, 'vendor_id', 0) or 0) != 0x1002:
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    pci_address = _opencl_pci_address(device)
+    if pci_address is None:
+        try:
+            dev_mem = int(getattr(device, 'global_mem_size', 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if dev_mem <= 0:
+            return None
+        tol = max(256 * 1024**2, dev_mem // 8)
+    else:
+        domain, bus, slot, function = pci_address
+        bdf = f':{bus:02x}:{slot:02x}.{function:x}'
+        full_address = f'{domain:04x}{bdf}' if domain is not None else None
+    try:
+        entries = sorted(os.listdir(drm_root))
+    except OSError:
+        return None
+    seen_devs = set()
+    matches = []
+    for name in entries:
+        if not (name.startswith('card') and name[4:].isdigit()):
+            continue
+        dev_dir = Path(drm_root) / name / 'device'
+        real_dev = Path(os.path.realpath(os.fspath(dev_dir)))
+        if real_dev in seen_devs:
+            continue
+        seen_devs.add(real_dev)
+        if pci_address is not None:
+            if full_address is not None and real_dev.name != full_address:
+                continue
+            if full_address is None and not real_dev.name.endswith(bdf):
+                continue
+        vendor = _drm_counter(dev_dir, 'vendor', 16)
+        if vendor is None and pci_address is not None:
+            return None
+        if vendor != 0x1002:
+            continue
+        total = _drm_counter(dev_dir, 'mem_info_vram_total')
+        if (pci_address is None and total is not None and total > 0
+                and abs(total - dev_mem) > tol):
+            continue
+        if matches:
+            return None
+        matches.append((dev_dir, total))
+    if not matches:
+        return None
+    dev_dir, total = matches[0]
+    if total is None or total <= 0:
+        return None
+    used = _drm_counter(dev_dir, 'mem_info_vram_used')
+    if used is None or not 0 <= used <= total:
+        return None
+    return total - used, total
+
+
 def _free_vram(device):
     """Read free memory from the selected OpenCL GPU's matching driver."""
-    import subprocess
-    if (int(device.vendor_id) == 0x1002
-            and 'cl_amd_device_attribute_query' in device.extensions.split()):
+    try:
+        vid = int(getattr(device, 'vendor_id', 0) or 0)
+    except (TypeError, ValueError):
+        vid = 0
+    if vid == 0x1002:
         try:
-            free_kib = int(device.get_info(0x4039)[0])
-            if 0 < free_kib * 1024 <= int(device.global_mem_size):
-                return free_kib * 1024, int(device.global_mem_size)
+            if 'cl_amd_device_attribute_query' in getattr(device, 'extensions', '').split():
+                free_kib = int(device.get_info(0x4039)[0])
+                if 0 < free_kib * 1024 <= int(device.global_mem_size):
+                    return free_kib * 1024, int(device.global_mem_size)
         except Exception:
             pass
-    if int(device.vendor_id) != 0x10de:
-        return None
-    nvml = _nvml_free_vram(device)
-    if nvml is not None:
-        return nvml
-    try:
-        result = subprocess.run(
-            ['nvidia-smi', '--query-gpu=name,memory.free,memory.total',
-             '--format=csv,noheader,nounits'], capture_output=True, text=True,
-            timeout=3, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        matches = []
-        for line in result.stdout.splitlines():
-            name, free, total = (part.strip() for part in line.rsplit(',', 2))
-            total_bytes = int(total) * 1024 * 1024
-            if (name == str(device.name).strip()
-                    and abs(total_bytes - int(device.global_mem_size)) <= 64 * 1024 * 1024):
-                matches.append((int(free) * 1024 * 1024, total_bytes))
-        return matches[0] if len(matches) == 1 else None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
+    if vid == 0x10de:
+        nvml = _nvml_free_vram(device)
+        if nvml is not None:
+            return nvml
+    if sys.platform == 'win32':
+        dxgi = _dxgi_free_vram(device)
+        if dxgi is not None:
+            return dxgi
+    if vid == 0x10de:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name,memory.free,memory.total',
+                 '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                timeout=3, check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            matches = []
+            for line in result.stdout.splitlines():
+                name, free, total = (part.strip() for part in line.rsplit(',', 2))
+                total_bytes = int(total) * 1024 * 1024
+                if (name == str(device.name).strip()
+                        and abs(total_bytes - int(device.global_mem_size)) <= 64 * 1024 * 1024):
+                    matches.append((int(free) * 1024 * 1024, total_bytes))
+            if len(matches) == 1:
+                return matches[0]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    if sys.platform.startswith('linux'):
+        return _linux_drm_free_vram(device)
+    return None
 
 
 class Merge:
-    """A job-local OpenCL context and bounded merge workspace."""
+    """A bounded merge workspace on the process's OpenCL context."""
 
     def __init__(self, width, channels):
         try:
@@ -726,7 +992,7 @@ class Merge:
             try:
                 queue.finish()
             except Exception:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
 
     def acquire(self, should_cancel):
         from fusion_methods.openfocus_ab import _check_cancel
@@ -742,7 +1008,8 @@ class Merge:
         _device_lock.release()
 
     def full_depth(self, frames, shape, img_resize, kernel_size, smoothing,
-                   feather, should_cancel, progress_callback, *, live_preview=None):
+                   feather, should_cancel, progress_callback, *, live_preview=None,
+                   preserve_detail: bool = True):
         """Run the PR depth stages only when all resident planes fit the job."""
         from core import resource_policy
         from core.multi_focus_fusion import memory_budget_bytes
@@ -799,7 +1066,8 @@ class Merge:
         # bincount casts the half-resolution uint16 confidence plane to native ints.
         final_staging = max(pixels * 2 + oh * ow * 2, oh * ow * (2 + np.dtype(np.intp).itemsize))
         host_staging = max(source_peak, final_staging + axes_bytes) + 16 * 1024 * 1024
-        vram_need = pixels * 24 + max_src_bytes + axes_bytes + 16 * 1024 * 1024
+        # The guided path retains both filter workspaces through expansion.
+        vram_need = pixels * (24 if preserve_detail else 17) + max_src_bytes + axes_bytes + 16 * 1024 * 1024
         largest_alloc = max(pixels * 8, max_src_bytes, max(height, width) * 8 * 8)
         if host_staging > host_budget or largest_alloc > int(self.device.max_mem_alloc_size):
             logging.getLogger(__name__).info('OpenFocus full GPU depth exceeds the job memory budget')
@@ -859,16 +1127,21 @@ class Merge:
                 )
                 engine._prefetch_slots = prefetch_slots
                 engine._ping_pong = ping_pong
+                depth_kwargs = {
+                    'prefetch': prefetch_slots > 0,
+                    'live_preview': live_preview,
+                }
+                if not preserve_detail:
+                    depth_kwargs['preserve_detail'] = False
                 return engine.depth(
                     frames, kernel_size, smoothing, feather, shape, len(frames),
-                    should_cancel, progress, prefetch=prefetch_slots > 0,
-                    live_preview=live_preview,
+                    should_cancel, progress, **depth_kwargs,
                 )
             except CallbackFailure as exc:
                 self._drain_queue()
                 raise exc.__cause__
             except (self.cl.Error, MemoryError) as exc:
-                _invalidate_program_cache()
+                _invalidate_program_cache(self.context)
                 self._drain_queue()
                 raise GpuError('OpenCL GPU depth failed') from exc
             except BaseException:
@@ -893,7 +1166,7 @@ class Merge:
             cl.enqueue_copy(self.queue, result, ob, is_blocking=True)
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             raise GpuError('OpenCL GPU depth activity failed') from exc
         finally:
@@ -968,7 +1241,7 @@ class Merge:
             return True
         except BaseException as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             _release_buffers(self._merge_acc, self._merge_depth, self._merge_src,
                              getattr(self, '_merge_src_alt', None))
@@ -1048,7 +1321,7 @@ class Merge:
             self.used = True
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             if getattr(self, '_merge_slot_events', None) is not None:
                 self._merge_slot_events = [None, None]
@@ -1070,7 +1343,7 @@ class Merge:
             self._merge_needs_drain = False
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             self._merge_needs_drain = False
             raise GpuError('OpenCL GPU merge download failed') from exc
@@ -1104,7 +1377,7 @@ class Merge:
             self._merge_needs_drain = False
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             self._merge_needs_drain = False
             raise GpuError('OpenCL GPU merge download failed') from exc
@@ -1155,7 +1428,7 @@ class Merge:
             cl.enqueue_copy(self.queue, result, ab, is_blocking=True)
         except Exception as exc:
             if hasattr(self, 'cl') and isinstance(exc, (self.cl.Error, MemoryError)):
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'context', None))
             self._drain_queue()
             raise GpuError('OpenCL GPU merge failed') from exc
         finally:
@@ -1746,7 +2019,8 @@ class _GpuB:
 
     # -- depth_map equivalent ---------------------------------------------
     def depth(self, frames, kernel_size, smoothing, feather, shape, count,
-              should_cancel, progress_callback=None, *, prefetch=False, live_preview=None):
+              should_cancel, progress_callback=None, *, prefetch=False, live_preview=None,
+              preserve_detail: bool = True):
         prefetch_slots = getattr(self, '_prefetch_slots', 1 if prefetch else 0)
         ping_pong = bool(getattr(self, '_ping_pong', False))
         from fusion_methods.openfocus_depth import _snap_lut
@@ -1767,6 +2041,9 @@ class _GpuB:
         extent = np.float32(max(oh, ow))
         fine_r = float(np.float32(extent * fine_p / np.float32(100)))
         coarse_r = float(np.float32(extent * coarse_p / np.float32(100)))
+        smooth = np.float32(np.float32(smoothing) * np.float32(0.75) * np.float32(0.03125))
+        scale = float(np.float32(extent * smooth / np.float32(100)))
+        low = float(np.float32(extent * np.float32(smooth * np.float32(64)) / np.float32(100)))
         step = 65535 // (count - 1)
 
         completed = False
@@ -1774,16 +2051,22 @@ class _GpuB:
         reader = None
         allocated = []
         try:
+            cancel()
             def _alloc(buf):
                 allocated.append(buf)
                 return buf
 
             gray_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, height * width * 2))
-            pb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
-            sb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
-            d_best_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
-            d_second_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
-            d_winner_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            pb = (_alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+                  if (preserve_detail or scale != 0.0) else None)
+            sb = (_alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+                  if (preserve_detail or scale != 0.0) else None)
+            if preserve_detail:
+                d_best_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+                d_second_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+                d_winner_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
+            else:
+                d_best_buf = d_second_buf = d_winner_buf = None
             half_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
             fine_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
             act_raw_buf = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_WRITE, m_bytes))
@@ -1815,11 +2098,12 @@ class _GpuB:
                 cancel()
                 upload = self._gray_into(prepared, gray_buf, height, width, slot=slot)
                 cancel()
-                self.kernels['detail_pool'](self.q, (ow, oh), None, gray_buf, pb,
-                                            np.int32(height), np.int32(width),
-                                            np.int32(oh), np.int32(ow))
-                self.kernels['detail_smooth'](self.q, (ow, oh), None, pb, sb,
-                                              np.int32(oh), np.int32(ow))
+                if preserve_detail:
+                    self.kernels['detail_pool'](self.q, (ow, oh), None, gray_buf, pb,
+                                                np.int32(height), np.int32(width),
+                                                np.int32(oh), np.int32(ow))
+                    self.kernels['detail_smooth'](self.q, (ow, oh), None, pb, sb,
+                                                  np.int32(oh), np.int32(ow))
                 self.gpu.used = True
                 cancel()
                 self.half.run_buf(gray_buf, half_buf, height, width)
@@ -1832,20 +2116,22 @@ class _GpuB:
                 code = idx * step
                 if idx == 0:
                     self.cl.enqueue_copy(self.q, best_buf, act_buf)
-                    self.kernels['init_activity'](self.q, (m,), None, act_buf, depth_buf,
-                                                  votes_buf, np.uint32(count), np.int32(m))
-                    self.cl.enqueue_copy(self.q, d_best_buf, sb)
-                    last_event = self.kernels['init_detail'](
-                        self.q, (m,), None, d_second_buf, d_winner_buf, np.int32(m),
-                    )
+                    last_event = self.kernels['init_activity'](self.q, (m,), None, act_buf, depth_buf,
+                                                               votes_buf, np.uint32(count), np.int32(m))
+                    if preserve_detail:
+                        self.cl.enqueue_copy(self.q, d_best_buf, sb)
+                        last_event = self.kernels['init_detail'](
+                            self.q, (m,), None, d_second_buf, d_winner_buf, np.int32(m),
+                        )
                 else:
-                    self.kernels['select_activity'](self.q, (m,), None, act_buf, best_buf,
-                                                    depth_buf, votes_buf, np.uint16(code),
-                                                    np.uint32(count), np.int32(m))
-                    last_event = self.kernels['detail_select'](
-                        self.q, (m,), None, sb, d_best_buf, d_second_buf, d_winner_buf,
-                        np.uint16(code), np.int32(m),
-                    )
+                    last_event = self.kernels['select_activity'](self.q, (m,), None, act_buf, best_buf,
+                                                                 depth_buf, votes_buf, np.uint16(code),
+                                                                 np.uint32(count), np.int32(m))
+                    if preserve_detail:
+                        last_event = self.kernels['detail_select'](
+                            self.q, (m,), None, sb, d_best_buf, d_second_buf, d_winner_buf,
+                            np.uint16(code), np.int32(m),
+                        )
                 if ping_pong and last_event is not None and hasattr(last_event, 'wait'):
                     slot_events[slot] = last_event
                     slot_hosts[slot] = (prepared, upload)
@@ -1865,7 +2151,7 @@ class _GpuB:
                         if sample is not None:
                             live_preview.show_positions(sample, idx, count, step * (count - 1),
                                                         sampled=True)
-                    del upload, prepared
+                del upload, prepared
                 if progress_callback is not None:
                     progress_callback(idx, count)
 
@@ -1878,40 +2164,37 @@ class _GpuB:
                 self.q.finish()
 
             cancel()
-            self.kernels['detail_confidence'](self.q, (m,), None, best_buf, d_best_buf,
-                                              d_second_buf, np.int32(m))
-            self.kernels['confidence'](self.q, (m,), None, best_buf, votes_buf, np.int32(m))
-            best = np.empty((oh, ow), dtype=np.uint16)
-            self.cl.enqueue_copy(self.q, best, best_buf, is_blocking=True)
+            if preserve_detail:
+                self.kernels['detail_confidence'](self.q, (m,), None, best_buf, d_best_buf,
+                                                  d_second_buf, np.int32(m))
+            if scale != 0.0:
+                self.kernels['confidence'](self.q, (m,), None, best_buf, votes_buf, np.int32(m))
+                best = np.empty((oh, ow), dtype=np.uint16)
+                self.cl.enqueue_copy(self.q, best, best_buf, is_blocking=True)
 
-            hist = np.bincount(best.ravel(), minlength=65536)
-            threshold = int(np.float32(np.float32(best.size)
-                                       * np.float32(0.009999999776482582)))
-            lo = int(np.searchsorted(np.cumsum(hist), threshold)) if threshold else 0
-            hi = (65535 - int(np.searchsorted(np.cumsum(hist[::-1]), threshold))
-                  if threshold else 65535)
-            positions = np.arange(4096, dtype=np.float64) * 65535.0 / 4095.0
-            span = max(hi - lo, 1)
-            lut = (65535.0 * np.sqrt(np.clip((positions - lo) / span, 0, 1))
-                   ).astype(np.float32)
+                hist = np.bincount(best.ravel(), minlength=65536)
+                threshold = int(np.float32(np.float32(best.size)
+                                           * np.float32(0.009999999776482582)))
+                lo = int(np.searchsorted(np.cumsum(hist), threshold)) if threshold else 0
+                hi = (65535 - int(np.searchsorted(np.cumsum(hist[::-1]), threshold))
+                      if threshold else 65535)
+                positions = np.arange(4096, dtype=np.float64) * 65535.0 / 4095.0
+                span = max(hi - lo, 1)
+                lut = (65535.0 * np.sqrt(np.clip((positions - lo) / span, 0, 1))
+                       ).astype(np.float32)
 
-            lb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
-                                       hostbuf=lut))
-            guide_buf = pb
-            self.kernels['guide'](self.q, (m,), None, best_buf, lb, guide_buf, np.int32(m))
-            smooth = np.float32(np.float32(smoothing) * np.float32(0.75)
-                                * np.float32(0.03125))
-            scale = float(np.float32(extent * smooth / np.float32(100)))
-            low = float(np.float32(extent * np.float32(smooth * np.float32(64))
-                                   / np.float32(100)))
-            tmp_depth_buf = sb
-            for _ in range(2):
-                cancel()
-                self.filt.axis_guided_buf(depth_buf, guide_buf, tmp_depth_buf, oh, ow,
-                                          scale, low, axis=1)
-                cancel()
-                self.filt.axis_guided_buf(tmp_depth_buf, guide_buf, depth_buf, oh, ow,
-                                          scale, low, axis=0)
+                lb = _alloc(self.cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+                                           hostbuf=lut))
+                guide_buf = pb
+                self.kernels['guide'](self.q, (m,), None, best_buf, lb, guide_buf, np.int32(m))
+                tmp_depth_buf = sb
+                for _ in range(2):
+                    cancel()
+                    self.filt.axis_guided_buf(depth_buf, guide_buf, tmp_depth_buf, oh, ow,
+                                              scale, low, axis=1)
+                    cancel()
+                    self.filt.axis_guided_buf(tmp_depth_buf, guide_buf, depth_buf, oh, ow,
+                                              scale, low, axis=0)
             half_step = step >> 1
             if half_step:
                 sl = _snap_lut(feather).astype(np.int64)
@@ -1919,8 +2202,10 @@ class _GpuB:
                                                hostbuf=sl))
                 self.kernels['snap'](self.q, (m,), None, depth_buf, sb_lut,
                                      np.int32(step), np.int32(m))
-            self.kernels['apply_detail'](self.q, (m,), None, depth_buf, d_second_buf,
-                                         d_winner_buf, np.int32(m))
+            if preserve_detail:
+                self.kernels['apply_detail'](self.q, (m,), None, depth_buf, d_second_buf,
+                                             d_winner_buf, np.int32(m))
+            cancel()
             out = self.expand.run_buf(depth_buf, (oh, ow), shape)
             completed = True
             return out
