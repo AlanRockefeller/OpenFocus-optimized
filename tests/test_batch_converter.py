@@ -535,7 +535,8 @@ def test_converter_identifies_tiff_off_gui_thread(qapp, tmp_path, monkeypatch, c
         assert dialog.format_example.text().endswith('原图.tif')
         ready = QSignalSpy(dialog.thumbnail_worker.ready)
         resume.set()
-        assert ready.wait(5000)
+        # The worker thread can emit before this thread starts to wait.
+        assert len(ready) or ready.wait(5000)
         qapp.processEvents()
         assert not dialog.start.isEnabled()
         assert trans.t('converter_no_changes') in dialog.format_warning.text()
