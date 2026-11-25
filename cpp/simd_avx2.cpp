@@ -4501,7 +4501,7 @@ void ecc_ic_pass_all_in_row_p6_avx2(
     const int vec_end = rw & ~3;
     int rx = 0;
     while (rx < vec_end) {
-        const int seg_end = std::min(vec_end, rx + kSegment);
+        const int seg_end = rx + std::min(kSegment, vec_end - rx);
         for (int k = rx; k < seg_end; k += 4) {
             const __m256d iw = ecc_bilinear_4_avx2(src_data, w, h, v_sx, v_sy);
             const __m256d t0 = _mm256_cvtps_pd(_mm_loadu_ps(t0_row + k));
@@ -4616,7 +4616,7 @@ void ecc_ic_pass_all_in_row_p8_avx2(
     const int vec_end = rw & ~3;
     int rx = 0;
     while (rx < vec_end) {
-        const int seg_end = std::min(vec_end, rx + kSegment);
+        const int seg_end = rx + std::min(kSegment, vec_end - rx);
         for (int k = rx; k < seg_end; k += 4) {
             const __m256d inv_d = _mm256_div_pd(v_one, v_den);
             const __m256d sx = _mm256_mul_pd(v_nsx, inv_d);
