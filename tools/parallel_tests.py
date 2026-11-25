@@ -121,13 +121,14 @@ def main(argv=None):
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
                         help="pytest processes to run at once (default: CPU count)")
     parser.add_argument("--slices", type=int, default=None,
-                        help="consecutive slices to cut the suite into (default: twice --jobs)")
+                        help="consecutive slices to cut the suite into (default: four per job)")
     options, pytest_options = parser.parse_known_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")  # test output may not fit the console encoding
     jobs = max(1, options.jobs)
     counts = collect(pytest_options)
-    groups = split_files(counts, options.slices or 2 * jobs)
+    # Slices differ several-fold in duration; four per job keeps the jobs busy.
+    groups = split_files(counts, options.slices or 4 * jobs)
     print(f"{sum(counts.values())} tests in {len(counts)} files, {len(groups)} slices, "
           f"{jobs} at a time", flush=True)
     worst = run(groups, jobs, pytest_options)
