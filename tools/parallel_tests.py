@@ -22,6 +22,10 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = "tests"
+# The same cuts on every machine, whatever its core count, so a result can be
+# reproduced elsewhere. Slices differ several-fold in duration; this many keep
+# four to eight processes busy.
+SLICES = 16
 # pytest lists one test per line ("file.py::test") or, when quieter, one file
 # per line with its number of tests ("file.py: 12").
 _NODE = re.compile(r"^(" + TESTS + r"/[^:\s]+\.py)(?:::|: (\d+)$)")
@@ -120,15 +124,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
                         help="pytest processes to run at once (default: CPU count)")
-    parser.add_argument("--slices", type=int, default=None,
-                        help="consecutive slices to cut the suite into (default: four per job)")
+    parser.add_argument("--slices", type=int, default=SLICES,
+                        help=f"consecutive slices to cut the suite into (default: {SLICES})")
     options, pytest_options = parser.parse_known_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")  # test output may not fit the console encoding
     jobs = max(1, options.jobs)
     counts = collect(pytest_options)
-    # Slices differ several-fold in duration; four per job keeps the jobs busy.
-    groups = split_files(counts, options.slices or 4 * jobs)
+    groups = split_files(counts, options.slices)
     print(f"{sum(counts.values())} tests in {len(counts)} files, {len(groups)} slices, "
           f"{jobs} at a time", flush=True)
     worst = run(groups, jobs, pytest_options)

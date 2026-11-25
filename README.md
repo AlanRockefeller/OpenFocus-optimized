@@ -385,6 +385,8 @@ which takes a fraction of the single-process time:
 python tools/parallel_tests.py --timeout=180 --timeout-method=thread
 ```
 
+Add `--jobs N` to use fewer processes than cores.
+
 On a headless host, set `QT_QPA_PLATFORM=offscreen`. CI uses these same dependency
 files on Windows, macOS and Linux. A change to processing, cancellation or GUI
 state also needs a real CLI/desktop smoke run; tests alone do not exercise the
