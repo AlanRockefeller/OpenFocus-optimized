@@ -302,7 +302,7 @@ class MultiFocusFusion:
     def descriptor(self):
         return get_fusion(self.algorithm)
 
-    def __init__(self, algorithm: str = FUSION_DEFAULT, use_gpu: bool = False,
+    def __init__(self, algorithm: str = FUSION_DEFAULT, use_gpu: bool = True,
                  tile_enabled: bool = True, tile_block_size: int = 1024,
                  tile_overlap: int = 256, tile_threshold: int = 2048,
                  ai_batch_size: int = 2,
@@ -315,7 +315,7 @@ class MultiFocusFusion:
         
         Args:
             algorithm (str): 融合算法名称,可选 'guided_filter', 'dct', 'dtcwt', 'stackmffv3'
-            use_gpu (bool): 是否使用GPU加速(CUDA/ROCm/XPU/MPS),默认为False
+            use_gpu (bool): 是否优先使用GPU加速(OpenCL / CUDA / ROCm / XPU / MPS),默认为True并在不可用时回退CPU
             ai_batch_size (int): StackMFF V3 批量处理大小，默认为2
             exposure_match (bool): 融合前匹配整栈曝光；OpenFocus A/B/C 使用
                 处理序首帧，其余算法使用末帧。分块前统一计算，默认 True。
@@ -735,6 +735,8 @@ class MultiFocusFusion:
                 raise RegistrationCancelled()
 
         check_cancel()
+        from core.source_frames import SOURCE_CACHE
+        SOURCE_CACHE.adapt_to_memory()
         self._tile_grid = None
         supplied = kwargs.pop('parameters', None)
         values = dict(self.fusion_parameters)
@@ -1078,15 +1080,38 @@ class MultiFocusFusion:
                     max(h, height), max(w, width), kwargs, count)
                 decode = max(frame_resolution_bytes(frame) for frame in input_source)
                 budget = memory_budget_bytes()
-                # Keep staging mandatory when the streamed peak exceeds RAM.
-                required = (fixed + worker + decode + source_cache_growth_bytes(input_source)
-                            > budget)
+                if method_b and not self.use_gpu:
+                    # Both CPU passes stream without retaining decoded sources.
+                    cache_growth = 0
+                    if img_resize is None and all(frame.dtype in (np.uint8, np.uint16)
+                                                  for frame in input_source):
+                        worker = min(worker, policy.frame_ram_budget(policy.probe_memory()))
+                else:
+                    cache_growth = source_cache_growth_bytes(input_source)
+                required = fixed + worker + decode + cache_growth > budget
                 # Stage decodes that cannot fit the frame cache even on a
-                # machine that has spare RAM at the start of this render.
+                # machine that has spare RAM at the start of this render, or
+                # processed disk stacks in OpenFocus B when scratch space is
+                # healthy and total footprint stays within the cache ceiling.
+                from core import frame_storage
+                from core.frame_resolution_cache import NATIVE_PREPARED_FRAME_LIMIT_BYTES
                 expensive_decode = max(128 * 1024 ** 2, min(budget // 4, FRAME_RAM_BUDGET_BYTES))
-                stage = required or (method_b and decode > expensive_decode and any(
-                    frame_resolution_bytes(input_source[index]) > expensive_decode
-                    for index in indices))
+                total_disk_bytes = (
+                    sum(int(getattr(input_source[index], 'nbytes', 0)) for index in indices)
+                    if method_b else 0
+                )
+                has_processed_disk = (
+                    method_b
+                    and 32 * 1024 * 1024 <= total_disk_bytes <= NATIVE_PREPARED_FRAME_LIMIT_BYTES
+                    and any(isinstance(input_source[index], ProcessedFrame) for index in indices)
+                    and frame_storage.assess_scratch(0, total_disk_bytes, 0).get('status') == 'ok'
+                )
+                stage = required or has_processed_disk or (
+                    method_b and decode > expensive_decode and any(
+                        frame_resolution_bytes(input_source[index]) > expensive_decode
+                        for index in indices
+                    )
+                )
             if indices and stage:
                 sources = [input_source[index] for index in indices]
                 scope = current()
@@ -1164,34 +1189,74 @@ class MultiFocusFusion:
             if not spec.neural:
                 height = max(h, img_resize[1]) if img_resize else h
                 width = max(w, img_resize[0]) if img_resize else w
+                openfocus_native_family = self.algorithm in ('openfocus_a', 'openfocus_b', 'openfocus_c')
                 estimates = {}
+                fixed = per_worker = decode_peak = 0
                 if spec.resource_estimator:
                     fixed, per_worker = resolve_runner(spec.resource_estimator)(height, width, kwargs, count)
                     if streaming_sources:
-                        from core.source_frames import (frame_has_mapped_pixels, frame_resolution_bytes,
+                        from core.source_frames import (frame_resolution_bytes,
                                                         source_cache_growth_bytes)
-                        if (self.algorithm == 'openfocus_b' and img_resize is None
-                                and all(frame.dtype in (np.uint8, np.uint16) and frame_has_mapped_pixels(frame)
+                        if (openfocus_native_family and img_resize is None
+                                and all(frame.dtype in (np.uint8, np.uint16)
                                         for frame in input_source)):
-                            # Its integer depth and merge planes spill to scratch
-                            # above the transient RAM cap. Device paths separately
-                            # admit their own host staging and VRAM.
+                            # OpenFocus A/B/C spill large transient planes to disk above
+                            # the shared frame RAM cap; device passes admit separately.
                             per_worker = min(per_worker, policy.frame_ram_budget(policy.probe_memory()))
-                        per_worker += max(frame_resolution_bytes(frame) for frame in input_source)
-                        fixed += source_cache_growth_bytes(input_source)
+                        decode_peak = max(frame_resolution_bytes(frame) for frame in input_source)
+                        per_worker += decode_peak
+                        if not openfocus_native_family:
+                            fixed += source_cache_growth_bytes(input_source)
                     estimates = {'fixed_bytes': fixed, 'per_worker_bytes': per_worker}
-                plan = policy.plan_execution(
-                    policy.Workload(algorithm=self.algorithm, frames=count,
-                        height=height, width=width, channels=3, itemsize=np.dtype(first.dtype).itemsize,
-                        outer_tasks=count if spec.parallel_frames else 1, **estimates),
-                    preference=self.resource_preference,
-                    user_threads=kwargs.get('thread_count'),
-                    ram_budget_override=memory_budget_bytes())
+                workload = policy.Workload(
+                    algorithm=self.algorithm, frames=count,
+                    height=height, width=width, channels=3, itemsize=np.dtype(first.dtype).itemsize,
+                    outer_tasks=count if spec.parallel_frames else 1, **estimates,
+                )
+                try:
+                    plan = policy.plan_execution(
+                        workload,
+                        preference=self.resource_preference,
+                        user_threads=kwargs.get('thread_count'),
+                        ram_budget_override=memory_budget_bytes(),
+                    )
+                except policy.ResourceLimitError:
+                    if not openfocus_native_family or memory_budget_bytes() <= 0:
+                        raise
+                    import gc
+                    from core.source_frames import SOURCE_CACHE
+
+                    SOURCE_CACHE.clear()
+                    gc.collect()
+                    budget_now = memory_budget_bytes()
+                    if budget_now <= 0:
+                        raise
+                    min_fixed = fixed
+                    if streaming_sources:
+                        min_worker = max(1, decode_peak or min(per_worker, min(height, 128) * width * 64))
+                    else:
+                        min_worker = max(1, min(per_worker, min(height, 128) * width * 64))
+                    if min_fixed + min_worker > budget_now:
+                        raise
+                    plan = policy.plan_execution(
+                        policy.Workload(
+                            algorithm=self.algorithm, frames=count,
+                            height=height, width=width, channels=3,
+                            itemsize=np.dtype(first.dtype).itemsize,
+                            outer_tasks=1, fixed_bytes=min_fixed, per_worker_bytes=min_worker,
+                        ),
+                        preference=self.resource_preference,
+                        user_threads=1,
+                        ram_budget_override=budget_now,
+                    )
+                    log_action(
+                        'openfocus_low_ram_degrade', algorithm=self.algorithm,
+                        required_bytes=min_fixed + min_worker, budget_bytes=budget_now,
+                    )
                 # OpenFocus admits the whole serial reconstruction here, then
                 # admits its independent FirstPass producers separately. Its
                 # global smoothing/pyramid maps are not live per producer.
-                kwargs['thread_count'] = (plan.native_threads if self.algorithm in
-                    ('openfocus_a', 'openfocus_b', 'openfocus_c') else plan.workers)
+                kwargs['thread_count'] = (plan.native_threads if openfocus_native_family else plan.workers)
                 if spec.ordered_plan:
                     kwargs['execution_plan'] = plan
             kwargs['should_cancel'] = should_cancel
@@ -1782,7 +1847,9 @@ class MultiFocusFusion:
                 depth_threads = min(depth_threads, thread_count)
             global_depth = depth_map(depth_images, None, kernel, smoothing, should_cancel,
                                      thread_count=depth_threads, half_resolution=True,
-                                     preserve_detail=True, feather=kwargs.get('feather', 3))
+                                     preserve_detail=True, feather=kwargs.get('feather', 3),
+                                     use_gpu=self.use_gpu,
+                                     device_callback=self._record_openfocus_device)
             del depth_images
 
         if get_fusion(algorithm).resource_estimator:
@@ -1823,6 +1890,11 @@ class MultiFocusFusion:
             # Directory tiles decode full source frames. Serializing them keeps
             # simultaneous full-frame decodes out of the tile-only budget.
             optimal_threads = 1
+        elif (self.use_gpu and algorithm in OPENCL_FUSION_ALGORITHMS
+              and optimal_threads > 2 and ensure_openfocus_gpu_available()):
+            # OpenCL device work serializes on _device_lock; keeping at most two
+            # tile workers avoids holding many cropped stacks in RAM at once.
+            optimal_threads = 2
         acc = create_frame((h, w, channels), np.float32)
         weight = create_frame((h, w, 1), np.float32)
         acc[...] = 0
@@ -2436,7 +2508,7 @@ class MultiFocusFusion:
 # 便捷函数
 def fuse_images(input_source: Union[str, List[np.ndarray]],
                 algorithm: str = FUSION_DEFAULT,
-                use_gpu: bool = False,
+                use_gpu: bool = True,
                 img_resize: Optional[Tuple[int, int]] = None,
                 tile_enabled: Optional[bool] = None,
                 tile_block_size: Optional[int] = None,
@@ -2451,7 +2523,7 @@ def fuse_images(input_source: Union[str, List[np.ndarray]],
     Args:
         input_source: 图像源(目录路径或图像列表)
             algorithm: 融合算法 ('guided_filter', 'dct', 'dtcwt', 'stackmffv3')
-        use_gpu: 是否使用GPU（当前版本将自动切换到CPU）
+        use_gpu: 是否优先使用GPU加速（不可用时自动回退CPU，默认True）
         img_resize: 目标尺寸
         ai_batch_size: StackMFF V3 批量处理大小（默认2）
         mode: StackMFF V3 输出模式，'soft'（概率加权，默认）或 'hard'（argmax）

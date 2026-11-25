@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Add an interactive desktop tour from the welcome dialog and Help menu.
+  Follow the highlighted controls to browse source frames, choose methods,
+  render, and compare the result.
 - Download smaller desktop updates for matching installations on Windows,
   Apple Silicon macOS, and Linux x86-64. Publish a patch helper for the
   official 2.0.0 desktop builds when the patch is smaller than the full package.
@@ -15,6 +18,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Use single-scale inference by default in StackMFF V3. Select dual-scale
   inference in fusion, batch, method comparison, and depth settings, or
   with the command-line inference scale option.
+- Add tiled text watermarks to command-line exports and recipes. Open the
+  Watermark and Batch Image Converter dialogs through desktop control.
 - Show live grayscale focus layers while OpenFocus A, B, and C render. The
   selected source row follows the frame in processing order, and OpenFocus B
   keeps the focus map readable during layer blending.
@@ -37,17 +42,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   OpenFocus depth codes and pyramid rounding across platform builds.
 - Read stack previews and metadata in a single scan and reuse compatible
   isolated render workers between renders.
+- Load dialogs and language packs on demand. Generate eligible 4K PNG previews
+  and prepare alignment frames in parallel within CPU and memory budgets.
+  Read TIFF calibration during the stack metadata scan.
 - Use OpenCL for eligible large integer ECC reductions, including 8×8 area
   downsizing. Apply exact Lanczos4 warps for large 8-bit and 16-bit frames
   during ECC and homography registration and whenever a GPU render resolves
   deferred frames, in whole images or tiles. Report the device for each step
   of a combined registration.
+- Share the OpenCL context across fusion, registration, and background focus
+  while retaining separate command queues. Cache the remaining GPU kernels
+  across launches.
+- Use the optional correctly rounded FP32 build flag on OpenCL devices that
+  advertise it. Budget eligible unified-memory registration against shared RAM.
+  Preserve OpenFocus C's pyramid rounding on devices that lack the flag.
+- Read OpenCL device budgets through DXGI on Windows and use Linux DRM VRAM
+  counters when the driver exposes them and the adapter can be identified.
+- Scan retained logs and crash reports using directory entry metadata.
+- Prefetch OpenFocus frames within CPU and memory budgets, and reuse compiled
+  OpenCL binaries across launches. Keep exact pixel checks on alignment plans,
+  estimate registration memory from imported metadata, and retain enough
+  working memory for ECC's OpenCV fallback.
+- Adapt decoded-frame caches and transient RAM to available memory. Spill
+  OpenFocus alignment planes to scratch under pressure while reserving RAM
+  for source decoding. Keep OpenFocus B staging optional when streaming fits.
 - Write disk-backed frames, preview pixels and imported video frames to scratch
   in chunks up to 8 MiB, with bounded packing of strided images and exact pixel
   bytes in C order.
+- Speed up eligible 8-bit and 16-bit PNG reads and banded PNG writes. Read
+  orientation from the validated PNG or JPEG header and preserve lossless WebP
+  metadata in one pass. Encode eligible baseline JPEGs in memory when RAM fits.
 - Read eligible uncompressed 8-bit and 16-bit gray and RGB TIFF pages directly
   from the file, preserving pixel values. Keep decoder validation for incomplete
   strip tables, configured limits, and other TIFF layouts.
+- Stream large LZW TIFF previews within the decode budget. Overlap source
+  preparation with OpenFocus B and C CPU fusion when memory permits.
 - Reuse the open stack's import mode when appending a folder, skipping the
   mode-selection scan before the loader starts.
 - Compute deferred perspective, OpenFocus alignment, and OpenFocus translation
@@ -169,10 +198,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   arena memory after each StackMFF inference.
 - Avoid repeated CPU topology queries while admitting each file in Batch Image
   Converter. Continue checking current memory and destination disk space.
+- Fit Wipe controls in narrow result panels and keep status text available on
+  hover. Refine dialog layouts, keyboard actions, and translated captions.
 - Reuse OpenFocus A response rows and limit GPU output readback size. Skip
   inactive OpenFocus B merge tiles and reuse OpenFocus C pyramid buffers.
 - Reduce the OpenFocus C OpenCL working set by processing the finest layer
   from packed source pixels. Log the device and admission limit on CPU fallback.
+- Run half-resolution OpenFocus C depth on supported OpenCL devices. Reduce
+  CPU pyramid memory and reuse OpenFocus A responses during soft and feather
+  blending. Decode eligible compressed TIFF strips in parallel and read JPEG
+  and PNG headers and pixels from the same file handle.
 - Count prepared frames and reuse OpenFocus B scratch data for matching renders
   in the same session, including the aligned depth validity mask.
 - Screen unsupported extensions before resolving paths in Batch Image
@@ -185,6 +220,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   normalization and OpenCV's reduction for normalized grayscale. Check for
   cancellation between exposure strips. Encode compressed TIFF strips in a
   bounded queue and preserve their output order.
+- Prewarm the first render process after loading a stack when memory permits,
+  and prepare the first display preview while remaining headers are scanned.
+  Reuse display buffers when panning or zooming and accelerate eligible 8-bit
+  PNG exports with the existing color and metadata handling.
 - Speed up packed OpenFocus A, B, and C fusion, exposure adjustment, tile
   reduction, and alignment with AVX2 on supported CPUs. Preserve scalar pixel
   arithmetic for strided views, wide integer sums, and float rounding.
@@ -194,8 +233,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   image views and scalar variance decisions for nearly flat ECC samples.
 - Check repeated original paths once when validating a desktop export
   destination, including exports from large image stacks.
+- Count physical CPU cores from Linux sysfs when processor records omit
+  topology. Preserve caller-relative files when launching the desktop app.
+  Finish conversion work safely during shutdown and support private Unix
+  control sockets up to the platform path limit.
 
 ### Fixed
+- Preserve saved result metadata and protect original stack files during
+  desktop exports. Release ROI previews and finish export and batch cleanup
+  safely when closing the window. Resolve Qt UI font fallback families and
+  find uppercase multi-page TIFF containers when reopening projects.
+- Bundle trusted CA roots with the desktop app so sign-in and other HTTPS
+  requests can verify server certificates on macOS.
+- Keep desktop sign-in responsive when the browser opens an idle connection,
+  handle unsupported system proxy schemes, and recover stale macOS Keychain
+  sessions after a confirmed write mismatch.
+- Restore embedded TIFF thumbnail previews in Batch Image Converter.
+- Reject Linux control socket paths that are too long for Qt clients and
+  preserve fixed-width text in the Environment Info dialog under application themes.
+- Keep desktop updates recoverable across channel changes, failed delta
+  downloads and interrupted installation. Verify the Windows website
+  installer against the release's published size and SHA-256 digest.
+- Use the Darwin C ABI for system memory and CPU topology probes, including
+  64-bit page sizes and validated system counter lengths.
 - Admit large JPEG stacks for ECC using reduced grayscale decodes, including
   with GPU acceleration enabled. Keep registration warps at full resolution.
 - Budget sequential decode and processing peaks separately. Decode RGB JPEGs

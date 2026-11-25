@@ -349,7 +349,7 @@ def _activity_frames(frames, img_resize, kernel_size, thread_count, should_cance
 def depth_map(frames, img_resize, kernel_size, smoothing, should_cancel,
               progress_callback=None, thread_count=1, *, return_codes=False,
               half_resolution=False, preserve_detail=False, feather: int = 0,
-              use_gpu=False, device_callback=None, _gpu=None, _live_preview=None):
+              use_gpu=True, device_callback=None, _gpu=None, _live_preview=None):
     """Estimate depth with the specified integer feather, defaulting to F0."""
     _validate_feather(feather)
     from fusion_methods.openfocus_ab import _check_cancel
@@ -380,14 +380,17 @@ def depth_map(frames, img_resize, kernel_size, smoothing, should_cancel,
                 callback(index, total)
                 reported = index
 
-    if gpu is not None and half_resolution and preserve_detail:
+    if gpu is not None and half_resolution:
         from fusion_methods._openfocus_gpu import GpuError, log_fallback, device_status
         shape = (frames[0].shape[:2] if img_resize is None
                  else (int(img_resize[1]), int(img_resize[0])))
         try:
+            full_depth_kwargs = {'live_preview': _live_preview}
+            if not preserve_detail:
+                full_depth_kwargs['preserve_detail'] = False
             accelerated = gpu.full_depth(frames, shape, img_resize, kernel_size,
                                          smoothing, feather, should_cancel,
-                                         progress_callback, live_preview=_live_preview)
+                                         progress_callback, **full_depth_kwargs)
         except GpuError as exc:
             gpu.failed = True
             log_fallback(exc)
