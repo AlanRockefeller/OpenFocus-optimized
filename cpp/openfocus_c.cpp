@@ -76,7 +76,7 @@ void down_horizontal_impl(
     // The vector kernel works in blocks; a scratch that overlaps the source
     // keeps the pixel order of the scalar loops.
     const bool simd_rows = fast_src_3c && ix_stop >= 4 && simd::use_avx2()
-        && !packed_rows_overlap(source, origin, origin + rows, scratch, 0, rows);
+        && !packed_rows_overlap(source, origin, origin + rows, width * 3, scratch, 0, rows, out_w * 3);
     std::unique_ptr<float[]> raw_as_f32;
     if constexpr (ScaledRaw) {
         if (simd_rows) {
@@ -250,7 +250,7 @@ void up_horizontal_impl(
     // next pair overwrites it; a scratch that overlaps the coarse level keeps
     // the pixel order of the scalar loop.
     const bool simd_3c = fast_3c && simd::use_avx2() && (pair_stop - ix_start) >= 4
-        && !packed_rows_overlap(coarse, origin, origin + rows, scratch, 0, rows);
+        && !packed_rows_overlap(coarse, origin, origin + rows, width * 3, scratch, 0, rows, out_w * 3);
 
     for (int64_t row = 0; row < rows; ++row) {
         const int64_t y = row + origin;
@@ -666,17 +666,36 @@ void of_pyr_level0_merge_from_raw_cpp(
             const float w3 = odd ? kE1 : kE3;
             const float w4 = odd ? kE0 : 0.0f;
 
-            // The vector merge loads eight weights before it stores eight
-            // best values; rows that share samples keep the pixel order below.
+            // The vector merge works in blocks: it stores eight best and
+            // winner values, then loads and stores the detail of eight
+            // samples at a time. That equals the pixel order below only
+            // while nothing it writes shares bytes with anything else it
+            // reads or writes in this row.
             const uint64_t code_bytes = static_cast<uint64_t>(width) * sizeof(uint16_t);
-            const bool codes_overlap = byte_ranges_overlap(wr, code_bytes, br, code_bytes)
-                || (win_row != nullptr
-                    && (byte_ranges_overlap(win_row, code_bytes, wr, code_bytes)
-                        || byte_ranges_overlap(win_row, code_bytes, br, code_bytes)));
-            if (avx2_skip && !codes_overlap && (source.itemsize == 1 || source.itemsize == 2)) {
-                const void* raw_row = (source.itemsize == 1)
-                    ? static_cast<const void*>(static_cast<const uint8_t*>(source.data) + y * source.stride[0])
-                    : static_cast<const void*>(static_cast<const uint16_t*>(source.data) + y * source.stride[0]);
+            const uint64_t detail_bytes = static_cast<uint64_t>(width) * 3 * sizeof(float);
+            const uint64_t raw_bytes = static_cast<uint64_t>(width) * 3 * static_cast<uint64_t>(source.itemsize);
+            const void* const raw_row = static_cast<const uint8_t*>(source.data)
+                                      + y * source.stride[0] * source.itemsize;
+            const int64_t scratch_step = scratch.stride[0] < 0 ? -scratch.stride[0] : scratch.stride[0];
+            const void* const taps_low = scratch.stride[0] < 0 ? hr4 : hr0;
+            const uint64_t taps_bytes = static_cast<uint64_t>(4 * scratch_step + width * 3) * sizeof(float);
+            const auto shares = [](const void* a, uint64_t a_bytes, const void* b, uint64_t b_bytes) {
+                return a != nullptr && b != nullptr && byte_ranges_overlap(a, a_bytes, b, b_bytes);
+            };
+            const bool rows_overlap =
+                shares(br, code_bytes, wr, code_bytes)
+                || shares(br, code_bytes, raw_row, raw_bytes)
+                || shares(br, code_bytes, taps_low, taps_bytes)
+                || shares(br, code_bytes, acc_row, detail_bytes)
+                || shares(win_row, code_bytes, wr, code_bytes)
+                || shares(win_row, code_bytes, br, code_bytes)
+                || shares(win_row, code_bytes, raw_row, raw_bytes)
+                || shares(win_row, code_bytes, taps_low, taps_bytes)
+                || shares(win_row, code_bytes, acc_row, detail_bytes)
+                || shares(acc_row, detail_bytes, wr, code_bytes)
+                || shares(acc_row, detail_bytes, raw_row, raw_bytes)
+                || shares(acc_row, detail_bytes, taps_low, taps_bytes);
+            if (avx2_skip && !rows_overlap && (source.itemsize == 1 || source.itemsize == 2)) {
                 simd::pyr_level0_merge_3c_row_avx2(
                     wr, br, win_row, hr0, hr1, hr2, hr3, hr4, raw_row, source.itemsize == 1,
                     acc_row, width, factor, index, first, w0, w1, w2, w3, w4, kPointOne);
