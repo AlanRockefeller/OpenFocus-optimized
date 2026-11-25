@@ -13,6 +13,8 @@ from threading import Event, Lock
 
 import numpy as np
 
+from core.frame_storage import async_upload_view
+
 _device_lock = Lock()
 _context_lock = Lock()
 _cache_lock = Lock()
@@ -1302,7 +1304,7 @@ class Merge:
                 setattr(self, src_attr, src_buf)
                 setattr(self, bytes_attr, image.nbytes)
             self._merge_needs_drain = True
-            upload = cl.enqueue_copy(self.queue, src_buf, image, is_blocking=False)
+            upload = cl.enqueue_copy(self.queue, src_buf, async_upload_view(image), is_blocking=False)
             height, width = self._merge_shape[:2]
             channels = 1 if image.ndim == 2 else image.shape[2]
             event = kern(self.queue, (height * width,), None, self._merge_acc,
@@ -2006,14 +2008,14 @@ class _GpuB:
         is_raw, host_buf, channels, is_u8 = prepared
         if is_raw:
             ib = self._source_buffer(host_buf.nbytes, slot=slot)
-            upload = self.cl.enqueue_copy(self.q, ib, host_buf, is_blocking=False)
+            upload = self.cl.enqueue_copy(self.q, ib, async_upload_view(host_buf), is_blocking=False)
             kern = self.kernels['gray_u8' if is_u8 else 'gray_u16']
             kern(self.q, (width, height), None, ib, gray_buf,
                  np.int32(height), np.int32(width), np.int32(channels),
                  np.int32(256 if is_u8 else 1))
             self.gpu.used = True
             return upload
-        return self.cl.enqueue_copy(self.q, gray_buf, host_buf, is_blocking=False)
+        return self.cl.enqueue_copy(self.q, gray_buf, async_upload_view(host_buf), is_blocking=False)
 
     # -- depth_map equivalent ---------------------------------------------
     def depth(self, frames, kernel_size, smoothing, feather, shape, count,

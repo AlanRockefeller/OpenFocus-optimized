@@ -12,6 +12,7 @@ from threading import Lock
 
 import numpy as np
 
+from core.frame_storage import async_upload_view
 from fusion_methods.openfocus_bc import _pyramid_levels, _source_codes
 from fusion_methods.openfocus_ab import _check_cancel
 
@@ -654,7 +655,7 @@ class GpuC:
                 packing = (np.float32(scale / (65280.0 if is_u8 else 65535.0)),
                            np.int32(pix_u8), np.int32(bgr_rev))
                 in_flight = True
-                upload = self.cl.enqueue_copy(self.q, src, codes, is_blocking=False)
+                upload = self.cl.enqueue_copy(self.q, src, async_upload_view(codes), is_blocking=False)
                 last_event = None
                 if not detail_levels:
                     last_event = self._run(self.k['c_norm'], full_size, src, coarsest,
