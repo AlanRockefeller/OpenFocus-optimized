@@ -11,6 +11,26 @@ bool use_avx2_fma();
 void set_force_scalar(bool force);
 std::string simd_info();
 
+// AVX-512 (F, DQ, BW, VL) kernels, compiled in simd_avx512.cpp. use_avx512() is
+// true when they were compiled in, the CPU and the operating system support
+// them, and neither scalar mode nor AVX2 mode is forced. set_force_avx2 keeps
+// every kernel at AVX2 so tests can compare the two; simd_info() reports the
+// AVX2 level as before and avx512_info() returns "AVX-512" or "".
+bool use_avx512();
+bool avx512_compiled();
+void set_force_avx2(bool force);
+std::string avx512_info();
+
+// Gray codes of packed RGB rows, sixteen pixels at a time; the same output as
+// gray_rgb_*_row_avx2. Returns the number of pixels written (a multiple of 16).
+int64_t gray_rgb_u8_row_avx512(
+    const uint8_t* sr, uint16_t* dst16, int32_t* dst32, int64_t width,
+    int32_t scale, bool depth_color, bool dst_is_u16);
+
+int64_t gray_rgb_u16_row_avx512(
+    const uint16_t* sr, uint16_t* dst16, int32_t* dst32, int64_t width,
+    int32_t scale, bool depth_color, bool dst_is_u16);
+
 void pyr_down_vertical_row_f32_avx2(
     const float* p0, const float* p1, const float* p2, const float* p3,
     float* dst, int64_t elems, float d0, float d1);

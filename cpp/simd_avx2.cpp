@@ -26,10 +26,12 @@ namespace simd {
 namespace {
 
 std::atomic<bool> g_force_scalar{false};
+std::atomic<bool> g_force_avx2{false};
 
 struct CpuFeatures {
     bool avx2 = false;
     bool fma = false;
+    bool avx512 = false;
 };
 
 CpuFeatures detect_cpu_features() {
@@ -82,7 +84,12 @@ CpuFeatures detect_cpu_features() {
     // Leaf 7 EBX bit 5 = AVX2, Leaf 1 ECX bit 12 = FMA3
     const bool has_avx2 = (ebx7 & (1u << 5)) != 0;
     const bool has_fma = has_avx2 && ((ecx1 & (1u << 12)) != 0);
-    return {has_avx2, has_fma};
+    // Leaf 7 EBX bits 16 (AVX512F), 17 (DQ), 30 (BW) and 31 (VL); the operating
+    // system must also save the opmask registers and both halves of the ZMM
+    // state (XCR0 bits 5, 6 and 7).
+    const uint32_t avx512_bits = (1u << 16) | (1u << 17) | (1u << 30) | (1u << 31);
+    const bool has_avx512 = has_avx2 && (ebx7 & avx512_bits) == avx512_bits && (xcr0 & 0xE0ull) == 0xE0ull;
+    return {has_avx2, has_fma, has_avx512};
 #else
     return {};
 #endif
@@ -121,6 +128,19 @@ bool use_avx2_fma() {
 
 void set_force_scalar(bool force) {
     g_force_scalar.store(force, std::memory_order_relaxed);
+}
+
+bool use_avx512() {
+    return !g_force_scalar.load(std::memory_order_relaxed) && !g_force_avx2.load(std::memory_order_relaxed)
+        && cpu_features().avx512 && avx512_compiled();
+}
+
+void set_force_avx2(bool force) {
+    g_force_avx2.store(force, std::memory_order_relaxed);
+}
+
+std::string avx512_info() {
+    return use_avx512() ? "AVX-512" : "";
 }
 
 std::string simd_info() {

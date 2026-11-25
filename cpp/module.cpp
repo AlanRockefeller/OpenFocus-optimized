@@ -920,6 +920,8 @@ NB_MODULE(_openfocus_native, m) {
     m.def("compiler_info", &compiler_info);
     m.def("simd_info", &openfocus::simd::simd_info);
     m.def("set_force_scalar", &openfocus::simd::set_force_scalar, nb::arg("force"));
+    m.def("set_force_avx2", &openfocus::simd::set_force_avx2, nb::arg("force"));
+    m.def("avx512_info", &openfocus::simd::avx512_info);
     m.def(
         "parallel_sum_smoke",
         &parallel_sum_smoke,

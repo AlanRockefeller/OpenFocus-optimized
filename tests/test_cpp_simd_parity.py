@@ -32,6 +32,42 @@ def _require_avx2():
     return mod
 
 
+def _require_avx512():
+    mod = _require_avx2()
+    if not hasattr(mod, "avx512_info") or mod.avx512_info() != "AVX-512":
+        pytest.skip("Host CPU/OS reports no AVX-512 (F, DQ, BW, VL) or the build has no AVX-512 kernels")
+    return mod
+
+
+def _avx512_avx2_and_scalar(mod, run):
+    try:
+        mod.set_force_avx2(False)
+        wide = run()
+        mod.set_force_avx2(True)
+        narrow = run()
+        mod.set_force_avx2(False)
+        mod.set_force_scalar(True)
+        scalar = run()
+    finally:
+        mod.set_force_avx2(False)
+        mod.set_force_scalar(False)
+    return wide, narrow, scalar
+
+
+def test_force_avx2_toggles_avx512_kernels():
+    mod = _require_avx512()
+    try:
+        mod.set_force_avx2(True)
+        assert mod.avx512_info() == ""
+        assert mod.simd_info() in ("AVX2", "AVX2+FMA")
+        mod.set_force_scalar(True)
+        assert mod.avx512_info() == ""
+    finally:
+        mod.set_force_avx2(False)
+        mod.set_force_scalar(False)
+    assert mod.avx512_info() == "AVX-512"
+
+
 def test_simd_info_and_force_scalar_toggle():
     mod = _require_avx2()
     try:
@@ -859,6 +895,34 @@ def test_gray_rows_rgb_sum_avx2_vs_scalar_bit_exact(w, dtype):
     total = rgb.astype(np.int64).sum(axis=2)
     np.testing.assert_array_equal(simd[1], (total // 3) * scale)
     np.testing.assert_array_equal(simd[3], (total * scale * 85) >> 8)
+
+
+@pytest.mark.parametrize("w", [1, 15, 16, 17, 31, 32, 33, 47, 131, 1029])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_gray_rows_avx512_vs_avx2_and_scalar_bit_exact(w, dtype):
+    """Sixteen-pixel blocks, the AVX2 remainder after them, both destinations."""
+    mod = _require_avx512()
+    rng = np.random.default_rng(1920 + w)
+    h = 5
+    hi = 256 if dtype == np.uint8 else 65536
+    rgb = rng.integers(0, hi, (h, w, 3), dtype=dtype)
+    rgb[0] = hi - 1
+    rgb[1, ::2] = 0
+    scale = 256 if dtype == np.uint8 else 1
+
+    def run():
+        results = []
+        for depth_color in (False, True):
+            for out_dtype in (np.uint16, np.int32):
+                out = np.full((h, w), 7, dtype=out_dtype)
+                mod.of_gray_rows(rgb, out, 0, h, scale, depth_color)
+                results.append(out)
+        return results
+
+    wide, narrow, scalar = _avx512_avx2_and_scalar(mod, run)
+    for a, b, c in zip(wide, narrow, scalar):
+        np.testing.assert_array_equal(a, b)
+        np.testing.assert_array_equal(a, c)
 
 
 @pytest.mark.parametrize("kind", ["random", "bright", "maximum"])

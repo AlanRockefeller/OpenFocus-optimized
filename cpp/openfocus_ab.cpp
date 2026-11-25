@@ -526,6 +526,34 @@ int select_a_background_row(
 }
 
 // Samples of one row are adjacent in memory (packed channels, unit steps).
+// Gray codes of a packed RGB row: AVX-512 for whole blocks of sixteen pixels
+// where available, then the AVX2 row for the rest. Only the destination in use
+// is offset; the other is null.
+template <typename SrcT>
+void gray_rgb_row_simd(
+    const SrcT* sr, uint16_t* dst16, int32_t* dst32, int64_t width,
+    int32_t scale, bool depth_color, bool dst_is_u16
+) {
+    int64_t x = 0;
+    if (simd::use_avx512()) {
+        if constexpr (std::is_same<SrcT, uint8_t>::value) {
+            x = simd::gray_rgb_u8_row_avx512(sr, dst16, dst32, width, scale, depth_color, dst_is_u16);
+        } else {
+            x = simd::gray_rgb_u16_row_avx512(sr, dst16, dst32, width, scale, depth_color, dst_is_u16);
+        }
+        if (x == width) {
+            return;
+        }
+    }
+    uint16_t* d16 = dst_is_u16 ? dst16 + x : nullptr;
+    int32_t* d32 = dst_is_u16 ? nullptr : dst32 + x;
+    if constexpr (std::is_same<SrcT, uint8_t>::value) {
+        simd::gray_rgb_u8_row_avx2(sr + 3 * x, d16, d32, width - x, scale, depth_color, dst_is_u16);
+    } else {
+        simd::gray_rgb_u16_row_avx2(sr + 3 * x, d16, d32, width - x, scale, depth_color, dst_is_u16);
+    }
+}
+
 inline bool rows_are_packed(const ArrayView& v) {
     if (v.ndim == 2) {
         return v.stride[1] == 1;
@@ -622,14 +650,14 @@ void of_gray_rows_cpp(const ArrayView& image, const ArrayView& output,
                     if (out_u16) {
                         uint16_t* dr = static_cast<uint16_t*>(output.data) + y * output.stride[0];
                         if (avx2_ok) {
-                            simd::gray_rgb_u8_row_avx2(sr, dr, nullptr, width, static_cast<int32_t>(scale), depth_color, true);
+                            gray_rgb_row_simd(sr, dr, nullptr, width, static_cast<int32_t>(scale), depth_color, true);
                         } else {
                             gray_rgb3_packed_row(sr, dr, width, image.stride[1], image.stride[2], scale, depth_color);
                         }
                     } else {
                         int32_t* dr = static_cast<int32_t*>(output.data) + y * output.stride[0];
                         if (avx2_ok) {
-                            simd::gray_rgb_u8_row_avx2(sr, nullptr, dr, width, static_cast<int32_t>(scale), depth_color, false);
+                            gray_rgb_row_simd(sr, nullptr, dr, width, static_cast<int32_t>(scale), depth_color, false);
                         } else {
                             gray_rgb3_packed_row(sr, dr, width, image.stride[1], image.stride[2], scale, depth_color);
                         }
@@ -639,14 +667,14 @@ void of_gray_rows_cpp(const ArrayView& image, const ArrayView& output,
                     if (out_u16) {
                         uint16_t* dr = static_cast<uint16_t*>(output.data) + y * output.stride[0];
                         if (avx2_ok) {
-                            simd::gray_rgb_u16_row_avx2(sr, dr, nullptr, width, static_cast<int32_t>(scale), depth_color, true);
+                            gray_rgb_row_simd(sr, dr, nullptr, width, static_cast<int32_t>(scale), depth_color, true);
                         } else {
                             gray_rgb3_packed_row(sr, dr, width, image.stride[1], image.stride[2], scale, depth_color);
                         }
                     } else {
                         int32_t* dr = static_cast<int32_t*>(output.data) + y * output.stride[0];
                         if (avx2_ok) {
-                            simd::gray_rgb_u16_row_avx2(sr, nullptr, dr, width, static_cast<int32_t>(scale), depth_color, false);
+                            gray_rgb_row_simd(sr, nullptr, dr, width, static_cast<int32_t>(scale), depth_color, false);
                         } else {
                             gray_rgb3_packed_row(sr, dr, width, image.stride[1], image.stride[2], scale, depth_color);
                         }

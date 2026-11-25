@@ -29,6 +29,7 @@ nanobind_add_module(
   cpp/openfocus_pipeline.cpp
   cpp/alignment_kernels.cpp
   cpp/simd_avx2.cpp
+  cpp/simd_avx512.cpp
 )
 
 target_include_directories(_openfocus_native PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/cpp")
@@ -38,10 +39,11 @@ if(MSVC)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     # SIMD and scalar kernels use separate rounding for multiply and add.
     set_property(SOURCE cpp/simd_avx2.cpp APPEND PROPERTY COMPILE_OPTIONS /arch:AVX2)
+    set_property(SOURCE cpp/simd_avx512.cpp APPEND PROPERTY COMPILE_OPTIONS /arch:AVX512)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-      set_property(SOURCE cpp/simd_avx2.cpp APPEND PROPERTY COMPILE_OPTIONS /clang:-ffp-contract=off)
+      set_property(SOURCE cpp/simd_avx2.cpp cpp/simd_avx512.cpp APPEND PROPERTY COMPILE_OPTIONS /clang:-ffp-contract=off)
     else()
-      set_property(SOURCE cpp/simd_avx2.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
+      set_property(SOURCE cpp/simd_avx2.cpp cpp/simd_avx512.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
     endif()
   endif()
 else()
@@ -50,6 +52,12 @@ else()
   set_property(SOURCE cpp/openfocus_c.cpp cpp/openfocus_pipeline.cpp cpp/alignment_kernels.cpp APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off)
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
     set_property(SOURCE cpp/simd_avx2.cpp APPEND PROPERTY COMPILE_OPTIONS -mavx2 -ffp-contract=off)
+    # MinGW does not align the stack for 64-byte vector spills, so its builds
+    # compile the AVX-512 file without AVX-512 and keep the AVX2 kernels.
+    if(NOT MINGW)
+      set_property(SOURCE cpp/simd_avx512.cpp APPEND PROPERTY COMPILE_OPTIONS
+        -mavx512f -mavx512dq -mavx512bw -mavx512vl -ffp-contract=off)
+    endif()
   endif()
 endif()
 
