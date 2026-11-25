@@ -131,6 +131,21 @@ def _local_mounts():
     return []
 
 
+def _mount_of(path):
+    """Linux (mount point, filesystem type) of the mount holding ``path``, or None."""
+    path = os.path.realpath(path)
+    best = None
+    with open('/proc/self/mountinfo', encoding='utf-8') as stream:
+        for line in stream:
+            before, after = line.split(' - ', 1)
+            mount = before.split()[4]
+            for encoded, char in (('\\040', ' '), ('\\011', '\t'), ('\\012', '\n'), ('\\134', '\\')):
+                mount = mount.replace(encoded, char)
+            if os.path.commonpath((path, mount)) == mount and (best is None or len(mount) > len(best[0])):
+                best = (mount, after.split()[0])
+    return best
+
+
 def _default_is_local(path):
     """Reject system temp overrides on network or removable volumes."""
     if sys.platform == 'win32':
@@ -140,17 +155,8 @@ def _default_is_local(path):
         return bool(kernel.GetVolumePathNameW(os.path.abspath(path), volume, len(volume))
                     and kernel.GetDriveTypeW(volume.value) == 3)
     if sys.platform.startswith('linux'):
-        path = os.path.realpath(path)
-        best = None
         try:
-            with open('/proc/self/mountinfo', encoding='utf-8') as stream:
-                for line in stream:
-                    before, after = line.split(' - ', 1)
-                    mount = before.split()[4]
-                    for encoded, char in (('\\040', ' '), ('\\011', '\t'), ('\\012', '\n'), ('\\134', '\\')):
-                        mount = mount.replace(encoded, char)
-                    if os.path.commonpath((path, mount)) == mount and (best is None or len(mount) > len(best[0])):
-                        best = (mount, after.split()[0])
+            best = _mount_of(path)
             if best is None:
                 return False
             if best[1] in ('tmpfs', 'ramfs', 'overlay'):
@@ -345,7 +351,9 @@ def _scratch_candidates(explicit, source_paths):
     if explicit is not None:
         return
     mounts = _local_mounts()
-    # Prefer a source's fixed local volume, not an arbitrary source folder.
+    # Prefer a source's fixed local volume. Scratch goes to an app folder on
+    # that volume (see _volume_scratch_parents), never into the folder that
+    # holds the user's images.
     for source in source_paths:
         source = os.path.normcase(os.path.abspath(source))
         for mount in sorted(mounts, key=len, reverse=True):
@@ -353,12 +361,136 @@ def _scratch_candidates(explicit, source_paths):
             try:
                 if (os.path.commonpath((source, root)) == root
                         and os.stat(source).st_dev == os.stat(mount).st_dev):
-                    yield os.path.dirname(source)
                     yield mount
                     break
             except (OSError, ValueError):
                 pass
     yield from mounts
+
+
+# Folder created at a volume root to hold one directory per scratch job.
+SCRATCH_FOLDER_NAME = 'OpenFocus-scratch'
+
+
+def _user_scratch_folder():
+    """The per-user scratch folder in the platform's cache location, or None."""
+    try:
+        from utils.app_paths import user_cache_dir
+        return os.fspath(user_cache_dir() / 'scratch')
+    except (OSError, RuntimeError, KeyError):
+        return None
+
+
+def _existing_ancestor(path):
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+    return path
+
+
+def _volume_scratch_parents(candidate):
+    """Folders that may hold a job's scratch on ``candidate``'s volume, in order.
+
+    First the app folder at the volume root. A volume whose root the user
+    cannot write (a root-owned Linux mount such as /home) can still hold
+    scratch in the per-user cache folder when that folder is on the same
+    volume. Never the folder that holds the source images.
+    """
+    yield os.path.join(candidate, SCRATCH_FOLDER_NAME)
+    user = _user_scratch_folder()
+    ancestor = _existing_ancestor(user) if user is not None else None
+    if ancestor is None:
+        return
+    volume = _scratch_volume(candidate)
+    if volume is not None and _scratch_volume(ancestor) == volume:
+        yield user
+
+
+def _create_job_directory(candidate):
+    """Create this job's scratch folder on ``candidate``'s volume and return it."""
+    error = None
+    for parent in _volume_scratch_parents(candidate):
+        try:
+            os.makedirs(parent, exist_ok=True)
+            return tempfile.mkdtemp(prefix='openfocus-', dir=parent)
+        except OSError as exc:
+            error = exc
+    raise error
+
+
+def _probe_job_directory(candidate):
+    """Raise OSError unless ``_create_job_directory(candidate)`` would succeed.
+
+    Creates and removes a job folder in the first parent that accepts one.
+    Parent folders the probe had to create are removed again, so assessing a
+    volume leaves no app folder at its root.
+    """
+    error = None
+    for parent in _volume_scratch_parents(candidate):
+        missing = []
+        folder = os.path.abspath(parent)
+        while not os.path.exists(folder) and os.path.dirname(folder) != folder:
+            missing.append(folder)
+            folder = os.path.dirname(folder)
+        try:
+            os.makedirs(parent, exist_ok=True)
+            os.rmdir(tempfile.mkdtemp(prefix='openfocus-', dir=parent))
+            return
+        except OSError as exc:
+            error = exc
+        finally:
+            for folder in missing:
+                try:
+                    os.rmdir(folder)
+                except OSError:
+                    break
+    raise error
+
+
+def _ram_backed(path):
+    """Whether ``path`` lives on a RAM filesystem (Linux tmpfs or ramfs)."""
+    if not sys.platform.startswith('linux'):
+        return False
+    try:
+        best = _mount_of(path)
+    except (OSError, ValueError, IndexError):
+        return False
+    return best is not None and best[1] in ('tmpfs', 'ramfs')
+
+
+def _ram_backed_limit():
+    """Largest scratch goal still placed first on a RAM filesystem: a quarter of RAM.
+
+    Files there occupy the memory that scratch exists to relieve, and the
+    stage budgets would count them a second time as used RAM.
+    """
+    try:
+        return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') // 4
+    except (AttributeError, OSError, ValueError):
+        return 0
+
+
+def _ordered_candidates(explicit, source_paths, goal):
+    """Scratch candidates in preference order for a job that may need ``goal`` bytes.
+
+    A RAM-backed system temporary directory stays first for small jobs and
+    moves behind disk-backed local volumes once the goal exceeds
+    ``_ram_backed_limit()``. An explicit directory is never reordered.
+
+    Candidates are listed only as far as the caller looks: listing every local
+    volume runs a disk utility per disk on macOS.
+    """
+    hold_ram = explicit is None and goal is not None and goal > _ram_backed_limit()
+    held = []
+    for candidate in _scratch_candidates(explicit, source_paths):
+        if hold_ram and _ram_backed(candidate):
+            held.append(candidate)
+        else:
+            yield candidate
+    yield from held
 
 
 def _scratch_volume(directory):
@@ -421,8 +553,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
                     if candidate == default:
                         validate_storage_directory(candidate)
                     else:
-                        probe = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
-                        os.rmdir(probe)
+                        _probe_job_directory(candidate)
                 except OSError:
                     continue
                 candidates.append((candidate, usage, reserve, available, _scratch_volume(candidate)))
@@ -449,7 +580,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
         best = (default, None)
         for target in sorted({goal, minimum}, reverse=True):
             seen = set()
-            for candidate in _scratch_candidates(None, source_paths):
+            for candidate in _ordered_candidates(None, source_paths, goal):
                 identity = os.path.normcase(os.path.abspath(candidate))
                 if identity in seen:
                     continue
@@ -463,8 +594,7 @@ def assess_scratch(minimum, expected, optional=0, source_paths=(), *, directory=
                     if candidate == default:
                         validate_storage_directory(candidate)
                     else:
-                        probe = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
-                        os.rmdir(probe)
+                        _probe_job_directory(candidate)
                     chosen = candidate
                     break
                 except OSError:
@@ -521,8 +651,6 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
         return state.directory
     default = state.explicit_directory or tempfile.gettempdir()
 
-    def candidates():
-        return _scratch_candidates(state.explicit_directory, source_paths)
     best = (default, None)
     # Optional staging and bounded-workspace estimates guide placement without
     # rejecting RAM-only work or jobs that fit the known required allocation.
@@ -530,6 +658,9 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
     if state.explicit_directory is None:
         goals = sorted({size, *(max(size, hint) for hint in
                         (preferred_size, working_size) if hint is not None)}, reverse=True)
+
+    def candidates():
+        return _ordered_candidates(state.explicit_directory, source_paths, goals[0])
     for goal in goals:
         seen = set()
         for candidate in candidates():
@@ -549,7 +680,7 @@ def select_scratch(size, source_paths=(), *, preferred_size=None, working_size=N
                     os.unlink(probe)
                     state.directory = candidate
                 else:
-                    state.directory = tempfile.mkdtemp(prefix='openfocus-', dir=candidate)
+                    state.directory = _create_job_directory(candidate)
                     from core.scratch_registry import register
                     register(state.directory)
                     state.owned = True

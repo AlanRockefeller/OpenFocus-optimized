@@ -1126,7 +1126,7 @@ EN = {
     "advanced_resource_maximum": "Maximum",
     "advanced_resource_hint": "Balanced keeps headroom for the desktop; Responsive uses less CPU and memory; Maximum uses everything the machine allows. None of them changes the image.",
     "advanced_storage_directory": "Temporary directory",
-    "advanced_storage_default": "System default",
+    "advanced_storage_default": "Automatic",
     "advanced_storage_browse": "Browse…",
     "advanced_storage_invalid": "Cannot use this temporary directory: {error}",
     'storage_low_title': 'Low temporary storage space',

@@ -1114,7 +1114,7 @@ PACK = {
     "advanced_resource_maximum": "Máximo",
     "advanced_resource_hint": "Equilibrado deixa margem para a área de trabalho; Priorizar resposta usa menos CPU e memória; Máximo usa tudo o que a máquina permite. Nenhum altera a imagem.",
     "advanced_storage_directory": "Pasta temporária",
-    "advanced_storage_default": "Padrão do sistema",
+    "advanced_storage_default": "Automático",
     "advanced_storage_browse": "Procurar…",
     "advanced_storage_invalid": "Não é possível usar esta pasta temporária: {error}",
     'storage_low_title': 'Pouco espaço de armazenamento temporário',

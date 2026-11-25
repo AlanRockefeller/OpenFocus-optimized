@@ -237,6 +237,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   topology. Preserve caller-relative files when launching the desktop app.
   Finish conversion work safely during shutdown and support private Unix
   control sockets up to the platform path limit.
+- Choose a desktop render's automatic temporary directory from everything the
+  render may store (source frames, its frame cache and staging) before any
+  stage starts. Before, the first small request (registration asks for a few
+  frames) chose the directory, and the frame cache, which uses the same
+  directory, was disabled when it did not fit there: a 110-frame Olympus ORF
+  render on Linux chose a 16 GB RAM-backed `/tmp` and decoded every frame four
+  times. On Linux, a RAM-backed temporary directory (tmpfs) is now used for a
+  job larger than a quarter of the computer's memory only after the disk
+  volumes. Automatic scratch on a disk goes to an `OpenFocus-scratch` folder at
+  the drive root, or to the per-user cache folder (`~/.cache/OpenFocus/scratch`
+  on Linux) when the root is not writable and that folder is on the same disk,
+  instead of a folder next to the source images. The setting's
+  empty choice is now labelled **Automatic**, and each render logs the
+  directory it chose (`render.scratch`).
 
 ### Fixed
 - Preserve saved result metadata and protect original stack files during

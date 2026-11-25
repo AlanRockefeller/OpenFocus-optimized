@@ -1123,7 +1123,7 @@ ZH = {
     "advanced_resource_maximum": "全速",
     "advanced_resource_hint": "均衡为桌面留出余量；优先流畅占用更少 CPU 与内存；全速使用机器允许的全部资源。三者都不会改变图像结果。",
     "advanced_storage_directory": "临时目录",
-    "advanced_storage_default": "系统默认",
+    "advanced_storage_default": "自动",
     "advanced_storage_browse": "浏览…",
     "advanced_storage_invalid": "无法使用此临时目录：{error}",
     'storage_low_title': '临时存储空间不足',

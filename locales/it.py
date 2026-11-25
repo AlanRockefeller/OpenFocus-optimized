@@ -1114,7 +1114,7 @@ PACK = {
     "advanced_resource_maximum": "Massima",
     "advanced_resource_hint": "Bilanciata lascia margine al desktop; Reattiva usa meno CPU e memoria; Massima usa tutto ciò che la macchina consente. Nessuna modifica l'immagine.",
     "advanced_storage_directory": "Cartella temporanea",
-    "advanced_storage_default": "Predefinita di sistema",
+    "advanced_storage_default": "Automatica",
     "advanced_storage_browse": "Sfoglia…",
     "advanced_storage_invalid": "Impossibile usare questa cartella temporanea: {error}",
     'storage_low_title': 'Spazio di archiviazione temporaneo insufficiente',
