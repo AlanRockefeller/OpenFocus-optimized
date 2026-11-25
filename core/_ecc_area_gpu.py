@@ -46,13 +46,15 @@ def _is_bgr_rev(image):
 
 def _get_or_build_program(cl, device):
     global _PROGRAM_CACHE
-    from fusion_methods._openfocus_gpu import _build_cached_program, _device_cache_key
+    from fusion_methods._openfocus_gpu import (
+        _build_cached_program, _device_cache_key, _get_shared_context,
+    )
 
     key = _device_cache_key(device)
     with _cache_lock:
-        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key:
+        context = _get_shared_context(cl, device)
+        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key and _PROGRAM_CACHE[1] is context:
             return _PROGRAM_CACHE[1:]
-        context = cl.Context([device])
         queue = cl.CommandQueue(context, device=device)
         program = _build_cached_program(cl, device, context, _KERNEL)
         kernels = {(size, rev, block): cl.Kernel(program, name)
@@ -61,10 +63,13 @@ def _get_or_build_program(cl, device):
         return context, queue, kernels
 
 
-def _invalidate_program_cache():
+def _invalidate_program_cache(context=None):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import _invalidate_shared_context
+
     with _cache_lock:
         _PROGRAM_CACHE = None
+        _invalidate_shared_context(context)
 
 _KERNEL = f'#define AREA_TAPS {_TAPS}\n' + r'''
 #pragma OPENCL FP_CONTRACT OFF
@@ -212,14 +217,20 @@ class ExactAreaGpu:
         dst_bytes = rows * width * channels * itemsize
         table_bytes = 0 if block else (width + height) * _AXIS.itemsize
         workspace = src_bytes + dst_bytes + table_bytes
-        memory = _free_vram(self._device)
-        if memory is None:
-            return False
-        budget = policy.vram_budget(policy.ResourceSnapshot(free_vram=memory[0], total_vram=memory[1]))
-        # Also allow for one stripe of pageable transfer staging on the host.
+        frame_budget = policy.frame_ram_budget(policy.probe_memory())
+        unified = getattr(self._device, 'host_unified_memory', False)
+        if unified:
+            budget = int(self._device.global_mem_size) // 4
+        else:
+            memory = _free_vram(self._device)
+            if memory is None:
+                return False
+            budget = policy.vram_budget(policy.ResourceSnapshot(free_vram=memory[0], total_vram=memory[1]))
+        # Charge the output and one stripe of host transfer staging. Device
+        # buffers also use the host budget on unified-memory adapters.
+        host_bytes = workspace * (2 if unified else 1) + height * width * channels * itemsize
         if (workspace > budget or max(src_bytes, dst_bytes, table_bytes) > self._device.max_mem_alloc_size
-                or workspace + height * width * channels * itemsize >
-                policy.frame_ram_budget(policy.probe_resources())):
+                or host_bytes > frame_budget):
             return False
         if self._context is None:
             self._context, self._queue, self._kernels = _get_or_build_program(
@@ -335,7 +346,7 @@ class ExactAreaGpu:
                     if isinstance(t, type)
                 )
                 if drain_failed or (err_types and isinstance(exc, err_types)):
-                    _invalidate_program_cache()
+                    _invalidate_program_cache(self._context)
                 self._disabled = True
                 self.fell_back = True
                 self.close()

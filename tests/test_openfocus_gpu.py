@@ -290,18 +290,24 @@ def test_opencl_matches_cpu_for_lazy_sources(dtype, channels, resize):
     np.testing.assert_array_equal(actual, expected)
 
 
-@pytest.mark.parametrize('dtype,channels,resize,smoothing', [
-    (np.uint8, 1, None, 0.),
-    (np.uint8, 3, (51, 49), 4.),
-    (np.uint16, 1, None, 4.),
-    (np.uint16, 3, None, 0.),
-    (np.float32, 3, None, 4.),
+@pytest.mark.parametrize('dtype,channels,resize,smoothing,software_divide', [
+    (np.uint8, 1, None, 0., False),
+    (np.uint8, 3, (51, 49), 4., False),
+    (np.uint16, 1, None, 4., False),
+    (np.uint16, 3, None, 0., False),
+    (np.float32, 3, None, 4., False),
+    pytest.param(np.uint16, 3, None, 0., True, id='uint16-software-division'),
 ])
 def test_openfocus_c_gpu_matches_cpu_and_reports_device(
-        dtype, channels, resize, smoothing, monkeypatch):
+        dtype, channels, resize, smoothing, software_divide, monkeypatch):
     from fusion_methods import _openfocus_gpu
     if not _openfocus_gpu.gpu_available():
         pytest.skip('No OpenCL GPU is available')
+    if software_divide:
+        from fusion_methods import _openfocus_gpu_c
+
+        monkeypatch.setattr(_openfocus_gpu_c, '_PROGRAM_CACHE', None)
+        monkeypatch.setattr(_openfocus_gpu, '_fp32_build_options', lambda cl, device: [])
     monkeypatch.setattr(_openfocus_gpu, '_free_vram',
                         lambda device: (int(device.global_mem_size),
                                         int(device.global_mem_size)))
@@ -549,15 +555,32 @@ def test_opencl_cpu_device_is_not_a_gpu():
     assert _openfocus_gpu._device(cl) is None
 
 
-def test_standalone_opencl_depth_matches_cpu():
+@pytest.mark.parametrize('method', ['openfocus_b', 'openfocus_c'])
+@pytest.mark.parametrize('smoothing', [0.0, 4.0])
+def test_standalone_opencl_depth_matches_cpu(method, smoothing, monkeypatch):
     from core.depth_map import compute_focus_index
     from fusion_methods import _openfocus_gpu
     if not _openfocus_gpu.gpu_available():
         pytest.skip('No OpenCL GPU is available')
     frames = [process_frame(frame, lambda image: image.copy())
               for frame in _stack(np.uint16, 3)]
-    expected = compute_focus_index(frames, 'openfocus_b', use_gpu=False, thread_count=1)
-    actual = compute_focus_index(frames, 'openfocus_b', use_gpu=True, thread_count=1)
+    monkeypatch.setattr(_openfocus_gpu, '_free_vram',
+                        lambda device: (int(device.global_mem_size), int(device.global_mem_size)))
+    full_depth = _openfocus_gpu.Merge.full_depth
+    completed = []
+
+    def track_full_depth(self, *args, preserve_detail=True, **kwargs):
+        result = full_depth(self, *args, preserve_detail=preserve_detail, **kwargs)
+        if result is not None:
+            completed.append(preserve_detail)
+        return result
+
+    monkeypatch.setattr(_openfocus_gpu.Merge, 'full_depth', track_full_depth)
+    expected = compute_focus_index(frames, method, use_gpu=False, thread_count=1,
+                                   smoothing=smoothing)
+    actual = compute_focus_index(frames, method, use_gpu=True, thread_count=1,
+                                 smoothing=smoothing)
+    assert completed == [method == 'openfocus_b']
     np.testing.assert_array_equal(actual, expected)
 
 

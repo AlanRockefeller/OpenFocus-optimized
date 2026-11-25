@@ -1,7 +1,10 @@
 import math
+import mmap
 import numbers
 import os
+import struct
 import threading
+import zlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 from functools import lru_cache
@@ -332,6 +335,39 @@ def set_source_exif(exif: bytes) -> None:
     SOURCE_EXIF = exif or b""
 
 
+def _scan_png_exif_bytes(buf, filename: str = "") -> Optional[bytes]:
+    """Scan an in-memory or mmap'd PNG buffer for its ``eXIf`` payload without decoding pixels."""
+    import zlib
+
+    with memoryview(buf) as view:
+        total = len(view)
+        if total < 8 or view[:8].tobytes() != b"\x89PNG\r\n\x1a\n":
+            raise OSError("Invalid PNG signature")
+        pos = 8
+        while True:
+            if pos + 8 > total:
+                raise OSError("Truncated PNG metadata")
+            length = int.from_bytes(view[pos:pos + 4], "big")
+            kind = bytes(view[pos + 4:pos + 8])
+            data_start = pos + 8
+            data_end = data_start + length
+            if kind == b"IEND":
+                return None
+            if kind == b"eXIf":
+                if length > _PNG_EXIF_LIMIT:
+                    raise SourceExifTooLarge(filename, length, _PNG_EXIF_LIMIT)
+                if data_end + 4 > total:
+                    raise OSError("Truncated PNG metadata")
+                payload = bytes(view[data_start:data_end])
+                crc = int.from_bytes(view[data_end:data_end + 4], "big")
+                if zlib.crc32(payload, zlib.crc32(kind)) != crc:
+                    raise OSError("Invalid PNG EXIF chunk")
+                return payload
+            pos = data_end + 4
+            if pos > total:
+                raise OSError("Truncated PNG metadata")
+
+
 def read_image_exif(image):
     """Read EXIF without PNG's getexif() forcing a full pixel decode."""
     if getattr(image, "format", None) != "PNG":
@@ -341,38 +377,52 @@ def read_image_exif(image):
     exif = Image.Exif()
     data = image.info.get("exif")
     if not data:
-        import zlib
-
         stream = getattr(image, "fp", None)
         if stream is None:
             return exif
+        filename = getattr(image, "filename", "")
         position = stream.tell()
         try:
-            stream.seek(0)
-            if stream.read(8) != b"\x89PNG\r\n\x1a\n":
-                raise OSError("Invalid PNG signature")
-            while True:
-                header = stream.read(8)
-                if len(header) != 8:
-                    raise OSError("Truncated PNG metadata")
-                length = int.from_bytes(header[:4], "big")
-                kind = header[4:]
-                if kind == b"IEND":
-                    return exif
-                if kind == b"eXIf":
-                    if length > _PNG_EXIF_LIMIT:
-                        raise SourceExifTooLarge(
-                            getattr(image, "filename", ""), length, _PNG_EXIF_LIMIT)
-                    data = stream.read(length)
-                    crc = stream.read(4)
-                    if (len(data) != length or len(crc) != 4
-                            or zlib.crc32(data, zlib.crc32(kind))
-                            != int.from_bytes(crc, "big")):
-                        raise OSError("Invalid PNG EXIF chunk")
-                    break
-                stream.seek(length + 4, 1)
+            mapping = mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+        except (AttributeError, OSError, ValueError):
+            mapping = None
         finally:
-            stream.seek(position)
+            # On Windows mapping a file can advance its shared seek position.
+            if stream.tell() != position:
+                stream.seek(position)
+        if mapping is not None:
+            with mapping:
+                data = _scan_png_exif_bytes(mapping, filename)
+            if data is None:
+                return exif
+        else:
+            import zlib
+
+            try:
+                stream.seek(0)
+                if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+                    raise OSError("Invalid PNG signature")
+                while True:
+                    header = stream.read(8)
+                    if len(header) != 8:
+                        raise OSError("Truncated PNG metadata")
+                    length = int.from_bytes(header[:4], "big")
+                    kind = header[4:]
+                    if kind == b"IEND":
+                        return exif
+                    if kind == b"eXIf":
+                        if length > _PNG_EXIF_LIMIT:
+                            raise SourceExifTooLarge(filename, length, _PNG_EXIF_LIMIT)
+                        data = stream.read(length)
+                        crc = stream.read(4)
+                        if (len(data) != length or len(crc) != 4
+                                or zlib.crc32(data, zlib.crc32(kind))
+                                != int.from_bytes(crc, "big")):
+                            raise OSError("Invalid PNG EXIF chunk")
+                        break
+                    stream.seek(length + 4, 1)
+            finally:
+                stream.seek(position)
     if len(data) > _PNG_EXIF_LIMIT:
         raise SourceExifTooLarge(
             getattr(image, "filename", ""), len(data), _PNG_EXIF_LIMIT)
@@ -488,17 +538,17 @@ def _png_insert_exif(png: bytes, tiff_exif: bytes) -> bytes:
     return png[:ihdr_end] + chunk + png[ihdr_end:]
 
 
-def _png_insert_icc(png: bytes, profile: bytes) -> bytes:
-    """Add a PNG iCCP chunk without changing the encoded pixels."""
-    import struct
-    import zlib
-    ihdr_end = 8 + 8 + 13 + 4
-    if png[12:16] != b"IHDR":
-        raise ValueError("not a PNG produced by cv2")
-    data = b"ICC\x00\x00" + zlib.compress(profile)
-    chunk = (struct.pack(">I", len(data)) + b"iCCP" + data
-             + struct.pack(">I", zlib.crc32(b"iCCP" + data)))
-    return png[:ihdr_end] + chunk + png[ihdr_end:]
+def _write_png_chunk(handle, kind, data):
+    handle.write(struct.pack('>I4s', len(data), kind))
+    handle.write(data)
+    handle.write(struct.pack('>I', zlib.crc32(data, zlib.crc32(kind))))
+
+
+def _write_png_metadata(handle, exif, profile):
+    if exif is not None:
+        _write_png_chunk(handle, b'eXIf', exif.tobytes()[6:])
+    if profile:
+        _write_png_chunk(handle, b'iCCP', b'ICC\0\0' + zlib.compress(profile))
 
 
 def _write_encoded_jpeg(handle, encoded, exif, profile, should_cancel):
@@ -955,8 +1005,6 @@ def _write_streamed_tiff(path, image, should_cancel=None, exif=None, icc_profile
 
 def _write_streamed_png(handle, image, params, exif, profile, should_cancel):
     """Write PNG scanline bands with zlib; never retain the encoded image."""
-    import struct
-    import zlib
     from core.frame_storage import frame_region
     metadata_bytes = len(profile) + (len(exif.tobytes()) if exif is not None else 0)
     rows = _image_write_rows(image, scratch_factor=5, codec_scratch=512 * 1024,
@@ -971,37 +1019,42 @@ def _write_streamed_png(handle, image, params, exif, profile, should_cancel):
                            zlib.Z_DEFAULT_STRATEGY if cv2.IMWRITE_PNG_COMPRESSION in options else zlib.Z_RLE)
     compressor = zlib.compressobj(level, zlib.DEFLATED, 15, 8, strategy)
 
-    def chunk(kind, data):
-        handle.write(struct.pack('>I', len(data)))
-        handle.write(kind)
-        handle.write(data)
-        handle.write(struct.pack('>I', zlib.crc32(data, zlib.crc32(kind))))
-
     samples = image.shape[2] if image.ndim == 3 else 1
     handle.write(b'\x89PNG\r\n\x1a\n')
-    chunk(b'IHDR', struct.pack('>IIBBBBB', image.shape[1], image.shape[0],
-                               image.dtype.itemsize * 8, {1: 0, 3: 2, 4: 6}[samples], 0, 0, 0))
-    if exif is not None:
-        chunk(b'eXIf', exif.tobytes()[6:])
-    if profile:
-        chunk(b'iCCP', b'ICC\0\0' + zlib.compress(profile))
+    _write_png_chunk(handle, b'IHDR', struct.pack(
+        '>IIBBBBB', image.shape[1], image.shape[0], image.dtype.itemsize * 8,
+        {1: 0, 3: 2, 4: 6}[samples], 0, 0, 0))
+    _write_png_metadata(handle, exif, profile)
     row_bytes = image.shape[1] * samples * image.dtype.itemsize
+    filtered = np.empty((min(rows, image.shape[0]), row_bytes + 1), np.uint8)
+    from core._native import load_native
+    native = load_native()
+    pack_fn = getattr(native, 'pack_png_scanlines', None) if native is not None else None
+    pack_threads = 0
+    if pack_fn is not None:
+        from core.resource_policy import native_thread_ceiling
+        pack_threads = native_thread_ceiling()
     for start in range(0, image.shape[0], rows):
         _check_write_cancelled(should_cancel)
         with frame_region(image, np.s_[start:start + rows]) as strip:
-            if samples > 1:
-                strip = cv2.cvtColor(strip, cv2.COLOR_BGRA2RGBA if samples == 4 else cv2.COLOR_BGR2RGB)
-            strip = np.ascontiguousarray(strip, dtype=strip.dtype.newbyteorder('>'))
-            filtered = np.empty((len(strip), row_bytes + 1), np.uint8)
-            filtered[:, 0] = 0  # PNG's standard None filter
-            filtered[:, 1:] = strip.view(np.uint8).reshape(len(strip), row_bytes)
-            encoded = compressor.compress(memoryview(filtered).cast('B'))
+            target = filtered[:len(strip)]
+            if (pack_fn is not None and strip.dtype in (np.uint8, np.uint16)
+                    and strip.dtype.isnative):
+                contig = np.require(strip, requirements=('C', 'A'))
+                pack_fn(contig, target, pack_threads)
+            else:
+                if samples > 1:
+                    strip = cv2.cvtColor(strip, cv2.COLOR_BGRA2RGBA if samples == 4 else cv2.COLOR_BGR2RGB)
+                strip = np.ascontiguousarray(strip, dtype=strip.dtype.newbyteorder('>'))
+                target[:, 0] = 0  # PNG's standard None filter
+                target[:, 1:] = strip.view(np.uint8).reshape(len(strip), row_bytes)
+            encoded = compressor.compress(memoryview(target).cast('B'))
             if encoded:
-                chunk(b'IDAT', encoded)
+                _write_png_chunk(handle, b'IDAT', encoded)
     encoded = compressor.flush()
     if encoded:
-        chunk(b'IDAT', encoded)
-    chunk(b'IEND', b'')
+        _write_png_chunk(handle, b'IDAT', encoded)
+    _write_png_chunk(handle, b'IEND', b'')
 
 
 def _encode_mapped_jpeg(image, handle, settings):
@@ -1092,6 +1145,150 @@ def _write_streamed_jpeg(handle, image, params, exif, profile, should_cancel):
                     mapped.close()
 
 
+def _write_encoded_png(handle, encoded, exif, profile, should_cancel):
+    """Stream one encoded PNG plus optional eXIf/iCCP chunks without full-buffer copies."""
+    pixels = memoryview(encoded).cast('B')
+    ihdr_end = 33
+    if (len(pixels) < ihdr_end or bytes(pixels[:8]) != b'\x89PNG\r\n\x1a\n'
+            or bytes(pixels[12:16]) != b'IHDR'):
+        raise ValueError('Invalid encoded PNG')
+    _check_write_cancelled(should_cancel)
+    handle.write(pixels[:ihdr_end])
+    _write_png_metadata(handle, exif, profile)
+    chunk_bytes = 4 * 1024 * 1024
+    for offset in range(ihdr_end, len(pixels), chunk_bytes):
+        _check_write_cancelled(should_cancel)
+        handle.write(pixels[offset:offset + chunk_bytes])
+
+
+def _try_fast_png_encode(handle, image, params, meta, profile, should_cancel) -> bool:
+    """Encode contiguous uint8 PNG (up to 48 MiB) via libspng when RAM comfortably fits it."""
+    if (image.dtype != np.uint8 or image.nbytes > 48 * 1024 * 1024
+            or not image.flags.c_contiguous
+            or not (image.ndim == 2 or (image.ndim == 3 and image.shape[2] in (3, 4)))):
+        return False
+    level = 3
+    if params:
+        if (len(params) != 2 or params[0] != cv2.IMWRITE_PNG_COMPRESSION
+                or not all(isinstance(value, numbers.Integral) and not isinstance(value, bool)
+                           for value in params)
+                or not 0 <= params[1] <= 9):
+            return False
+        level = int(params[1])
+    try:
+        import imagecodecs
+    except ImportError:
+        return False
+    encoder = getattr(imagecodecs, 'spng_encode', None)
+    if encoder is None:
+        return False
+    from core.frame_storage import frame_region, is_mapped_frame
+    from core.resource_policy import probe_memory, ram_budget
+    # libspng grows its output buffer geometrically. Its capacity and the
+    # imagecodecs bytes result can coexist, along with the codec's filter rows.
+    height, width = image.shape[:2]
+    samples = image.shape[2] if image.ndim == 3 else 1
+    row_bytes = width * samples
+    scanline_bytes = (row_bytes + 1) * height
+    encoded_bound = scanline_bytes + scanline_bytes // 64 + 64 * 1024
+    scratch = 3 * encoded_bound + 3 * row_bytes + 16 * 1024 ** 2
+    if samples > 1:
+        scratch += image.nbytes  # BGR(A) to RGB(A) conversion
+    if is_mapped_frame(image):
+        scratch += image.nbytes  # Pages faulted in by the full-frame lease
+    if ram_budget(probe_memory()) < scratch:
+        return False
+    _check_write_cancelled(should_cancel)
+    try:
+        with frame_region(image) as pixels:
+            if samples == 1:
+                encoded = encoder(pixels, level=level)
+            else:
+                color_code = cv2.COLOR_BGRA2RGBA if samples == 4 else cv2.COLOR_BGR2RGB
+                encoded = encoder(cv2.cvtColor(pixels, color_code), level=level)
+    except Exception:
+        _check_write_cancelled(should_cancel)
+        return False
+    _write_encoded_png(handle, encoded, meta, profile, should_cancel)
+    return True
+
+
+def _try_fast_jpeg_encode(handle, image, params, meta, profile, should_cancel) -> bool:
+    """Encode packed uint8 JPEG directly in memory when RAM comfortably fits it."""
+    if (image.dtype != np.uint8 or not image.flags.c_contiguous
+            or not (image.ndim == 2 or (image.ndim == 3 and image.shape[2] == 3))):
+        return False
+    options = dict(zip((params or [])[::2], (params or [])[1::2]))
+    if options.keys() - {cv2.IMWRITE_JPEG_QUALITY}:
+        return False
+    try:
+        import imagecodecs
+        bgr_cs = getattr(getattr(imagecodecs.JPEG8, 'CS', None), 'EXT_BGR', None)
+        if image.ndim == 3 and bgr_cs is None:
+            return False
+    except (ImportError, AttributeError):
+        return False
+    from core.resource_policy import probe_memory, ram_budget
+    snap = probe_memory()
+    if ram_budget(snap) < image.nbytes * 2 + 16 * 1024 ** 2:
+        return False
+    _check_write_cancelled(should_cancel)
+    quality = max(0, min(100, int(options.get(cv2.IMWRITE_JPEG_QUALITY, 95))))
+    try:
+        colorspace = bgr_cs if image.ndim == 3 else 'GRAY'
+        encoded = imagecodecs.jpeg8_encode(image, level=quality, colorspace=colorspace)
+    except Exception:
+        return False
+    _write_encoded_jpeg(handle, encoded, meta, profile, should_cancel)
+    return True
+
+
+def _try_fast_webp_encode(handle, image, params, embed_exif, profile,
+                          bounded, should_cancel) -> bool:
+    """Write lossless WebP and its metadata in one pass when Pillow supports it."""
+    options = dict(zip((params or [])[::2], (params or [])[1::2]))
+    if (options.keys() - {cv2.IMWRITE_WEBP_QUALITY}
+            or int(options.get(cv2.IMWRITE_WEBP_QUALITY, 101)) <= 100):
+        return False
+    if image.dtype not in (np.uint8, np.uint16):
+        return False
+    if not (image.ndim == 2 or (image.ndim == 3 and image.shape[2] in (3, 4))):
+        return False
+    try:
+        from PIL import Image, features
+    except ImportError:
+        return False
+    if not features.check_module('webp'):
+        return False
+    if bounded:
+        from core.resource_policy import require_memory
+        require_memory(image.nbytes * 4)
+    _check_write_cancelled(should_cancel)
+    work = to_display_uint8(image) if image.dtype == np.uint16 else image
+    if work.ndim == 3:
+        code = cv2.COLOR_BGRA2RGBA if work.shape[2] == 4 else cv2.COLOR_BGR2RGB
+        pil_img = Image.fromarray(cv2.cvtColor(work, code))
+    else:
+        pil_img = Image.fromarray(work)
+    save_kw = {
+        'format': 'WEBP',
+        'lossless': True,
+        'method': 0,
+        'quality': 0,
+    }
+    if embed_exif:
+        upright = _upright_exif(embed_exif)
+        if upright:
+            save_kw['exif'] = upright
+    if profile:
+        save_kw['icc_profile'] = profile
+    try:
+        pil_img.save(handle, **save_kw)
+    finally:
+        pil_img.close()
+    return True
+
+
 def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional[list] = None,
                  exif: Optional[bytes] = None, icc_profile: bytes = b"",
                  linear_dng_metadata=None, should_cancel=None,
@@ -1158,12 +1355,19 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
                      and any(flag != cv2.IMWRITE_JPEG_QUALITY for flag in params[::2]))
     part = None
     try:
+        webp_written = False
         fd, part = tempfile.mkstemp(suffix=ext, dir=os.path.dirname(os.path.abspath(path)))
         with os.fdopen(fd, 'wb') as handle:
-            if bounded and ext == '.png':
+            if ext == '.png' and _try_fast_png_encode(handle, image, params or [], meta, profile, should_cancel):
+                pass
+            elif bounded and ext == '.png':
                 _write_streamed_png(handle, image, params or [], meta, profile, should_cancel)
+            elif ext in jpeg_exts and _try_fast_jpeg_encode(handle, image, params or [], meta, profile, should_cancel):
+                pass
             elif ext in jpeg_exts and (bounded or advanced_jpeg):
                 _write_streamed_jpeg(handle, image, params or [], meta, profile, should_cancel)
+            elif ext == '.webp' and _try_fast_webp_encode(handle, image, params or [], embed, profile, bounded, should_cancel):
+                webp_written = True
             else:
                 if bounded:
                     # BMP/WebP and other legacy codecs still use whole-image
@@ -1176,15 +1380,13 @@ def imwrite_auto(path: str, image: Optional[np.ndarray] = None, params: Optional
                 ok, encoded = cv2.imencode(encode_ext, image, params or [])
                 if not ok:
                     return False
-                if meta is not None and ext == '.png':
-                    encoded = _png_insert_exif(bytes(encoded), meta.tobytes()[6:])
-                if profile and ext == '.png':
-                    encoded = _png_insert_icc(bytes(encoded), profile)
-                if ext in jpeg_exts:
+                if ext == '.png':
+                    _write_encoded_png(handle, encoded, meta, profile, should_cancel)
+                elif ext in jpeg_exts:
                     _write_encoded_jpeg(handle, encoded, meta, profile, should_cancel)
                 else:
                     handle.write(encoded)
-        if image.dtype == np.uint8 and ext == '.webp' and (embed or profile):
+        if not webp_written and image.dtype == np.uint8 and ext == '.webp' and (embed or profile):
             from PIL import Image
             with Image.open(part) as source:
                 source.load()

@@ -198,8 +198,9 @@ def _source_window(inverse, rect, src_w, src_h):
             max(top, min(src_h, int(math.ceil(sy.max())) + 1 + _HALO)))
 
 
-def _band_plan(inverse, rect, src_size, channels, itemsize, budget, max_alloc, fixed_bytes):
-    """Split the destination into bands whose source windows fit the VRAM budget."""
+def _band_plan(inverse, rect, src_size, channels, itemsize, budget, max_alloc, fixed_bytes,
+               *, shared_budget=None):
+    """Fit a destination band within the device and optional shared-memory budgets."""
     x0, y0, width, height = rect
     src_h, src_w = src_size
     for rows in _BAND_ROWS:
@@ -214,7 +215,13 @@ def _band_plan(inverse, rect, src_size, channels, itemsize, budget, max_alloc, f
                      for area, (_, _, *window) in zip(areas, bands))
         src_bytes = max(areas) * channels * itemsize
         rows_bytes = min(rows, height) * width * channels * itemsize
-        if (src_bytes + rows_bytes + fixed_bytes <= budget
+        transfer_bytes = src_bytes + rows_bytes
+        # On unified memory, device buffers and pageable transfers share RAM
+        # with the host copy used for narrow source windows.
+        if (shared_budget is not None
+                and fixed_bytes + 2 * transfer_bytes + staged * channels * itemsize > shared_budget):
+            continue
+        if (transfer_bytes + fixed_bytes <= budget
                 and max(src_bytes, rows_bytes) <= max_alloc):
             return bands, src_bytes, rows_bytes, staged * channels
     return None
@@ -293,13 +300,13 @@ def _self_check(cl, device, program):
 
 def _verified_program(cl, device):
     global _program
-    from fusion_methods._openfocus_gpu import _build_cached_program
+    from fusion_methods._openfocus_gpu import _build_cached_program, _get_shared_context
 
+    context = _get_shared_context(cl, device)
     key = _device_cache_key(device)
-    if _program is not None and _program[0] == key:
+    if _program is not None and _program[0] == key and _program[1][0] is context:
         return _program[1]
-    context = cl.Context(devices=[device])
-    queue = cl.CommandQueue(context)
+    queue = cl.CommandQueue(context, device=device)
     program = _build_cached_program(
         cl, device, context, _SOURCE, options=[f'-DREPAIR_LIMIT={_REPAIR_LIMIT}'],
     )
@@ -325,6 +332,7 @@ class ExactPerspectiveGpu:
 
     def __init__(self):
         self._cl = self._device = self._buffers = None
+        self._buffer_context = None
         self._vram_cache = None
         self._disabled = False
         self._round_mode = None
@@ -337,6 +345,7 @@ class ExactPerspectiveGpu:
     def close(self):
         self._vram_cache = None
         buffers, self._buffers = self._buffers, None
+        self._buffer_context = None
         for buffer in (buffers or ())[2:]:
             buffer.release()
 
@@ -360,13 +369,15 @@ class ExactPerspectiveGpu:
         # a region mapped outside the image.
         src_bytes, dst_bytes = max(1, src_bytes), max(1, dst_bytes)
         buffers = self._buffers
-        if buffers is None or buffers[0] < src_bytes or buffers[1] < dst_bytes:
+        if (self._buffer_context is not context or buffers is None
+                or buffers[0] < src_bytes or buffers[1] < dst_bytes):
             self.close()
             flags = cl.mem_flags
             self._buffers = (src_bytes, dst_bytes,
                              cl.Buffer(context, flags.READ_ONLY, src_bytes),
                              cl.Buffer(context, flags.WRITE_ONLY, dst_bytes),
                              cl.Buffer(context, flags.READ_WRITE, _REPAIR_BYTES))
+            self._buffer_context = context
             buffers = self._buffers
         return buffers[2:]
 
@@ -437,7 +448,9 @@ class ExactPerspectiveGpu:
                     try:
                         queue.finish()
                     except Exception:
+                        from fusion_methods._openfocus_gpu import _invalidate_shared_context
                         _program = None
+                        _invalidate_shared_context(program[0])
                 if isinstance(exc, RegistrationCancelled):
                     raise
                 self.close()
@@ -447,6 +460,18 @@ class ExactPerspectiveGpu:
 
     def _plan_bands(self, inverse, rect, src_size, channels, itemsize, fixed_bytes):
         from core import resource_policy as policy
+
+        if getattr(self._device, 'host_unified_memory', False):
+            snapshot = policy.probe_memory()
+            dev_mem = int(self._device.global_mem_size)
+            budget = min(_MAX_WORKSPACE_BYTES, policy.frame_ram_budget(snapshot), dev_mem // 4)
+            output_bytes = rect[2] * rect[3] * channels * itemsize
+            shared_budget = policy.ram_ceiling(snapshot) - output_bytes
+            if budget <= 0 or shared_budget <= 0:
+                return None
+            return _band_plan(inverse, rect, src_size, channels, itemsize, budget,
+                              int(self._device.max_mem_alloc_size), fixed_bytes,
+                              shared_budget=shared_budget)
 
         now = time.monotonic()
         cache = self._vram_cache
@@ -483,7 +508,8 @@ class ExactPerspectiveGpu:
             self._disabled = True
             return None
         bands, src_bytes, dst_bytes, staged = plan
-        policy.require_memory(width * height * channels * itemsize + staged * itemsize)
+        if not getattr(self._device, 'host_unified_memory', False):
+            policy.require_memory(width * height * channels * itemsize + staged * itemsize)
         _check_cancel(should_cancel)
         result = np.empty((height, width) if channels == 1 else (height, width, channels), image.dtype)
         stage = np.empty(staged, image.dtype) if staged else None
