@@ -344,10 +344,14 @@ python main.py
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest -n auto -q --timeout=90 --timeout-method=thread
+python -m pytest -q --timeout=90 --timeout-method=thread
 ```
 
-`-n auto` 与 CI 一样使用全部 CPU 核心并行运行测试；去掉该参数则在单个进程中逐个运行。
+完整测试在单个进程中耗时较长。CI 将测试按顺序切分为连续的若干段，每个 CPU 核心并行运行一段：
+
+```bash
+python tools/parallel_tests.py --timeout=180 --timeout-method=thread
+```
 
 无显示环境应设置 `QT_QPA_PLATFORM=offscreen`。处理、取消或界面状态的改动还需
 实际运行 CLI 或桌面程序，打包后的程序也需单独验证。

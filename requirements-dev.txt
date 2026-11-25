@@ -1,5 +1,4 @@
 pytest>=8.0
 pytest-timeout
-pytest-xdist
 PyYAML>=6.0
 tomli; python_version < "3.11"
