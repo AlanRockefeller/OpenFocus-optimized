@@ -419,13 +419,17 @@ int select_a_background_row(
         const uint64_t src_bytes = static_cast<uint64_t>(3 * width) * sizeof(SrcT);
         const uint64_t out_bytes = static_cast<uint64_t>(3 * width) * sizeof(uint16_t);
         const uint64_t bg_bytes = static_cast<uint64_t>(5 * width) * sizeof(float);
+        const uint64_t best_bytes = static_cast<uint64_t>(width) * sizeof(int32_t);
         const auto* src_lo = reinterpret_cast<const uint8_t*>(irow) - (is2 < 0 ? 2 * sizeof(SrcT) : 0);
         if (simd::use_avx2() && width >= 8 && is1 == 3 && (is2 == 1 || is2 == -1) && os1 == 3 && os2 == 1
                 && bsx == 5 && bsc == 1 && scale == (sizeof(SrcT) == 1 ? 256 : 1)
                 && static_cast<const void*>(st_row) == static_cast<const void*>(bg_row)
                 && !byte_ranges_overlap(src_lo, src_bytes, orow, out_bytes)
                 && !byte_ranges_overlap(bg_row, bg_bytes, orow, out_bytes)
-                && !byte_ranges_overlap(bg_row, bg_bytes, src_lo, src_bytes)) {
+                && !byte_ranges_overlap(bg_row, bg_bytes, src_lo, src_bytes)
+                && !byte_ranges_overlap(b_row, best_bytes, src_lo, src_bytes)
+                && !byte_ranges_overlap(b_row, best_bytes, orow, out_bytes)
+                && !byte_ranges_overlap(b_row, best_bytes, bg_row, bg_bytes)) {
             state = simd::select_a_background_row_avx2(
                 b_row, response, width, irow, sizeof(SrcT) == 1, is2 < 0, orow, bg_row, first, state, &x,
                 static_cast<int32_t>(kAMaxResponse), static_cast<int32_t>(kABlendLimit),
