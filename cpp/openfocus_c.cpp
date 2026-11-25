@@ -73,9 +73,13 @@ void down_horizontal_impl(
     const bool fast_src_3c = (channels == 3 && ix_stop > 1 && source.ndim == 3
                               && source.stride[2] == 1 && source.stride[1] == 3
                               && scratch.stride[2] == 1 && scratch.stride[1] == 3);
+    // The vector kernel works in blocks; a scratch that overlaps the source
+    // keeps the pixel order of the scalar loops.
+    const bool simd_rows = fast_src_3c && ix_stop >= 4 && simd::use_avx2()
+        && !packed_rows_overlap(source, origin, origin + rows, scratch, 0, rows);
     std::unique_ptr<float[]> raw_as_f32;
     if constexpr (ScaledRaw) {
-        if (fast_src_3c && ix_stop >= 4 && simd::use_avx2()) {
+        if (simd_rows) {
             // One spare element: the kernel's last vector load reads one past the row.
             raw_as_f32.reset(new float[static_cast<size_t>(width * 3 + 1)]);
             raw_as_f32[static_cast<size_t>(width * 3)] = 0.0f;
@@ -99,7 +103,7 @@ void down_horizontal_impl(
             }
             if constexpr (!ScaledRaw) {
                 const float* sr = static_cast<const float*>(source.data) + y * source.stride[0];
-                if (simd::use_avx2() && ix_stop >= 4) {
+                if (simd_rows) {
                     simd::pyr_down_horiz_f32_3c_row_avx2(sr, h_row, ix_stop, kD0, kD1);
                 } else {
                     for (int64_t x = 1; x < ix_stop; ++x) {
@@ -242,6 +246,11 @@ void up_horizontal_impl(
                           && scratch.stride[2] == 1 && scratch.stride[1] == 3);
     const bool fast_1c = (channels == 1 && pair_stop > ix_start
                           && coarse.stride[1] == 1 && scratch.stride[1] == 1);
+    // The three-channel vector kernel stores past each pixel pair before the
+    // next pair overwrites it; a scratch that overlaps the coarse level keeps
+    // the pixel order of the scalar loop.
+    const bool simd_3c = fast_3c && simd::use_avx2() && (pair_stop - ix_start) >= 4
+        && !packed_rows_overlap(coarse, origin, origin + rows, scratch, 0, rows);
 
     for (int64_t row = 0; row < rows; ++row) {
         const int64_t y = row + origin;
@@ -265,7 +274,7 @@ void up_horizontal_impl(
         if (fast_3c) {
             const float* sr = static_cast<const float*>(coarse.data) + y * coarse.stride[0];
             float* dr = static_cast<float*>(scratch.data) + row * scratch.stride[0];
-            if (simd::use_avx2() && (pair_stop - ix_start) >= 4) {
+            if (simd_3c) {
                 simd::pyr_up_horiz_3c_row_avx2(sr, dr, ix_start, pair_stop, kE0, kE1, kE2, kE3);
             } else {
                 for (int64_t x = ix_start; x < pair_stop; x += 2) {
@@ -657,7 +666,14 @@ void of_pyr_level0_merge_from_raw_cpp(
             const float w3 = odd ? kE1 : kE3;
             const float w4 = odd ? kE0 : 0.0f;
 
-            if (avx2_skip && (source.itemsize == 1 || source.itemsize == 2)) {
+            // The vector merge loads eight weights before it stores eight
+            // best values; rows that share samples keep the pixel order below.
+            const uint64_t code_bytes = static_cast<uint64_t>(width) * sizeof(uint16_t);
+            const bool codes_overlap = byte_ranges_overlap(wr, code_bytes, br, code_bytes)
+                || (win_row != nullptr
+                    && (byte_ranges_overlap(win_row, code_bytes, wr, code_bytes)
+                        || byte_ranges_overlap(win_row, code_bytes, br, code_bytes)));
+            if (avx2_skip && !codes_overlap && (source.itemsize == 1 || source.itemsize == 2)) {
                 const void* raw_row = (source.itemsize == 1)
                     ? static_cast<const void*>(static_cast<const uint8_t*>(source.data) + y * source.stride[0])
                     : static_cast<const void*>(static_cast<const uint16_t*>(source.data) + y * source.stride[0]);

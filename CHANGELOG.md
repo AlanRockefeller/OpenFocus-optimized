@@ -33,14 +33,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   OpenFocus depth codes and pyramid rounding across platform builds.
 - Read stack previews and metadata in a single scan and reuse compatible
   isolated render workers between renders.
-- Speed up the C++ CPU kernels with identical output. On AVX2 processors
-  OpenFocus A, B, and C fuse 20-megapixel frames 1.2 to 1.9 times as fast,
-  depending on the method, thread count, and processor speed, and the
-  OpenFocus alignment search and refinement run about twice as fast. The
-  depth and activity kernels no longer use gather instructions,
-  which are slow on processors that mitigate gather data sampling. Depth
-  smoothing reuses its per-worker workspace instead of allocating one for
-  every strip.
+- Speed up the C++ CPU kernels on AVX2 processors with identical output. On
+  the laptop used for testing, OpenFocus A, B, and C fused 20-megapixel
+  frames 1.2 to 1.9 times as fast, depending on the method, thread count,
+  and power profile, and the OpenFocus alignment search and refinement ran
+  at least twice as fast. The depth and activity kernels no longer use
+  gather instructions, which are slow on processors that mitigate gather
+  data sampling. Depth smoothing reuses its per-worker workspace instead of
+  allocating one for every strip.
 - Use OpenCL for eligible large integer ECC reductions, including 8×8 area
   downsizing. Apply exact Lanczos4 warps for large 8-bit and 16-bit frames
   during ECC and homography registration and whenever a GPU render resolves

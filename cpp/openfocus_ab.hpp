@@ -24,6 +24,26 @@ inline bool byte_ranges_overlap(const void* lhs, uint64_t lhs_bytes,
     return left <= right ? right - left < lhs_bytes : left - right < rhs_bytes;
 }
 
+// True when rows [a_start, a_stop) of `a` and rows [b_start, b_stop) of `b`
+// share any byte. Both views have packed rows (unit steps inside a row).
+inline bool packed_rows_overlap(const ArrayView& a, int64_t a_start, int64_t a_stop,
+                                const ArrayView& b, int64_t b_start, int64_t b_stop) {
+    if (a_start >= a_stop || b_start >= b_stop) {
+        return false;
+    }
+    const auto low_address = [](const ArrayView& v, int64_t start, int64_t stop) {
+        const int64_t y = v.stride[0] < 0 ? stop - 1 : start;
+        return static_cast<const uint8_t*>(v.data) + y * v.stride[0] * v.itemsize;
+    };
+    const auto extent = [](const ArrayView& v, int64_t start, int64_t stop) {
+        const int64_t elems = v.shape[1] * (v.ndim == 3 ? v.shape[2] : 1);
+        const int64_t sy = v.stride[0] < 0 ? -v.stride[0] : v.stride[0];
+        return static_cast<uint64_t>(((stop - start - 1) * sy + elems) * v.itemsize);
+    };
+    return byte_ranges_overlap(low_address(a, a_start, a_stop), extent(a, a_start, a_stop),
+                               low_address(b, b_start, b_stop), extent(b, b_start, b_stop));
+}
+
 void of_gray_rows_cpp(const ArrayView& image, const ArrayView& output,
                       int64_t start, int64_t stop, int64_t scale, bool depth_color);
 

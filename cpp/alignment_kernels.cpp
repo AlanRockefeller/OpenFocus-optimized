@@ -195,11 +195,20 @@ void warp_translation_row_packed(
             && image.shape[1] <= std::numeric_limits<int32_t>::max()) {
         const int64_t item = image.itemsize;
         const auto* sb = static_cast<const uint8_t*>(image.data);
-        simd::align_warp_translation_rgb_row_avx2(
-            sb + iy_b * image.stride[0] * item, sb + jy_b * image.stride[0] * item, item == 1,
-            static_cast<uint8_t*>(out.data) + oy * out.stride[0] * item, rw,
-            ix, jx, fx, inv_x, fy, bgr_rev, image.shape[1]);
-        return;
+        const uint8_t* r0 = sb + iy_b * image.stride[0] * item;
+        const uint8_t* r1 = sb + jy_b * image.stride[0] * item;
+        uint8_t* dst = static_cast<uint8_t*>(out.data) + oy * out.stride[0] * item;
+        // The vector kernel reads a whole pixel before it stores one and
+        // stores past it; an output row that shares bytes with a source row
+        // keeps the per-channel order of the loops below.
+        const uint64_t src_bytes = static_cast<uint64_t>(image.shape[1] * 3 * item);
+        const uint64_t dst_bytes = static_cast<uint64_t>(rw * 3 * item);
+        if (!byte_ranges_overlap(dst, dst_bytes, r0, src_bytes)
+                && !byte_ranges_overlap(dst, dst_bytes, r1, src_bytes)) {
+            simd::align_warp_translation_rgb_row_avx2(
+                r0, r1, item == 1, dst, rw, ix, jx, fx, inv_x, fy, bgr_rev, image.shape[1]);
+            return;
+        }
     }
     if (image.itemsize == 1) {
         const auto* sb = static_cast<const uint8_t*>(image.data);
@@ -473,10 +482,13 @@ void of_align_warp_alignment_int_rows_cpp(
     const int64_t h = image.shape[0];
     const int64_t w = image.shape[1];
     const int64_t channels = (image.ndim == 2) ? 1 : image.shape[2];
+    // The vector kernel reads and stores in a different order than the
+    // per-channel loop, so an output that overlaps the image stays scalar.
     const bool use_simd = simd::use_avx2()
         && is_warp_packed(image, out, channels)
         && w >= 8 && w <= 16777216
-        && h <= std::numeric_limits<int32_t>::max();
+        && h <= std::numeric_limits<int32_t>::max()
+        && !packed_rows_overlap(image, 0, image.shape[0], out, y_start, y_stop);
     for (int64_t y = y_start; y < y_stop; ++y) {
         float v_dy = 0.0f, u_dy = 0.0f;
         map_uv_row(static_cast<float>(y), cy, p1c, p0c, v_dy, u_dy);
@@ -1021,7 +1033,8 @@ void of_align_warp_alignment_region_int_rows_cpp(
         && rw >= 8
         && src_h <= std::numeric_limits<int32_t>::max()
         && src_w <= std::numeric_limits<int32_t>::max()
-        && x_off >= -16777216 && x_off <= 16777216 - rw;
+        && x_off >= -16777216 && x_off <= 16777216 - rw
+        && !packed_rows_overlap(image, 0, image.shape[0], out, oy_start, oy_stop);
     for (int64_t oy = oy_start; oy < oy_stop; ++oy) {
         float v_dy = 0.0f, u_dy = 0.0f;
         map_uv_row(static_cast<float>(y_off + oy), cy, p1c, p0c, v_dy, u_dy);

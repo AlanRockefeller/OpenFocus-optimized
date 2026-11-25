@@ -287,8 +287,9 @@ void pyr_detail_weight_3c_f32_avx2(
         target_row[off3] = v0;
         target_row[off3 + 1] = v1;
         target_row[off3 + 2] = v2;
+        const bool is_border = y_border || (width > 2 && (x == 0 || x == width - 1));
         const float strength = (std::abs(v0) + std::abs(v1)) + std::abs(v2);
-        w_row[x] = encode_weight_scalar(strength, false, w_scale);
+        w_row[x] = encode_weight_scalar(strength, is_border, w_scale);
     }
     clear_border_weights(w_row, width, y_border);
 }
@@ -364,8 +365,9 @@ void pyr_level0_weights_3c_f32_from_raw_avx2(
         const float v0 = (s0 - lo0) / (lo0 + point_one);
         const float v1 = (s1 - lo1) / (lo1 + point_one);
         const float v2 = (s2 - lo2) / (lo2 + point_one);
+        const bool is_border = width > 2 && (x == 0 || x == width - 1);
         const float strength = (std::abs(v0) + std::abs(v1)) + std::abs(v2);
-        w_row[x] = encode_weight_scalar(strength, false, w_scale);
+        w_row[x] = encode_weight_scalar(strength, is_border, w_scale);
     }
     clear_border_weights(w_row, width, false);
 }

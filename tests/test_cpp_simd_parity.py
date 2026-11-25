@@ -752,7 +752,7 @@ def _scalar_and_simd(mod, run):
 
 
 @pytest.mark.parametrize("guided", [False, True])
-@pytest.mark.parametrize("shape", [(8, 8), (9, 17), (16, 31), (33, 64), (40, 129), (70, 33)])
+@pytest.mark.parametrize("shape", [(8, 8), (9, 17), (16, 31), (33, 64), (40, 129), (70, 33), (257, 257)])
 def test_depth_axis_iir_rows_avx2_vs_scalar_bit_exact(guided, shape):
     """The horizontal recurrence advances eight rows per vector."""
     mod = _require_avx2()
@@ -1041,3 +1041,167 @@ def test_alignment_refine_level_avx2_vs_scalar_bit_exact(crop):
     # The exact shift lies inside the first search window in both directions.
     assert simd[0] == (2.0, -1.0, True)
     assert simd[1] == (-2.0, 1.0, True)
+
+
+def _assert_same_bytes(simd, scalar):
+    for a, b in zip(simd, scalar):
+        assert np.array_equal(np.ascontiguousarray(a).view(np.uint8), np.ascontiguousarray(b).view(np.uint8))
+
+
+def test_depth_axis_iir_rows_keep_overlapping_output_rows_exact():
+    """Output rows that share samples only have the row-by-row order."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(911)
+    base = rng.integers(0, 65536, 40, dtype=np.uint16)
+    plane = rng.integers(0, 65536, (9, 16), dtype=np.uint16)
+
+    def rows(buffer, h, w, step):
+        return np.lib.stride_tricks.as_strided(
+            buffer, shape=(h, w), strides=(step * buffer.itemsize, buffer.itemsize))
+
+    def run():
+        results = []
+        for q, t in ((4096, 0), (3072, 512)):
+            in_place = base.copy()
+            view = rows(in_place, 8, 8, 1)
+            mod.of_depth_axis_iir(view, None, view, q, t, 0, 0, 1, 1, 1)
+            separate = base.copy()
+            mod.of_depth_axis_iir(plane, None, rows(separate, 9, 16, 2), q, t, 0, 0, 3, 1, 1)
+            results += [in_place, separate]
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+def test_pyr_level0_merge_keeps_overlapping_code_rows_exact():
+    """Weight, best and winner rows that share samples keep the pixel order."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(912)
+    h, w = 12, 40
+    ch, cw = (h + 1) // 2, (w + 1) // 2
+    raw = rng.integers(0, 65536, (h, w, 3), dtype=np.uint16)
+    coarse = rng.uniform(0.0, 65535.0, (ch, cw, 3)).astype(np.float32)
+    codes = rng.integers(0, 65535, (h, w + 1), dtype=np.uint16)
+    weight = rng.integers(0, 65535, (h, w), dtype=np.uint16)
+
+    def run():
+        results = []
+        for first in (True, False):
+            scratch = np.empty((ch, w, 3), dtype=np.float32)
+            # best starts one sample after weight
+            shared = codes.copy()
+            acc = np.zeros((h, w, 3), dtype=np.float32)
+            winner = np.full((h, w), 7, dtype=np.uint16)
+            mod.of_pyr_level0_merge_from_raw(
+                coarse, raw, shared[:, :w], acc, shared[:, 1:], winner, scratch, 257.0, first, 3, 0, h)
+            results += [shared, acc, winner]
+            # winner starts one sample after best
+            shared = codes.copy()
+            acc = np.zeros((h, w, 3), dtype=np.float32)
+            mod.of_pyr_level0_merge_from_raw(
+                coarse, raw, weight, acc, shared[:, :w], shared[:, 1:], scratch, 257.0, first, 3, 0, h)
+            results += [shared, acc]
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+def test_pyramid_resampling_keeps_overlapping_scratch_exact():
+    """A scratch that shares memory with its source keeps the pixel order."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(913)
+    h, w = 12, 40
+    ch, cw = (h + 1) // 2, (w + 1) // 2
+    fine = rng.uniform(-50.0, 65600.0, (h, w + 1, 3)).astype(np.float32)
+    coarse_base = rng.uniform(0.0, 65535.0, (ch, w + 1, 3)).astype(np.float32)
+    target = rng.random((h, w, 3), dtype=np.float32)
+    raw_bytes = rng.integers(0, 256, h * w * 6, dtype=np.uint8).tobytes()
+
+    def run():
+        # float downsample: scratch starts one pixel after the source
+        shared = fine.copy()
+        down = np.empty((ch, cw, 3), dtype=np.float32)
+        mod.of_pyr_down_f32(shared[:, :w], down, shared[:, 1:1 + cw], 0, ch)
+        # raw downsample: the float scratch lies over the integer source
+        buffer = bytearray(raw_bytes)
+        raw = np.frombuffer(buffer, dtype=np.uint16).reshape(h, w, 3)
+        raw_scratch = np.frombuffer(buffer, dtype=np.float32).reshape(h, cw, 3)
+        raw_down = np.empty((ch, cw, 3), dtype=np.float32)
+        mod.of_pyr_down_from_raw(raw, raw_down, raw_scratch, 1.0 / 65535.0, 0, ch)
+        # upsample: scratch starts one pixel after the coarse level
+        shared_coarse = coarse_base.copy()
+        recon = target.copy()
+        mod.of_pyr_reconstruct_f32(shared_coarse[:, :cw], recon, shared_coarse[:, 1:], 0, h)
+        return shared, down, np.frombuffer(bytes(buffer), dtype=np.uint8), raw_down, shared_coarse, recon
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+def test_pyramid_weights_ignore_non_finite_border_pixels():
+    """Border pixels carry no weight whatever their detail is."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(914)
+    h, w = 9, 9
+    ch, cw = (h + 1) // 2, (w + 1) // 2
+    coarse = rng.uniform(0.0, 1.0, (ch, cw, 3)).astype(np.float32)
+    target = rng.random((h, w, 3), dtype=np.float32)
+    target[:, -1, 1] = np.nan
+    target[0, 3, 0] = np.inf
+    target[-1, 4, 2] = np.nan
+
+    def run():
+        weights = np.full((h, w), 9, dtype=np.uint16)
+        detail = target.copy()
+        scratch = np.empty((ch, w, 3), dtype=np.float32)
+        mod.of_pyr_detail_weight_f32(coarse, detail, weights, scratch, 0, h)
+        assert not weights[0].any() and not weights[-1].any()
+        assert not weights[:, 0].any() and not weights[:, -1].any()
+        return weights, detail
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_alignment_rgb_warps_keep_overlapping_output_exact(dtype):
+    """An output that shares memory with its source only has the scalar order."""
+    import math
+
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(961)
+    h, w = 21, 37
+    backing = rng.integers(0, np.iinfo(dtype).max + 1, (h + 1, w + 1, 3), dtype=dtype)
+
+    def similarity(shift_x, shift_y, degrees, scale):
+        cx, cy = w * 0.5, h * 0.5
+        cos = scale * math.cos(math.radians(degrees))
+        sin = scale * math.sin(math.radians(degrees))
+        return (cx + shift_x, cy + shift_y, cx, cy, sin, sin, cos, cos)
+
+    def run():
+        results = []
+        for dx, dy in ((0.0, 0.0), (0.5, 0.5), (-3.25, 2.75)):
+            for kernel in (ak.warp_int_rows, ak.warp_int_rows_bgr_rev):
+                same = backing.copy()
+                kernel(same[:h, :w], same[:h, :w], dx, dy, 0, h)
+                right = backing.copy()
+                kernel(right[:h, :w], right[:h, 1:], dx, dy, 0, h)
+                below = backing.copy()
+                kernel(below[:h, :w], below[1:, :w], dx, dy, 0, h)
+                results += [same, right, below]
+        for spec in ((0.0, 0.0, 0.0, 1.0), (1.5, -0.75, 1.5, 1.01)):
+            transform = similarity(*spec)
+            for kernel in (ak.warp_alignment_int_rows, ak.warp_alignment_int_rows_bgr_rev):
+                same = backing.copy()
+                kernel(same[:h, :w], same[:h, :w], *transform, 0, h)
+                right = backing.copy()
+                kernel(right[:h, :w], right[:h, 1:], *transform, 0, h)
+                results += [same, right]
+            region = backing.copy()
+            ak.warp_alignment_region_int_rows(
+                region[:h, :w], region[1:h - 4, 1:w - 6], h, w, 0, 3, 2, *transform, 0, h - 5)
+            results.append(region)
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))

@@ -538,15 +538,7 @@ bool copy_scaled_rows(const ArrayView& dst, const ArrayView& src,
         return true;
     }
     // Overlapping planes keep the element-by-element order of the generic path.
-    const auto low_address = [start, stop](const ArrayView& v) {
-        const int64_t y = v.stride[0] < 0 ? stop - 1 : start;
-        return static_cast<const uint8_t*>(v.data) + y * v.stride[0] * v.itemsize;
-    };
-    const auto extent = [start, stop, elems](const ArrayView& v) {
-        const int64_t sy = v.stride[0] < 0 ? -v.stride[0] : v.stride[0];
-        return static_cast<uint64_t>(((stop - start - 1) * sy + elems) * v.itemsize);
-    };
-    if (byte_ranges_overlap(low_address(src), extent(src), low_address(dst), extent(dst))) {
+    if (packed_rows_overlap(src, start, stop, dst, start, stop)) {
         return false;
     }
     const uint32_t scale32 = static_cast<uint32_t>(scale);
@@ -1322,7 +1314,7 @@ void of_depth_axis_iir_cpp(
             uint32_t* const acc = scratch.acc;
             if (guide == nullptr) {
                 if (!scratch.first16) {
-                    scratch.first16.reset(new uint16_t[static_cast<size_t>(h * band)]);
+                    scratch.first16.reset(new uint16_t[static_cast<size_t>(h * std::min(w, band))]);
                 }
                 uint16_t* const first = scratch.first16.get();
                 if (simd::use_avx2() && cols >= 8) {
@@ -1370,7 +1362,7 @@ void of_depth_axis_iir_cpp(
                 }
             } else {
                 if (!scratch.first32) {
-                    scratch.first32.reset(new uint32_t[static_cast<size_t>(h * band)]);
+                    scratch.first32.reset(new uint32_t[static_cast<size_t>(h * std::min(w, band))]);
                 }
                 uint32_t* const first = scratch.first32.get();
                 if (simd::use_avx2() && cols >= 8) {
@@ -1464,7 +1456,10 @@ void of_depth_axis_iir_cpp(
     const int64_t row_band = 32;
     const int threads = (h * w >= 65536) ? num_threads : 1;
     const bool in_place = (src == out && src_sy == out_sy);
-    bool simd_rows = simd::use_avx2() && w >= 8 && h >= 8;
+    // Eight rows are filtered together, which matches the row-by-row order
+    // only while no output row shares samples with another one.
+    const bool out_rows_disjoint = out_sy >= w || out_sy <= -w;
+    bool simd_rows = simd::use_avx2() && w >= 8 && h >= 8 && out_rows_disjoint;
     if (simd_rows) {
         if (guide == nullptr) {
             // Updating src in place is well defined; any other overlap is not.
