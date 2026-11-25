@@ -16,7 +16,7 @@
 
 const REPO = "Xinzhe99/OpenFocus";
 const RELEASE_API = `https://api.github.com/repos/${REPO}/releases/latest`;
-const CACHE_URL = "https://openfocus.internal/latest-release.json";
+const CACHE_URL = "https://openfocus.internal/latest-release-v2.json";
 const MIRROR_MANIFEST = "openfocus-meta/latest-release.json";
 const PREVIEW_MANIFEST = "openfocus-meta/beta-release.json";
 const DOWNLOAD_PREFIX = "/download/latest/";
@@ -234,6 +234,8 @@ function releasePayload(release) {
       name: asset.name,
       size: Number(asset.size) || 0,
       url: githubAssetUrl(asset.browser_download_url),
+      ...(typeof asset.digest === "string" && /^sha256:[0-9a-fA-F]{64}$/.test(asset.digest)
+        ? { digest: asset.digest } : {}),
     };
   };
   const linuxName = `OpenFocus-${release.tag_name}-${DOWNLOAD_SUFFIXES["linux-desktop"]}`;
@@ -441,7 +443,7 @@ function validDeltas(data) {
     const full = data.assets[DELTA_FULL_KINDS.get(platform)];
     if (!full || !name || name !== deltaName(data.tag, from, platform) ||
         !Number.isSafeInteger(size) || size <= 0 || size >= full.size ||
-        size >= 2147483648 || typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(digest)) continue;
+        size >= 2147483648 || typeof digest !== "string" || !/^sha256:[0-9a-fA-F]{64}$/.test(digest)) continue;
     if (deltas.has(name)) duplicates.add(name);
     deltas.set(name, { name, size, digest, from, platform });
   }
@@ -669,12 +671,41 @@ async function r2Download(request, env, key, name) {
   return new Response(object.body, { status, headers });
 }
 
+function recordWebsiteTraffic(db, ctx, downloadKind) {
+  if (!ctx?.waitUntil) return;
+  const now = Math.floor(Date.now() / 1000);
+  const platform = downloadKind?.slice(0, downloadKind.indexOf("-"));
+  try {
+    ctx.waitUntil(Promise.resolve().then(() => db.prepare(`INSERT INTO website_traffic_daily
+      (day, page_views, download_starts, windows_downloads, macos_downloads, linux_downloads)
+      VALUES (date(?, 'unixepoch', '+8 hours'), ?, ?, ?, ?, ?)
+      ON CONFLICT(day) DO UPDATE SET page_views = page_views + excluded.page_views,
+      download_starts = download_starts + excluded.download_starts,
+      windows_downloads = COALESCE(windows_downloads, 0) + excluded.windows_downloads,
+      macos_downloads = COALESCE(macos_downloads, 0) + excluded.macos_downloads,
+      linux_downloads = COALESCE(linux_downloads, 0) + excluded.linux_downloads`)
+      .bind(now, Number(downloadKind === null), Number(downloadKind !== null),
+        Number(platform === "windows"), Number(platform === "macos"), Number(platform === "linux"))
+      .run()).catch(() => {}));
+  } catch {
+    // Statistics must not delay or break the page or file response.
+  }
+}
+
+function isPrefetch(request) {
+  return request.headers.get("Sec-Purpose")?.includes("prefetch") || request.headers.get("Purpose") === "prefetch";
+}
+
 // Analytics is optional and must never interfere with serving a download.
 function recordDownload(request, response, env, ctx, version, kind, channel, source) {
-  if (request.method !== "GET" || !env?.ANALYTICS || !ctx?.waitUntil ||
-      typeof version !== "string" || !/^v[0-9A-Za-z._+-]{1,80}$/.test(version)) return;
+  const siteAnalytics = channel === "website" && env?.SITE_ANALYTICS;
+  if ((!siteAnalytics && !env?.ANALYTICS) || request.method !== "GET" || !ctx?.waitUntil) return;
   if (response.status !== 200 && response.status !== 302 &&
       !(response.status === 206 && /^bytes 0-\d+\/\d+$/.test(response.headers.get("Content-Range") || ""))) return;
+  if (siteAnalytics && new URL(request.url).hostname === "openfocus.top" && !isPrefetch(request)) {
+    recordWebsiteTraffic(siteAnalytics, ctx, kind);
+  }
+  if (!env.ANALYTICS || typeof version !== "string" || !/^v[0-9A-Za-z._+-]{1,80}$/.test(version)) return;
   try {
     const operation = Promise.resolve().then(() => env.ANALYTICS.prepare(
       "INSERT INTO download_counts (day, version, kind, channel, source, count) VALUES (date('now'), ?, ?, ?, ?, 1) " +
@@ -850,10 +881,10 @@ async function handleVersionedDownload(request, env, ctx) {
     return response || textResponse("The delta mirror is not ready; retry the download.", 503, { "Retry-After": "60" }, method);
   }
   const alias = /^(v[0-9]+(?:\.[0-9]+)*)\.999999999\.([1-9][0-9]*)$/.exec(tag);
-  const objectTag = alias && !alias[1].split(".").includes("999999999")
+  const objectTag = alias && !alias[1].split(".").some((part) => /^0*999999999$/.test(part))
     ? `${alias[1]}-beta.${alias[2]}` : tag;
   if (parts.length !== 2 || !/^v[0-9]+(?:\.[0-9]+)*(?:-beta\.[1-9][0-9]*)?$/.test(tag) ||
-      (tag.split("-beta.")[0].split(".").includes("999999999") && !alias) ||
+      (tag.split("-beta.")[0].split(".").some((part) => /^0*999999999$/.test(part)) && !alias) ||
       (alias && objectTag === tag) || !DOWNLOAD_KINDS.has(kind)) {
     return textResponse("Unknown release download", 404, {}, method);
   }
@@ -934,7 +965,8 @@ export default {
     }
 
     let languageHeaders = null;
-    if ((url.pathname === "/" || url.pathname === "/zh/") && (method === "GET" || method === "HEAD")) {
+    const homepage = url.pathname === "/" || url.pathname === "/zh/";
+    if (homepage && (method === "GET" || method === "HEAD")) {
       const query = url.searchParams.get("lang");
       const explicit = query === "en" || query === "zh";
       const lang = explicit ? query : url.pathname === "/zh/" ? "zh" : preferredLanguage(request);
@@ -959,6 +991,11 @@ export default {
     }
 
     const response = await env.ASSETS.fetch(request);
+    if (env.SITE_ANALYTICS && homepage && url.hostname === "openfocus.top" && method === "GET" &&
+        (response.status === 304 || (response.status === 200 && response.headers.get("Content-Type")?.startsWith("text/html"))) &&
+        !isPrefetch(request)) {
+      recordWebsiteTraffic(env.SITE_ANALYTICS, ctx, null);
+    }
     if (!languageHeaders) return response;
     const headers = new Headers(response.headers);
     for (const [key, value] of languageHeaders) headers.set(key, value);
