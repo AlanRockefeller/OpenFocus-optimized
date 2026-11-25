@@ -1283,3 +1283,87 @@ def test_alignment_rgb_warps_keep_overlapping_output_exact(dtype):
         return results
 
     _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+def _background_frames(rng, h, w, dtype, count, sharp_only=False):
+    """Column bands that reach each background branch: flat (zero response),
+    low texture, high texture, a 0/max checkerboard that changes per frame,
+    and low texture in the first frame only, so that a zero response follows
+    a non-zero minimum. sharp_only gives high texture everywhere."""
+    top = np.iinfo(dtype).max
+    if sharp_only:
+        return [rng.integers(0, top + 1, (h, w, 3), dtype=dtype) for _ in range(count)]
+    yy, xx = np.mgrid[0:h, 0:w]
+    band = (xx * 9 // w) % 5
+    frames = []
+    for i in range(count):
+        f = np.full((h, w, 3), top * 0.4)
+        f = np.where((band == 1)[:, :, None], f + rng.normal(0, top * 0.01 * (1 + i), (h, w, 3)), f)
+        f = np.where((band == 2)[:, :, None], rng.uniform(0, top, (h, w, 3)), f)
+        checker = ((yy + xx + i) % 2)[:, :, None] * top
+        f = np.where(((band == 3) & (yy % 5 < 2 + i % 3))[:, :, None], checker, f)
+        if i == 0:
+            f = np.where((band == 4)[:, :, None], f + rng.normal(0, top * 0.02, (h, w, 3)), f)
+        frames.append(np.clip(f, 0, top).astype(dtype))
+    return frames
+
+
+# Bands of a 1029-pixel row are wide enough for zero responses inside them.
+@pytest.mark.parametrize("w", [8, 9, 17, 64, 131, 1029])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("sharp_only", [False, True])
+def test_openfocus_a_background_select_rows_avx2_vs_scalar_bit_exact(w, dtype, sharp_only):
+    """Direct row selection: output, best responses, background sums, weight
+    totals, packed statistics and the state each row returns."""
+    from fusion_methods._openfocus_kernels import select_rows
+    from fusion_methods._openfocus_pixels import frame_gray_codes
+    from fusion_methods.openfocus_a import _hard_pyramid
+
+    mod = _require_avx2()
+    h = 7
+    rng = np.random.default_rng(4500 + w + np.dtype(dtype).itemsize + sharp_only)
+    frames = _background_frames(rng, h, w, dtype, 4, sharp_only)
+    scale = 256 if dtype == np.uint8 else 1
+    inputs = []
+    for frame in frames:
+        for layout in (frame, np.ascontiguousarray(frame[:, :, ::-1])[:, :, ::-1]):
+            gray = frame_gray_codes(layout, None, None)
+            inputs.append((layout, gray, *_hard_pyramid(gray, 8, None, lambda cancelled: None)))
+
+    def run():
+        results = []
+        for reversed_view in (0, 1):
+            output = np.full((h, w, 3), 3, np.uint16)
+            best = np.zeros((h, w), np.int32)
+            background = np.full((h, w, 5), 0.25, np.float32)
+            states = []
+            for index, (image, gray, half_gray, laplacians, levels) in enumerate(inputs[reversed_view::2]):
+                response = np.empty(w, np.int32)
+                for y in range(h):
+                    states.append(select_rows(image, gray, half_gray, laplacians, levels, response, best,
+                                              output, y, y + 1, scale, index == 0, background[y:y + 1]))
+            results += [output, best, background.view(np.uint32), np.asarray(states)]
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("w", [8, 9, 17, 64, 131])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+@pytest.mark.parametrize("reversed_view", [False, True])
+def test_openfocus_a_background_rows_avx2_vs_scalar_bit_exact(monkeypatch, w, dtype, reversed_view):
+    """Background selection runs eight pixels per step on packed rows."""
+    _mock_resources(monkeypatch)
+    mod = _require_avx2()
+    rng = np.random.default_rng(4400 + w + np.dtype(dtype).itemsize)
+    frames = _background_frames(rng, 13, w, dtype, 4)
+    if reversed_view:
+        frames = [np.ascontiguousarray(f[:, :, ::-1])[:, :, ::-1] for f in frames]
+
+    def run():
+        return openfocus_a.openfocus_a_impl(frames, thread_count=2)
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    np.testing.assert_array_equal(simd, scalar)

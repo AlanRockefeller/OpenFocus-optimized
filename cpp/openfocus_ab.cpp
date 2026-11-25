@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace openfocus {
@@ -410,7 +411,28 @@ int select_a_background_row(
     float* bg_row, uint32_t* st_row, int64_t bsx, int64_t bsc,
     int64_t scale, bool first, int state
 ) {
-    for (int64_t x = 0; x < width; ++x) {
+    int64_t x = 0;
+    if constexpr (std::is_same<DstT, uint16_t>::value) {
+        // The AVX2 rows read 24 source samples and five floats per eight pixels
+        // and write the output and background rows, so they need packed rows
+        // that do not overlap, and the statistics in the same floats.
+        const uint64_t src_bytes = static_cast<uint64_t>(3 * width) * sizeof(SrcT);
+        const uint64_t out_bytes = static_cast<uint64_t>(3 * width) * sizeof(uint16_t);
+        const uint64_t bg_bytes = static_cast<uint64_t>(5 * width) * sizeof(float);
+        const auto* src_lo = reinterpret_cast<const uint8_t*>(irow) - (is2 < 0 ? 2 * sizeof(SrcT) : 0);
+        if (simd::use_avx2() && width >= 8 && is1 == 3 && (is2 == 1 || is2 == -1) && os1 == 3 && os2 == 1
+                && bsx == 5 && bsc == 1 && scale == (sizeof(SrcT) == 1 ? 256 : 1)
+                && static_cast<const void*>(st_row) == static_cast<const void*>(bg_row)
+                && !byte_ranges_overlap(src_lo, src_bytes, orow, out_bytes)
+                && !byte_ranges_overlap(bg_row, bg_bytes, orow, out_bytes)
+                && !byte_ranges_overlap(bg_row, bg_bytes, src_lo, src_bytes)) {
+            state = simd::select_a_background_row_avx2(
+                b_row, response, width, irow, sizeof(SrcT) == 1, is2 < 0, orow, bg_row, first, state, &x,
+                static_cast<int32_t>(kAMaxResponse), static_cast<int32_t>(kABlendLimit),
+                kABackground, kASharp, kASaturated);
+        }
+    }
+    for (; x < width; ++x) {
         const int64_t prev = first ? 0 : static_cast<int64_t>(b_row[x]);
         if (!first && prev == kAMaxResponse) {
             continue;

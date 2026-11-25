@@ -123,6 +123,18 @@ int select_a_no_bg_packed_row_avx2(
     int64_t is1, int64_t is2, int64_t os1, int64_t os2,
     int64_t scale, int state, int64_t max_response, int sharp_state, int saturated_state);
 
+// OpenFocus A selection with background statistics, eight columns at a time:
+// packed three-channel source rows (channel step 1, or -1 for a reversed view
+// whose irow addresses channel 0), packed uint16 output scaled by 256 for
+// uint8 and 1 for uint16 sources, and a background row of five floats per
+// pixel (three sums, the weight total, the packed statistics). Handles columns
+// [0, width - width % 8), stores that count in *done and returns the state.
+int select_a_background_row_avx2(
+    int32_t* b_row, const int32_t* response, int64_t width,
+    const void* irow, bool src_u8, bool src_reversed, uint16_t* orow,
+    float* bg_row, bool first, int state, int64_t* done,
+    int32_t max_response, int32_t blend_limit, int background_state, int sharp_state, int saturated_state);
+
 void tile_accumulate_f32_1c_row_avx2(
     const float* tr, const float* wr, float* ar, float* war, int64_t fw);
 

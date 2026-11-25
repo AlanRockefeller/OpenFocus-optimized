@@ -1536,6 +1536,302 @@ int select_a_no_bg_packed_row_avx2(
         is1, is2, os1, os2, scale, state, max_response, sharp_state, saturated_state);
 }
 
+namespace {
+
+// Memory channels 0, 1 and 2 of eight packed RGB pixels (24 samples at p) as
+// eight int32 lanes each. Both 32-byte loads stay inside the 24 samples.
+inline void deinterleave_rgb8(const uint16_t* p, __m256i& c0, __m256i& c1, __m256i& c2) {
+    const __m256i lo = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p));      // 0..15
+    const __m256i hi = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + 8));  // 8..23
+    c0 = _mm256_or_si256(
+        _mm256_shuffle_epi8(lo, _mm256_setr_epi8(
+            0, 1, -1, -1, 6, 7, -1, -1, 12, 13, -1, -1, -1, -1, -1, -1,
+            8, 9, -1, -1, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+        _mm256_shuffle_epi8(hi, _mm256_setr_epi8(
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3, -1, -1,
+            -1, -1, -1, -1, -1, -1, -1, -1, 4, 5, -1, -1, 10, 11, -1, -1)));
+    c1 = _mm256_or_si256(
+        _mm256_shuffle_epi8(lo, _mm256_setr_epi8(
+            2, 3, -1, -1, 8, 9, -1, -1, 14, 15, -1, -1, -1, -1, -1, -1,
+            10, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+        _mm256_shuffle_epi8(hi, _mm256_setr_epi8(
+            -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 4, 5, -1, -1,
+            -1, -1, -1, -1, 0, 1, -1, -1, 6, 7, -1, -1, 12, 13, -1, -1)));
+    c2 = _mm256_or_si256(
+        _mm256_shuffle_epi8(lo, _mm256_setr_epi8(
+            4, 5, -1, -1, 10, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+            12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+        _mm256_shuffle_epi8(hi, _mm256_setr_epi8(
+            -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, -1, -1, 6, 7, -1, -1,
+            -1, -1, -1, -1, 2, 3, -1, -1, 8, 9, -1, -1, 14, 15, -1, -1)));
+}
+
+inline void deinterleave_rgb8(const uint8_t* p, __m256i& c0, __m256i& c1, __m256i& c2) {
+    // Lane 0 holds bytes 0..15 (pixels 0..3), lane 1 bytes 8..23 (pixels 4..7).
+    const __m256i src = _mm256_inserti128_si256(
+        _mm256_castsi128_si256(_mm_loadu_si128(reinterpret_cast<const __m128i*>(p))),
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 8)), 1);
+    c0 = _mm256_shuffle_epi8(src, _mm256_setr_epi8(
+        0, -1, -1, -1, 3, -1, -1, -1, 6, -1, -1, -1, 9, -1, -1, -1,
+        4, -1, -1, -1, 7, -1, -1, -1, 10, -1, -1, -1, 13, -1, -1, -1));
+    c1 = _mm256_shuffle_epi8(src, _mm256_setr_epi8(
+        1, -1, -1, -1, 4, -1, -1, -1, 7, -1, -1, -1, 10, -1, -1, -1,
+        5, -1, -1, -1, 8, -1, -1, -1, 11, -1, -1, -1, 14, -1, -1, -1));
+    c2 = _mm256_shuffle_epi8(src, _mm256_setr_epi8(
+        2, -1, -1, -1, 5, -1, -1, -1, 8, -1, -1, -1, 11, -1, -1, -1,
+        6, -1, -1, -1, 9, -1, -1, -1, 12, -1, -1, -1, 15, -1, -1, -1));
+}
+
+// The 24 output samples of eight pixels: the source samples scaled to 16 bits
+// (by 1 for uint16, by 256 for uint8), in output channel order.
+template <bool Rev>
+inline void a_output_samples(const uint16_t* p, __m128i out[3]) {
+    const __m128i s0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    const __m128i s8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 8));
+    const __m128i s16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 16));
+    if constexpr (!Rev) {
+        out[0] = s0;
+        out[1] = s8;
+        out[2] = s16;
+    } else {
+        // Output sample 3k + c is source sample 3k + 2 - c.
+        out[0] = _mm_or_si128(
+            _mm_shuffle_epi8(s0, _mm_setr_epi8(4, 5, 2, 3, 0, 1, 10, 11, 8, 9, 6, 7, -1, -1, 14, 15)),
+            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, -1, -1)));
+        out[1] = _mm_or_si128(
+            _mm_or_si128(
+                _mm_shuffle_epi8(s0, _mm_setr_epi8(12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+                _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 6, 7, 4, 5, 2, 3, 12, 13, 10, 11, 8, 9, -1, -1))),
+            _mm_shuffle_epi8(s16, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3)));
+        out[2] = _mm_or_si128(
+            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+            _mm_shuffle_epi8(s16, _mm_setr_epi8(0, 1, -1, -1, 8, 9, 6, 7, 4, 5, 14, 15, 12, 13, 10, 11)));
+    }
+}
+
+template <bool Rev>
+inline void a_output_samples(const uint8_t* p, __m128i out[3]) {
+    // Byte b becomes the 16-bit sample b << 8. Windows start at bytes 0, 4 and 8.
+    const __m128i w0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p));
+    const __m128i w4 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 4));
+    const __m128i w8 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 8));
+    if constexpr (!Rev) {
+        out[0] = _mm_shuffle_epi8(w0, _mm_setr_epi8(-1, 0, -1, 1, -1, 2, -1, 3, -1, 4, -1, 5, -1, 6, -1, 7));
+        out[1] = _mm_shuffle_epi8(w4, _mm_setr_epi8(-1, 4, -1, 5, -1, 6, -1, 7, -1, 8, -1, 9, -1, 10, -1, 11));
+        out[2] = _mm_shuffle_epi8(w8, _mm_setr_epi8(-1, 8, -1, 9, -1, 10, -1, 11, -1, 12, -1, 13, -1, 14, -1, 15));
+    } else {
+        out[0] = _mm_shuffle_epi8(w0, _mm_setr_epi8(-1, 2, -1, 1, -1, 0, -1, 5, -1, 4, -1, 3, -1, 8, -1, 7));
+        out[1] = _mm_shuffle_epi8(w4, _mm_setr_epi8(-1, 2, -1, 7, -1, 6, -1, 5, -1, 10, -1, 9, -1, 8, -1, 13));
+        out[2] = _mm_shuffle_epi8(w8, _mm_setr_epi8(-1, 8, -1, 7, -1, 12, -1, 11, -1, 10, -1, 15, -1, 14, -1, 13));
+    }
+}
+
+// Sixteen-bit masks for the 24 samples of the eight pixels selected in `pixels`.
+inline void a_sample_masks(__m256i pixels, __m128i masks[3]) {
+    const __m256i g0 = _mm256_permutevar8x32_epi32(pixels, _mm256_setr_epi32(0, 0, 0, 1, 1, 1, 2, 2));
+    const __m256i g1 = _mm256_permutevar8x32_epi32(pixels, _mm256_setr_epi32(2, 3, 3, 3, 4, 4, 4, 5));
+    const __m256i g2 = _mm256_permutevar8x32_epi32(pixels, _mm256_setr_epi32(5, 5, 6, 6, 6, 7, 7, 7));
+    masks[0] = _mm_packs_epi32(_mm256_castsi256_si128(g0), _mm256_extracti128_si256(g0, 1));
+    masks[1] = _mm_packs_epi32(_mm256_castsi256_si128(g1), _mm256_extracti128_si256(g1, 1));
+    masks[2] = _mm_packs_epi32(_mm256_castsi256_si128(g2), _mm256_extracti128_si256(g2, 1));
+}
+
+// Background statistics of eight pixels, five floats each (three weighted sums,
+// the weight total and the packed response statistics), as one vector per field.
+struct ABackground8 {
+    __m256 sum[3];
+    __m256 total;
+    __m256i stat;
+};
+
+inline __m256 a_bg_pair(const float* bg, int k, int field) {
+    return _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_loadu_ps(bg + 5 * k + field)),
+                                _mm_loadu_ps(bg + 5 * (k + 4) + field), 1);
+}
+
+inline ABackground8 a_bg_load(const float* bg) {
+    ABackground8 v;
+    // Fields 0..3 of pixels k and k + 4, then a 4x4 transpose in each lane.
+    const __m256 a0 = a_bg_pair(bg, 0, 0), a1 = a_bg_pair(bg, 1, 0);
+    const __m256 a2 = a_bg_pair(bg, 2, 0), a3 = a_bg_pair(bg, 3, 0);
+    const __m256 t0 = _mm256_unpacklo_ps(a0, a1), t1 = _mm256_unpackhi_ps(a0, a1);
+    const __m256 t2 = _mm256_unpacklo_ps(a2, a3), t3 = _mm256_unpackhi_ps(a2, a3);
+    v.sum[0] = _mm256_shuffle_ps(t0, t2, 0x44);
+    v.sum[1] = _mm256_shuffle_ps(t0, t2, 0xEE);
+    v.sum[2] = _mm256_shuffle_ps(t1, t3, 0x44);
+    v.total = _mm256_shuffle_ps(t1, t3, 0xEE);
+    // Field 4 is the last element of the fields 1..4 of each pixel.
+    const __m256 b0 = a_bg_pair(bg, 0, 1), b1 = a_bg_pair(bg, 1, 1);
+    const __m256 b2 = a_bg_pair(bg, 2, 1), b3 = a_bg_pair(bg, 3, 1);
+    v.stat = _mm256_castps_si256(
+        _mm256_shuffle_ps(_mm256_unpackhi_ps(b0, b1), _mm256_unpackhi_ps(b2, b3), 0xEE));
+    return v;
+}
+
+inline void a_bg_store(float* bg, const ABackground8& v) {
+    const __m256 t0 = _mm256_unpacklo_ps(v.sum[0], v.sum[1]), t1 = _mm256_unpackhi_ps(v.sum[0], v.sum[1]);
+    const __m256 t2 = _mm256_unpacklo_ps(v.sum[2], v.total), t3 = _mm256_unpackhi_ps(v.sum[2], v.total);
+    const __m256 rows[4] = {_mm256_shuffle_ps(t0, t2, 0x44), _mm256_shuffle_ps(t0, t2, 0xEE),
+                            _mm256_shuffle_ps(t1, t3, 0x44), _mm256_shuffle_ps(t1, t3, 0xEE)};
+    for (int k = 0; k < 4; ++k) {
+        _mm_storeu_ps(bg + 5 * k, _mm256_castps256_ps128(rows[k]));
+        _mm_storeu_ps(bg + 5 * (k + 4), _mm256_extractf128_ps(rows[k], 1));
+    }
+    alignas(32) uint32_t stat[8];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(stat), v.stat);
+    for (int k = 0; k < 8; ++k) {
+        std::memcpy(bg + 5 * k + 4, &stat[k], sizeof(uint32_t));
+    }
+}
+
+inline __m256 select_ps(__m256 if_false, __m256 if_true, __m256i mask) {
+    return _mm256_blendv_ps(if_false, if_true, _mm256_castsi256_ps(mask));
+}
+
+inline __m256i select_epi32(__m256i if_false, __m256i if_true, __m256i mask) {
+    return _mm256_blendv_epi8(if_false, if_true, mask);
+}
+
+// Eight columns at a time of select_a_background_row in openfocus_ab.cpp. Each
+// lane runs the scalar per-pixel sequence with the same float operations in
+// the same order; the row state is the scalar sequence reduced over the chunk
+// (any collected pixel makes it background, otherwise a non-collected pixel
+// below the response maximum turns saturated into sharp).
+template <typename SrcT, bool Rev, bool First>
+int select_a_background_impl(
+    int32_t* b_row, const int32_t* response, int64_t width,
+    const SrcT* irow, uint16_t* orow, float* bg_row, int state, int64_t* done,
+    int32_t max_response, int32_t blend_limit, int background_state, int sharp_state, int saturated_state
+) {
+    const __m256i v_max = _mm256_set1_epi32(max_response);
+    const __m256i v_limit = _mm256_set1_epi32(blend_limit);
+    const __m256i v_zero = _mm256_setzero_si256();
+    const __m256i v_ones = _mm256_set1_epi32(-1);
+    const __m256 f_one = _mm256_set1_ps(1.0f);
+    const __m256 f_zero = _mm256_setzero_ps();
+    const int shift = std::is_same<SrcT, uint8_t>::value ? 8 : 0;
+    int64_t x = 0;
+    for (; x + 8 <= width; x += 8) {
+        const __m256i prev = First ? v_zero : _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_row + x));
+        const __m256i sc = _mm256_min_epi32(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(response + x)), v_max);
+        const __m256i live = First ? v_ones : _mm256_xor_si256(_mm256_cmpeq_epi32(prev, v_max), v_ones);
+        const __m256i take = First ? v_ones : _mm256_cmpgt_epi32(sc, prev);
+        const __m256i collect = _mm256_and_si256(
+            _mm256_and_si256(_mm256_cmpgt_epi32(v_limit, prev), _mm256_cmpgt_epi32(v_limit, sc)), live);
+        if (_mm256_movemask_epi8(collect) != 0) {
+            state = background_state;
+        } else if (state == saturated_state) {
+            const __m256i below_max = _mm256_andnot_si256(_mm256_cmpeq_epi32(sc, v_max), live);
+            if (_mm256_movemask_epi8(below_max) != 0) {
+                state = sharp_state;
+            }
+        }
+        if (_mm256_movemask_epi8(_mm256_or_si256(collect, take)) == 0) {
+            continue;
+        }
+        const SrcT* sp = irow + 3 * x - (Rev ? 2 : 0);
+        __m256i written = take;
+        if (_mm256_movemask_epi8(collect) != 0) {
+            float* bg = bg_row + 5 * x;
+            ABackground8 v = a_bg_load(bg);
+            __m256i c[3];
+            deinterleave_rgb8(sp, c[0], c[1], c[2]);
+            __m256 val[3];
+            for (int ch = 0; ch < 3; ++ch) {
+                val[ch] = _mm256_cvtepi32_ps(_mm256_slli_epi32(c[Rev ? 2 - ch : ch], shift));
+            }
+            const __m256i code = _mm256_srai_epi32(sc, 4);
+            const __m256i is_zero = _mm256_cmpeq_epi32(sc, v_zero);
+            if constexpr (First) {
+                const __m256 weight = select_ps(f_one, f_zero, is_zero);
+                v.stat = select_epi32(v.stat, code, collect);
+                v.total = select_ps(v.total, weight, collect);
+                for (int ch = 0; ch < 3; ++ch) {
+                    v.sum[ch] = select_ps(v.sum[ch], _mm256_mul_ps(val[ch], weight), collect);
+                }
+            } else {
+                const __m256 fprev = _mm256_cvtepi32_ps(prev);
+                const __m256 fsc = _mm256_cvtepi32_ps(sc);
+                const __m256 ratio = _mm256_div_ps(select_ps(fsc, fprev, take), select_ps(fprev, fsc, take));
+                __m256 power = _mm256_mul_ps(ratio, ratio);
+                power = _mm256_mul_ps(power, power);
+                const __m256 factor = select_ps(f_one, power, take);
+                const __m256 weight = select_ps(power, f_one, take);
+                const __m256 total = select_ps(_mm256_add_ps(v.total, weight),
+                                               _mm256_add_ps(_mm256_mul_ps(v.total, factor), f_one), take);
+                const __m256i minimum = _mm256_and_si256(v.stat, _mm256_set1_epi32(4095));
+                const __m256i second = _mm256_srli_epi32(v.stat, 12);
+                const __m256i second_new = select_epi32(
+                    _mm256_max_epu32(second, code), _mm256_srai_epi32(prev, 4), take);
+                const __m256i stat = _mm256_or_si256(
+                    _mm256_slli_epi32(second_new, 12), _mm256_min_epu32(minimum, code));
+                // A zero response clears the minimum and skips the sums and the copy.
+                const __m256i cleared = _mm256_and_si256(collect, is_zero);
+                const __m256i update = _mm256_andnot_si256(is_zero, collect);
+                v.stat = select_epi32(select_epi32(v.stat, stat, update), _mm256_slli_epi32(second, 12), cleared);
+                v.total = select_ps(v.total, total, update);
+                for (int ch = 0; ch < 3; ++ch) {
+                    const __m256 sum = _mm256_add_ps(_mm256_mul_ps(v.sum[ch], factor), _mm256_mul_ps(val[ch], weight));
+                    v.sum[ch] = select_ps(v.sum[ch], sum, update);
+                }
+                written = _mm256_andnot_si256(cleared, take);
+            }
+            a_bg_store(bg, v);
+        }
+        const int taken = _mm256_movemask_epi8(written);
+        if (taken != 0) {
+            __m128i samples[3];
+            a_output_samples<Rev>(sp, samples);
+            uint16_t* dp = orow + 3 * x;
+            if (taken != -1) {
+                __m128i masks[3];
+                a_sample_masks(written, masks);
+                for (int g = 0; g < 3; ++g) {
+                    const __m128i old = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dp + 8 * g));
+                    samples[g] = _mm_blendv_epi8(old, samples[g], masks[g]);
+                }
+            }
+            for (int g = 0; g < 3; ++g) {
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 8 * g), samples[g]);
+            }
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(b_row + x), select_epi32(prev, sc, written));
+        }
+    }
+    *done = x;
+    return state;
+}
+
+}  // namespace
+
+int select_a_background_row_avx2(
+    int32_t* b_row, const int32_t* response, int64_t width,
+    const void* irow, bool src_u8, bool src_reversed, uint16_t* orow,
+    float* bg_row, bool first, int state, int64_t* done,
+    int32_t max_response, int32_t blend_limit, int background_state, int sharp_state, int saturated_state
+) {
+    const auto run = [&](auto impl, const auto* src) {
+        return impl(b_row, response, width, src, orow, bg_row, state, done,
+                    max_response, blend_limit, background_state, sharp_state, saturated_state);
+    };
+    if (src_u8) {
+        const auto* src = static_cast<const uint8_t*>(irow);
+        if (src_reversed) {
+            return first ? run(select_a_background_impl<uint8_t, true, true>, src)
+                         : run(select_a_background_impl<uint8_t, true, false>, src);
+        }
+        return first ? run(select_a_background_impl<uint8_t, false, true>, src)
+                     : run(select_a_background_impl<uint8_t, false, false>, src);
+    }
+    const auto* src = static_cast<const uint16_t*>(irow);
+    if (src_reversed) {
+        return first ? run(select_a_background_impl<uint16_t, true, true>, src)
+                     : run(select_a_background_impl<uint16_t, true, false>, src);
+    }
+    return first ? run(select_a_background_impl<uint16_t, false, true>, src)
+                 : run(select_a_background_impl<uint16_t, false, false>, src);
+}
+
 void tile_accumulate_f32_1c_row_avx2(
     const float* tr, const float* wr, float* ar, float* war, int64_t fw
 ) {
@@ -4371,6 +4667,7 @@ void gray_rgb_u8_row_avx2(const uint8_t*, uint16_t*, int32_t*, int64_t, int32_t,
 void gray_rgb_u16_row_avx2(const uint16_t*, uint16_t*, int32_t*, int64_t, int32_t, bool, bool) {}
 void merge_recip_packed_row_avx2(const uint16_t*, const void*, bool, void*, bool, int64_t, int64_t, int64_t, int64_t, int64_t, int32_t, int32_t, uint64_t, int32_t) {}
 int select_a_no_bg_packed_row_avx2(int32_t*, const int32_t*, int64_t, const void*, bool, void*, bool, int64_t, int64_t, int64_t, int64_t, int64_t, int state, int64_t, int, int) { return state; }
+int select_a_background_row_avx2(int32_t*, const int32_t*, int64_t, const void*, bool, bool, uint16_t*, float*, bool, int state, int64_t* done, int32_t, int32_t, int, int, int) { *done = 0; return state; }
 void tile_accumulate_f32_1c_row_avx2(const float*, const float*, float*, float*, int64_t) {}
 void tile_finalize_3c_row_avx2(const float*, const float*, uint8_t*, float*, int64_t, int64_t, bool) {}
 bool pyr_any_gt_u16_avx2(const uint16_t*, const uint16_t*, int64_t) { return false; }
