@@ -200,14 +200,22 @@ def cmyk_to_bgr(image, path, profile=b''):
     return cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
 
 
-def validate_pil_header(path, image):
+def validate_pil_header(path, image, *, stream=None):
     """Reject unsupported display sample types and CMYK profiles without decoding."""
     if image.mode == 'F':
         _validate_depth(path, np.float32)
     if image.mode == 'I':
         # Pillow exposes unsigned 16-bit PNG grayscale as mode I on some versions.
-        with open(path, 'rb') as stream:
-            header = stream.read(26)
+        if stream is None:
+            with open(path, 'rb') as source:
+                header = source.read(26)
+        else:
+            position = stream.tell()
+            try:
+                stream.seek(0)
+                header = stream.read(26)
+            finally:
+                stream.seek(position)
         if not (header[:8] == b'\x89PNG\r\n\x1a\n' and len(header) == 26 and header[24] == 16):
             _validate_depth(path, np.int32)
     if image.mode == 'CMYK':
@@ -237,11 +245,17 @@ def _orient_tiff_pixels(page, image):
 # Rows exchanged at once while turning stored RGB samples into BGR in place.
 _TIFF_SWAP_BAND_BYTES = 4 << 20
 # OpenCV enforces these defaults before allocating a decoded image.
-_TIFF_DECODE_MAX_DIMENSION = 1 << 20
-_TIFF_DECODE_MAX_PIXELS = 1 << 30
-_TIFF_DECODE_LIMIT_OVERRIDES = (
+_OPENCV_DECODE_MAX_DIMENSION = 1 << 20
+_OPENCV_DECODE_MAX_PIXELS = 1 << 30
+_OPENCV_DECODE_LIMIT_OVERRIDES = (
     'OPENCV_IO_MAX_IMAGE_WIDTH', 'OPENCV_IO_MAX_IMAGE_HEIGHT', 'OPENCV_IO_MAX_IMAGE_PIXELS',
 )
+
+
+def _within_opencv_decode_limits(width, height):
+    return (min(width, height) > 0 and max(width, height) <= _OPENCV_DECODE_MAX_DIMENSION
+            and width * height <= _OPENCV_DECODE_MAX_PIXELS
+            and not any(name in os.environ for name in _OPENCV_DECODE_LIMIT_OVERRIDES))
 
 
 def _stored_tiff_layout(page):
@@ -267,10 +281,9 @@ def _stored_tiff_layout(page):
     rows, width, per_strip = int(page.imagelength), int(page.imagewidth), int(page.rowsperstrip)
     row_bytes = width * page.samplesperpixel * page.dtype.itemsize
     shape = (rows, width, 3) if rgb else (rows, width)
-    if (min(rows, width, per_strip) < 1 or tuple(page.shape) != shape
-            or max(rows, width) > _TIFF_DECODE_MAX_DIMENSION or rows * width > _TIFF_DECODE_MAX_PIXELS
-            or (rgb and row_bytes > _TIFF_SWAP_BAND_BYTES)
-            or any(name in os.environ for name in _TIFF_DECODE_LIMIT_OVERRIDES)):
+    if (per_strip < 1 or tuple(page.shape) != shape
+            or not _within_opencv_decode_limits(width, rows)
+            or (rgb and row_bytes > _TIFF_SWAP_BAND_BYTES)):
         return None
 
     offsets, counts = page.dataoffsets, page.databytecounts
@@ -366,6 +379,40 @@ def validate_tiff_page(path, page):
     return True
 
 
+def _decode_compressed_tiff_page(tif, page):
+    """Decode complete, lossless grayscale or RGB strips with bounded workers."""
+    photometric = int(page.photometric)
+    channels = 3 if photometric == 2 else 1
+    rows, width = page.imagelength, page.imagewidth
+    offsets, counts = page.dataoffsets, page.databytecounts
+    if (page.is_tiled or int(page.compression) not in (5, 8, 32946, 32773)
+            or int(page.planarconfig) != 1 or int(page.fillorder) != 1
+            or photometric not in (1, 2) or page.samplesperpixel != channels or page.extrasamples
+            or page.dtype not in (np.uint8, np.uint16) or page.bitspersample != page.dtype.itemsize * 8
+            or rows * width < 1_000_000 or not _within_opencv_decode_limits(width, rows)
+            or page.rowsperstrip < 1):
+        return None
+    strips = (rows + page.rowsperstrip - 1) // page.rowsperstrip
+    size = tif.filehandle.size
+    if strips < 4 or len(offsets) != strips or len(counts) != strips or any(
+            offset <= 0 or count <= 0 or offset + count > size
+            for offset, count in zip(offsets, counts)):
+        return None
+
+    from utils.platform_utils import physical_core_count
+
+    try:
+        image = page.asarray(maxworkers=min(_MAX_DECODE_WORKERS, physical_core_count()))
+    except (KeyError, ImportError, OSError, RuntimeError, ValueError):
+        return None
+    shape = (rows, width, 3) if channels == 3 else (rows, width)
+    if image.shape != shape or image.dtype != page.dtype or not image.dtype.isnative:
+        return None
+    if channels == 3:
+        _exchange_red_blue(image)
+    return _orient_tiff_pixels(page, image)
+
+
 def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
     """Decode a validated display TIFF page, applying its orientation exactly once."""
     import tifffile
@@ -404,6 +451,8 @@ def decode_tiff_page(path, page_index=None, *, preserve_grayscale=False):
         stored = _stored_tiff_layout(page) if page_index >= 0 else None
         # Read from the same file handle used to inspect the strip layout.
         image = _read_stored_tiff_page(tif.filehandle, stored) if stored is not None else None
+        if image is None and page_index >= 0:
+            image = _decode_compressed_tiff_page(tif, page)
     if image is None:
         data = np.memmap(path, dtype=np.uint8, mode='r')
         success, decoded = cv2.imdecodemulti(data, flags=cv2.IMREAD_UNCHANGED,
@@ -576,6 +625,48 @@ def _decode_jpeg_bgr_into(path, encoded_bytes, destination):
             and decoded.ctypes.data == destination.ctypes.data)
 
 
+def _decode_png_fast(path: str, raw_bytes: bytes, *, allow_transparent_png: bool,
+                     preserve_grayscale: bool) -> Optional[np.ndarray]:
+    """Decode standard 8/16-bit PNG via imagecodecs without opening Pillow twice."""
+    if (len(raw_bytes) < 33 or raw_bytes[:8] != b'\x89PNG\r\n\x1a\n'
+            or raw_bytes[12:16] != b'IHDR'):
+        return None
+    bit_depth = raw_bytes[24]
+    color_type = raw_bytes[25]
+    if bit_depth not in (8, 16) or color_type not in (0, 2, 4, 6):
+        return None
+    try:
+        import imagecodecs
+    except ImportError:
+        return None
+    decoder = getattr(imagecodecs, 'spng_decode' if bit_depth == 8 else 'png_decode', None)
+    if decoder is None:
+        return None
+    try:
+        decoded = decoder(raw_bytes)
+    except Exception:
+        return None
+    if decoded is None or decoded.dtype.type not in (np.uint8, np.uint16):
+        return None
+    if not decoded.dtype.isnative:
+        decoded = np.ascontiguousarray(decoded, dtype=decoded.dtype.newbyteorder('='))
+    if _has_transparency(decoded):
+        if allow_transparent_png:
+            return cv2.cvtColor(decoded, cv2.COLOR_RGBA2BGRA)
+        raise UnsupportedTransparency(
+            f"Transparent input is unsupported here: {path}. "
+            "Matching rectangular PNG transparency is supported in the desktop and CLI workflows; see the manual.")
+    if decoded.ndim == 2:
+        img = decoded if preserve_grayscale else cv2.cvtColor(decoded, cv2.COLOR_GRAY2BGR)
+    elif decoded.ndim == 3 and decoded.shape[2] == 3:
+        img = cv2.cvtColor(decoded, cv2.COLOR_RGB2BGR)
+    elif decoded.ndim == 3 and decoded.shape[2] == 4:
+        img = cv2.cvtColor(decoded, cv2.COLOR_RGBA2BGR)
+    else:
+        return None
+    return img
+
+
 def decode_image(path: str, *, allow_transparent_png: bool = False,
                  preserve_grayscale: bool = False, scale_factor: float = 1.0,
                  area_resizer=None) -> Optional[np.ndarray]:
@@ -592,49 +683,79 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
         return _read_raw(path, scale_factor)
     if ext in ('.tif', '.tiff'):
         return decode_tiff_page(path, preserve_grayscale=preserve_grayscale)
-    # _downscale_page leaves the image alone at a scale of one.
     jpeg_scale = scale_factor if is_scaled_jpeg(path, scale_factor) else 1.0
     jpeg_mode = None
-    if PIL_AVAILABLE:
+    png_fast = False
+    orientation = 1
+    raw_bytes = None
+    single_open = PIL_AVAILABLE and (ext in _JPEG_EXTENSIONS or ext == '.png')
+    if single_open:
+        with open(path, 'rb') as fh:
+            with PILImage.open(fh) as header:
+                validate_pil_header(path, header, stream=fh)
+                if ext in _JPEG_EXTENSIONS and header.format == 'JPEG':
+                    jpeg_mode = header.mode
+                    jpeg_size = header.size
+                try:
+                    orientation = int(read_image_exif(header).get(274, 1))
+                except SourceExifTooLarge:
+                    raise
+                except Exception:
+                    pass
+                if header.mode == 'CMYK':
+                    image = cmyk_to_bgr(header, path, header.info.get('icc_profile', b''))
+                    return _apply_orientation_value(_downscale_page(image, jpeg_scale, area_resizer), orientation)
+                # Color-key transparency follows OpenCV's existing PNG semantics.
+                png_fast = (ext == '.png' and header.format == 'PNG'
+                            and 'transparency' not in header.info
+                            and _within_opencv_decode_limits(*header.size))
+            fh.seek(0)
+            raw_bytes = fh.read()
+    elif PIL_AVAILABLE:
         with PILImage.open(path) as header:
             validate_pil_header(path, header)
+            if ext == '.webp':
+                try:
+                    orientation = int(read_image_exif(header).get(274, 1))
+                except SourceExifTooLarge:
+                    raise
+                except Exception:
+                    pass
             if header.mode == 'CMYK':
                 image = cmyk_to_bgr(header, path, header.info.get('icc_profile', b''))
-                image = _downscale_page(image, jpeg_scale, area_resizer)
-                return apply_exif_orientation(path, image)
-            if ext in ('.jpg', '.jpeg', '.jpe', '.jfif') and header.format == 'JPEG':
-                jpeg_mode = header.mode
-                jpeg_size = header.size
-    if jpeg_mode is not None:
-        with open(path, 'rb') as fh:
-            raw_bytes = fh.read()
+                return _apply_orientation_value(_downscale_page(image, jpeg_scale, area_resizer), orientation)
+    if raw_bytes is not None:
         img = None
-        try:
-            import imagecodecs
-            if jpeg_mode == 'L':
-                img = imagecodecs.jpeg8_decode(raw_bytes, outcolorspace='GRAY')
-                if img is not None and img.ndim == 2 and not preserve_grayscale:
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-            else:
-                # Use the decoder's explicit extension enum. Older wheels
-                # without it retain the portable RGB conversion path.
-                colors = getattr(imagecodecs.JPEG8, 'CS', None)
-                bgr = getattr(colors, 'EXT_BGR', None) if jpeg_mode == 'RGB' else None
-                img = imagecodecs.jpeg8_decode(raw_bytes, outcolorspace=bgr if bgr is not None else 'RGB')
-                if img is not None and img.ndim == 3 and img.shape[2] == 3:
-                    if bgr is None:
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                elif img is not None and img.ndim == 2 and not preserve_grayscale:
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if png_fast:
+            img = _decode_png_fast(path, raw_bytes, allow_transparent_png=allow_transparent_png,
+                                   preserve_grayscale=preserve_grayscale)
+        elif jpeg_mode is not None:
+            try:
+                import imagecodecs
+
+                if jpeg_mode == 'L':
+                    img = imagecodecs.jpeg8_decode(raw_bytes, outcolorspace='GRAY')
+                    if img is not None and img.ndim == 2 and not preserve_grayscale:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                 else:
-                    img = None
-        except Exception:
-            img = None
+                    # Use the decoder's explicit extension enum. Older wheels
+                    # without it retain the portable RGB conversion path.
+                    colors = getattr(imagecodecs.JPEG8, 'CS', None)
+                    bgr = getattr(colors, 'EXT_BGR', None) if jpeg_mode == 'RGB' else None
+                    img = imagecodecs.jpeg8_decode(raw_bytes, outcolorspace=bgr if bgr is not None else 'RGB')
+                    if img is not None and img.ndim == 3 and img.shape[2] == 3:
+                        if bgr is None:
+                            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                    elif img is not None and img.ndim == 2 and not preserve_grayscale:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    else:
+                        img = None
+            except Exception:
+                img = None
         if img is not None:
             del raw_bytes
             _validate_depth(path, img.dtype)
-            img = _downscale_page(img, jpeg_scale, area_resizer)
-            return apply_exif_orientation(path, img)
+            return _apply_orientation_value(_downscale_page(img, jpeg_scale, area_resizer), orientation)
         data = np.frombuffer(raw_bytes, dtype=np.uint8)
     else:
         data = np.fromfile(path, dtype=np.uint8)
@@ -645,7 +766,7 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
             unchanged = _apply_png_gray_key(data, unchanged)
     if unchanged is not None and _has_transparency(unchanged):
         if allow_transparent_png and ext == '.png':
-            return apply_exif_orientation(path, unchanged)
+            return _apply_orientation_value(unchanged, orientation)
         raise UnsupportedTransparency(
             f"Transparent input is unsupported here: {path}. "
             "Matching rectangular PNG transparency is supported in the desktop and CLI workflows; see the manual.")
@@ -675,7 +796,7 @@ def decode_image(path: str, *, allow_transparent_png: bool = False,
     if img is not None:
         _validate_depth(path, img.dtype)
         img = _downscale_page(img, jpeg_scale, area_resizer)
-        img = apply_exif_orientation(path, img)
+        img = _apply_orientation_value(img, orientation)
     return img
 
 
@@ -739,13 +860,13 @@ def _read_raw_exif_bytes(path: str) -> bytes:
             return b""
 
 
-def _exif_bytes_from_image(image) -> bytes:
+def _exif_bytes_from_image(image, *, pre_exif=None) -> bytes:
     """Read EXIF from the active image page without loading pixels."""
     try:
         raw = image.info.get('exif', b'') or b''
         if raw and image.format != 'TIFF':
             return raw
-        exif = read_image_exif(image)
+        exif = pre_exif if pre_exif is not None else read_image_exif(image)
         if not len(exif):
             return b''
         safe = export_exif(exif.tobytes())
@@ -893,12 +1014,13 @@ def _frame_metadata(path, frames, should_cancel):
     return result
 
 
-def _pil_metadata_from_image(path: str, image) -> Tuple[bytes, bytes]:
+def _pil_metadata_from_image(path: str, image, *, pre_exif=None) -> Tuple[bytes, bytes]:
     """Extract sanitized EXIF and ICC profile from an already-opened Pillow image."""
     if not PIL_AVAILABLE:
         return b'', b''
     ext = os.path.splitext(path)[1].lower()
-    raw_exif = _exif_bytes_from_image(image) if ext in ('.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.webp') else b''
+    raw_exif = (_exif_bytes_from_image(image, pre_exif=pre_exif)
+                if ext in ('.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.webp') else b'')
     safe_exif = _safe_exif_bytes(path, raw_exif)
     try:
         profile = _display_profile(path, image.info.get('icc_profile', b''), image.mode == 'CMYK')
@@ -966,6 +1088,13 @@ _EXIF_TRANSFORMS = {
 }
 
 
+def _apply_orientation_value(img: np.ndarray, orientation: int) -> np.ndarray:
+    transform = _EXIF_TRANSFORMS.get(int(orientation))
+    if transform is not None:
+        return np.ascontiguousarray(transform(img))
+    return img
+
+
 def apply_exif_orientation(path: str, img: np.ndarray) -> np.ndarray:
     """Rotate/flip a decoded image according to its EXIF Orientation tag.
 
@@ -982,9 +1111,7 @@ def apply_exif_orientation(path: str, img: np.ndarray) -> np.ndarray:
             return img
         with PILImage.open(path) as pil_img:
             orientation = read_image_exif(pil_img).get(274, 1)
-        transform = _EXIF_TRANSFORMS.get(int(orientation))
-        if transform is not None:
-            return np.ascontiguousarray(transform(img))
+        return _apply_orientation_value(img, orientation)
     except Exception as e:
         print(f"EXIF orientation check failed for {path}: {e}")
     return img
@@ -1567,8 +1694,12 @@ class ImageStackLoader:
                             thread_count: int = 0,
                             resource_preference: str = "balanced"):
         """Open headers and prepare the first display in an admitted background job."""
-        from concurrent.futures import ThreadPoolExecutor
-        from core.source_frames import scan_source, ensure_display_preview
+        from collections import deque
+        from concurrent.futures import ThreadPoolExecutor, wait
+        from itertools import islice
+        from threading import Event
+        from core.resource_policy import cpu_capacity, probe_resources, ram_budget
+        from core.source_frames import _PREVIEW_WORKING_BYTES, scan_source, ensure_display_preview
         from utils.logging_setup import log_operation
         from utils.scalebar import detect_px_size_um
 
@@ -1578,34 +1709,56 @@ class ImageStackLoader:
         images, names, paths, px_sizes, exifs, profiles = [], [], [], [], [], []
         failed = 0
         exif = b""
-        workers = min(4, max(1, int(thread_count or 4)))
+        snapshot = probe_resources()
+        workers = max(1, min(len(sources), 8, int(thread_count or 8),
+                             cpu_capacity(snapshot, resource_preference),
+                             ram_budget(snapshot) // _PREVIEW_WORKING_BYTES))
+        stop_scans = Event()
+
+        def scan_cancelled():
+            return stop_scans.is_set() or self.should_cancel()
+
         def inspect(path):
-            if self.should_cancel():
+            if scan_cancelled():
                 raise _DecodeCancelled()
             metadata = []
+            px_size_holder = []
             try:
                 frames = scan_source(path, scale_factor, header_only=True,
-                                     should_cancel=self.should_cancel,
-                                     metadata_out=metadata)
+                                     should_cancel=scan_cancelled,
+                                     metadata_out=metadata,
+                                     px_size_out=px_size_holder)
                 if len(metadata) != len(frames):
-                    metadata = _frame_metadata(path, frames, self.should_cancel)
-                px_um = detect_px_size_um(path)
+                    metadata = _frame_metadata(path, frames, scan_cancelled)
+                px_um = px_size_holder[0] if px_size_holder else detect_px_size_um(path)
                 return (frames, metadata, px_um), None
-            except SourceExifTooLarge:
+            except (SourceExifTooLarge, _DecodeCancelled):
                 raise
             except Exception as exc:
                 return ([], [], None), exc
         if self.progress_callback is not None:
             self.progress_callback(0, len(sources))
         with log_operation('source_manifest', count=len(sources), preview_threads=workers):
-            # Only descriptors are queued. The first preview is prepared here;
-            # remaining thumbnails are generated after the workspace is usable.
+            # Alpha validation can decode a strip even in a header-only
+            # scan. Keep its work and the completed descriptors bounded.
             with ThreadPoolExecutor(max_workers=workers) as pool:
+                pending_paths = iter(sources)
+                window = deque()
+                first_preview_future = None
                 try:
-                    for done, (path, result) in enumerate(zip(sources, pool.map(inspect, sources)), 1):
+                    for path in islice(pending_paths, workers):
                         if self.should_cancel():
                             raise _DecodeCancelled()
-                        (frames, metadata, px_um), error = result
+                        window.append(pool.submit(inspect, path))
+                    for done, path in enumerate(sources, 1):
+                        future = window.popleft()
+                        while not future.done():
+                            if self.should_cancel():
+                                raise _DecodeCancelled()
+                            wait((future,), timeout=.05)
+                        if self.should_cancel():
+                            raise _DecodeCancelled()
+                        (frames, metadata, px_um), error = future.result()
                         if error is not None:
                             if isinstance(error, InterruptedError):
                                 return False, 'CANCELLED', [], []
@@ -1615,7 +1768,7 @@ class ImageStackLoader:
                             failed += 1
                             import logging
                             logging.getLogger(__name__).warning('Source preview failed path=%s: %s', path, error)
-                        else:
+                        elif frames:
                             for frame_exif, frame_icc in metadata:
                                 if not exif:
                                     exif = frame_exif
@@ -1627,16 +1780,41 @@ class ImageStackLoader:
                             paths.extend([path] * len(frames))
                             names.extend(f'{stem}_page_{index + 1:03d}.tif' if len(frames) > 1
                                          else os.path.basename(path) for index, frame in enumerate(frames))
+                            # RAW display can fall back to unpacking the full sensor.
+                            if (first_preview_future is None and workers >= 2 and done < len(sources)
+                                    and not getattr(images[0], 'raw_sensor_shape', ())):
+                                first_preview_future = pool.submit(
+                                    ensure_display_preview, images[0], should_cancel=scan_cancelled,
+                                )
                         if self.progress_callback is not None:
                             self.progress_callback(done, len(sources))
+                        if self.should_cancel():
+                            raise _DecodeCancelled()
+                        next_path = next(pending_paths, None)
+                        if next_path is not None:
+                            window.append(pool.submit(inspect, next_path))
+                    if first_preview_future is not None:
+                        while not first_preview_future.done():
+                            if self.should_cancel():
+                                raise _DecodeCancelled()
+                            wait((first_preview_future,), timeout=.05)
                 except _DecodeCancelled:
                     return False, 'CANCELLED', [], []
+                finally:
+                    stop_scans.set()
+                    for future in window:
+                        future.cancel()
+                    if first_preview_future is not None:
+                        first_preview_future.cancel()
         if not images:
             return False, 'Could not load any image files', [], []
         if self.should_cancel():
             return False, 'CANCELLED', [], []
         try:
-            ensure_display_preview(images[0], should_cancel=self.should_cancel)
+            if first_preview_future is not None:
+                first_preview_future.result()
+            else:
+                ensure_display_preview(images[0], should_cancel=self.should_cancel)
         except InterruptedError:
             return False, 'CANCELLED', [], []
         except UnsupportedTransparency:

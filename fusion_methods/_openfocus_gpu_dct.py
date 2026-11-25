@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from scipy.ndimage import median_filter
 
+from core.frame_storage import async_upload_view
 from fusion_methods.dct import _ensure_color_image
 from fusion_methods.openfocus_ab import _check_cancel
 from utils.image_utils import fuse_output_dtype
@@ -239,24 +240,32 @@ def _device_cache_key(device):
 
 def _get_or_build_program(cl, device):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import (
+        _build_cached_program, _fp32_build_options, _get_shared_context,
+    )
+
     key = _device_cache_key(device)
     with _cache_lock:
-        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key:
+        ctx = _get_shared_context(cl, device)
+        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key and _PROGRAM_CACHE[1] is ctx:
             return _PROGRAM_CACHE[1:]
-        ctx = cl.Context(devices=[device])
         queue = cl.CommandQueue(ctx, device=device)
-        program = cl.Program(ctx, _DCT_K).build(
-            options=['-cl-fp32-correctly-rounded-divide-sqrt']
+        program = _build_cached_program(
+            cl, device, ctx, _DCT_K,
+            options=_fp32_build_options(cl, device),
         )
         kernels = {name: cl.Kernel(program, name) for name in _KERNEL_NAMES}
         _PROGRAM_CACHE = (key, ctx, queue, kernels)
         return ctx, queue, kernels
 
 
-def _invalidate_program_cache():
+def _invalidate_program_cache(context=None):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import _invalidate_shared_context
+
     with _cache_lock:
         _PROGRAM_CACHE = None
+        _invalidate_shared_context(context)
 
 
 def _upload_kind(dtype):
@@ -320,7 +329,7 @@ class GpuDct:
             try:
                 q.finish()
             except Exception:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
 
     def fuse(self, frames, block_size, kernel_size,
              should_cancel=None, progress_callback=None):
@@ -346,7 +355,7 @@ class GpuDct:
                 self._drain_queue()
                 raise exc.__cause__
             except (self.cl.Error, MemoryError) as exc:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
                 self._drain_queue()
                 raise GpuError('OpenCL GPU DCT execution failed') from exc
             except BaseException:
@@ -473,7 +482,7 @@ class GpuDct:
                 _check_cancel(should_cancel)
                 h_src, ch, kind = prepare_upload(index)
                 in_flight = True
-                self.cl.enqueue_copy(self.q, src_buf, h_src, is_blocking=False)
+                self.cl.enqueue_copy(self.q, src_buf, async_upload_view(h_src), is_blocking=False)
                 self._run(
                     self.k[f'dct_block_var_argmax_{kind}'],
                     (map_w, map_h),
@@ -505,7 +514,7 @@ class GpuDct:
 
             unique_set = set(int(v) for v in np.unique(final_index_map))
             in_flight = True
-            self.cl.enqueue_copy(self.q, idx_buf, final_index_map, is_blocking=False)
+            self.cl.enqueue_copy(self.q, idx_buf, async_upload_view(final_index_map), is_blocking=False)
 
             # Pass 3: reconstruct selected blocks for active source frames only.
             out_buf = self.cl.Buffer(self.ctx, self.mf.WRITE_ONLY, max(1, out_bytes))
@@ -522,7 +531,7 @@ class GpuDct:
                     continue
                 h_src, ch, kind = prepare_upload(index)
                 in_flight = True
-                self.cl.enqueue_copy(self.q, src_buf, h_src, is_blocking=False)
+                self.cl.enqueue_copy(self.q, src_buf, async_upload_view(h_src), is_blocking=False)
                 self._run(
                     self.k[f'dct_copy_{kind}_{out_suffix}'],
                     (orig_w, orig_h),

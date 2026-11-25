@@ -13,8 +13,6 @@ from utils.output_sharpen import DEFAULT_SHARPEN_STRENGTH
 from core.multi_focus_fusion import is_ai_fusion_available
 from core.render_context import RegistrationDetails, build_render_context
 from utils.validators import intersect_roi
-from core.render_process import RenderProcessWorker
-from dialogs import ROIRenderOptionsDialog  # Import the new dialog
 from locales import trans
 from core.algorithms import fusion_algorithms, get_fusion, get_registration, alignment_steps
 from core.experimental import alignment_is_locked
@@ -28,6 +26,18 @@ _RENDER_STAGE_KEYS = {
     'align': 'render_stage_align', 'fuse': 'render_stage_fuse',
     'finalize': 'render_stage_finalize', 'publish': 'render_stage_publish',
 }
+
+
+def __getattr__(name):
+    """Keep render dependencies importable without loading them at GUI startup."""
+    if name == 'RenderProcessWorker':
+        from core.render_process import RenderProcessWorker as dependency
+    elif name == 'ROIRenderOptionsDialog':
+        from dialogs import ROIRenderOptionsDialog as dependency
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = dependency
+    return dependency
 
 
 def _base_frame(method, enabled):
@@ -103,7 +113,7 @@ class RenderManager:
 
     def __init__(self, window: Any):
         self.window = window
-        self.worker: Optional[RenderProcessWorker] = None
+        self.worker: Optional[Any] = None
         self.context_worker = None
         self._context_candidate = None
         self._retiring_context_workers = set()
@@ -610,7 +620,7 @@ class RenderManager:
         box.exec()
         return box.clickedButton() is proceed
 
-    def _estimate_memory(self, frames, method, parameters, roi_rect, register):
+    def _estimate_memory(self, frames, method, parameters, roi_rect, register, alignment=None):
         from core.render_preflight import estimate_render_memory
         from utils.logging_setup import get_logger
 
@@ -621,6 +631,7 @@ class RenderManager:
         try:
             return estimate_render_memory(
                 frames, method, parameters, preview=self._preview_mode, roi=roi, register=register,
+                alignment=alignment,
                 use_gpu=getattr(window, 'use_gpu', True),
                 tile_enabled=getattr(window, 'tile_enabled', None),
                 tile_block=getattr(window, 'tile_block_size', None),
@@ -1226,7 +1237,10 @@ class RenderManager:
                     self._abort_compare_run()
                     return
                 else:
-                    dialog = ROIRenderOptionsDialog(
+                    dialog_cls = globals().get('ROIRenderOptionsDialog')
+                    if dialog_cls is None:
+                        dialog_cls = __getattr__('ROIRenderOptionsDialog')
+                    dialog = dialog_cls(
                         len(window.roi_aligned_images), window,
                         frame_names=names, roi_size=roi_size,
                         output_size=output_size, frames=window.roi_aligned_images,
@@ -1363,7 +1377,8 @@ class RenderManager:
             memory_estimate = self._estimate_memory(
                 estimate_frames, method, fusion_parameters, roi_rect,
                 register=bool(requested_steps and effective_alignment != 'none'
-                              and (not effective_is_aligned or collect_report)))
+                              and (not effective_is_aligned or collect_report)),
+                alignment=effective_alignment)
         if (memory_estimate and (memory_estimate.ram_short or memory_estimate.gpu_fallback)
                 and interactive and not confirmed and force_algorithm is None
                 and not self._confirm_memory(memory_estimate)):
@@ -1519,7 +1534,10 @@ class RenderManager:
             self._render_context['live_source_rows'] = tuple(
                 reversed(included_idx) if getattr(window, 'stack_reverse_order', False)
                 else included_idx)
-        self.worker = RenderProcessWorker(
+        worker_cls = globals().get('RenderProcessWorker')
+        if worker_cls is None:
+            worker_cls = __getattr__('RenderProcessWorker')
+        self.worker = worker_cls(
             source_images,
             effective_aligned_images,
             effective_is_aligned,

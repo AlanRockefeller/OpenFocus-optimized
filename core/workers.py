@@ -649,16 +649,45 @@ class RenderWorker(QThread):
 
     def _run_admitted(self):
         from core.algorithms import alignment_steps
-        from core.frame_resolution_cache import (mandatory_staging_bytes,
+        from core.frame_resolution_cache import (mandatory_staging_bytes, planned_cache_bytes,
                                                  render_scope)
         steps = len(alignment_steps(self.alignment)) if self.alignment else 0
         mandatory = mandatory_staging_bytes(
             self.raw_images, alignment_steps=steps,
             exposure_match=self.exposure_match, deferred=bool(self._defer_warps))
+        # What ScopedCache will admit against the bound directory: its plan
+        # plus the pipeline's mandatory staging. RAM-only renders plan nothing.
+        planned, _ = planned_cache_bytes(self.raw_images)
+        self._bind_job_scratch(planned + mandatory if planned else 0)
         with render_scope(self.raw_images, mandatory_bytes=mandatory,
                           should_cancel=lambda: self.is_cancelled), \
                 performance_profile.current().stage('render', resources=True):
             return self._run_admitted_body()
+
+    def _bind_job_scratch(self, goal):
+        """Choose this render's scratch volume from the whole job's estimate.
+
+        Otherwise the first stage that needs scratch (registration asks for a
+        few frames) binds a volume that fits only that request, and the frame
+        cache, which follows the bound volume, is disabled when it does not fit.
+        RAM-only and in-memory renders (``goal`` 0) bind nothing here.
+        """
+        if not goal:
+            return
+        from core.frame_storage import ScratchSpaceError, capture_scratch
+        from core.source_frames import select_frame_scratch
+        state = capture_scratch()
+        if state is None or state.directory is not None:
+            return
+        try:
+            directory = select_frame_scratch(self.raw_images, preferred_size=goal,
+                                             should_cancel=lambda: self.is_cancelled)
+        except (ScratchSpaceError, OSError):
+            # Later stages select for their own allocations, as before.
+            logger.warning('could not choose a scratch volume for the whole render', exc_info=True)
+            return
+        log_action('render.scratch', directory=directory, goal_bytes=int(goal),
+                   explicit=state.explicit_directory is not None)
 
     def _run_admitted_body(self):
         """在线程中执行图像处理流程"""

@@ -513,6 +513,7 @@ def setup_menus(window: QMainWindow) -> None:
         action.setCheckable(True)
         action.setChecked(getattr(window, 'font_size_mode', 'medium') == mode)
         action.setData(mode)
+        action.setProperty("trans_key", key)
         action.triggered.connect(lambda _checked, choice=mode: window.set_ui_font_size(choice))
         font_group.addAction(action)
         window.ui_objs[key] = action
@@ -525,17 +526,26 @@ def setup_menus(window: QMainWindow) -> None:
     
     lang_group = QActionGroup(window)
     lang_group.setExclusive(True)
-    
-    # Built from the packs that actually loaded, so adding locales_xx.py puts
-    # the language in this menu without touching it. Order comes from
-    # TranslationManager.PACK_ORDER.
-    for code, label in trans.available_languages():
+
+    def select_language(action):
+        code = action.data()
+        window.set_language(code)
+        if trans.current_lang != code:
+            # An installed pack can still fail when imported on first use.
+            lang_group.removeAction(action)
+            lang_menu.removeAction(action)
+            window.ui_objs.pop(f'action_lang_{code}')
+            action.deleteLater()
+            active_action = window.ui_objs.get(f'action_lang_{trans.current_lang}')
+            if active_action is not None:
+                active_action.setChecked(True)
+
+    lang_group.triggered.connect(select_language)
+    for code, label in trans.menu_languages():
         act = QAction(label, window)
         act.setCheckable(True)
         act.setChecked(trans.current_lang == code)
         act.setData(code)
-        act.triggered.connect(
-            lambda _checked=False, c=code: window.set_language(c))
         lang_group.addAction(act)
         lang_menu.addAction(act)
         window.ui_objs[f'action_lang_{code}'] = act
@@ -581,6 +591,14 @@ def setup_menus(window: QMainWindow) -> None:
     quickstart_action.triggered.connect(window.show_quick_start)
     help_menu.addAction(quickstart_action)
     window.ui_objs['menu_quick_start'] = quickstart_action
+
+    guided_tour_action = QAction(trans.t('menu_guided_tour'), window)
+    guided_tour_action.setProperty('trans_key', 'menu_guided_tour')
+    guided_tour_action.triggered.connect(
+        lambda: getattr(window, 'start_guided_tour', lambda **_k: None)(load_demo_if_empty=True)
+    )
+    help_menu.addAction(guided_tour_action)
+    window.ui_objs['menu_guided_tour'] = guided_tour_action
 
     manual_action = QAction(trans.t('menu_github_manual'), window)
     manual_action.triggered.connect(_open_github_manual)

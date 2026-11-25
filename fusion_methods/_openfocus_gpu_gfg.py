@@ -14,6 +14,7 @@ from threading import Lock
 import cv2
 import numpy as np
 
+from core.frame_storage import async_upload_view
 from fusion_methods.dct import _ensure_color_image
 from fusion_methods.openfocus_ab import _check_cancel
 from utils.image_utils import fuse_output_dtype
@@ -591,23 +592,32 @@ def _device_cache_key(device):
 
 def _get_or_build_program(cl, device):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import (
+        _build_cached_program, _fp32_build_options, _get_shared_context,
+    )
+
     key = _device_cache_key(device)
     with _cache_lock:
-        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key:
+        ctx = _get_shared_context(cl, device)
+        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key and _PROGRAM_CACHE[1] is ctx:
             return _PROGRAM_CACHE[1:]
-        ctx = cl.Context(devices=[device])
         q = cl.CommandQueue(ctx, device=device)
-        prog = cl.Program(ctx, _GFG_K).build(
-            options=['-cl-fp32-correctly-rounded-divide-sqrt'])
+        prog = _build_cached_program(
+            cl, device, ctx, _GFG_K,
+            options=_fp32_build_options(cl, device),
+        )
         kernels = {name: cl.Kernel(prog, name) for name in _KERNEL_NAMES}
         _PROGRAM_CACHE = (key, ctx, q, kernels)
         return ctx, q, kernels
 
 
-def _invalidate_program_cache():
+def _invalidate_program_cache(context=None):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import _invalidate_shared_context
+
     with _cache_lock:
         _PROGRAM_CACHE = None
+        _invalidate_shared_context(context)
 
 
 class GpuGfg:
@@ -643,7 +653,7 @@ class GpuGfg:
             try:
                 q.finish()
             except Exception:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
 
     def fuse(self, frames, img_resize, kernel_size, min_frame_focus,
              should_cancel=None, progress_callback=None):
@@ -669,7 +679,7 @@ class GpuGfg:
                 self._drain_queue()
                 raise exc.__cause__
             except (self.cl.Error, MemoryError) as exc:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
                 self._drain_queue()
                 raise GpuError('OpenCL GPU GFG-FGF execution failed') from exc
             except BaseException:
@@ -806,7 +816,7 @@ class GpuGfg:
             # Frame 0 upload + dominant channel selection (same argmax over channel sums).
             host0, ch0, kind0 = prepare_upload(0)
             in_flight = True
-            self.cl.enqueue_copy(self.q, src_buf, host0, is_blocking=False)
+            self.cl.enqueue_copy(self.q, src_buf, async_upload_view(host0), is_blocking=False)
             self._run(self.k[f'gfg_chan_sum_{kind0}'], red_groups * 256,
                       src_buf, wg4_buf, np.int32(n), np.int32(ch0), lsize=256)
             wg4_host = np.empty((red_groups, 4), dtype=np.float32)
@@ -831,7 +841,7 @@ class GpuGfg:
                     else:
                         h_src, cur_ch, cur_kind = prepare_upload(index)
                         in_flight = True
-                        self.cl.enqueue_copy(self.q, src_buf, h_src, is_blocking=False)
+                        self.cl.enqueue_copy(self.q, src_buf, async_upload_view(h_src), is_blocking=False)
                     in_flight = True
                     self._run(self.k[f'gfg_extract_{cur_kind}'], n,
                               src_buf, gray_buf, np.int32(n), np.int32(cur_ch), np.int32(channel_idx))
@@ -867,7 +877,7 @@ class GpuGfg:
                     # Re-use frame 0 already resident in src_buf when scale <= 0
                     if scale > 0.0:
                         in_flight = True
-                        self.cl.enqueue_copy(self.q, src_buf, host0, is_blocking=False)
+                        self.cl.enqueue_copy(self.q, src_buf, async_upload_view(host0), is_blocking=False)
                     cur_ch, cur_kind = ch0, kind0
                 else:
                     if host0 is not None:
@@ -875,7 +885,7 @@ class GpuGfg:
                         host0 = None
                     h_src, cur_ch, cur_kind = prepare_upload(index)
                     in_flight = True
-                    self.cl.enqueue_copy(self.q, src_buf, h_src, is_blocking=False)
+                    self.cl.enqueue_copy(self.q, src_buf, async_upload_view(h_src), is_blocking=False)
 
                 in_flight = True
                 self._run(self.k[f'gfg_extract_{cur_kind}'], n,
@@ -959,7 +969,7 @@ class GpuGfg:
                     continue
                 h_src, cur_ch, cur_kind = prepare_upload(index)
                 in_flight = True
-                self.cl.enqueue_copy(self.q, src_buf, h_src, is_blocking=False)
+                self.cl.enqueue_copy(self.q, src_buf, async_upload_view(h_src), is_blocking=False)
 
                 self._run(self.k[f'gfg_extract_{cur_kind}'], n,
                           src_buf, gray_buf, np.int32(n), np.int32(cur_ch), np.int32(channel_idx))

@@ -121,6 +121,22 @@ the static binding. Every page and asset request counts as a Worker invocation.
 - Everything else — `site/dist` with `html_handling: auto-trailing-slash`,
   `not_found_handling: 404-page`, and the headers in `dist/_headers`.
 
+### Website traffic totals
+
+An account-specific Worker config can bind `SITE_ANALYTICS` to a D1 database
+with the website traffic migrations in `site/migrations` applied. Keep this
+binding on subsequent deployments. For the apex domain, it keeps daily
+Beijing-time totals for successful English and Chinese homepage requests and
+desktop download starts through `/download/latest/*`. Locale redirects,
+prefetch requests and HEAD probes are excluded. The download counter includes
+successful full or byte-zero responses and redirects to GitHub. The counts
+contain dates and totals, with downloads grouped by the package platform
+(Windows, macOS or Linux). Apply `0003_website_download_platforms.sql` before
+deploying the platform counters. The older total-only rows keep their counts
+with platform values unset. Publish the homepage privacy text with the update.
+The separate `ANALYTICS` binding below enables desktop usage reports and
+detailed download statistics.
+
 ### Optional private analytics
 
 The Worker can count download starts and receive desktop activity
@@ -362,7 +378,8 @@ available. The Linux path installs the stable CLI from PyPI and does not use the
 
 `install.ps1`:
 
-- downloads `windows-setup` through the site and runs the setup;
+- downloads `windows-setup` through the site and checks the published byte
+  size and SHA-256 digest before starting setup;
 - a non-zero setup exit code is reported as an error;
 - `OPENFOCUS_DRY_RUN=1` (also `true`, `yes` or `on`) prints the plan without
   downloading or installing anything.

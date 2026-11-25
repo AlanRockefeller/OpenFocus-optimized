@@ -14,6 +14,7 @@ from threading import Lock
 import cv2
 import numpy as np
 
+from core.frame_storage import async_upload_view
 from fusion_methods.dct import _ensure_color_image
 from fusion_methods.openfocus_ab import _check_cancel
 from utils.image_utils import fuse_output_dtype
@@ -599,23 +600,32 @@ def _device_cache_key(device):
 
 def _get_or_build_program(cl, device):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import (
+        _build_cached_program, _fp32_build_options, _get_shared_context,
+    )
+
     key = _device_cache_key(device)
     with _cache_lock:
-        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key:
+        ctx = _get_shared_context(cl, device)
+        if _PROGRAM_CACHE is not None and _PROGRAM_CACHE[0] == key and _PROGRAM_CACHE[1] is ctx:
             return _PROGRAM_CACHE[1:]
-        ctx = cl.Context(devices=[device])
         q = cl.CommandQueue(ctx, device=device)
-        prog = cl.Program(ctx, _GFF_K).build(
-            options=['-cl-fp32-correctly-rounded-divide-sqrt'])
+        prog = _build_cached_program(
+            cl, device, ctx, _GFF_K,
+            options=_fp32_build_options(cl, device),
+        )
         kernels = {name: cl.Kernel(prog, name) for name in _KERNEL_NAMES}
         _PROGRAM_CACHE = (key, ctx, q, kernels)
         return ctx, q, kernels
 
 
-def _invalidate_program_cache():
+def _invalidate_program_cache(context=None):
     global _PROGRAM_CACHE
+    from fusion_methods._openfocus_gpu import _invalidate_shared_context
+
     with _cache_lock:
         _PROGRAM_CACHE = None
+        _invalidate_shared_context(context)
 
 
 class GpuGff:
@@ -649,7 +659,7 @@ class GpuGff:
             try:
                 q.finish()
             except Exception:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
 
     def fuse(self, frames, img_resize, average_filter_size,
              should_cancel=None, progress_callback=None):
@@ -675,7 +685,7 @@ class GpuGff:
                 self._drain_queue()
                 raise exc.__cause__
             except (self.cl.Error, MemoryError) as exc:
-                _invalidate_program_cache()
+                _invalidate_program_cache(getattr(self, 'ctx', None))
                 self._drain_queue()
                 raise GpuError('OpenCL GPU Guided Filter execution failed') from exc
             except BaseException:
@@ -797,7 +807,7 @@ class GpuGff:
             for index in range(count):
                 host_src, channels, kind = prepare_upload(index)
                 in_flight = True
-                self.cl.enqueue_copy(self.q, src_buf, host_src, is_blocking=False)
+                self.cl.enqueue_copy(self.q, src_buf, async_upload_view(host_src), is_blocking=False)
                 self._run(self.k[f'gff_sum_{kind}'], n, src_buf, t1_buf,
                           np.int32(n), np.int32(channels))
                 self._run(self.k['gff_laplacian_abs'], (width, height),
@@ -855,7 +865,7 @@ class GpuGff:
                     continue
                 host_src, channels, kind = prepare_upload(index)
                 in_flight = True
-                self.cl.enqueue_copy(self.q, src_buf, host_src, is_blocking=False)
+                self.cl.enqueue_copy(self.q, src_buf, async_upload_view(host_src), is_blocking=False)
                 self._run(self.k[f'prep_{kind}_f4'], grid_hw, src_buf, bgrg, bgrg_T,
                           np.int32(height), np.int32(width), np.int32(channels), lsize=local_16)
                 if rad_avg > 0:
