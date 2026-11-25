@@ -1588,6 +1588,22 @@ inline void deinterleave_rgb8(const uint8_t* p, __m256i& c0, __m256i& c1, __m256
         6, -1, -1, -1, 9, -1, -1, -1, 12, -1, -1, -1, 15, -1, -1, -1));
 }
 
+// Reverses the channels of eight packed RGB pixels whose 24 uint16 samples are
+// held in s0, s8 and s16: output sample 3k + c is source sample 3k + 2 - c.
+inline void reverse_rgb_u16x24(__m128i s0, __m128i s8, __m128i s16, __m128i out[3]) {
+    out[0] = _mm_or_si128(
+        _mm_shuffle_epi8(s0, _mm_setr_epi8(4, 5, 2, 3, 0, 1, 10, 11, 8, 9, 6, 7, -1, -1, 14, 15)),
+        _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, -1, -1)));
+    out[1] = _mm_or_si128(
+        _mm_or_si128(
+            _mm_shuffle_epi8(s0, _mm_setr_epi8(12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 6, 7, 4, 5, 2, 3, 12, 13, 10, 11, 8, 9, -1, -1))),
+        _mm_shuffle_epi8(s16, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3)));
+    out[2] = _mm_or_si128(
+        _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
+        _mm_shuffle_epi8(s16, _mm_setr_epi8(0, 1, -1, -1, 8, 9, 6, 7, 4, 5, 14, 15, 12, 13, 10, 11)));
+}
+
 // The 24 output samples of eight pixels: the source samples scaled to 16 bits
 // (by 1 for uint16, by 256 for uint8), in output channel order.
 template <bool Rev>
@@ -1600,18 +1616,7 @@ inline void a_output_samples(const uint16_t* p, __m128i out[3]) {
         out[1] = s8;
         out[2] = s16;
     } else {
-        // Output sample 3k + c is source sample 3k + 2 - c.
-        out[0] = _mm_or_si128(
-            _mm_shuffle_epi8(s0, _mm_setr_epi8(4, 5, 2, 3, 0, 1, 10, 11, 8, 9, 6, 7, -1, -1, 14, 15)),
-            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, -1, -1)));
-        out[1] = _mm_or_si128(
-            _mm_or_si128(
-                _mm_shuffle_epi8(s0, _mm_setr_epi8(12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
-                _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 6, 7, 4, 5, 2, 3, 12, 13, 10, 11, 8, 9, -1, -1))),
-            _mm_shuffle_epi8(s16, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3)));
-        out[2] = _mm_or_si128(
-            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
-            _mm_shuffle_epi8(s16, _mm_setr_epi8(0, 1, -1, -1, 8, 9, 6, 7, 4, 5, 14, 15, 12, 13, 10, 11)));
+        reverse_rgb_u16x24(s0, s8, s16, out);
     }
 }
 
@@ -2613,22 +2618,11 @@ inline void dense_store_rgb(__m256i g0, __m256i g1, __m256i g2, uint16_t* dp) {
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(dp), low);
         _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 16), s16);
     } else {
-        const __m128i s0 = _mm256_castsi256_si128(low);
-        const __m128i s8 = _mm256_extracti128_si256(low, 1);
-        const __m128i o0 = _mm_or_si128(
-            _mm_shuffle_epi8(s0, _mm_setr_epi8(4, 5, 2, 3, 0, 1, 10, 11, 8, 9, 6, 7, -1, -1, 14, 15)),
-            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 1, -1, -1)));
-        const __m128i o1 = _mm_or_si128(
-            _mm_or_si128(
-                _mm_shuffle_epi8(s0, _mm_setr_epi8(12, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
-                _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 6, 7, 4, 5, 2, 3, 12, 13, 10, 11, 8, 9, -1, -1))),
-            _mm_shuffle_epi8(s16, _mm_setr_epi8(-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 3)));
-        const __m128i o2 = _mm_or_si128(
-            _mm_shuffle_epi8(s8, _mm_setr_epi8(-1, -1, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1)),
-            _mm_shuffle_epi8(s16, _mm_setr_epi8(0, 1, -1, -1, 8, 9, 6, 7, 4, 5, 14, 15, 12, 13, 10, 11)));
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp), o0);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 8), o1);
-        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 16), o2);
+        __m128i o[3];
+        reverse_rgb_u16x24(_mm256_castsi256_si128(low), _mm256_extracti128_si256(low, 1), s16, o);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp), o[0]);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 8), o[1]);
+        _mm_storeu_si128(reinterpret_cast<__m128i*>(dp + 16), o[2]);
     }
 }
 
