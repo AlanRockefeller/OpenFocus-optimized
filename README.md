@@ -375,8 +375,11 @@ Install the shared development tools and run the regression suite:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest -q --timeout=90 --timeout-method=thread
+python -m pytest -n auto -q --timeout=90 --timeout-method=thread
 ```
+
+`-n auto` runs the suite on every CPU core, as CI does; omit it to run the tests
+one at a time in a single process.
 
 On a headless host, set `QT_QPA_PLATFORM=offscreen`. CI uses these same dependency
 files on Windows, macOS and Linux. A change to processing, cancellation or GUI
