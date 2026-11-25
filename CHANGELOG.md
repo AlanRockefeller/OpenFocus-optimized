@@ -35,12 +35,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   isolated render workers between renders.
 - Speed up the C++ CPU kernels on AVX2 processors with identical output. On
   the laptop used for testing, OpenFocus A, B, and C fused 20-megapixel
-  frames 1.2 to 1.9 times as fast, depending on the method, thread count,
-  and power profile, and the OpenFocus alignment search and refinement ran
-  at least twice as fast. The depth and activity kernels no longer use
-  gather instructions, which are slow on processors that mitigate gather
-  data sampling. Depth smoothing reuses its per-worker workspace instead of
-  allocating one for every strip.
+  frames up to 2.0 times as fast with 1.7 to 2.9 times fewer processor
+  cycles, depending on the method, thread count, and power profile. The
+  OpenFocus alignment, including its final warps, needed about half the
+  cycles, and the native ECC solver about an eighth fewer. The depth and
+  activity kernels no longer use gather instructions, which are slow on
+  processors that mitigate gather data sampling. Depth smoothing reuses its
+  per-worker workspace instead of allocating one for every strip.
 - Use OpenCL for eligible large integer ECC reductions, including 8×8 area
   downsizing. Apply exact Lanczos4 warps for large 8-bit and 16-bit frames
   during ECC and homography registration and whenever a GPU render resolves
