@@ -605,10 +605,12 @@ def test_openfocus_spill_keeps_both_reference_chains_within_scratch(monkeypatch,
     })
     with frame_storage.scratch_directory():
         registration.process(frames, thread_count=1)
-        assert os.path.dirname(frame_storage.storage_directory()) == str(alternative)
+        assert os.path.dirname(frame_storage.storage_directory()) == _app_folder(alternative)
         left, center, right = registration.alignment_plan.transforms
         assert center.is_identity and not left.is_identity and not right.is_identity
-    assert not list(default.iterdir()) and not list(alternative.iterdir())
+    # The job folder is removed; the app folder stays for the next job.
+    assert not list(default.iterdir()) and not os.listdir(_app_folder(alternative))
+    assert os.listdir(alternative) == [frame_storage.SCRATCH_FOLDER_NAME]
 
 
 def test_materialization_spills_snapshot_to_admit_next_decode(monkeypatch, tmp_path):
