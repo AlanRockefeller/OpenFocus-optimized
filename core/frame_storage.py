@@ -450,12 +450,18 @@ def _ordered_candidates(explicit, source_paths, goal):
     A RAM-backed system temporary directory stays first for small jobs and
     moves behind disk-backed local volumes once the goal exceeds
     ``_ram_backed_limit()``. An explicit directory is never reordered.
+
+    Lazy unless it reorders: listing every local volume runs a disk utility
+    per disk on macOS, so a small job that fits the first candidate must not
+    list them.
     """
-    candidates = list(_scratch_candidates(explicit, source_paths))
+    candidates = _scratch_candidates(explicit, source_paths)
     if explicit is not None or goal is None or goal <= _ram_backed_limit():
-        return candidates
+        yield from candidates
+        return
+    candidates = list(candidates)
     ram = [candidate for candidate in candidates if _ram_backed(candidate)]
-    return [candidate for candidate in candidates if candidate not in ram] + ram
+    yield from [candidate for candidate in candidates if candidate not in ram] + ram
 
 
 def _scratch_volume(directory):

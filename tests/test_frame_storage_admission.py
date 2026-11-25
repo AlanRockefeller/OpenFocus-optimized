@@ -391,6 +391,24 @@ def test_ram_backed_temp_is_ranked_after_disk_for_large_jobs(monkeypatch, tmp_pa
         assert os.path.dirname(chosen) == _app_folder(alternative)
 
 
+def test_small_jobs_do_not_list_every_volume(monkeypatch):
+    listed = []
+
+    def candidates(explicit, source_paths):
+        for candidate in ('temp', 'volume'):
+            listed.append(candidate)
+            yield candidate
+
+    monkeypatch.setattr(frame_storage, '_scratch_candidates', candidates)
+    monkeypatch.setattr(frame_storage, '_ram_backed_limit', lambda: 100)
+    # Volumes after the first are listed only when a job they may serve asks.
+    assert next(frame_storage._ordered_candidates(None, (), 50)) == 'temp'
+    assert listed == ['temp']
+    listed.clear()
+    assert list(frame_storage._ordered_candidates(None, (), 1000)) == ['temp', 'volume']
+    assert listed == ['temp', 'volume']
+
+
 def test_explicit_ram_backed_directory_is_still_used(monkeypatch, tmp_path):
     default, alternative = _fake_volumes(monkeypatch, tmp_path, 5000, 5000)
     monkeypatch.setattr(frame_storage, '_ram_backed', lambda path: True)

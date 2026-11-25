@@ -82,6 +82,9 @@ def test_automatic_assessment_skips_unwritable_candidate(tmp_path, monkeypatch):
                         lambda explicit, paths: iter([str(unwritable), str(fallback)]))
     monkeypatch.setattr(frame_storage, '_space', _fake_space(
         {str(unwritable): 60 * GIB, str(fallback): 5 * GIB}))
+    # The per-user fallback on that volume is refused too, not the real cache folder.
+    monkeypatch.setattr(frame_storage, '_user_scratch_folder',
+                        lambda: str(unwritable / 'cache' / 'scratch'))
     real_mkdtemp = frame_storage.tempfile.mkdtemp
 
     def mkdtemp(*args, **kwargs):
