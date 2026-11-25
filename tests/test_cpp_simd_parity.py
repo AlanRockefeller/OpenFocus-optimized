@@ -977,6 +977,84 @@ def test_alignment_rgb_warps_avx2_vs_scalar_bit_exact(dtype):
         np.testing.assert_array_equal(a, b)
 
 
+@pytest.mark.parametrize("w", [8, 9, 16, 17, 61, 8203])
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_alignment_dense_warp_chunks_avx2_vs_scalar_bit_exact(dtype, w):
+    """Eight outputs over consecutive source columns read whole spans.
+
+    Rows mix dense chunks with per-pixel ones: fractions a hair off an integer,
+    column skips and repeats from scaling, row changes from rotation, chunks
+    that are partly out of bounds or clamped at the right edge, region offsets
+    that are not multiples of eight, and a band that starts below row 0.
+    """
+    import math
+
+    from core import _alignment_kernels as ak
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(1971 + w)
+    h = 4 if w > 1000 else 23
+    top = np.iinfo(dtype).max
+    image = rng.integers(0, top + 1, (h, w, 3), dtype=dtype)
+    image[0, : min(w, 40)] = top
+    image[1, : min(w, 40)] = 0
+    gray = np.ascontiguousarray(image[:, :, 2])
+
+    def similarity(shift_x, shift_y, degrees, scale):
+        cx, cy = w * 0.5, h * 0.5
+        cos = scale * math.cos(math.radians(degrees))
+        sin = scale * math.sin(math.radians(degrees))
+        return (cx + shift_x, cy + shift_y, cx, cy, sin, sin, cos, cos)
+
+    specs = [(0.0, 0.0, 0.0, 1.0), (2.0001, 0.5, 0.0, 1.0), (-1.0 / 256 + 1e-6, 0.25, 0.0, 1.0),
+             (3.3, -0.7, 0.05, 1.003), (0.3, 0.2, 1.0, 1.03), (5.5, 0.0, 0.0, 0.97),
+             (w * 0.4, 0.0, 0.0, 1.0), (-w * 0.3 - 0.5, 1.5, 0.0, 1.0)]
+    shifts = [(0.0, 0.0), (0.5, 0.25), (1e-4, -1e-4), (-0.999, 0.75), (w * 0.37 + 0.5, 0.0),
+              (-3.75, 1.25), (-w * 0.6, 0.0)]
+    rgb_kernels = ((ak.warp_alignment_int_rows, image), (ak.warp_alignment_int_rows_bgr_rev, image),
+                   (ak.warp_alignment_int_rows, gray))
+    region_kernels = ((ak.warp_alignment_region_int_rows, image),
+                      (ak.warp_alignment_region_int_rows_bgr_rev, image),
+                      (ak.warp_alignment_region_int_rows, gray))
+    shift_kernels = ((ak.warp_int_rows, image), (ak.warp_int_rows_bgr_rev, image), (ak.warp_int_rows, gray))
+    shift_region_kernels = ((ak.warp_translation_region_int_rows, image),
+                            (ak.warp_translation_region_int_rows_bgr_rev, image),
+                            (ak.warp_translation_region_int_rows, gray))
+
+    def run():
+        results = []
+        for spec in specs:
+            transform = similarity(*spec)
+            for kernel, source in rgb_kernels:
+                out = np.full(source.shape, 7, dtype=dtype)
+                kernel(source, out, *transform, 0, h)
+                results.append(out)
+            for x_off, rw in ((3, w - 3), (5, max(1, w - 13)), (0, max(1, w - 1))):
+                for kernel, source in region_kernels:
+                    out = np.full((h - 1, rw) + source.shape[2:], 7, dtype=dtype)
+                    kernel(source, out, h, w, 0, x_off, 1, *transform, 0, h - 1)
+                    results.append(out)
+        for dx, dy in shifts:
+            for kernel, source in shift_kernels:
+                out = np.full(source.shape, 7, dtype=dtype)
+                kernel(source, out, dx, dy, 0, h)
+                results.append(out)
+            for x_off, rw in ((3, w - 3), (6, max(1, w - 9))):
+                for kernel, source in shift_region_kernels:
+                    # A band of rows 1 .. h - 1; with y_off 3 and dy <= 1.25 every
+                    # output row reads source rows 1 .. h - 1.
+                    band = np.ascontiguousarray(source[1:])
+                    out = np.full((h - 2, rw) + source.shape[2:], 7, dtype=dtype)
+                    kernel(band, out, h, w, 1, x_off, 3, dx, abs(dy), 0, h - 2)
+                    results.append(out)
+        return results
+
+    simd, scalar = _scalar_and_simd(mod, run)
+    assert len(simd) == len(scalar)
+    for a, b in zip(simd, scalar):
+        np.testing.assert_array_equal(a, b)
+
+
 @pytest.mark.parametrize("grid", [(3, 2), (8, 5), (12, 9), (17, 3)])
 def test_alignment_score_flat_grid_avx2_vs_scalar_bit_exact(grid):
     """Sample grids are scored as one padded list, including rejected samples."""
