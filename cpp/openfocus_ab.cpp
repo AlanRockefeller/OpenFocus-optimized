@@ -560,7 +560,7 @@ bool copy_scaled_rows(const ArrayView& dst, const ArrayView& src,
         return true;
     }
     // Overlapping planes keep the element-by-element order of the generic path.
-    if (packed_rows_overlap(src, start, stop, dst, start, stop)) {
+    if (packed_rows_overlap(src, start, stop, elems, dst, start, stop, elems)) {
         return false;
     }
     const uint32_t scale32 = static_cast<uint32_t>(scale);
@@ -2028,7 +2028,22 @@ void of_resample_rows_u16_cpp(
     std::vector<float> row_buf(static_cast<size_t>(sw));
     std::vector<float> sums_buf(static_cast<size_t>(std::max<int64_t>(0, last - first)));
     const bool use_fma = simd::use_avx2_fma();
-    const bool use_taps_simd = use_fma && h_taps >= 1;
+    // The tap kernel reads the plan of eight columns before it stores them, so
+    // output rows that lie over the horizontal plan keep the column loop.
+    const auto plan_bytes = [ow, h_taps](int64_t column_step, size_t item) {
+        return static_cast<uint64_t>(((ow - 1) * (column_step < 0 ? -column_step : column_step) + h_taps)
+                                     * static_cast<int64_t>(item));
+    };
+    const uint16_t* const out_low = out + (o_sy < 0 ? stop - 1 : start) * o_sy;
+    const uint64_t out_bytes = static_cast<uint64_t>(
+        ((stop - start - 1) * (o_sy < 0 ? -o_sy : o_sy) + ow) * int64_t{sizeof(uint16_t)});
+    const bool out_over_plan =
+        byte_ranges_overlap(out_low, out_bytes, hi_sy < 0 ? h_idx + (ow - 1) * hi_sy : h_idx,
+                            plan_bytes(hi_sy, sizeof(int32_t)))
+        || byte_ranges_overlap(out_low, out_bytes, hw_sy < 0 ? h_w + (ow - 1) * hw_sy : h_w,
+                               plan_bytes(hw_sy, sizeof(float)))
+        || byte_ranges_overlap(out_low, out_bytes, h_cnt, static_cast<uint64_t>(ow) * sizeof(int32_t));
+    const bool use_taps_simd = use_fma && h_taps >= 1 && !out_over_plan;
 
     for (int64_t y = start; y < stop; ++y) {
         std::fill(row_buf.begin(), row_buf.end(), 0.0f);

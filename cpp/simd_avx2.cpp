@@ -165,12 +165,18 @@ inline void store_encoded_weights_x8(__m256 strength, __m256 v_scale, uint16_t* 
 }
 
 // Border pixels carry no weight: the whole first/last row, and both row ends.
-inline void clear_border_weights(uint16_t* w_row, int64_t width, bool y_border) {
+// Called right after the store of the eight weights at x, before anything
+// else is read, so no other value is ever visible in a border position.
+inline void zero_border_weights_x8(uint16_t* w_row, int64_t x, int64_t width, bool y_border) {
     if (y_border) {
-        std::memset(w_row, 0, static_cast<size_t>(width) * sizeof(uint16_t));
+        std::memset(w_row + x, 0, 8 * sizeof(uint16_t));
     } else if (width > 2) {
-        w_row[0] = 0;
-        w_row[width - 1] = 0;
+        if (x == 0) {
+            w_row[0] = 0;
+        }
+        if (x + 8 == width) {
+            w_row[width - 1] = 0;
+        }
     }
 }
 
@@ -273,6 +279,7 @@ void pyr_detail_weight_3c_f32_avx2(
             av[blk] = _mm256_and_ps(v, vabs);
         }
         store_encoded_weights_x8(packed3_pixel_sums(av[0], av[1], av[2]), v_scale, w_row + x);
+        zero_border_weights_x8(w_row, x, width, y_border);
     }
     for (; x < width; ++x) {
         const int64_t off3 = x * 3;
@@ -292,7 +299,6 @@ void pyr_detail_weight_3c_f32_avx2(
         const float strength = (std::abs(v0) + std::abs(v1)) + std::abs(v2);
         w_row[x] = encode_weight_scalar(strength, is_border, w_scale);
     }
-    clear_border_weights(w_row, width, y_border);
 }
 
 void pyr_level0_weights_3c_f32_from_raw_avx2(
@@ -315,7 +321,7 @@ void pyr_level0_weights_3c_f32_from_raw_avx2(
 
     if (y_border) {
         // Nothing but the weights is produced here, and a border row has none.
-        clear_border_weights(w_row, width, true);
+        std::memset(w_row, 0, static_cast<size_t>(width) * sizeof(uint16_t));
         return;
     }
     const __m256 v_scale = _mm256_set1_ps(w_scale);
@@ -344,6 +350,7 @@ void pyr_level0_weights_3c_f32_from_raw_avx2(
             av[blk] = _mm256_and_ps(v, vabs);
         }
         store_encoded_weights_x8(packed3_pixel_sums(av[0], av[1], av[2]), v_scale, w_row + x);
+        zero_border_weights_x8(w_row, x, width, false);
     }
     for (; x < width; ++x) {
         const int64_t off3 = x * 3;
@@ -370,7 +377,6 @@ void pyr_level0_weights_3c_f32_from_raw_avx2(
         const float strength = (std::abs(v0) + std::abs(v1)) + std::abs(v2);
         w_row[x] = encode_weight_scalar(strength, is_border, w_scale);
     }
-    clear_border_weights(w_row, width, false);
 }
 
 void depth_axis_iir_y_unguided_avx2(
@@ -3649,10 +3655,24 @@ void align_score_chunk_packed_avx2(
     int64_t* ssum, int64_t* ssq, int64_t* cnt
 ) {
     const FlatScoreGrid grid = make_flat_score_grid(rb, ref_sy, bb, b_sy, h, w, xs, nxx, ys, nyy);
+    // The flat grid copies xs, ys and the reference samples once. A sum stored
+    // over one of them changes what the next candidates must read, so from
+    // there on they use the kernel that reads those inputs in place.
+    bool use_flat = grid.usable;
+    const uint16_t* const ref_low = ref_sy < 0 ? rb + (nyy - 1) * ref_sy : rb;
+    const uint64_t ref_bytes =
+        static_cast<uint64_t>((nyy - 1) * (ref_sy < 0 ? -ref_sy : ref_sy) + nxx) * sizeof(uint16_t);
+    const uint64_t xs_bytes = static_cast<uint64_t>(nxx) * sizeof(float);
+    const uint64_t ys_bytes = static_cast<uint64_t>(nyy) * sizeof(float);
+    const auto slot_touches = [](const int64_t* slot, const void* low, uint64_t bytes) {
+        const auto a = reinterpret_cast<uintptr_t>(slot);
+        const auto b = reinterpret_cast<uintptr_t>(low);
+        return bytes != 0 && (a <= b ? b - a < sizeof(int64_t) : a - b < bytes);
+    };
     for (int64_t k = k_start; k < k_stop; ++k) {
         const int64_t ci = idx[k];
         int64_t acc_sum = 0, acc_sq = 0, acc_cnt = 0;
-        if (grid.usable) {
+        if (use_flat) {
             score_block_flat_avx2(
                 grid, bb, b_sy, h, w,
                 tx[ci], ty[ci], cx[ci], cy[ci],
@@ -3668,6 +3688,14 @@ void align_score_chunk_packed_avx2(
         ssum[ci] = acc_sum;
         ssq[ci] = acc_sq;
         cnt[ci] = acc_cnt;
+        if (use_flat) {
+            for (const int64_t* slot : {ssum + ci, ssq + ci, cnt + ci}) {
+                if (slot_touches(slot, xs, xs_bytes) || slot_touches(slot, ys, ys_bytes)
+                        || slot_touches(slot, ref_low, ref_bytes)) {
+                    use_flat = false;
+                }
+            }
+        }
     }
 }
 

@@ -503,7 +503,7 @@ void of_align_warp_alignment_int_rows_cpp(
         && is_warp_packed(image, out, channels)
         && w >= 8 && w <= 16777216
         && h <= std::numeric_limits<int32_t>::max()
-        && !packed_rows_overlap(image, 0, image.shape[0], out, y_start, y_stop);
+        && !packed_rows_overlap(image, 0, h, w * channels, out, y_start, y_stop, w * channels);
     for (int64_t y = y_start; y < y_stop; ++y) {
         float v_dy = 0.0f, u_dy = 0.0f;
         map_uv_row(static_cast<float>(y), cy, p1c, p0c, v_dy, u_dy);
@@ -1049,7 +1049,8 @@ void of_align_warp_alignment_region_int_rows_cpp(
         && src_h <= std::numeric_limits<int32_t>::max()
         && src_w <= std::numeric_limits<int32_t>::max()
         && x_off >= -16777216 && x_off <= 16777216 - rw
-        && !packed_rows_overlap(image, 0, image.shape[0], out, oy_start, oy_stop);
+        && !packed_rows_overlap(image, 0, image.shape[0], std::max(image.shape[1], src_w) * channels,
+                                out, oy_start, oy_stop, rw * channels);
     for (int64_t oy = oy_start; oy < oy_stop; ++oy) {
         float v_dy = 0.0f, u_dy = 0.0f;
         map_uv_row(static_cast<float>(y_off + oy), cy, p1c, p0c, v_dy, u_dy);

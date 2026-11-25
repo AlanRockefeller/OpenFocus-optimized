@@ -1151,8 +1151,8 @@ def test_depth_axis_iir_rows_keep_overlapping_output_rows_exact():
     _assert_same_bytes(*_scalar_and_simd(mod, run))
 
 
-def test_pyr_level0_merge_keeps_overlapping_code_rows_exact():
-    """Weight, best and winner rows that share samples keep the pixel order."""
+def test_pyr_level0_merge_keeps_overlapping_rows_exact():
+    """Whatever the merge writes may share memory with what it reads."""
     mod = _require_avx2()
     rng = np.random.default_rng(912)
     h, w = 12, 40
@@ -1162,23 +1162,35 @@ def test_pyr_level0_merge_keeps_overlapping_code_rows_exact():
     codes = rng.integers(0, 65535, (h, w + 1), dtype=np.uint16)
     weight = rng.integers(0, 65535, (h, w), dtype=np.uint16)
 
+    def merge(first, source=raw, wt=weight, acc=None, best=None, winner=None, scratch=None):
+        acc = np.zeros((h, w, 3), dtype=np.float32) if acc is None else acc
+        best = np.full((h, w), 20000, dtype=np.uint16) if best is None else best
+        winner = np.full((h, w), 7, dtype=np.uint16) if winner is None else winner
+        scratch = np.empty((ch, w, 3), dtype=np.float32) if scratch is None else scratch
+        mod.of_pyr_level0_merge_from_raw(coarse, source, wt, acc, best, winner, scratch, 1.0, first, 3, 0, h)
+        return [acc, best, winner]
+
     def run():
         results = []
         for first in (True, False):
-            scratch = np.empty((ch, w, 3), dtype=np.float32)
-            # best starts one sample after weight
+            # best one sample after weight, winner one sample after best or weight
             shared = codes.copy()
-            acc = np.zeros((h, w, 3), dtype=np.float32)
-            winner = np.full((h, w), 7, dtype=np.uint16)
-            mod.of_pyr_level0_merge_from_raw(
-                coarse, raw, shared[:, :w], acc, shared[:, 1:], winner, scratch, 257.0, first, 3, 0, h)
-            results += [shared, acc, winner]
-            # winner starts one sample after best
+            results += merge(first, wt=shared[:, :w], best=shared[:, 1:]) + [shared]
             shared = codes.copy()
-            acc = np.zeros((h, w, 3), dtype=np.float32)
-            mod.of_pyr_level0_merge_from_raw(
-                coarse, raw, weight, acc, shared[:, :w], shared[:, 1:], scratch, 257.0, first, 3, 0, h)
-            results += [shared, acc]
+            results += merge(first, best=shared[:, :w], winner=shared[:, 1:]) + [shared]
+            shared = codes.copy()
+            results += merge(first, wt=shared[:, :w], winner=shared[:, 1:]) + [shared]
+            # best and winner inside the 16-bit source
+            source = raw.copy()
+            results += merge(first, source=source, best=source.reshape(h, w * 3)[:, :w]) + [source]
+            source = raw.copy()
+            results += merge(first, source=source, winner=source.reshape(h, w * 3)[:, w:2 * w]) + [source]
+            # the accumulator row starts one pixel after the scratch row of its middle tap
+            buffer = np.zeros((h + ch + 4) * w * 3, dtype=np.float32)
+            row = 8
+            start = row * w * 3 - (row // 2) * w * 3 - 3
+            results += merge(first, acc=buffer[: h * w * 3].reshape(h, w, 3),
+                             scratch=buffer[start:start + ch * w * 3].reshape(ch, w, 3)) + [buffer]
         return results
 
     _assert_same_bytes(*_scalar_and_simd(mod, run))
@@ -1206,10 +1218,10 @@ def test_pyramid_resampling_keeps_overlapping_scratch_exact():
         raw_scratch = np.frombuffer(buffer, dtype=np.float32).reshape(h, cw, 3)
         raw_down = np.empty((ch, cw, 3), dtype=np.float32)
         mod.of_pyr_down_from_raw(raw, raw_down, raw_scratch, 1.0 / 65535.0, 0, ch)
-        # upsample: scratch starts one pixel after the coarse level
+        # upsample: the coarse level starts one pixel after the scratch
         shared_coarse = coarse_base.copy()
         recon = target.copy()
-        mod.of_pyr_reconstruct_f32(shared_coarse[:, :cw], recon, shared_coarse[:, 1:], 0, h)
+        mod.of_pyr_reconstruct_f32(shared_coarse[:, 1:1 + cw], recon, shared_coarse[:, :w], 0, h)
         return shared, down, np.frombuffer(bytes(buffer), dtype=np.uint8), raw_down, shared_coarse, recon
 
     _assert_same_bytes(*_scalar_and_simd(mod, run))
@@ -1276,9 +1288,10 @@ def test_alignment_rgb_warps_keep_overlapping_output_exact(dtype):
                 right = backing.copy()
                 kernel(right[:h, :w], right[:h, 1:], *transform, 0, h)
                 results += [same, right]
+            # a region written over the pixels it samples
             region = backing.copy()
             ak.warp_alignment_region_int_rows(
-                region[:h, :w], region[1:h - 4, 1:w - 6], h, w, 0, 3, 2, *transform, 0, h - 5)
+                region[:h, :w], region[2:h - 3, 3:w - 4], h, w, 0, 3, 2, *transform, 0, h - 5)
             results.append(region)
         return results
 
@@ -1367,3 +1380,72 @@ def test_openfocus_a_background_rows_avx2_vs_scalar_bit_exact(monkeypatch, w, dt
 
     simd, scalar = _scalar_and_simd(mod, run)
     np.testing.assert_array_equal(simd, scalar)
+
+
+def test_alignment_score_keeps_sums_stored_over_inputs_exact():
+    """A sum stored over the grid or its coordinates changes what later candidates read."""
+    mod = _require_avx2()
+    rng = np.random.default_rng(971)
+    h, w = 97, 131
+    nx, ny, count = 12, 9, 40
+    reference = rng.integers(0, 65536, (h, w), dtype=np.uint16)
+    moved = np.roll(reference, (1, -2), (0, 1))
+    xs0 = np.linspace(0, w - 1, nx).round().astype(np.float32)
+    ys0 = np.linspace(0, h - 1, ny).round().astype(np.float32)
+    samples0 = np.ascontiguousarray(reference[ys0.astype(np.int64)[:, None], xs0.astype(np.int64)[None, :]])
+    p08 = rng.normal(0, 0.02, count).astype(np.float32)
+    p0c = rng.normal(0, 0.02, count).astype(np.float32)
+    p18 = (1 + rng.normal(0, 0.02, count)).astype(np.float32)
+    p1c = (1 + rng.normal(0, 0.02, count)).astype(np.float32)
+    tx = (w / 2 + rng.normal(0, 6, count)).astype(np.float32)
+    ty = (h / 2 + rng.normal(0, 6, count)).astype(np.float32)
+    cx = np.full(count, w / 2, dtype=np.float32)
+    cy = np.full(count, h / 2, dtype=np.float32)
+    order = np.arange(count, dtype=np.int64)
+
+    def run():
+        results = []
+        for place in ("xs", "samples"):
+            ssum = np.zeros(count, dtype=np.int64)
+            ssq = np.zeros(count, dtype=np.int64)
+            cnt = np.zeros(count, dtype=np.int64)
+            xs, samples = xs0, samples0
+            if place == "xs":
+                xs = ssum.view(np.float32)[:nx]
+                xs[...] = xs0
+            else:
+                samples = cnt.view(np.uint16)[: nx * ny].reshape(ny, nx)
+                samples[...] = samples0
+            mod.of_align_score_chunk_u16_slice(samples, moved, xs, ys0, p08, p0c, p18, p1c, tx, ty, cx, cy,
+                                               order, 0, count, ssum, ssq, cnt)
+            results += [ssum, ssq, cnt]
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
+
+
+def test_linear_resample_keeps_output_over_plan_exact():
+    """Output rows that lie over the horizontal plan keep the column order."""
+    from fusion_methods._openfocus_resample import _axis_plan
+
+    mod = _require_avx2()
+    rng = np.random.default_rng(951)
+    source = rng.integers(0, 65536, (23, 37), dtype=np.uint16)
+    width = 64
+    vertical = _axis_plan(source.shape[0], 4, linear=True)
+    horizontal = _axis_plan(source.shape[1], width, linear=True)
+
+    def run():
+        results = []
+        for plan in ("weights", "indices"):
+            weights = np.ascontiguousarray(horizontal.weights).copy()
+            indices = np.ascontiguousarray(horizontal.indices).copy()
+            shared = weights if plan == "weights" else indices
+            out = shared.reshape(-1).view(np.uint16)[: 4 * width].reshape(4, width)
+            mod.of_resample_rows_u16(
+                source, out, vertical.indices, vertical.weights, vertical.counts,
+                indices, weights, horizontal.counts, 0, 4)
+            results.append(shared)
+        return results
+
+    _assert_same_bytes(*_scalar_and_simd(mod, run))
