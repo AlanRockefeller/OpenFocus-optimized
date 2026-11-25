@@ -412,6 +412,10 @@ int select_a_background_row(
     int64_t scale, bool first, int state
 ) {
     int64_t x = 0;
+    // The AVX2 rows round every multiplication and addition separately. When the
+    // target has FMA, the compiler may fuse this loop's multiply-adds instead, so
+    // the vector rows are used only in builds where it cannot.
+#if !defined(__FMA__)
     if constexpr (std::is_same<DstT, uint16_t>::value) {
         // The AVX2 rows read 24 source samples and five floats per eight pixels
         // and write the output and background rows, so they need packed rows
@@ -436,6 +440,7 @@ int select_a_background_row(
                 kABackground, kASharp, kASaturated);
         }
     }
+#endif
     for (; x < width; ++x) {
         const int64_t prev = first ? 0 : static_cast<int64_t>(b_row[x]);
         if (!first && prev == kAMaxResponse) {
