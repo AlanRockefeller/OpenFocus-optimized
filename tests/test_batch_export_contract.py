@@ -107,6 +107,42 @@ def test_align_only_is_one_directory_per_stack_with_original_names(qapp, tmp_pat
     assert worker.written_paths == []
 
 
+def test_batch_exports_to_entered_subfolder_with_leading_space(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QDialog, QMessageBox
+    from dialogs.batch import BatchProcessingDialog
+
+    source = make_stack(tmp_path / 'stack')
+    entered = source / ' Exports'
+    trimmed = source / 'Exports'
+    entered.mkdir()
+    trimmed.mkdir()
+    monkeypatch.setattr(QMessageBox, 'warning',
+                        lambda _parent, *details: pytest.fail(' | '.join(map(str, details))))
+
+    dialog = BatchProcessingDialog()
+    dialog.rb_multiple_folders.setChecked(True)
+    dialog.folder_paths = [str(source)]
+    dialog.rb_subfolder.setChecked(True)
+    dialog.subfolder_name.setText(entered.name)
+    dialog.align_combo.setCurrentIndex(dialog.align_combo.findData('none'))
+    dialog.fusion_combo.setCurrentIndex(dialog.fusion_combo.findData('none'))
+    dialog.format_combo.setCurrentText('PNG')
+    dialog.start_batch_processing()
+    assert dialog.result() == QDialog.DialogCode.Accepted
+
+    worker = BatchWorker(dialog.folder_paths, *dialog.get_output_settings(),
+                         dialog.get_processing_settings(), use_gpu=False)
+    outcome = {}
+    worker.finished.connect(outcome.update)
+    worker.error.connect(lambda message: outcome.update(error=message))
+    worker.run()
+    assert outcome['counts']['success'] == 1, outcome
+    artifact = Path(outcome['aligned_stacks'][0]['path'])
+    assert artifact.parent == entered.resolve()
+    assert sorted(path.name for path in artifact.iterdir()) == ['img1.png', 'img2.png']
+    assert not list(trimmed.iterdir())
+
+
 def test_leftover_aligned_copies_are_not_reloaded_as_frames(qapp, tmp_path):
     """A folder that already received `*_registered*` copies must keep its
     original frame count: older builds wrote them beside the sources, and
@@ -605,14 +641,20 @@ def test_grouped_batch_rejects_split_and_aligned_export(qapp, tmp_path):
 
 def test_batch_thumbnail_decodes_only_first_readable_image(qapp, tmp_path, monkeypatch):
     import core.image_loader as loader
+    import core.source_frames as source_frames
     from core.workers import BatchImportWorker
 
     source = make_stack(tmp_path / 'stack', ('img1.png', 'img2.png', 'img3.png'), np.uint8)
     decoded = []
-    original = loader.decode_image
+    original_scan = source_frames.scan_source
+    original_decode = loader.decode_image
+    def scan(path, *args, **kwargs):
+        decoded.append(Path(path).name)
+        return original_scan(path, *args, **kwargs)
     def decode(path):
         decoded.append(Path(path).name)
-        return original(path)
+        return original_decode(path)
+    monkeypatch.setattr(source_frames, 'scan_source', scan)
     monkeypatch.setattr(loader, 'decode_image', decode)
     monkeypatch.setattr(ImageStackLoader, 'load_from_folder', lambda *a, **kw: pytest.fail('preloaded stack'))
     worker = BatchImportWorker('thumbnails', folder_paths=[str(source)])

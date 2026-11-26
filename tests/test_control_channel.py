@@ -622,7 +622,7 @@ def test_settings_tab_inventory_and_navigation(server):
         controls = inventory()
         tabs = controls["advanced_settings_tabs"]
         assert tabs["class"] == "QTabWidget" and tabs["value"] == 0
-        assert len(tabs["tabs"]) == 4
+        assert len(tabs["tabs"]) == 5
         assert all(tab["text"] and tab["visible"] and tab["enabled"] for tab in tabs["tabs"])
         assert {"combo_align_failure", "chk_align_cache", "btn_clear_align_cache",
                 "chk_collect_alignment_report", "btn_alignment_report", "chk_profile_performance",
@@ -630,15 +630,16 @@ def test_settings_tab_inventory_and_navigation(server):
                 "spin_ai_batch", "spin_threads"}.isdisjoint(controls)
 
         page_controls = ("chk_experimental_features", "sensor_cleanup_disclosure",
-                         "registration_options_disclosure", "chk_include_beta")
-        for index in (1, 2, 3, 0):
+                         "registration_options_disclosure", "chk_include_beta",
+                         "chk_danmaku_enabled")
+        for index in (1, 2, 3, 4, 0):
             reply = call(server, "ui.set", path=tabs["path"], value=index)
             assert reply["result"]["value"] == index
             controls = inventory()
             assert controls["advanced_settings_tabs"]["value"] == index
             assert [i for i, name in enumerate(page_controls) if controls[name]["visible"]] == [index]
 
-        for invalid in (-1, 4, 1.5, True):
+        for invalid in (-1, 5, 1.5, True):
             reply = call(server, "ui.set", path=tabs["path"], value=invalid)
             assert reply["error"]["code"] == "invalid_argument"
         assert inventory()["advanced_settings_tabs"]["value"] == 0
@@ -660,6 +661,9 @@ def test_settings_disclosures_via_control(server, index, disclosure, panel):
             return node
 
         tabs = find(control_id="advanced_settings_tabs")
+        if disclosure == "registration_options_disclosure":
+            exp = find(control_id="chk_experimental_features")
+            assert call(server, "ui.set", path=exp["path"], value=True)["ok"]
         assert call(server, "ui.set", path=tabs["path"], value=index)["ok"]
         button = find(control_id=disclosure)
         assert button["class"] == "QToolButton" and button["visible"] and button["enabled"]
@@ -1519,6 +1523,113 @@ def test_batch_accept_validates_before_starting(server, monkeypatch):
         call(server, "dialog.close")
 
 
+@pytest.mark.parametrize('entry', ['desktop', 'control'])
+def test_batch_accept_drops_late_thumbnail_and_releases_finished_thread(
+        entry, server, control_window, stack_frames, monkeypatch):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QDialog, QMessageBox
+    from controllers.batch_manager import _ORPHAN_WORKERS
+    from core.workers import BatchImportWorker, BatchWorker
+    from dialogs.batch import BatchProcessingDialog
+
+    manager = control_window.batch_manager
+    thumbnail_queued, release = threading.Event(), threading.Event()
+    launches, thumbnails, errors = [], [], []
+    run_batch = BatchWorker.run
+
+    def queue_thumbnail(worker):
+        worker.folder_loaded.emit(str(stack_frames), np.zeros((8, 8, 3), np.uint8))
+        thumbnail_queued.set()
+
+    def hold_batch(worker):
+        launches.append(worker)
+        if release.wait(10):
+            run_batch(worker)
+
+    def configure(dialog):
+        dialog.rb_multiple_folders.setChecked(True)
+        dialog.fusion_combo.setCurrentIndex(dialog.fusion_combo.findData('none'))
+        dialog.align_combo.setCurrentIndex(dialog.align_combo.findData('none'))
+        dialog.add_folders_to_list([str(stack_frames)])
+        assert thumbnail_queued.wait(5)
+
+    monkeypatch.setattr(BatchImportWorker, 'run', queue_thumbnail)
+    monkeypatch.setattr(BatchWorker, 'run', hold_batch)
+    monkeypatch.setattr(BatchProcessingDialog, '_apply_thumbnails',
+                        lambda _dialog, results: thumbnails.extend(results))
+    monkeypatch.setattr(QMessageBox, 'warning', lambda *args: errors.append(args))
+    monkeypatch.setattr(manager, '_show_message', lambda **_kwargs: None)
+
+    try:
+        if entry == 'desktop':
+            execute = BatchProcessingDialog.exec
+
+            def launch_modal(dialog):
+                def accept():
+                    try:
+                        configure(dialog)
+                        dialog.start_batch_processing()
+                    except Exception as exc:
+                        errors.append(exc)
+                    if dialog.result() != QDialog.DialogCode.Accepted:
+                        dialog.reject()
+
+                QTimer.singleShot(0, accept)
+                return execute(dialog)
+
+            monkeypatch.setattr(BatchProcessingDialog, 'exec', launch_modal)
+            control_window.show_batch_processing_dialog()
+        else:
+            assert call(server, 'dialog.open', name='batch')['ok']
+            configure(server._dialogs['batch'])
+            assert call(server, 'dialog.accept')['ok']
+
+        assert not errors
+        assert wait_until(lambda: bool(launches))
+        thread, worker = manager._thread, manager._worker
+        assert launches == [worker]
+        progress = manager._progress_dialog
+        assert progress.isVisible()
+        running = thread.isRunning
+
+        def finish_during_teardown():
+            was_running = running()
+            release.set()
+            assert thread.wait(5000)
+            return was_running
+
+        with monkeypatch.context() as teardown:
+            teardown.setattr(thread, 'isRunning', finish_during_teardown)
+            manager._teardown_worker()
+        assert not progress.isVisible()
+        assert wait_until(lambda: manager._thread is None)
+        assert (thread, worker) not in _ORPHAN_WORKERS
+        assert launches == [worker] and not thumbnails
+    finally:
+        release.set()
+        if manager._thread is not None:
+            manager._teardown_worker()
+            assert wait_until(lambda: manager._thread is None)
+
+
+def test_wipe_clears_after_deleting_last_fusion_result(control_window, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    from controllers.output_manager import OutputRecord
+
+    image = np.full((8, 12, 3), 73, dtype=np.uint8)
+    manager = control_window.output_manager
+    record = OutputRecord.create(image, 'Wipe result')
+    manager._insert_output(image, record.label, record)
+    manager.display_specific_fusion_result(image)
+    control_window.set_wipe_mode(True)
+    assert control_window.wipe_widget._right_pixmap is not None
+
+    monkeypatch.setattr(QMessageBox, 'exec', lambda _box: QMessageBox.StandardButton.Yes)
+    manager.delete_selected_output_images()
+    assert control_window.output_list.count() == 0
+    assert control_window.wipe_widget._right_pixmap is None
+
+
 def test_dialog_accept_reports_pending_mask_inspection(server):
     assert call(server, "dialog.open", name="settings")["ok"]
     dialog = server._dialogs["settings"]
@@ -1738,13 +1849,17 @@ def test_stack_load_reports_a_failed_decode(server, tmp_path):
     assert frames["count"] == 0
 
 
-def _decode_video_with_controlled_reader(path, scale, pixels_path, result_path):
+def _decode_video_with_controlled_reader(path, scale, pixels_path, result_path, progress=None):
     """Spawn target that runs the real decoder around a controllable read()."""
     import cv2
     from core.video_import import _decode_video_child
 
     class Capture:
+        instances = 0
+
         def __init__(self, path):
+            Capture.instances += 1
+            assert Capture.instances == 1, 'progress must use the decoder already reading frames'
             self.path = Path(path)
             self.index = 0
 
@@ -1769,7 +1884,7 @@ def _decode_video_with_controlled_reader(path, scale, pixels_path, result_path):
             pass
 
     cv2.VideoCapture = Capture  # This replacement is confined to the spawned process.
-    _decode_video_child(path, scale, pixels_path, result_path)
+    _decode_video_child(path, scale, pixels_path, result_path, progress)
 
 
 def test_cancel_blocked_video_import_allows_retry(server, stack_frames, tmp_path, monkeypatch):
@@ -2643,7 +2758,7 @@ def test_reset_stack_menu_clears_real_wipe_and_restores_import(qapp, control_win
     assert window.output_list.count() == 0 and not window.fusion_results
     assert not list(window.label_manager.labels) and not window.scale_bar_enabled
     assert window.scale_um_per_px_manual == 0.5
-    assert not window.wipe_active and window.view_stack.currentIndex() == 0
+    assert not window.wipe_active and window.view_stack.currentIndex() in (0, 3)
     assert not window._undo_stack and not window._redo_stack
 
 

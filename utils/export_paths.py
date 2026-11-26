@@ -133,6 +133,27 @@ def frame_export_name(filename: str, index: int, extension: str = '') -> str:
     return (stem or f'frame_{index + 1:04d}') + (suffix or '.png')
 
 
+def resolve_output_subfolder(source_folder: str, subfolder_name: str) -> str:
+    """Resolve a batch output subfolder and guarantee it stays inside ``source_folder``.
+
+    Raises ``ValueError`` if ``subfolder_name`` is empty, absolute, traverses
+    above ``source_folder``, or resolves onto a different drive.
+    """
+    if not (subfolder_name or "").strip():
+        raise ValueError("Output subfolder name is required")
+    if os.path.isabs(subfolder_name):
+        raise ValueError("Output subfolder must be inside the source folder")
+    root = os.path.realpath(source_folder)
+    target = os.path.realpath(os.path.join(root, subfolder_name))
+    try:
+        common = os.path.commonpath((root, target))
+    except ValueError as exc:
+        raise ValueError("Output subfolder must be inside the source folder") from exc
+    if common != root:
+        raise ValueError("Output subfolder must be inside the source folder")
+    return target
+
+
 def derived_aligned_source(name: str) -> str:
     """Stem of the original a `*_registered*` file was derived from, else ''.
 
@@ -147,11 +168,7 @@ def derived_aligned_source(name: str) -> str:
 def batch_output_dir(source_folder: str, output_type: str, output_path) -> str:
     """Folder a batch task writes its results into; it is not created here."""
     if output_type == 'subfolder':
-        root = os.path.realpath(source_folder)
-        output_dir = os.path.realpath(os.path.join(root, output_path))
-        if os.path.isabs(output_path) or os.path.commonpath((root, output_dir)) != root:
-            raise ValueError('Output subfolder must be inside the source folder')
-        return output_dir
+        return resolve_output_subfolder(source_folder, output_path)
     if output_type == 'same':
         return source_folder
     return output_path
