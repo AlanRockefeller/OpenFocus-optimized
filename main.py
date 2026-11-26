@@ -156,8 +156,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QPushButton,
 )
-from PyQt6.QtCore import Qt, QThread, QUrl, QEvent, QSignalBlocker, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import QPoint, QPointF, Qt, QThread, QUrl, QEvent, QSignalBlocker, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut, QWheelEvent
 from PyQt6.QtGui import QFont, QIcon, QDesktopServices, QDragEnterEvent, QDropEvent, QPixmap
 from core import ImageStackLoader
 from core.app import OpenFocusApplication, _serve_instance_request, process_command_line_args
@@ -204,6 +204,7 @@ from controllers.label_manager import LabelManager
 from controllers.export_manager import ExportManager
 from controllers.transform_manager import TransformManager
 from controllers.batch_manager import BatchManager
+from controllers.gallery_controller import GalleryController
 from controllers.update_manager import (
     UpdateManager,
     STATE_DOWNLOADING,
@@ -545,10 +546,12 @@ class OpenFocus(QMainWindow):
         self.transform_manager = TransformManager(self)
         self.batch_manager = BatchManager(self)
         self.update_manager = UpdateManager(self)
+        self.gallery_controller = GalleryController(self)
         from utils.usage_analytics import UsageAnalytics
         from PyQt6.QtCore import QTimer as _QTimer
         self.usage_analytics = UsageAnalytics(self)
         _QTimer.singleShot(0, self.usage_analytics.start)
+        _QTimer.singleShot(0, self.gallery_controller.start)
 
         # 初始化图像加载器
         self.image_loader = ImageStackLoader()
@@ -682,6 +685,7 @@ class OpenFocus(QMainWindow):
         self.result_control_bar = result_panel.control_bar
         self.result_slider = result_panel.slider
         self.live_preview_page = result_panel.live_preview_page
+        self.gallery_showcase_page = result_panel.gallery_showcase_page
         self.result_slider.actionTriggered.connect(self.render_manager.inspect_previous_output)
         # 连接右侧面板的ROI模式退出请求信号
         self.lbl_result_img.roiModeExitRequested.connect(self._on_roi_mode_exit_requested)
@@ -768,6 +772,7 @@ class OpenFocus(QMainWindow):
         for _attribute, _control in ((
                 "lbl_source_img", "view_source"),
                 ("lbl_result_img", "view_result"),
+                ("gallery_showcase_page", "gallery_showcase"),
                 ("wipe_widget", "wipe_compare"),
                 ("wipe_bar", "wipe_bar"),
                 ("view_stack", "result_view_stack"),
@@ -786,6 +791,8 @@ class OpenFocus(QMainWindow):
         self.output_list.currentRowChanged.connect(self.render_manager.inspect_previous_output)
         self.output_list.itemClicked.connect(self.render_manager.inspect_previous_output)
         bind_right_panel(self, right_panel_components)
+        if hasattr(self, "gallery_controller"):
+            self.gallery_controller.attach_ui()
         # Selecting a method through the combo box is a project edit even
         # though it does not go through set_fusion_method()/set_alignment_method().
         for combo in (self.combo_fusion, self.combo_align):
@@ -834,6 +841,10 @@ class OpenFocus(QMainWindow):
                 ("Ctrl+Shift+B", lambda: self.show_batch_processing_dialog()),
                 ("Ctrl+M", lambda: self.show_depth_map_dialog()),
                 ("Ctrl+E", lambda: self.btn_wipe.toggle()),
+                ("Ctrl+=", lambda: self._zoom_active_canvas(1)),
+                ("Ctrl++", lambda: self._zoom_active_canvas(1)),
+                ("Ctrl+-", lambda: self._zoom_active_canvas(-1)),
+                ("Ctrl+0", lambda: self._zoom_active_canvas(0)),
         ):
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
@@ -875,48 +886,92 @@ class OpenFocus(QMainWindow):
         main_layout.addWidget(self.accelerator_banner)
         main_layout.addWidget(self.main_splitter, 1)
 
+    def _zoom_active_canvas(self, direction: int) -> None:
+        """Apply Ctrl+=/Ctrl+-/Ctrl+0 zoom or fit-reset to the active canvas."""
+        if getattr(self, "wipe_active", False):
+            wipe = getattr(self, "wipe_widget", None)
+            if wipe is not None and wipe.isVisible():
+                if direction == 0:
+                    wipe.reset_view()
+                else:
+                    center = wipe.rect().center()
+                    wheel = QWheelEvent(
+                        QPointF(center), QPointF(wipe.mapToGlobal(center)), QPoint(),
+                        QPoint(0, 120 if direction > 0 else -120), Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+                    )
+                    QApplication.sendEvent(wipe, wheel)
+            return
+        source = getattr(self, "lbl_source_img", None)
+        result = getattr(self, "lbl_result_img", None)
+        target = None
+        if source is not None and source.isVisible() and source.underMouse():
+            target = source
+        elif result is not None and result.isVisible() and result.underMouse():
+            target = result
+        elif result is not None and result.isVisible() and result.view_zoom_state()[3]:
+            target = result
+        elif source is not None and source.isVisible() and source.view_zoom_state()[3]:
+            target = source
+        if target is None:
+            return
+        if direction == 0:
+            target.reset_view()
+        else:
+            target.zoom_view(direction > 0)
+
     def eventFilter(self, obj, event):
         """Global event filter to handle Space key and Delete key interactions."""
-        # Handle Delete/Backspace for ROI
-        if event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
-                # Check if mouse is over source image and ROI mode is active
+        etype = event.type()
+        if etype == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
+            if not event.isAutoRepeat():
                 if hasattr(self, 'lbl_source_img') and self.lbl_source_img:
-                    # Check if widget is visible and under mouse
-                    if self.lbl_source_img.isVisible() and self.lbl_source_img.underMouse():
-                         # If ROI exists, delete it and consume event
-                         if self.lbl_source_img.get_roi_rect() is not None:
-                             self.lbl_source_img.set_roi_rect(None)
-                             self.lbl_source_img.roiDeleted.emit()
-                             return True # Event handled, do not propagate to list widget
+                    self.lbl_source_img.set_space_pressed(False)
+                if hasattr(self, 'lbl_result_img') and self.lbl_result_img:
+                    self.lbl_result_img.set_space_pressed(False)
+            return False
 
-        if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space:
-            # Check if mouse is over source or result image
+        if etype != QEvent.Type.KeyPress:
+            return False
+
+        key = event.key()
+        if key not in (Qt.Key.Key_Space, Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            return False
+
+        # Never intercept keys meant for another window, modal/popup, or text input.
+        if (not self.isActiveWindow()
+                or QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None):
+            return False
+
+        focus = self.focusWidget()
+        if focus is not None:
+            from PyQt6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit
+            if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                return False
+
+        # Handle Delete/Backspace for ROI
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if hasattr(self, 'lbl_source_img') and self.lbl_source_img:
+                if self.lbl_source_img.isVisible() and self.lbl_source_img.underMouse():
+                    if self.lbl_source_img.get_roi_rect() is not None:
+                        self.lbl_source_img.set_roi_rect(None)
+                        self.lbl_source_img.roiDeleted.emit()
+                        return True
+
+        if key == Qt.Key.Key_Space:
             handled = False
-            
-            # Using underMouse() is safer than tracking enter/leave events which can be unreliable
-            # during rapid movement or with other widgets involved
             if hasattr(self, 'lbl_source_img') and self.lbl_source_img and self.lbl_source_img.isVisible():
                 if self.lbl_source_img.underMouse():
                     self.lbl_source_img.set_space_pressed(True)
                     handled = True
-            
             if hasattr(self, 'lbl_result_img') and self.lbl_result_img and self.lbl_result_img.isVisible():
                 if self.lbl_result_img.underMouse():
                     self.lbl_result_img.set_space_pressed(True)
                     handled = True
-            
             if handled:
                 return True
-                
-        elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Space:
-            if not event.isAutoRepeat():
-                if hasattr(self, 'lbl_source_img') and self.lbl_source_img:
-                    self.lbl_source_img.set_space_pressed(False)
-                
-                if hasattr(self, 'lbl_result_img') and self.lbl_result_img:
-                    self.lbl_result_img.set_space_pressed(False)
-        
+
         return False
 
     # --- Status Display ---
@@ -1626,10 +1681,39 @@ class OpenFocus(QMainWindow):
         if manager is not None and getattr(self, 'btn_render', None) is not None:
             manager.refresh_action_labels()
 
-    def apply_experimental_features(self) -> None:
-        """Refresh desktop gates while preserving the selected project settings."""
-        if getattr(self, 'combo_fusion', None) is not None and getattr(self, 'combo_align', None) is not None:
-            self.refresh_method_availability()
+    def apply_experimental_features(self, *, fallback_to_stable: bool = False) -> None:
+        """Refresh desktop gates; optionally fall back to Stable defaults when disabled."""
+        if getattr(self, 'combo_fusion', None) is None or getattr(self, 'combo_align', None) is None:
+            return
+        if fallback_to_stable and not experimental_enabled(self):
+            from ui.right_panel import ALIGN_DEFAULT
+            switched = []
+            fusion = self.current_fusion_method()
+            align = self.current_alignment_method()
+            switch_fusion = fusion != 'none' and get_fusion(fusion).experimental
+            switch_align = alignment_is_experimental(align)
+            if switch_fusion:
+                self.set_fusion_method(FUSION_DEFAULT)
+                switched.append(trans.t(get_fusion(FUSION_DEFAULT).label_key))
+            if switch_align:
+                self.set_alignment_method(ALIGN_DEFAULT)
+                switched.append(trans.t(get_registration(ALIGN_DEFAULT).label_key))
+            preferred_fusion = getattr(self, '_preferred_fusion_method', None)
+            preferred_align = getattr(self, '_preferred_alignment_method', None)
+            if switch_fusion or (
+                    preferred_fusion not in (None, 'none') and get_fusion(preferred_fusion).experimental):
+                self._preferred_fusion_method = FUSION_DEFAULT if switch_fusion else fusion
+            if switch_align or alignment_is_experimental(preferred_align):
+                self._preferred_alignment_method = ALIGN_DEFAULT if switch_align else align
+            if (preferred_fusion != getattr(self, '_preferred_fusion_method', None)
+                    or preferred_align != getattr(self, '_preferred_alignment_method', None)):
+                self.persist_settings()
+            if switched:
+                self._show_status_message(
+                    trans.t('experimental_fallback_notice').format(methods=', '.join(switched)),
+                    6000,
+                )
+        self.refresh_method_availability()
 
     # --- Update check ---
 
@@ -3707,6 +3791,9 @@ class OpenFocus(QMainWindow):
         if action is None:
             return
         client = getattr(self, '_account_client', None)
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            gallery.sync_account_session(client)
         if client is not None and getattr(client, 'logout_cleanup_pending', False):
             text = trans.t('account_cleanup_pending')
         elif client is not None and client.is_signed_in():
@@ -3736,11 +3823,44 @@ class OpenFocus(QMainWindow):
         """Manage the account and require another sign-in after sign-out."""
         from dialogs.account import AccountDialog
         AccountDialog(self).exec()
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            gallery.sync_account_session(getattr(self, '_account_client', None))
         while not getattr(self, '_shutting_down', False):
             if self._require_account():
+                if gallery is not None:
+                    gallery.sync_account_session(getattr(self, '_account_client', None))
                 return
             if self.close():
                 return
+
+    def open_account_center(self, initial_tab: int = 0):
+        """Open the Account Center dialog (0: My Account, 1: Message Box)."""
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            return gallery.open_account_center(initial_tab=initial_tab)
+        return None
+
+    def open_gallery_hub(self, initial_tab: int = 0):
+        """Open the 4-Tab OpenFocus Gallery Hub dialog."""
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            return gallery.open_gallery_hub(initial_tab=initial_tab)
+        return None
+
+    def open_gallery_downloads(self):
+        """Open the local Gallery downloads directory in the OS file manager."""
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            return gallery.open_downloads_folder()
+        return None
+
+    def open_gallery_screensaver(self):
+        """Launch the Fullscreen Always-on-Top Gallery Screensaver."""
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            return gallery.open_screensaver()
+        return None
 
     def show_feedback_dialog(self) -> None:
         """Report a bug or suggestion, with the session log attached."""
@@ -4153,6 +4273,10 @@ class OpenFocus(QMainWindow):
         if tour is not None and tour.is_active:
             tour.reapply_theme()
 
+        gallery = getattr(self, "gallery_controller", None)
+        if gallery is not None:
+            gallery.apply_theme(theme)
+
         self._enable_dark_title_bar(dark=(theme != "light"))
         self._sync_appearance_actions()
 
@@ -4420,6 +4544,9 @@ class OpenFocus(QMainWindow):
         from dialogs.account import AccountDialog, cancel_account_jobs
         from dialogs.retouch import RetouchDialog, _SHARPNESS_WORKERS
         shutdown_running = cancel_account_jobs(self)
+        gallery = getattr(self, 'gallery_controller', None)
+        if gallery is not None:
+            shutdown_running = gallery.publication_in_progress or shutdown_running
         accelerator = getattr(self, 'accelerator_banner', None)
         if accelerator is not None:
             shutdown_running = accelerator.shutdown_running() or shutdown_running
@@ -4516,6 +4643,9 @@ class OpenFocus(QMainWindow):
         from utils.logging_setup import log_action, get_logger
         shutdown_started = perf_counter()
         log_action("shutdown.started", restart=bool(getattr(self, '_restart_for_update', False)))
+        gallery = getattr(self, "gallery_controller", None)
+        if gallery is not None:
+            gallery.shutdown()
         self.usage_analytics.shutdown()
 
         # Persist user preferences, layout and recent files for next time
@@ -4953,6 +5083,12 @@ class OpenFocus(QMainWindow):
         self.rebuild_recent_menu()
         self.rebuild_recent_projects_menu()
         self.apply_experimental_features()
+        tour = getattr(self, "_onboarding_tour", None)
+        if tour is not None and tour.is_active:
+            tour.retranslate()
+        gallery = getattr(self, "gallery_controller", None)
+        if gallery is not None:
+            gallery.retranslate()
 
 
 if __name__ == "__main__":
@@ -5199,8 +5335,15 @@ if __name__ == "__main__":
         def _show_welcome():
             # A slow cooperative close can make this timer overdue. Entering
             # exec() now would consume Qt's posted last-window Quit event.
+            source = getattr(window, "source_manager", None)
             if (getattr(window, "_shutting_down", False)
-                    or getattr(window, "_close_confirmation_active", False)):
+                    or getattr(window, "_close_confirmation_active", False)
+                    or QApplication.activeModalWidget() is not None
+                    or QApplication.activePopupWidget() is not None
+                    or getattr(window, "raw_images", None)
+                    or getattr(source, "_load_worker", None) is not None
+                    or getattr(window, "project_path", None)
+                    or app._pending or app._import_queue or app._import_processing):
                 return
             window.show_quick_start()
             get_settings().setValue("ui/first_run_done", "1")

@@ -9,6 +9,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add an interactive desktop tour from the welcome dialog and Help menu.
   Follow the highlighted controls to browse source frames, choose methods,
   render, and compare the result.
+- Add Gallery Hub, Account Center, and Honor Card dialogs in all supported
+  languages. Preserve public camera and exposure metadata in Gallery uploads.
+- Open Gallery and Account Center from the main window. Browse bundled
+  showcase images when the Gallery service is unavailable, and finish active
+  Gallery publishing before the application closes.
 - Download smaller desktop updates for matching installations on Windows,
   Apple Silicon macOS, and Linux x86-64. Publish a patch helper for the
   official 2.0.0 desktop builds when the patch is smaller than the full package.
@@ -39,6 +44,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Start renders and tiles sooner on macOS: OpenFocus remembers which volumes
   are internal until a volume is mounted or unmounted, and no longer asks
   the system before every scratch choice.
+- Distribute OpenFocus source under Apache 2.0 and retain prior attribution
+  and model terms. View bundled licenses and any release EULA in Help.
 - Build desktop packages and platform wheels with C++17 CPU kernels for
   homography ECC and OpenFocus A, B, and C. Reuse per-frame ECC pyramids and
   estimate eligible JPEG stacks from reduced grayscale decodes. Preserve
@@ -48,6 +55,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Load dialogs and language packs on demand. Generate eligible 4K PNG previews
   and prepare alignment frames in parallel within CPU and memory budgets.
   Read TIFF calibration during the stack metadata scan.
+- Accelerate eligible mapped alignment warps, TIFF decoding, and 16-bit display
+  conversion. Use shared memory for eligible render process transfers.
 - Use OpenCL for eligible large integer ECC reductions, including 8×8 area
   downsizing. Apply exact Lanczos4 warps for large 8-bit and 16-bit frames
   during ECC and homography registration and whenever a GPU render resolves
@@ -227,6 +236,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and prepare the first display preview while remaining headers are scanned.
   Reuse display buffers when panning or zooming and accelerate eligible 8-bit
   PNG exports with the existing color and metadata handling.
+- Coalesce canvas, Wipe, and method comparison updates during interaction.
+  Refresh only affected retouch tiles during undo and redo.
 - Speed up packed OpenFocus A, B, and C fusion, exposure adjustment, tile
   reduction, and alignment with AVX2 on supported CPUs. Preserve scalar pixel
   arithmetic for strided views, wide integer sums, and float rounding.
@@ -234,6 +245,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   affine and homography refinement. Use fused multiply-add for depth
   resampling on supported CPUs. Retain scalar update order for overlapping
   image views and scalar variance decisions for nearly flat ECC samples.
+- Speed up OpenFocus A, B, and C with reusable OpenCL upload buffers,
+  persistent native workers, and SIMD depth and pyramid kernels.
 - Check repeated original paths once when validating a desktop export
   destination, including exports from large image stacks.
 - Count physical CPU cores from Linux sysfs when processor records omit
@@ -256,10 +269,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   directory it chose (`render.scratch`).
 
 ### Fixed
+- Match scalar and AVX2 rounding in OpenFocus A background accumulation.
+- Verify all encoded file bytes when reusing file-backed alignment plans and
+  preserve decoded BGR fingerprints for directly mapped RGB TIFF frames.
+- Release Retouch pixel buffers as soon as the dialog closes while background
+  workers finish cooperatively.
+- Preserve available camera, exposure, and other export-safe EXIF when
+  exporting camera RAW sources, including supported RAF and RW2 previews.
 - Preserve saved result metadata and protect original stack files during
   desktop exports. Release ROI previews and finish export and batch cleanup
   safely when closing the window. Resolve Qt UI font fallback families and
   find uppercase multi-page TIFF containers when reopening projects.
+- Preserve spaces in batch output subfolder names and retain the failing
+  decode or transfer location in isolated-render diagnostic reports.
+- Discard superseded render results before opening them, release batch workers
+  that finish during teardown, and refresh Wipe after removing an output.
+- Allow desktop control to start an eligible batch while folder thumbnails load.
+- Keep the guided tour usable through render completion and cancellation.
+  Improve video and batch progress and prepare drag-out files off the UI thread.
 - Bundle trusted CA roots with the desktop app so sign-in and other HTTPS
   requests can verify server certificates on macOS.
 - Report a memory limit in the batch converter, mosaic and flat-field
