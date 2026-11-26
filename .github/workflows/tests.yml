@@ -15,6 +15,10 @@ on:
         description: Run the OS-matrix pytest suite and headless wheel checks
         type: boolean
         default: true
+      run_macos:
+        description: Include macOS in the suite (its runners are often unavailable)
+        type: boolean
+        default: false
       run_engineering:
         description: Run the remote OpenFocus large-source acceptance gates
         type: boolean
@@ -33,6 +37,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS runs for release validation and when a manual run asks for
+        # it. In 203 runs up to November 2026 GitHub cancelled 24 macOS job
+        # attempts because no runner was free within 15 minutes, each one
+        # marking a healthy run failed, while macOS alone caught two
+        # problems. Its runners also come with three or five cores, so the
+        # same job takes 7 or 14 minutes.
+        exclude:
+          - os: ${{ inputs.ref == '' && !inputs.run_macos && 'macos-latest' || 'none' }}
     steps:
       - uses: actions/checkout@v5
         with:

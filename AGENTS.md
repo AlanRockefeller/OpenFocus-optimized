@@ -27,8 +27,10 @@ Process new PRs when the maintainer requests a merge batch. After the
 maintainer confirms the day's PRs have been handled, run the full test
 matrix on `main` with `gh workflow run tests.yml --ref main -f run_suite=true`.
 Investigate failures across platforms, verify fixes locally, and rerun the
-matrix on the corrected `main` when needed. The release workflow runs the
-full matrix against the exact release commit.
+matrix on the corrected `main` when needed. That run covers Linux and Windows;
+add `-f run_macos=true` when a change needs macOS, and expect to wait for a
+runner. The release workflow runs the full matrix, macOS included, against the
+exact release commit.
 
 ## Daily closeout
 

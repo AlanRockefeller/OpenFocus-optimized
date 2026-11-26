@@ -210,9 +210,18 @@ def test_release_job_graph_requires_successful_dependencies(channel, failed, exp
 
 def test_called_suite_conditions_matrix_and_checkout_identity(bash):
     jobs = workflow('tests.yml')['jobs']
-    assert set(jobs['test']['strategy']['matrix']['os']) == {
-        'ubuntu-latest', 'windows-latest', 'macos-latest'}
+    matrix = jobs['test']['strategy']['matrix']
+    assert set(matrix['os']) == {'ubuntu-latest', 'windows-latest', 'macos-latest'}
     sha = 'b' * 40
+    # macOS is left out unless a release calls the suite or a manual run asks.
+    (excluded,) = matrix['exclude']
+    for inputs, runs_macos in [({'ref': sha, 'run_suite': True}, True),
+                               ({'ref': '', 'run_macos': True}, True),
+                               ({'ref': '', 'run_macos': False}, False),
+                               ({}, False)]:
+        left_out = expression(excluded['os'], {'inputs': inputs})
+        assert (left_out not in matrix['os']) is runs_macos, inputs
+        assert runs_macos or left_out == 'macos-latest'
     for name in ('test', 'headless-wheel'):
         core = jobs[name]
         for event, enabled, expected in [('push', False, True), ('pull_request', False, True),
