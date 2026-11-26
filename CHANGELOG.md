@@ -36,6 +36,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Add a flip review viewer that compares same-size renders in one shared view and records ratings and notes.
 
 ### Changed
+- Start renders and tiles sooner on macOS: OpenFocus remembers which volumes
+  are internal until a volume is mounted or unmounted, and no longer asks
+  the system before every scratch choice.
 - Build desktop packages and platform wheels with C++17 CPU kernels for
   homography ECC and OpenFocus A, B, and C. Reuse per-frame ECC pyramids and
   estimate eligible JPEG stacks from reduced grayscale decodes. Preserve
