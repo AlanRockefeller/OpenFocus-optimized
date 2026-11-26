@@ -3090,27 +3090,36 @@ void ecc_ic_pass_all_in_row_p6_avx2(
     const __m256d v_dsy4 = _mm256_set1_pd(dsy * 4.0);
     const __m256d v_invs4 = _mm256_set1_pd(inv_s * 4.0);
 
+    // Two passes per segment, as in the eight-parameter pass below.
+    constexpr int kSegment = 512;
+    alignas(32) double iw_seg[kSegment];
+    const int vec_end = rw & ~3;
     int rx = 0;
-    for (; rx + 4 <= rw; rx += 4) {
-        const __m256d iw = ecc_bilinear_4_avx2(src_data, w, h, v_sx, v_sy);
-        const __m256d t0 = _mm256_cvtps_pd(_mm_loadu_ps(t0_row + rx));
-        const __m256d gxw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gx_row + rx)), iw);
-        const __m256d gyw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gy_row + rx)), iw);
-
-        v_iw = _mm256_add_pd(v_iw, iw);
-        v_iw2 = _mm256_add_pd(v_iw2, _mm256_mul_pd(iw, iw));
-        v_tiw = _mm256_add_pd(v_tiw, _mm256_mul_pd(t0, iw));
-
-        v_rg[0] = _mm256_add_pd(v_rg[0], _mm256_mul_pd(gxw, v_u));
-        v_rg[1] = _mm256_add_pd(v_rg[1], _mm256_mul_pd(gyw, v_u));
-        v_rg[2] = _mm256_add_pd(v_rg[2], _mm256_mul_pd(gxw, v_vv));
-        v_rg[3] = _mm256_add_pd(v_rg[3], _mm256_mul_pd(gyw, v_vv));
-        v_rg[4] = _mm256_add_pd(v_rg[4], gxw);
-        v_rg[5] = _mm256_add_pd(v_rg[5], gyw);
-
-        v_sx = _mm256_add_pd(v_sx, v_dsx4);
-        v_sy = _mm256_add_pd(v_sy, v_dsy4);
-        v_u = _mm256_add_pd(v_u, v_invs4);
+    while (rx < vec_end) {
+        const int seg_end = rx + std::min(kSegment, vec_end - rx);
+        for (int k = rx; k < seg_end; k += 4) {
+            const __m256d iw = ecc_bilinear_4_avx2(src_data, w, h, v_sx, v_sy);
+            const __m256d t0 = _mm256_cvtps_pd(_mm_loadu_ps(t0_row + k));
+            v_iw = _mm256_add_pd(v_iw, iw);
+            v_iw2 = _mm256_add_pd(v_iw2, _mm256_mul_pd(iw, iw));
+            v_tiw = _mm256_add_pd(v_tiw, _mm256_mul_pd(t0, iw));
+            _mm256_store_pd(iw_seg + (k - rx), iw);
+            v_sx = _mm256_add_pd(v_sx, v_dsx4);
+            v_sy = _mm256_add_pd(v_sy, v_dsy4);
+        }
+        for (int k = rx; k < seg_end; k += 4) {
+            const __m256d iw = _mm256_load_pd(iw_seg + (k - rx));
+            const __m256d gxw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gx_row + k)), iw);
+            const __m256d gyw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gy_row + k)), iw);
+            v_rg[0] = _mm256_add_pd(v_rg[0], _mm256_mul_pd(gxw, v_u));
+            v_rg[1] = _mm256_add_pd(v_rg[1], _mm256_mul_pd(gyw, v_u));
+            v_rg[2] = _mm256_add_pd(v_rg[2], _mm256_mul_pd(gxw, v_vv));
+            v_rg[3] = _mm256_add_pd(v_rg[3], _mm256_mul_pd(gyw, v_vv));
+            v_rg[4] = _mm256_add_pd(v_rg[4], gxw);
+            v_rg[5] = _mm256_add_pd(v_rg[5], gyw);
+            v_u = _mm256_add_pd(v_u, v_invs4);
+        }
+        rx = seg_end;
     }
 
     double s_iw = hsum_pd4(v_iw);
@@ -3192,35 +3201,47 @@ void ecc_ic_pass_all_in_row_p8_avx2(
     const __m256d v_dden4 = _mm256_set1_pd(d_den * 4.0);
     const __m256d v_invs4 = _mm256_set1_pd(inv_s * 4.0);
 
+    // Eleven running sums do not fit in the vector registers next to the
+    // coordinates, so the row runs in segments of two passes: the first warps
+    // and samples, keeping the three image sums and the samples, the second
+    // adds the eight Jacobian sums. Every lane adds its pixels in the same
+    // order as one combined loop.
+    constexpr int kSegment = 512;
+    alignas(32) double iw_seg[kSegment];
+    const int vec_end = rw & ~3;
     int rx = 0;
-    for (; rx + 4 <= rw; rx += 4) {
-        const __m256d inv_d = _mm256_div_pd(v_one, v_den);
-        const __m256d sx = _mm256_mul_pd(v_nsx, inv_d);
-        const __m256d sy = _mm256_mul_pd(v_nsy, inv_d);
-        const __m256d iw = ecc_bilinear_4_avx2(src_data, w, h, sx, sy);
-
-        const __m256d t0 = _mm256_cvtps_pd(_mm_loadu_ps(t0_row + rx));
-        const __m256d gxw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gx_row + rx)), iw);
-        const __m256d gyw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gy_row + rx)), iw);
-        const __m256d guvw = _mm256_add_pd(_mm256_mul_pd(gxw, v_u), _mm256_mul_pd(gyw, v_vv));
-
-        v_iw = _mm256_add_pd(v_iw, iw);
-        v_iw2 = _mm256_add_pd(v_iw2, _mm256_mul_pd(iw, iw));
-        v_tiw = _mm256_add_pd(v_tiw, _mm256_mul_pd(t0, iw));
-
-        v_rg[0] = _mm256_add_pd(v_rg[0], _mm256_mul_pd(gxw, v_u));
-        v_rg[1] = _mm256_add_pd(v_rg[1], _mm256_mul_pd(gyw, v_u));
-        v_rg[2] = _mm256_sub_pd(v_rg[2], _mm256_mul_pd(v_u, guvw));
-        v_rg[3] = _mm256_add_pd(v_rg[3], _mm256_mul_pd(gxw, v_vv));
-        v_rg[4] = _mm256_add_pd(v_rg[4], _mm256_mul_pd(gyw, v_vv));
-        v_rg[5] = _mm256_sub_pd(v_rg[5], _mm256_mul_pd(v_vv, guvw));
-        v_rg[6] = _mm256_add_pd(v_rg[6], gxw);
-        v_rg[7] = _mm256_add_pd(v_rg[7], gyw);
-
-        v_nsx = _mm256_add_pd(v_nsx, v_dnsx4);
-        v_nsy = _mm256_add_pd(v_nsy, v_dnsy4);
-        v_den = _mm256_add_pd(v_den, v_dden4);
-        v_u = _mm256_add_pd(v_u, v_invs4);
+    while (rx < vec_end) {
+        const int seg_end = rx + std::min(kSegment, vec_end - rx);
+        for (int k = rx; k < seg_end; k += 4) {
+            const __m256d inv_d = _mm256_div_pd(v_one, v_den);
+            const __m256d sx = _mm256_mul_pd(v_nsx, inv_d);
+            const __m256d sy = _mm256_mul_pd(v_nsy, inv_d);
+            const __m256d iw = ecc_bilinear_4_avx2(src_data, w, h, sx, sy);
+            const __m256d t0 = _mm256_cvtps_pd(_mm_loadu_ps(t0_row + k));
+            v_iw = _mm256_add_pd(v_iw, iw);
+            v_iw2 = _mm256_add_pd(v_iw2, _mm256_mul_pd(iw, iw));
+            v_tiw = _mm256_add_pd(v_tiw, _mm256_mul_pd(t0, iw));
+            _mm256_store_pd(iw_seg + (k - rx), iw);
+            v_nsx = _mm256_add_pd(v_nsx, v_dnsx4);
+            v_nsy = _mm256_add_pd(v_nsy, v_dnsy4);
+            v_den = _mm256_add_pd(v_den, v_dden4);
+        }
+        for (int k = rx; k < seg_end; k += 4) {
+            const __m256d iw = _mm256_load_pd(iw_seg + (k - rx));
+            const __m256d gxw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gx_row + k)), iw);
+            const __m256d gyw = _mm256_mul_pd(_mm256_cvtps_pd(_mm_loadu_ps(gy_row + k)), iw);
+            const __m256d guvw = _mm256_add_pd(_mm256_mul_pd(gxw, v_u), _mm256_mul_pd(gyw, v_vv));
+            v_rg[0] = _mm256_add_pd(v_rg[0], _mm256_mul_pd(gxw, v_u));
+            v_rg[1] = _mm256_add_pd(v_rg[1], _mm256_mul_pd(gyw, v_u));
+            v_rg[2] = _mm256_sub_pd(v_rg[2], _mm256_mul_pd(v_u, guvw));
+            v_rg[3] = _mm256_add_pd(v_rg[3], _mm256_mul_pd(gxw, v_vv));
+            v_rg[4] = _mm256_add_pd(v_rg[4], _mm256_mul_pd(gyw, v_vv));
+            v_rg[5] = _mm256_sub_pd(v_rg[5], _mm256_mul_pd(v_vv, guvw));
+            v_rg[6] = _mm256_add_pd(v_rg[6], gxw);
+            v_rg[7] = _mm256_add_pd(v_rg[7], gyw);
+            v_u = _mm256_add_pd(v_u, v_invs4);
+        }
+        rx = seg_end;
     }
 
     double s_iw = hsum_pd4(v_iw);
