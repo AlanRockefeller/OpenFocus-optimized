@@ -1007,11 +1007,13 @@ def test_macos_volume_failures_are_asked_again(monkeypatch, stand_in_volume_answ
     assert len(calls) == asked + 5
 
 
-def test_macos_volume_answers_are_not_kept_without_a_mount_signature(monkeypatch, stand_in_volume_answers):
+@pytest.mark.parametrize('error', [OSError('getfsstat failed'), AttributeError('getfsstat'),
+                                   TypeError('no C library handle'), ValueError('bad count')])
+def test_macos_volume_answers_are_not_kept_without_a_mount_signature(monkeypatch, stand_in_volume_answers, error):
     calls, _, _ = _macos_volume_queries(monkeypatch)
 
     def unavailable():
-        raise OSError('getfsstat failed')
+        raise error
 
     monkeypatch.setattr(frame_storage, '_mount_table_signature', unavailable)
     assert frame_storage._default_is_local('/private/tmp')

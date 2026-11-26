@@ -106,7 +106,8 @@ def _mounted_volume_fact(key, query):
     """
     try:
         signature = _mount_table_signature()
-    except (OSError, AttributeError, ValueError):
+    except (OSError, AttributeError, TypeError, ValueError):
+        # No getfsstat in this C library: nothing tells when volumes change.
         return query()[0]
     with _volume_facts_lock:
         if _volume_facts.get('signature') != signature:
