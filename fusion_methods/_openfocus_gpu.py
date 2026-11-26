@@ -607,7 +607,18 @@ def _device(cl):
                 index += 1
     if not candidates:
         return None
-    return max(candidates, key=lambda item: _device_rank(item[1], item[0]))[1]
+    ranked = sorted(candidates, key=lambda item: _device_rank(item[1], item[0]), reverse=True)
+    discrete = [device for index, device in ranked if _device_rank(device, index)[0]]
+    if len(discrete) > 1:
+        # Budgeted paths decline a discrete GPU whose free VRAM cannot be read,
+        # so prefer the highest-ranked discrete GPU that has a reading.
+        for device in discrete:
+            try:
+                if _free_vram(device) is not None:
+                    return device
+            except Exception:
+                pass
+    return ranked[0][1]
 
 
 def opencl_device_name(device):
@@ -1083,6 +1094,7 @@ class Merge:
             self._merge_slot_hosts = [None, None]
             self._merge_slot = 0
             self._merge_ping_pong = False
+            self._merge_unified_bytes = 0
             self._merge_u16_depth = False
             self._merge_needs_drain = False
             self.rows = rows
@@ -1339,6 +1351,10 @@ class Merge:
             self._merge_slot_hosts = [None, None]
             self._merge_slot = 0
             self._merge_ping_pong = ping_pong
+            # Unified memory allocates the upload buffers from host RAM after the merge
+            # sizes its prefetch window, unlike the depth and accumulator buffers below.
+            self._merge_unified_bytes = (extra_src * (2 if ping_pong else 1)
+                                         if self.device.host_unified_memory else 0)
             self._merge_needs_drain = False
             self._merge_depth = cl.Buffer(self.context, cl.mem_flags.READ_ONLY |
                                           cl.mem_flags.COPY_HOST_PTR, hostbuf=codes)
@@ -1363,6 +1379,7 @@ class Merge:
             self._merge_slot_hosts = [None, None]
             self._merge_slot = 0
             self._merge_ping_pong = False
+            self._merge_unified_bytes = 0
             self._merge_u16_depth = False
             self._merge_needs_drain = False
             self.release()
@@ -1549,6 +1566,7 @@ class Merge:
         self._merge_src_bytes = self._merge_src_alt_bytes = 0
         self._merge_slot = 0
         self._merge_ping_pong = False
+        self._merge_unified_bytes = 0
         self._merge_u16_depth = False
         self._merge_needs_drain = False
         self.release()

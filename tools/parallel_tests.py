@@ -12,23 +12,22 @@ Options this script does not know are passed to every pytest process.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
-import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-TESTS = "tests"
 # The same cuts on every machine, whatever its core count, so a result can be
 # reproduced elsewhere. Slices differ several-fold in duration; this many keep
 # four to eight processes busy.
 SLICES = 16
-# pytest lists one test per line ("file.py::test") or, when quieter, one file
-# per line with its number of tests ("file.py: 12").
-_NODE = re.compile(r"^(" + TESTS + r"/[^:\s]+\.py)(?:::|: (\d+)$)")
+_COLLECTION_FILE = "OPENFOCUS_PYTEST_COLLECTION_FILE"
+_SLICE_FILE = "OPENFOCUS_PYTEST_SLICE_FILE"
 
 
 def split_files(counts, slices):
@@ -54,25 +53,50 @@ def split_files(counts, slices):
     return groups
 
 
+def pytest_configure(config):
+    selection = os.environ.pop(_SLICE_FILE, None)
+    if selection:
+        # Pytest has already parsed flags and selectors. Replace only the
+        # collection targets, so explicit paths are not added to every slice.
+        config.args = json.loads(Path(selection).read_text(encoding="utf-8"))
+
+
+def pytest_collection_finish(session):
+    report = os.environ.pop(_COLLECTION_FILE, None)
+    if not report:
+        return
+    counts, targets = {}, {}
+    has_node_selectors = any("::" in arg for arg in session.config.args)
+    for item in session.items:
+        name, separator, node = item.nodeid.partition("::")
+        counts[name] = counts.get(name, 0) + 1
+        if has_node_selectors:
+            targets.setdefault(name, []).append(f"{item.path}{separator}{node}")
+        elif name not in targets:
+            targets[name] = [str(item.path)]
+    basetemp = session.config.getoption("basetemp")
+    Path(report).write_text(json.dumps([counts, targets, basetemp]), encoding="utf-8")
+
+
+def _pytest_command(options, *extra):
+    end = options.index("--") if "--" in options else len(options)
+    return [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-p", "tools.parallel_tests",
+            *options[:end], *extra, *options[end:]]
+
+
 def collect(pytest_options):
-    """Return {file: test count} in collection order, uncollected files last."""
-    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-               *pytest_options]
-    listing = subprocess.run(command, cwd=ROOT, capture_output=True, text=True,
-                             encoding="utf-8", errors="replace")
-    counts = {}
-    for line in listing.stdout.splitlines():
-        match = _NODE.match(line.replace("\\", "/"))
-        if match:
-            counts[match.group(1)] = counts.get(match.group(1), 0) + int(match.group(2) or 1)
-    if not counts:
-        sys.stdout.write(listing.stdout + listing.stderr)
-        raise SystemExit(listing.returncode or 1)
-    # A file that failed to import has no tests listed. Keep it, so the slice
-    # that runs it reports the error.
-    for path in sorted((ROOT / TESTS).rglob("test_*.py")):
-        counts.setdefault(path.relative_to(ROOT).as_posix(), 0)
-    return counts
+    """Collect the full selection before starting any test process."""
+    with tempfile.TemporaryDirectory(prefix="openfocus-collect-") as scratch:
+        report = Path(scratch) / "collection.json"
+        environment = {**os.environ, _COLLECTION_FILE: str(report)}
+        environment.pop(_SLICE_FILE, None)
+        listing = subprocess.run(_pytest_command(pytest_options, "--collect-only"), cwd=ROOT,
+                                 env=environment, capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace")
+        if listing.returncode or not report.is_file():
+            sys.stdout.write(listing.stdout + listing.stderr)
+            raise SystemExit(exit_code(listing.returncode) or 1)
+        return json.loads(report.read_text(encoding="utf-8"))
 
 
 def exit_code(returncode):
@@ -82,31 +106,40 @@ def exit_code(returncode):
     return returncode if returncode < 256 else 128 + (returncode & 0x7F)
 
 
-def run(groups, jobs, pytest_options):
+def run(groups, jobs, pytest_options, targets, basetemp, crash_selection):
     """Run every group, at most ``jobs`` at a time; return the worst exit code."""
     grouped = os.environ.get("GITHUB_ACTIONS") == "true"
     pending = list(enumerate(groups, 1))
     running = {}
     worst = 0
+    if basetemp is not None:
+        basetemp = ROOT / basetemp
+        basetemp.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="openfocus-tests-") as scratch:
         while pending or running:
             while pending and len(running) < jobs:
                 index, files = pending.pop(0)
+                selection = Path(scratch) / f"slice-{index}.json"
+                selection.write_text(json.dumps([target for name in files for target in targets[name]]),
+                                     encoding="utf-8")
+                extra = () if basetemp is None else ("--basetemp", str(basetemp / f"slice-{index}"))
                 output = open(os.path.join(scratch, f"slice-{index}.txt"), "w+",
                               encoding="utf-8", errors="replace")
-                command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
-                           *pytest_options, *files]
-                process = subprocess.Popen(command, cwd=ROOT, stdout=output,
-                                           stderr=subprocess.STDOUT)
-                running[index] = (process, output, files, time.monotonic())
+                process = subprocess.Popen(_pytest_command(pytest_options, *extra), cwd=ROOT,
+                                           env={**os.environ, _SLICE_FILE: str(selection)},
+                                           stdout=output, stderr=subprocess.STDOUT)
+                running[index] = (process, output, files, time.monotonic(), selection)
             time.sleep(0.2)
             for index in sorted(running):
-                process, output, files, started = running[index]
+                process, output, files, started, selection = running[index]
                 if process.poll() is None:
                     continue
                 del running[index]
                 code = exit_code(process.returncode)
                 worst = max(worst, code)
+                if code >= 128 and crash_selection is not None:
+                    shutil.copyfile(selection, crash_selection)
+                    crash_selection = None
                 title = (f"tests {index} of {len(groups)}: {files[0]} to {files[-1]}, "
                          f"exit code {code}, {time.monotonic() - started:.0f} s")
                 output.seek(0)
@@ -126,15 +159,17 @@ def main(argv=None):
                         help="pytest processes to run at once (default: CPU count)")
     parser.add_argument("--slices", type=int, default=SLICES,
                         help=f"consecutive slices to cut the suite into (default: {SLICES})")
+    parser.add_argument("--crash-selection", type=Path,
+                        help="save the first crashing slice's targets for a debugger")
     options, pytest_options = parser.parse_known_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")  # test output may not fit the console encoding
     jobs = max(1, options.jobs)
-    counts = collect(pytest_options)
+    counts, targets, basetemp = collect(pytest_options)
     groups = split_files(counts, options.slices)
     print(f"{sum(counts.values())} tests in {len(counts)} files, {len(groups)} slices, "
           f"{jobs} at a time", flush=True)
-    worst = run(groups, jobs, pytest_options)
+    worst = run(groups, jobs, pytest_options, targets, basetemp, options.crash_selection)
     print(f"\nworst exit code: {worst}", flush=True)
     return worst
 
