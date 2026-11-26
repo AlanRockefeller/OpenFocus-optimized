@@ -1,6 +1,10 @@
 name: Tests
 
 on:
+  # Pull requests run only the static checks. This nightly run of the Linux
+  # and Windows suites on main finds what those miss within a day.
+  schedule:
+    - cron: '23 10 * * *'
   workflow_call:
     inputs:
       ref:
