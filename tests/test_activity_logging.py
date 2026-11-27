@@ -20,8 +20,9 @@ def _exercise():
     from PyQt6.QtCore import QEvent, QPoint, Qt
     from PyQt6.QtGui import QAction
     from PyQt6.QtTest import QTest
-    from PyQt6.QtWidgets import (QCheckBox, QComboBox, QLineEdit, QListWidget, QMainWindow,
-                                 QPushButton, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
+    from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QLineEdit, QListWidget,
+                                 QMainWindow, QPushButton, QSlider, QSpinBox, QTabWidget,
+                                 QVBoxLayout, QWidget)
     from core.app import OpenFocusApplication
     import ui.activity as activity
     from widgets.wipe_compare import WipeCompareWidget
@@ -63,9 +64,18 @@ def _exercise():
     panel.button = QPushButton('private button')
     layout.addWidget(panel.button)
     panel.button.show()
+    # Qt creates standard dialog buttons itself; PyQt denies protected
+    # methods such as hitButton() on them.
+    panel.box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+    layout.addWidget(panel.box)
+    panel.box.show()
     app.processEvents()
+    qt_created = panel.box.button(QDialogButtonBox.StandardButton.Ok)
+    unhandled = []
+    sys.excepthook = lambda *error: unhandled.append(error)
     for widget, pos in ((panel.button, panel.button.rect().center()),
-                        (panel.check, QPoint(5, panel.check.height() // 2))):
+                        (panel.check, QPoint(5, panel.check.height() // 2)),
+                        (qt_created, qt_created.rect().center())):
         clicks = []
         widget.clicked.connect(lambda checked=False, clicks=clicks: clicks.append(checked))
         for button in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
@@ -78,6 +88,8 @@ def _exercise():
         assert len(clicks) == 1
         assert len([event for event, _ in events if event == 'ui.action']) == 1
         events.clear()
+    sys.excepthook = sys.__excepthook__
+    assert not unhandled, [str(error[1]) for error in unhandled]
     panel.check.setChecked(False)
 
 
