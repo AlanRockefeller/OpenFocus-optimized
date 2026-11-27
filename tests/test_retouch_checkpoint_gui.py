@@ -369,16 +369,21 @@ def test_background_worker_close_cancels_without_closing_or_mutating_workspace(q
 def test_background_progress_uses_worker_stage_and_cancels_from_visible_button(qapp):
     from types import SimpleNamespace
     from threading import Event
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import QEvent, QObject, Qt
     from PyQt6.QtTest import QTest
     from dialogs.retouch import _AutoBackgroundDialog
 
     advance = Event()
+    tiny = Event()
     release = Event()
 
     def compute(_preset, _clean, cancelled, progress, **_kwargs):
         progress(0, "waiting for processing")
         if not advance.wait(5):
+            return "cancelled"
+        # The first of 110 prepared frames: under one pixel of a 1000-step bar.
+        progress(0.12 / 110, "preparing source frames")
+        if not tiny.wait(5):
             return "cancelled"
         progress(0.25, "finding the subject's outline")
         release.wait(5)
@@ -390,17 +395,44 @@ def test_background_progress_uses_worker_stage_and_cancels_from_visible_button(q
         dialog.show()
         assert dialog.options_scroll.isVisible() and dialog.progress_box.isHidden()
         assert dialog.cancel_button.text() == trans.t("dialog_close")
+        # Like a tiling window manager, keep the options height after Run.
+        dialog.setFixedSize(dialog.size())
         QTest.mouseClick(dialog.run_button, Qt.MouseButton.LeftButton)
         for _ in range(100):
             if dialog.stage_label.text() == trans.t("retouch_auto_bg_waiting"):
                 break
             QTest.qWait(10)
         assert dialog.stage_label.text() == trans.t("retouch_auto_bg_waiting")
-        assert dialog.progress.isVisible() and dialog.options_scroll.isHidden()
-        assert dialog.progress.maximum() == 0 and not dialog.lbl_progress.text()
+        assert dialog.busy_progress.isVisible() and dialog.options_scroll.isHidden()
+        qapp.processEvents()
+        assert dialog.progress_box.height() <= dialog.progress_box.sizeHint().height() + 1
+        assert dialog.busy_progress.maximum() == 0 and not dialog.lbl_progress.text()
+        assert dialog.progress.isHidden()
         advance.set()
         for _ in range(100):
             if dialog.lbl_progress.text():
+                break
+            QTest.qWait(10)
+        assert dialog.lbl_progress.text() == "<1%"
+        assert dialog.progress.isVisible() and dialog.busy_progress.isHidden()
+        assert dialog.progress.maximum() == 1000 and dialog.progress.value() == 1
+
+        # The busy animation must not carry over to the sub-pixel value.
+        class Paints(QObject):
+            count = 0
+
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Type.Paint:
+                    Paints.count += 1
+                return False
+        paints = Paints()
+        dialog.progress.installEventFilter(paints)
+        QTest.qWait(500)
+        dialog.progress.removeEventFilter(paints)
+        assert Paints.count < 5, Paints.count
+        tiny.set()
+        for _ in range(100):
+            if dialog.lbl_progress.text() == "25%":
                 break
             QTest.qWait(10)
         assert dialog.stage_label.text() == trans.t("retouch_auto_bg_outline")
@@ -415,6 +447,7 @@ def test_background_progress_uses_worker_stage_and_cancels_from_visible_button(q
         assert dialog.status == "cancelled" and not dialog.isVisible()
     finally:
         advance.set()
+        tiny.set()
         release.set()
         if dialog.worker is not None:
             dialog.reject()

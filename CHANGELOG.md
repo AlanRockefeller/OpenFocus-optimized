@@ -493,6 +493,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carry the first frame's metadata.
 - Keep the first frame's EXIF in CLI batch results (`--output-dir`), as
   single-stack output already does.
+- Stop the Auto background progress bar animating after progress starts. The
+  waiting animation continued while the reported progress was under one pixel
+  of the bar, which on a large stack lasted for the first few prepared frames
+  and repainted the dialog about 30 times a second. Waiting now uses a
+  separate bar that is hidden as soon as a fraction is known. The progress
+  card also stays at its own height when a window manager keeps the dialog at
+  the options height after **Replace background**, instead of stretching.
 
 ## [2.0.0]
 
