@@ -39,6 +39,7 @@ def _isolated_preview_size(qapp):
 def dialog(qapp):
     window = QWidget()
     window.experimental_features = True
+    window.legacy_features = True
     window.raw_images = make_two_focus_stack((160, 560))
     window.current_fusion_method = lambda: "openfocus_a"
     window.current_alignment_method = lambda: "none"
@@ -129,17 +130,13 @@ def test_parameter_cards_stack_headers_and_wrap(dialog, qapp):
         assert title.geometry().bottom() < panel.geometry().top()
         assert title.width() >= title.fontMetrics().horizontalAdvance(title.text())
         editors = list(panel.editors.values())
-        specs_by_key = {spec.key: spec for spec in panel._specs}
         numeric_count = sum(1 for spec in panel._specs if not spec.choices)
         for key, editor in panel.editors.items():
             label = panel._labels[key]
             assert label.text()
             assert editor.accessibleName().rstrip(':： ').strip() == label.text().rstrip(':： ').strip()
             assert label.width() >= label.fontMetrics().horizontalAdvance(label.text())
-            if numeric_count > 1 and not specs_by_key[key].choices:
-                assert label.geometry().bottom() < editor.geometry().top()
-            else:
-                assert label.geometry().right() < editor.geometry().left()
+            assert label.geometry().right() < editor.geometry().left()
         assert len({editor.geometry().left() for editor in editors}) <= (2 if numeric_count > 1 else 1)
 
     widths = [card.sizeHint().width() for card in cards]
@@ -639,7 +636,7 @@ def test_method_checkboxes_follow_the_shared_family_groups(dialog):
         groups.setdefault(checkbox.parentWidget(), []).append(method)
     assert list(groups.values()) == [
         ["openfocus_a", "openfocus_b", "openfocus_c"],
-        ["stackmffv3", "stackmffv2", "stackmff"],
+        ["stackmffv4", "stackmffv3", "stackmffv2", "stackmff"],
         ["guided_filter", "gfgfgf", "dct", "dtcwt"],
     ]
 
@@ -654,6 +651,7 @@ def test_unavailable_methods_stay_visible_with_a_reason(
     monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: False)
     window = QWidget()
     window.experimental_features = True
+    window.legacy_features = True
     window.raw_images = make_two_focus_stack((160, 560))
     window.current_fusion_method = lambda: "stackmffv3"
     window.current_alignment_method = lambda: "none"
@@ -663,7 +661,7 @@ def test_unavailable_methods_stay_visible_with_a_reason(
     instance = CompareDialog(window)
     try:
         instance._preview_timer.stop()
-        for method in ("stackmffv3", "stackmffv2", "stackmff"):
+        for method in ("stackmffv4", "stackmffv3", "stackmffv2", "stackmff"):
             box = instance._checks[method]
             assert not box.isHidden()
             assert not box.isEnabled()
@@ -1556,6 +1554,57 @@ def test_workspace_reuse_computes_only_edited_or_added_method_and_aligns_lazily(
         assert dialog._results['openfocus_a']['image'] is edited_a
         assert dialog._results['openfocus_b']['image'] is saved_images['openfocus_b']
         assert dialog._results['openfocus_c']['image'] is saved_images['openfocus_c']
+    finally:
+        if not sip.isdeleted(dialog):
+            dialog.reject()
+        _until(qapp, lambda: not dialog._has_workers())
+        host.deleteLater()
+
+
+def test_reused_workspace_output_enables_adopt_output_in_full_mode_only(qapp, monkeypatch):
+    import numpy as np
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QKeyEvent
+
+    host = _make_workspace_host(qapp, alignment='none', fusion_method='dct')
+    expected = np.full((160, 560, 3), 210, dtype=np.uint8)
+    _add_workspace_fusion(
+        host, 'dct', 'Workspace dct', expected, alignment_options=(),
+    )
+    records = []
+    host.output_manager.publish_compare_output = records.append
+
+    dialog = CompareDialog(host)
+    try:
+        dialog.show()
+        dialog.view_combo.setCurrentIndex(dialog.view_combo.findData("full"))
+        dialog.run_comparison()
+        _until(qapp, lambda: _finished(dialog) and dialog._canvases['dct'].can_show_full())
+        canvas = dialog._canvases['dct']
+        dialog.eventFilter(canvas, QKeyEvent(
+            QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier))
+        assert dialog._selected_method == 'dct'
+        assert dialog.btn_adopt_output.isEnabled()
+
+        # Switching to ROI mode clears full-frame adopt eligibility until returning to Full.
+        dialog.ref_canvas.set_magnification(4)
+        dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(True))
+        _until(qapp, lambda: _finished(dialog) and dialog._canvases['dct'].has_region())
+        assert not dialog.btn_adopt_output.isEnabled()
+
+        dialog.mode_combo.setCurrentIndex(dialog.mode_combo.findData(False))
+        assert dialog.btn_adopt_output.isEnabled()
+        dialog.view_combo.setCurrentIndex(dialog.view_combo.findData("full"))
+        _until(qapp, lambda: _finished(dialog) and dialog._canvases['dct'].can_show_full())
+        if dialog._selected_method != 'dct':
+            dialog._select_method('dct')
+        else:
+            dialog._update_adopt_actions()
+        assert dialog.btn_adopt_output.isEnabled()
+
+        dialog._adopt_output()
+        assert len(records) == 1
+        np.testing.assert_array_equal(records[0].image, expected)
     finally:
         if not sip.isdeleted(dialog):
             dialog.reject()

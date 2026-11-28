@@ -155,11 +155,8 @@ def test_main_selector_explains_missing_dtcwt(qapp, monkeypatch):
     index = combo.findData('dtcwt')
     assert not combo.model().item(index).isEnabled()
     assert trans.t('env_dtcwt_unavailable') in combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-    assert trans.t('experimental_locked_hint') in combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+    assert trans.t('experimental_locked_hint') not in combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
     monkeypatch.setattr(algorithm_combo, '_package_available', lambda _name: True)
-    main.OpenFocus.refresh_method_availability(host)
-    assert not combo.model().item(index).isEnabled()
-    host.experimental_features = True
     main.OpenFocus.refresh_method_availability(host)
     assert combo.model().item(index).isEnabled()
     assert combo.itemData(index, Qt.ItemDataRole.ToolTipRole) == trans.t('radio_dtcwt_hint')
@@ -783,15 +780,15 @@ def test_batch_ai_mode_survives_a_method_switch(qapp):
     from dialogs.batch import BatchProcessingDialog
     dlg = BatchProcessingDialog(None)
     from types import SimpleNamespace
-    dlg.parent_window = SimpleNamespace(experimental_features=True)
+    dlg.parent_window = SimpleNamespace(experimental_features=True, legacy_features=False)
     dlg._apply_fusion_availability()
     try:
         dlg.show()
-        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv3"))
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv4"))
         mode = dlg.fusion_parameter_panel.editors["mode"]
         mode.setCurrentIndex(mode.findData("hard"))
         dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("dtcwt"))
-        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv3"))
+        dlg.fusion_combo.setCurrentIndex(dlg.fusion_combo.findData("stackmffv4"))
         qapp.processEvents()
         assert dlg.fusion_parameter_panel.values()["mode"] == "hard"
         assert dlg.get_processing_settings()["fusion_params"]["mode"] == "hard"

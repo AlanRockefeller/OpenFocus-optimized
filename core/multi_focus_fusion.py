@@ -353,6 +353,7 @@ class MultiFocusFusion:
         self.prepared_cache = None
         self.ecc_warp_device = None
         self.registration_warp_devices = {}
+        self.deferred_alignment_seconds = 0.0
         self.retain_preparation = False
         # 资源偏好（'balanced' | 'responsive' | 'maximum'）：只影响并发、
         # 预取和预算，不改变任何输出几何或数值路径。
@@ -696,7 +697,8 @@ class MultiFocusFusion:
         """Fuse under one cancellable lease, including preparation and publication."""
         # A focus callback receives the merger's 2D positions and their scale.
         from core.resource_policy import heavy_job
-        from core.registration import RegistrationCancelled, deferred_ecc_warp_accelerator
+        from core.registration import (RegistrationCancelled, deferred_alignment_timer,
+                                       deferred_ecc_warp_accelerator)
         from core.frame_storage import scratch_directory
         from utils.logging_setup import log_operation, image_result_details
         from contextlib import nullcontext
@@ -714,14 +716,19 @@ class MultiFocusFusion:
             self._fallback_reasons = ()
             self.ecc_warp_device = None
             self.registration_warp_devices = {}
+            self.deferred_alignment_seconds = 0.0
             try:
                 # Every method resolves deferred frames here, in whole images or tiles.
-                with deferred_ecc_warp_accelerator(self.use_gpu) as warp:
+                with deferred_alignment_timer() as align_timer, deferred_ecc_warp_accelerator(self.use_gpu) as warp:
                     result = self._fuse_under_lease(
                         input_source, img_resize, should_cancel, progress_callback, ecc_warp=warp, **kwargs)
             except RegistrationCancelled:
                 operation.cancel()
                 raise
+            self.deferred_alignment_seconds = align_timer.elapsed
+            if align_timer.warps:
+                _profile().set('deferred_alignment', seconds=round(align_timer.elapsed, 6),
+                               warps=align_timer.warps)
             if warp is not None and warp.gpu_warps:
                 self.ecc_warp_device = ('CPU / ' if warp.cpu_warps else '') + warp.device_name
                 self.registration_warp_devices = warp.devices_by_method
@@ -907,8 +914,8 @@ class MultiFocusFusion:
         from core.source_frames import NativePreparedCache, TileExposureCache
         has_uint16 = any(frame.dtype == np.uint16 for frame in input_source)
         native_neural_tiles = native_neural_tiles and needs_tiles
-        # Small V3 stacks can use the same per-crop exposure path as large stacks.
-        tile_raw_exposure = (self.algorithm == 'stackmffv3' and self.exposure_match
+        # Small V3/V4 stacks can use the same per-crop exposure path as large stacks.
+        tile_raw_exposure = (self.algorithm in ('stackmffv3', 'stackmffv4') and self.exposure_match
                              and self.tile_enabled and needs_tiles and img_resize is None
                              and has_uint16)
         cached_preparation = self.prepared_cache
@@ -1092,10 +1099,12 @@ class MultiFocusFusion:
                     max(h, height), max(w, width), kwargs, count)
                 decode = max(frame_resolution_bytes(frame) for frame in input_source)
                 budget = memory_budget_bytes()
-                if not self.use_gpu and self.algorithm in ('openfocus_a', 'openfocus_b'):
-                    # CPU A and B stream without retaining decoded sources.
+                openfocus_native_family = self.algorithm in ('openfocus_a', 'openfocus_b', 'openfocus_c')
+                if openfocus_native_family:
+                    # OpenFocus A/B/C stream without retaining decoded sources and
+                    # spill large transient planes above the shared frame RAM cap.
                     cache_growth = 0
-                    if (method_b and img_resize is None
+                    if (img_resize is None
                             and all(frame.dtype in (np.uint8, np.uint16) for frame in input_source)):
                         worker = min(worker, policy.frame_ram_budget(policy.probe_memory()))
                 else:
@@ -1186,7 +1195,7 @@ class MultiFocusFusion:
             kws = dict(kwargs)
             kws.pop('block_size', None)
             kws.pop('overlap', None)
-            if self.algorithm != 'stackmffv3':
+            if self.algorithm not in ('stackmffv3', 'stackmffv4'):
                 kws.pop('focus_callback', None)
             with _profile().stage('tiled'):
                 result = self._fuse_tiled(
@@ -1428,6 +1437,35 @@ class MultiFocusFusion:
             device_callback=self._record_openfocus_device,
         )
     
+    def _fuse_stackmffv4(self,
+                         input_source: Union[str, List[np.ndarray]],
+                         img_resize: Optional[Tuple[int, int]] = None,
+                         model_path: Optional[str] = 'weights/stackmff_v4_flash.onnx',
+                         mode: str = 'soft',
+                         should_cancel=None,
+                         progress_callback=None,
+                         **kwargs) -> np.ndarray:
+        """StackMFF V4 (StreamFocusNet Flash) order-invariant fusion."""
+        from fusion_methods.stackmffv4 import DEFAULT_WEIGHTS, _stackmffv4_impl
+
+        if not model_path or model_path == DEFAULT_WEIGHTS:
+            model_path = resource_path('weights', os.path.basename(DEFAULT_WEIGHTS))
+
+        return _stackmffv4_impl(
+            input_source,
+            img_resize,
+            model_path,
+            self.use_gpu,
+            mode=mode,
+            should_cancel=should_cancel,
+            progress_callback=progress_callback,
+            thread_count=kwargs.get('thread_count'),
+            resource_preference=self.resource_preference,
+            execution_plan=kwargs.get('execution_plan'),
+            focus_callback=kwargs.get('focus_callback'),
+            tile_plan=kwargs.get('tile_plan'),
+        )
+
     def _fuse_stackmffv3(self,
                          input_source: Union[str, List[np.ndarray]],
                          img_resize: Optional[Tuple[int, int]] = None,
@@ -2160,7 +2198,9 @@ class MultiFocusFusion:
         count = len(imgs) if imgs is not None else len(files)
         from core.resource_policy import plan_neural_tiles, require_memory
         from fusion_methods.neural_runtime import (apply_inference_budget,
-                                                   estimate_inference_bytes, resolve_job_device)
+                                                   estimate_inference_bytes,
+                                                   estimate_linear_inference_bytes,
+                                                   resolve_job_device)
         from fusion_methods.neural_common import ATTENTION_PAD_ALIGN
         profile = _profile()
         requested_device = resolve_job_device(self.use_gpu)
@@ -2168,7 +2208,10 @@ class MultiFocusFusion:
         if mode_normalizer is not None:
             kwargs['mode'] = mode_normalizer(
                 kwargs.get('mode', self.fusion_parameters.get('mode', 'soft')))
-        hard_pick = self.algorithm == 'stackmffv3' and kwargs.get('mode') == 'hard'
+        hard_pick = self.algorithm in ('stackmffv3', 'stackmffv4') and kwargs.get('mode') == 'hard'
+        inference_estimator = (estimate_linear_inference_bytes
+                               if self.algorithm == 'stackmffv4'
+                               else estimate_inference_bytes)
 
         # Touch accumulator pages before reading the final child headroom.
         # Alignment, prepared frames and existing caches also belong to that
@@ -2199,7 +2242,7 @@ class MultiFocusFusion:
         with profile.stage('plan_neural_tiles'):
             block_size, tile_plan = plan_neural_tiles(
                 count, h, w, channels, block_size, requested_device,
-                estimate_inference_bytes, directory=imgs is None,
+                inference_estimator, directory=imgs is None,
                 itemsize=(max(frame.dtype.itemsize for frame in imgs)
                           if imgs is not None else np.dtype(out_dtype).itemsize),
                 source_resolution_bytes=source_resolution, source_cache_bytes=source_cache,
@@ -2455,6 +2498,17 @@ class MultiFocusFusion:
         if focus is not None:
             focus_callback(focus, count - 1)
         return fused[:, :, 0] if channels == 1 else fused
+
+    def _fuse_tiled_stackmffv4(self, imgs, img_dir, h, w,
+                               channels, block_size, overlap, **kwargs):
+        """StackMFF V4 tiles: single-scale probability blend/pick, one inference per tile."""
+        from fusion_methods.stackmffv4 import DEFAULT_WEIGHTS, normalize_mode
+
+        return self._fuse_tiled_neural(
+            imgs, img_dir, h, w, channels, block_size, overlap,
+            label="StackMFF V4",
+            default_weights=self.descriptor.weights or DEFAULT_WEIGHTS,
+            mode_normalizer=normalize_mode, **kwargs)
 
     def _fuse_tiled_ai_batched(self, imgs, img_dir, h, w,
                                channels, block_size, overlap, **kwargs):

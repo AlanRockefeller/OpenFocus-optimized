@@ -631,7 +631,7 @@ def test_settings_tab_inventory_and_navigation(server):
 
         page_controls = ("chk_experimental_features", "sensor_cleanup_disclosure",
                          "registration_options_disclosure", "chk_include_beta",
-                         "chk_danmaku_enabled")
+                         "edit_developer_key")
         for index in (1, 2, 3, 4, 0):
             reply = call(server, "ui.set", path=tabs["path"], value=index)
             assert reply["result"]["value"] == index
@@ -2582,13 +2582,13 @@ def test_control_channel_guards_experimental_fusion_and_alignment(server, contro
     from core.algorithms import fusion_algorithms
     from locales import trans
 
-    assert call(server, 'method.set', id='guided_filter')['result']['id'] == 'guided_filter'
+    assert call(server, 'method.set', id='stackmffv3')['result']['id'] == 'stackmffv3'
     control_window.experimental_features = False
     control_window.apply_experimental_features()
     locked_render = call(server, 'render.start')
     assert locked_render['error']['code'] == 'invalid_argument'
     assert trans.t('experimental_locked_hint') in locked_render['error']['message']
-    assert control_window.current_fusion_method() == 'guided_filter'
+    assert control_window.current_fusion_method() == 'stackmffv3'
     for spec in fusion_algorithms():
         before = control_window.current_fusion_method()
         reply = call(server, 'method.set', id=spec.id)
@@ -3271,3 +3271,28 @@ def test_bounded_drag_delivers_press_and_release(server, control_window, monkeyp
     assert response['result']['steps'] == steps
     assert (probe.presses, probe.moves, probe.releases) == (1, steps, 1)
     probe.deleteLater()
+
+
+def test_stack_load_mixed_sizes_fails_cleanly_without_modal_hang(server, tmp_path):
+    import cv2
+
+    mixed_dir = tmp_path / "mixed"
+    mixed_dir.mkdir()
+    paths = []
+    for idx, height in enumerate((40, 50, 60)):
+        path = mixed_dir / f"frame_{idx}.tif"
+        assert cv2.imwrite(str(path), np.full((height, 60, 3), 100 + idx * 10, dtype=np.uint8))
+        paths.append(str(path))
+
+    for req in ({"files": paths}, {"folder": str(mixed_dir)}):
+        started = call(server, "stack.load", **req)["result"]
+        assert wait_until(
+            lambda: call(server, "stack.frames")["result"]["load"]["id"] == started["load_id"]
+            and call(server, "stack.frames")["result"]["load"]["finished"],
+            timeout=10,
+        )
+        frames = call(server, "stack.frames")["result"]
+        assert frames["load"]["active"] is False
+        assert frames["load"]["finished"] is True
+        assert frames["load"]["error"]
+        assert frames["count"] == 0

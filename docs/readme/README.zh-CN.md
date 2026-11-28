@@ -216,8 +216,7 @@ StackMFF V3 使用 AI 合并各帧的清晰部分，生成景深合成图像。
 - **十二种界面语言**——按系统区域自动检测，可通过 `locales/<code>.py` 添加语言。
 - **内存管理**——按 RAM 预算限制帧或分块并发，使用磁盘中间存储，并仅在选用 AI 方法时加载模型。
 
-OpenFocus A、B、C 为稳定融合方法。使用其他融合方法时，请在高级设置中启用
-**实验性功能**，或在无界面 CLI 中加上 `--experimental`。
+OpenFocus A、B、C 以及引导滤波（Guided Filter）、GFG-FGF、DCT 和 DTCWT 为稳定融合方法。使用实验性融合方法（StackMFF V1/V2/V3）时，请在高级设置中启用**实验性功能**，或在无界面 CLI 中加上 `--experimental`。
 
 StackMFF V1/V2/V3 使用 ONNX Runtime；Windows 可使用 DirectML，macOS 可使用
 CoreML，无法使用相应执行提供程序时回退到 CPU。设备被识别并不代表模型已在
@@ -303,8 +302,8 @@ openfocus -i ./stack_folder -o ./result/fused.tif --auto-background auto --save-
     <th align="center">微信公众号</th>
   </tr>
   <tr>
-    <td align="center" valign="top"><img src="../../assets/readme/wechat-group.png" alt="OpenFocus 微信交流群二维码" width="260"></td>
-    <td align="center" valign="top"><img src="../../assets/readme/wechat-official-account.jpg" alt="OpenFocus 微信公众号二维码" width="260"></td>
+    <td align="center" valign="top"><img src="https://account.openfocus.top/v1/qr/wechat-group" alt="OpenFocus 微信交流群二维码" width="260"></td>
+    <td align="center" valign="top"><img src="https://account.openfocus.top/v1/qr/wechat-official-account" alt="OpenFocus 微信公众号二维码" width="260"></td>
   </tr>
 </table>
 
@@ -316,8 +315,8 @@ openfocus -i ./stack_folder -o ./result/fused.tif --auto-background auto --save-
     <th align="center">PayPal · 海外</th>
   </tr>
   <tr>
-    <td align="center" valign="top"><img src="../../assets/readme/alipay-coffee.jpg" alt="通过支付宝支持 OpenFocus 的二维码" width="260"></td>
-    <td align="center" valign="top"><a href="https://paypal.me/XinZEN0602"><img src="../../assets/readme/paypal-coffee.png" alt="中心带 PayPal 标志的二维码；扫码或点击，通过 PayPal 支持 OpenFocus" width="260"></a><br><a href="https://paypal.me/XinZEN0602">扫码或点击，通过 PayPal 捐赠</a></td>
+    <td align="center" valign="top"><img src="https://account.openfocus.top/v1/qr/alipay" alt="通过支付宝支持 OpenFocus 的二维码" width="260"></td>
+    <td align="center" valign="top"><a href="https://paypal.me/XinZEN0602"><img src="https://account.openfocus.top/v1/qr/paypal" alt="中心带 PayPal 标志的二维码；扫码或点击，通过 PayPal 支持 OpenFocus" width="260"></a><br><a href="https://paypal.me/XinZEN0602">扫码或点击，通过 PayPal 捐赠</a></td>
   </tr>
 </table>
 
@@ -334,7 +333,7 @@ OpenFocus 应用以 [MIT 许可](../../LICENSE) 发布。
 从源码运行：
 
 ```bash
-conda create -n openfocus python=3.10
+conda create -n openfocus python=3.12
 conda activate openfocus
 pip install -r requirements.txt
 python main.py

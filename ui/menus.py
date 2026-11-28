@@ -22,14 +22,87 @@ class _UnavailableToolHint(QObject):
         return super().eventFilter(watched, event)
 
 
+_COMMUNITY_MENU_KEYS = ('menu_account', 'menu_gallery')
+_COMMUNITY_ACTION_KEYS = (
+    'action_my_account',
+    'action_message_box',
+    'action_open_gallery',
+    'action_gallery_showcase',
+    'action_gallery_screensaver',
+    'action_my_downloads',
+)
+
+
+def apply_community_menu_visibility(window: QMainWindow, enabled: bool) -> None:
+    """Show/hide live Community menus while displaying disabled placeholder when locked."""
+    visible = bool(enabled)
+    ui_objs = getattr(window, 'ui_objs', None) or {}
+    for key in _COMMUNITY_MENU_KEYS:
+        menu = ui_objs.get(key)
+        if menu is not None:
+            menu.setEnabled(visible)
+            menu_action = menu.menuAction()
+            if menu_action is not None:
+                menu_action.setVisible(visible)
+                menu_action.setEnabled(visible)
+    for key in _COMMUNITY_ACTION_KEYS:
+        action = ui_objs.get(key)
+        if action is not None:
+            action.setVisible(visible)
+            action.setEnabled(visible)
+    community_dev = ui_objs.get('menu_community_dev')
+    if community_dev is not None:
+        community_dev.setEnabled(False)
+        dev_action = community_dev.menuAction()
+        if dev_action is not None:
+            dev_action.setVisible(not visible)
+            dev_action.setEnabled(False)
+    help_account = ui_objs.get('action_account')
+    if help_account is not None:
+        help_account.setVisible(True)
+
+
+def format_check_updates_label() -> str:
+    """Return localized Check for Updates label suffixed with the current version."""
+    from constants import app_display_version
+    return f"{trans.t('menu_check_updates')} (v{app_display_version()})"
+
+
+def is_ai_accelerator_pack_installed(window=None) -> bool:
+    """Return True when the optional AI inference accelerator pack is installed."""
+    banner = getattr(window, 'accelerator_banner', None) if window is not None else None
+    status = getattr(banner, 'status', None)
+    if status is not None and hasattr(status, 'installed'):
+        return bool(status.installed)
+    try:
+        from core import inference_pack
+        return inference_pack.worker_command() is not None
+    except Exception:
+        return False
+
+
+def refresh_ai_pack_action(window: QMainWindow) -> None:
+    """Sync the AI Accelerator Pack menu checkmark with actual installation state."""
+    action = (getattr(window, 'ui_objs', None) or {}).get('action_ai_pack')
+    if action is not None:
+        if not action.isCheckable():
+            action.setCheckable(True)
+        action.setChecked(is_ai_accelerator_pack_installed(window))
+
+
 def update_development_actions(window: QMainWindow) -> None:
-    """Retranslate the unavailable tools after the standard menu sweep."""
+    """Retranslate unavailable tools and formatted menu labels after the standard sweep."""
+    ui_objs = getattr(window, 'ui_objs', None) or {}
     for key in ('mosaic_title', 'menu_dust_map'):
-        action = getattr(window, 'ui_objs', {}).get(key)
+        action = ui_objs.get(key)
         if action is not None:
             action.setText(f"{trans.t(key)} ({trans.t('development_label')})")
             action.setEnabled(False)
             action.setToolTip(trans.t('development_unavailable_hint'))
+    update_action = ui_objs.get('menu_check_updates')
+    if update_action is not None:
+        update_action.setText(format_check_updates_label())
+    refresh_ai_pack_action(window)
 
 
 def _show_support_dialog(window):
@@ -131,6 +204,22 @@ def setup_menus(window: QMainWindow) -> None:
     file_menu.addAction(export_all_action)
     window.ui_objs['menu_export_all'] = export_all_action
 
+    export_psd_action = QAction(trans.t('action_export_layered_psd'), window)
+    export_psd_action.setProperty('trans_key', 'action_export_layered_psd')
+    export_psd_action.triggered.connect(
+        lambda: getattr(window.export_manager, 'export_layered_psd_dialog', lambda: None)()
+    )
+    file_menu.addAction(export_psd_action)
+    window.ui_objs['action_export_layered_psd'] = export_psd_action
+
+    export_contrast_action = QAction(trans.t('action_export_contrast_map'), window)
+    export_contrast_action.setProperty('trans_key', 'action_export_contrast_map')
+    export_contrast_action.triggered.connect(
+        lambda: getattr(window.export_manager, 'export_contrast_map_dialog', lambda: None)()
+    )
+    file_menu.addAction(export_contrast_action)
+    window.ui_objs['action_export_contrast_map'] = export_contrast_action
+
     save_stack_menu = file_menu.addMenu(trans.t('menu_save_stack'))
     window.ui_objs['menu_save_stack'] = save_stack_menu
 
@@ -178,6 +267,13 @@ def setup_menus(window: QMainWindow) -> None:
     save_input_mtiff_action.setProperty("trans_key", 'action_save_multipage_tiff')
     input_stack_menu.addAction(save_input_mtiff_action)
     window.ui_objs['action_save_mtiff_input'] = save_input_mtiff_action
+
+    export_html_action = QAction(trans.t('action_export_html_animation'), window)
+    export_html_action.setProperty("trans_key", 'action_export_html_animation')
+    export_html_action.triggered.connect(
+        lambda: window.export_manager.export_html_animation())
+    file_menu.addAction(export_html_action)
+    window.ui_objs['action_export_html_animation'] = export_html_action
 
     file_menu.addSeparator()
 
@@ -290,11 +386,48 @@ def setup_menus(window: QMainWindow) -> None:
     batch_menu.addAction(batch_action)
     window.ui_objs['action_batch_process'] = batch_action
 
+    watch_folder_action = QAction(trans.t('action_watch_folder'), window)
+    watch_folder_action.setProperty('trans_key', 'action_watch_folder')
+    watch_folder_action.setToolTip(trans.t('action_watch_folder_hint'))
+    watch_folder_action.triggered.connect(
+        lambda: getattr(window, 'show_watch_folder_dialog', lambda: None)()
+    )
+    batch_menu.addAction(watch_folder_action)
+    window.ui_objs['action_watch_folder'] = watch_folder_action
+
+    render_queue_action = QAction(trans.t('action_render_queue'), window)
+    render_queue_action.setToolTip(trans.t('action_render_queue_hint'))
+    render_queue_action.setProperty('trans_key', 'action_render_queue')
+    render_queue_action.triggered.connect(
+        lambda: getattr(window, 'show_render_queue_dialog', lambda: None)()
+    )
+    batch_menu.addAction(render_queue_action)
+    window.ui_objs['action_render_queue'] = render_queue_action
+
     compare_action = QAction(trans.t('action_method_compare'), window)
     compare_action.setToolTip(trans.t('action_method_compare_hint'))
     compare_action.triggered.connect(window.show_compare_dialog)
     batch_menu.addAction(compare_action)
     window.ui_objs['action_method_compare'] = compare_action
+
+    live_preview_action = QAction(trans.t('action_live_preview'), window)
+    live_preview_action.setProperty('trans_key', 'action_live_preview')
+    live_preview_action.setToolTip(trans.t('btn_live_preview_hint'))
+    live_preview_action.triggered.connect(
+        lambda: getattr(window, 'open_live_preview', lambda *_a, **_k: None)()
+    )
+    batch_menu.addAction(live_preview_action)
+    window.ui_objs['action_live_preview'] = live_preview_action
+
+    render_substacks_action = QAction(trans.t('action_render_substacks'), window)
+    render_substacks_action.setProperty('trans_key', 'action_render_substacks')
+    render_substacks_action.setToolTip(trans.t('action_render_substacks_hint'))
+    render_substacks_action.setEnabled(False)
+    render_substacks_action.triggered.connect(
+        lambda: getattr(window, 'show_render_substacks_dialog', lambda *_a, **_k: None)()
+    )
+    batch_menu.addAction(render_substacks_action)
+    window.ui_objs['action_render_substacks'] = render_substacks_action
 
     mosaic_action = QAction(trans.t('mosaic_title'), window)
     mosaic_action.setProperty('trans_key', 'mosaic_title')
@@ -457,6 +590,15 @@ def setup_menus(window: QMainWindow) -> None:
     advanced_action.setProperty("trans_key", 'advanced_settings_title')
     window.ui_objs['action_advanced_settings'] = advanced_action
 
+    raw_develop_action = QAction(trans.t("raw_develop_title"), window)
+    raw_develop_action.setToolTip(trans.t("raw_develop_menu_hint"))
+    raw_develop_action.triggered.connect(
+        lambda: getattr(window, "show_raw_develop_dialog", lambda *_a, **_k: None)()
+    )
+    raw_develop_action.setProperty("trans_key", "raw_develop_title")
+    settings_menu.addAction(raw_develop_action)
+    window.ui_objs["action_raw_develop"] = raw_develop_action
+
     # GPU stays reachable here as a quick toggle; it is the one switch users
     # flip often enough to deserve a click instead of two.
     gpu_action = QAction(trans.t('action_gpu_accel'), window)
@@ -477,11 +619,32 @@ def setup_menus(window: QMainWindow) -> None:
     gpu_action.triggered.connect(window.set_use_gpu)
     settings_menu.addAction(gpu_action)
     window.ui_objs['action_gpu_accel'] = gpu_action
+
+    icc_preview_action = QAction(trans.t('action_ui_icc_preview'), window)
+    icc_preview_action.setCheckable(True)
+    icc_preview_action.setChecked(bool(getattr(window, 'enable_ui_icc_preview', True)))
+    icc_preview_action.setToolTip(trans.t('action_ui_icc_preview_hint'))
+    icc_preview_action.setProperty('trans_key', 'action_ui_icc_preview')
+    icc_preview_action.triggered.connect(
+        lambda checked: getattr(window, 'set_ui_icc_preview', lambda *_a: None)(checked)
+    )
+    settings_menu.addAction(icc_preview_action)
+    window.ui_objs['action_ui_icc_preview'] = icc_preview_action
     pack_action = QAction(trans.t('ai_pack_title'), window)
+    pack_action.setCheckable(True)
     pack_action.setProperty('trans_key', 'ai_pack_title')
-    pack_action.triggered.connect(lambda: window.accelerator_banner.open_settings())
+
+    def _open_ai_pack_settings(_checked=False):
+        refresh_ai_pack_action(window)
+        banner = getattr(window, 'accelerator_banner', None)
+        if banner is not None:
+            banner.open_settings()
+
+    pack_action.triggered.connect(_open_ai_pack_settings)
     settings_menu.addAction(pack_action)
     window.ui_objs['action_ai_pack'] = pack_action
+    refresh_ai_pack_action(window)
+    settings_menu.aboutToShow.connect(lambda: refresh_ai_pack_action(window))
     # Resolve the backend in the background when the user opens Settings.
     # Device probing must never delay menu construction.
     if (_opencl is None or (_gpu_kind is None and _runtime_installed)) and hasattr(
@@ -661,11 +824,6 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.addAction(support_action)
     window.ui_objs['support_title'] = support_action
 
-    quickstart_action = QAction(trans.t('menu_quick_start'), window)
-    quickstart_action.triggered.connect(window.show_quick_start)
-    help_menu.addAction(quickstart_action)
-    window.ui_objs['menu_quick_start'] = quickstart_action
-
     guided_tour_action = QAction(trans.t('menu_guided_tour'), window)
     guided_tour_action.setProperty('trans_key', 'menu_guided_tour')
     guided_tour_action.triggered.connect(
@@ -679,7 +837,7 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.addAction(manual_action)
     window.ui_objs['menu_github_manual'] = manual_action
 
-    update_action = QAction(trans.t('menu_check_updates'), window)
+    update_action = QAction(format_check_updates_label(), window)
     update_action.triggered.connect(window.check_for_updates)
     help_menu.addAction(update_action)
     window.ui_objs['menu_check_updates'] = update_action
@@ -699,6 +857,16 @@ def setup_menus(window: QMainWindow) -> None:
     help_menu.addAction(install_action)
     window.ui_objs['action_install_update'] = install_action
 
+    community_dev_menu = QMenu(trans.t('menu_community_dev'), menubar)
+    community_dev_menu.setEnabled(False)
+    community_dev_menu.setProperty('trans_key', 'menu_community_dev')
+    community_unavailable = community_dev_menu.addAction(trans.t('development_unavailable_hint'))
+    community_unavailable.setEnabled(False)
+    community_unavailable.setProperty('trans_key', 'development_unavailable_hint')
+    menubar.addMenu(community_dev_menu)
+    window.ui_objs['menu_community_dev'] = community_dev_menu
+    window.ui_objs['community_development_unavailable_hint'] = community_unavailable
+
     extensions_menu = QMenu(trans.t('menu_extensions'), menubar)
     extensions_menu.setEnabled(False)
     # Qt's native macOS menu bar hides empty menus.
@@ -707,3 +875,6 @@ def setup_menus(window: QMainWindow) -> None:
     menubar.addMenu(extensions_menu)
     window.ui_objs['menu_extensions'] = extensions_menu
     window.ui_objs['development_unavailable_hint'] = unavailable_action
+
+    from core.developer_options import is_community_enabled
+    apply_community_menu_visibility(window, is_community_enabled())

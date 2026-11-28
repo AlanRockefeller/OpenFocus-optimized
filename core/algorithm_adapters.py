@@ -74,18 +74,22 @@ def openfocus_c_resources(height, width, parameters, frames):
 
 
 def guided_resources(height, width, parameters, frames):
-    # Four retained accumulators plus the decision map; one guided-filter
-    # worker, including its ordered result, has a bounded float workspace.
-    return height * width * 40, height * width * 192
+    # Band-streamed Pass 2 and OpenCL workspace hold bounded accumulators
+    # (~24*N fixed, ~8*N per worker; GPU Peak RSS ~0.8 GiB, CPU ~2.1 GiB at 45 MP).
+    return height * width * 24, height * width * 8
 
 
 def gfg_resources(height, width, parameters, frames):
-    return height * width * 40, height * width * 128
+    # Row-parallel streaming and OpenCL workspace (~16*N fixed, ~8*N per worker;
+    # GPU Peak RSS ~0.8 GiB, CPU ~1.25 GiB at 45 MP).
+    return height * width * 16, height * width * 8
 
 
 def dct_resources(height, width, parameters, frames):
-    # Include block padding and median-filter scratch at the coarser grid.
-    return 4 * 1024 * 1024, (height + 8) * (width + 8) * 64
+    # Coarse block variance/index maps plus active frame strip and output buffers
+    # (~8*N fixed, ~8*N per worker; Peak RSS ~1.0-1.2 GiB at 45 MP).
+    padded = (height + 8) * (width + 8)
+    return padded * 8, padded * 8
 
 
 def _openfocus_needs_tiles(frames, threshold, *, height=None, width=None, **_kwargs):
@@ -108,6 +112,30 @@ def openfocus_b_needs_tiles(frames, threshold, **kwargs):
     return _openfocus_needs_tiles(frames, threshold, **kwargs)
 
 
+def _spatial_needs_tiles(algorithm, frames, threshold, *, height=None, width=None, **_kwargs):
+    from core.multi_focus_fusion import (_DEFAULT_TILE_THRESHOLD,
+                                         estimate_peak_bytes,
+                                         memory_budget_bytes)
+    if not frames:
+        return False
+    h, w = frames[0].shape[:2]
+    h = int(height) if height is not None else h
+    w = int(width) if width is not None else w
+    if threshold != _DEFAULT_TILE_THRESHOLD and max(h, w) > threshold:
+        return True
+    return estimate_peak_bytes(algorithm, frames, height=h, width=w) > memory_budget_bytes()
+
+
+def guided_needs_tiles(frames, threshold, **kwargs):
+    return _spatial_needs_tiles('guided_filter', frames, threshold, **kwargs)
+
+
+def gfg_needs_tiles(frames, threshold, **kwargs):
+    return _spatial_needs_tiles('gfgfgf', frames, threshold, **kwargs)
+
+
+def dct_needs_tiles(frames, threshold, **kwargs):
+    return _spatial_needs_tiles('dct', frames, threshold, **kwargs)
 
 
 def dtcwt_resources(height, width, parameters, frames):
@@ -118,6 +146,8 @@ def dtcwt_resources(height, width, parameters, frames):
 def dtcwt_needs_tiles(frames, threshold, *, height=None, width=None, **_kwargs):
     from core.multi_focus_fusion import estimate_peak_bytes, memory_budget_bytes
     # Prefer whole transforms to avoid introducing tile-boundary wavelets.
+    if not frames:
+        return False
     return estimate_peak_bytes('dtcwt', frames, height=height, width=width) > memory_budget_bytes()
 
 
@@ -131,26 +161,54 @@ def neural_needs_tiles(frames, threshold, *, height=None, width=None, **_kwargs)
 
 
 def registration_homography(registration, images, thread_count=4, should_cancel=None, **parameters):
-    return registration._process_homography(images, thread_count=thread_count, should_cancel=should_cancel, failure_policy=parameters['failure_policy'])
+    return registration._process_homography(
+        images, thread_count=thread_count, should_cancel=should_cancel,
+        failure_policy=parameters['failure_policy'],
+        max_shift_x_ratio=parameters.get('max_shift_x_ratio'),
+        max_shift_y_ratio=parameters.get('max_shift_y_ratio'),
+        max_rotation_deg=parameters.get('max_rotation_deg'),
+        max_scale_change=parameters.get('max_scale_change'),
+        auto_crop=parameters.get('auto_crop', True),
+        interpolation=parameters.get('interpolation', 'lanczos'),
+    )
 
 
 def registration_ecc(registration, images, thread_count=4, should_cancel=None, **parameters):
-    return registration._process_ecc(images, thread_count=thread_count, should_cancel=should_cancel,
-        failure_policy=parameters['failure_policy'], stage_budget=parameters.get('stage_budget'),
-        progress_callback=parameters.get('progress_callback'))
+    return registration._process_ecc(
+        images, thread_count=thread_count, should_cancel=should_cancel,
+        failure_policy=parameters['failure_policy'],
+        stage_budget=parameters.get('stage_budget'),
+        progress_callback=parameters.get('progress_callback'),
+        max_shift_x_ratio=parameters.get('max_shift_x_ratio'),
+        max_shift_y_ratio=parameters.get('max_shift_y_ratio'),
+        max_rotation_deg=parameters.get('max_rotation_deg'),
+        max_scale_change=parameters.get('max_scale_change'),
+        auto_crop=parameters.get('auto_crop', True),
+        interpolation=parameters.get('interpolation', 'lanczos'),
+    )
 
 
 def registration_openfocus(registration, images, thread_count=4, should_cancel=None, **parameters):
     from core.registration import _align_openfocus_impl, deferred_warp_threads
 
     with deferred_warp_threads(thread_count if thread_count and thread_count > 0 else None):
-        return _align_openfocus_impl(images, should_cancel=should_cancel,
+        return _align_openfocus_impl(
+            images, should_cancel=should_cancel,
             max_shift_ratio=parameters['max_shift_ratio'],
-            failure_policy=parameters['failure_policy'], reference_frame=parameters['reference_frame'],
-            rotation=parameters['rotation'], magnification=parameters['magnification'],
-            defer_warps=registration.defer_warps, output_path=parameters.get('output_path'),
+            max_shift_x_ratio=getattr(registration, 'max_shift_x_ratio', None),
+            max_shift_y_ratio=getattr(registration, 'max_shift_y_ratio', None),
+            failure_policy=parameters['failure_policy'],
+            reference_frame=parameters['reference_frame'],
+            rotation=parameters['rotation'],
+            magnification=parameters['magnification'],
+            alignment_roi=getattr(registration, 'alignment_roi', None),
+            auto_crop=getattr(registration, 'auto_crop', True),
+            interpolation=getattr(registration, 'openfocus_interpolation', None),
+            defer_warps=registration.defer_warps,
+            output_path=parameters.get('output_path'),
             plan_callback=lambda plan: setattr(registration, 'alignment_plan', plan),
-            dispatch_callback=registration._record_dispatch)
+            dispatch_callback=registration._record_dispatch,
+        )
 
 
 def depth_dct(images, progress_callback=None, should_cancel=None, **parameters):
@@ -171,6 +229,14 @@ def depth_dtcwt(images, progress_callback=None, should_cancel=None, **parameters
     return _measure_dtcwt(images, progress_callback, should_cancel,
                           nlevels=parameters['N'],
                           thread_count=parameters.get('thread_count'))
+
+
+def depth_stackmffv4(images, progress_callback=None, should_cancel=None, **parameters):
+    from core.depth_map import _measure_stackmffv4
+    return _measure_stackmffv4(
+        images, progress_callback, should_cancel,
+        model_path=parameters.get('model_path'), use_gpu=parameters.get('use_gpu', True),
+        execution_plan=parameters.get('execution_plan'), mode=parameters.get('mode', 'soft'))
 
 
 def depth_neural(images, progress_callback=None, should_cancel=None, **parameters):
