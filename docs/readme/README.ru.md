@@ -108,7 +108,7 @@ StackMFF V3 использует ИИ для объединения резких
 
 Сравнивайте методы рядом и используйте выбранный результат или его настройки.
 
-OpenFocus A, OpenFocus B и OpenFocus C — единственные стабильные методы объединения. Остальные методы экспериментальные. Чтобы использовать их в настольном приложении, выберите **Настройки → Дополнительные настройки… → Включить экспериментальные функции**. В CLI без графического интерфейса используйте `--experimental`.
+OpenFocus A, OpenFocus B, OpenFocus C, Guided Filter, GFG-FGF, DCT и DTCWT — стабильные методы объединения. Экспериментальные методы (StackMFF V1/V2/V3) можно включить в настольном приложении через **Настройки → Дополнительные настройки… → Включить экспериментальные функции**, а в CLI без графического интерфейса — с помощью `--experimental`.
 
 </td>
 <td width="54%">
@@ -293,7 +293,7 @@ openfocus -i ./stack_folder -o ./result/fused.png
 Запуск из репозитория:
 
 ```bash
-conda create -n openfocus python=3.10
+conda create -n openfocus python=3.12
 conda activate openfocus
 pip install -r requirements.txt
 python main.py

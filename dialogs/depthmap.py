@@ -10,8 +10,9 @@ import os
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QSignalBlocker, QThread, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtCore import QPointF, QRectF, QSignalBlocker, QSize, QThread, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap, QPolygonF
+from utils.design_tokens import SPACE, palette
 from utils.file_dialogs import FileDialog
 from utils.file_modes import apply_destination_mode
 from PyQt6.QtWidgets import (
@@ -21,6 +22,8 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QFrame,
     QLabel,
@@ -55,6 +58,72 @@ from utils.platform_utils import configure_native_worker_stack
 from utils.layered_tiff import protect_sources, source_paths
 
 _DEFAULT_METHOD_COLORMAP = "turbo"
+
+
+def _draw_depth_export_pixmap(kind: str, color_hex: str) -> QPixmap:
+    """Render a crisp 16x16 (@2x) monochrome vector icon for depth export buttons."""
+    pm = QPixmap(32, 32)
+    pm.setDevicePixelRatio(2.0)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    col = QColor(color_hex)
+    pen = QPen(col, 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    if kind == "color":
+        for x, y in ((2.5, 2.5), (9.0, 2.5), (2.5, 9.0), (9.0, 9.0)):
+            painter.drawRoundedRect(QRectF(x, y, 4.5, 4.5), 1.0, 1.0)
+        painter.setBrush(col)
+        painter.drawRoundedRect(QRectF(9.0, 2.5, 4.5, 4.5), 1.0, 1.0)
+    elif kind == "raw":
+        for x, top in ((3.0, 9.0), (6.3, 5.5), (9.6, 3.0), (12.9, 7.0)):
+            painter.drawLine(QPointF(x, 13.0), QPointF(x, top))
+    elif kind == "indices":
+        for dy in (0.0, 3.3, 6.6):
+            painter.drawLine(QPointF(3.0, 5.2 + dy), QPointF(8.0, 2.7 + dy))
+            painter.drawLine(QPointF(8.0, 2.7 + dy), QPointF(13.0, 5.2 + dy))
+            if dy == 0.0:
+                painter.drawLine(QPointF(13.0, 5.2), QPointF(8.0, 7.7))
+                painter.drawLine(QPointF(8.0, 7.7), QPointF(3.0, 5.2))
+    elif kind == "render":
+        painter.drawRoundedRect(QRectF(2.2, 2.8, 11.6, 10.4), 1.5, 1.5)
+        painter.drawLine(QPointF(3.8, 11.4), QPointF(6.8, 7.8))
+        painter.drawLine(QPointF(6.8, 7.8), QPointF(9.2, 10.0))
+        painter.drawLine(QPointF(9.2, 10.0), QPointF(11.0, 8.2))
+        painter.drawLine(QPointF(11.0, 8.2), QPointF(12.6, 11.4))
+    elif kind == "contrast":
+        painter.drawEllipse(QRectF(2.5, 2.5, 11.0, 11.0))
+        painter.setBrush(col)
+        painter.drawPie(QRectF(2.5, 2.5, 11.0, 11.0), 90 * 16, 180 * 16)
+    elif kind == "physical":
+        painter.drawLine(QPointF(5.5, 2.5), QPointF(5.5, 13.5))
+        for y, w in ((3.5, 4.0), (6.5, 2.5), (9.5, 4.0), (12.5, 2.5)):
+            painter.drawLine(QPointF(5.5, y), QPointF(5.5 + w, y))
+        painter.drawLine(QPointF(12.2, 3.0), QPointF(12.2, 13.0))
+        painter.drawLine(QPointF(10.5, 4.7), QPointF(12.2, 3.0))
+        painter.drawLine(QPointF(13.9, 4.7), QPointF(12.2, 3.0))
+    elif kind == "mesh3d":
+        painter.drawPolygon(QPolygonF([
+            QPointF(8.0, 2.0), QPointF(13.4, 5.0), QPointF(13.4, 11.0),
+            QPointF(8.0, 14.0), QPointF(2.6, 11.0), QPointF(2.6, 5.0),
+        ]))
+        painter.drawLine(QPointF(8.0, 8.0), QPointF(8.0, 14.0))
+        painter.drawLine(QPointF(8.0, 8.0), QPointF(2.6, 5.0))
+        painter.drawLine(QPointF(8.0, 8.0), QPointF(13.4, 5.0))
+
+    painter.end()
+    return pm
+
+
+def _make_depth_export_icon(kind: str, theme: str = "light") -> QIcon:
+    """Build Normal/Disabled monochrome QIcon consistent with active theme tokens."""
+    t = palette(theme if theme in ("light", "dark", "gray") else "light")
+    icon = QIcon()
+    icon.addPixmap(_draw_depth_export_pixmap(kind, t["text"]), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(_draw_depth_export_pixmap(kind, t["textFaint"]), QIcon.Mode.Disabled, QIcon.State.Off)
+    return icon
 
 
 # 对话框关闭时仍在跑的 worker 放这里保活：QThread 对象被销毁而线程仍在
@@ -260,6 +329,85 @@ class MeshExportWorker(QThread):
             self.failed.emit("cancelled")
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class Stereo3DExportWorker(QThread):
+    ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, path, texture, depth_index, kind, options, source_paths=(), parent=None):
+        super().__init__(parent)
+        configure_native_worker_stack(self)
+        self.path = path
+        self.texture = texture
+        self.depth_index = depth_index
+        self.kind = kind  # "anaglyph" or "stereo_pair"
+        self.options = dict(options)
+        self.source_paths = tuple(source_paths)
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def run(self):
+        from core.stereo_3d_export import render_anaglyph, render_stereo_pair
+        try:
+            protect_sources((self.path,), self.source_paths)
+            if self.isInterruptionRequested():
+                self.failed.emit("cancelled")
+                return
+            if self.kind == "anaglyph":
+                pixels = render_anaglyph(self.texture, self.depth_index, **self.options)
+            else:
+                pixels = render_stereo_pair(self.texture, self.depth_index, **self.options)
+            if self.isInterruptionRequested():
+                self.failed.emit("cancelled")
+                return
+            protect_sources((self.path,), self.source_paths)
+            if not imwrite_auto(self.path, pixels, should_cancel=self.isInterruptionRequested):
+                raise OSError(trans.t("msg_save_failed_text"))
+            self.ok.emit({"files": [self.path]})
+        except Exception as exc:
+            self.failed.emit("cancelled" if self.isInterruptionRequested() else str(exc))
+
+
+class TurntableExportWorker(QThread):
+    progress = pyqtSignal(int, int)
+    ok = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, path, height_field, texture, extent, colormap_lut, options, source_paths=(), parent=None):
+        super().__init__(parent)
+        configure_native_worker_stack(self)
+        self.path = path
+        self.height_field = height_field
+        self.texture = texture
+        self.extent = extent
+        self.colormap_lut = colormap_lut
+        self.options = options
+        self.source_paths = tuple(source_paths)
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def run(self):
+        from core.stereo_3d_export import Stereo3DExportCancelled, export_turntable_video
+        try:
+            protect_sources((self.path,), self.source_paths)
+            written = export_turntable_video(
+                self.path,
+                self.height_field,
+                self.texture,
+                extent=self.extent,
+                colormap_lut=self.colormap_lut,
+                options=self.options,
+                progress_callback=lambda i, n: self.progress.emit(i, n),
+                should_cancel=self.isInterruptionRequested,
+            )
+            self.ok.emit({"files": [written]})
+        except Stereo3DExportCancelled:
+            self.failed.emit("cancelled")
+        except Exception as exc:
+            self.failed.emit("cancelled" if self.isInterruptionRequested() else str(exc))
 
 
 class DepthProductExportWorker(QThread):
@@ -788,6 +936,10 @@ class DepthMapDialog(QDialog):
         self._visual_outcome = None
         self._mesh_height = None
         self._mesh_texture = None
+        self._surface_height = None
+        self._surface_texture = None
+        self._surface_extent = None
+        self._surface_lut = None
         self._map_valid_mask = None
         self._map_frames = []
         self._map_indices = []
@@ -838,34 +990,59 @@ class DepthMapDialog(QDialog):
 
         surf_page = QWidget()
         surf_lay = QVBoxLayout(surf_page)
-        surf_lay.setContentsMargins(0, 0, 0, 0)
+        surf_lay.setContentsMargins(0, 4, 0, 0)
+        surf_lay.setSpacing(6)
+
+        # Compact 3D toolbar: render mode + direct stereo & video exports + reset view
+        toolbar_3d = FlowPanel(h_spacing=6, v_spacing=4)
+        mode_wrap = QWidget()
+        mode_lay = QHBoxLayout(mode_wrap)
+        mode_lay.setContentsMargins(0, 0, 0, 0)
+        mode_lay.setSpacing(4)
+        mode_lay.addWidget(QLabel(trans.t("depth_3d_render_mode")))
+        self.render_mode_combo = QComboBox()
+        for mode_id, mode_key in (
+            ("textured", "depth_3d_mode_textured"),
+            ("shaded_clay", "depth_3d_mode_clay"),
+            ("depth_color", "depth_3d_mode_depth_color"),
+            ("wireframe", "depth_3d_mode_wireframe"),
+            ("textured_wireframe", "depth_3d_mode_textured_wireframe"),
+        ):
+            self.render_mode_combo.addItem(trans.t(mode_key), mode_id)
+        self.render_mode_combo.currentIndexChanged.connect(self._on_render_mode_changed)
+        mode_lay.addWidget(self.render_mode_combo)
+        toolbar_3d.add(mode_wrap)
+
+        self.btn_export_anaglyph = QPushButton(trans.t("depth_3d_export_anaglyph"))
+        self.btn_export_anaglyph.clicked.connect(self._export_anaglyph)
+        toolbar_3d.add(self.btn_export_anaglyph)
+
+        self.btn_export_stereo_pair = QPushButton(trans.t("depth_3d_export_stereo_pair"))
+        self.btn_export_stereo_pair.clicked.connect(self._export_stereo_pair)
+        toolbar_3d.add(self.btn_export_stereo_pair)
+
+        self.btn_export_turntable = QPushButton(trans.t("depth_3d_export_turntable"))
+        self.btn_export_turntable.clicked.connect(self._export_turntable)
+        toolbar_3d.add(self.btn_export_turntable)
+
+        self.btn_surface_reset = QPushButton(trans.t("depth_3d_reset"))
+        self.btn_surface_reset.clicked.connect(self._reset_3d_view)
+        toolbar_3d.add(self.btn_surface_reset)
+        surf_lay.addWidget(toolbar_3d)
+
         self.surface = DepthSurface()
-        self.surface.setMinimumSize(180, 130)
+        self.surface.setMinimumSize(180, 160)
         surf_lay.addWidget(self.surface, 1)
-        # Detail slider: the surface is sampled at a working resolution to
-        # stay interactive; this exposes that trade-off instead of hiding it.
-        detail_row = QHBoxLayout()
-        detail_row.setContentsMargins(0, 0, 0, 0)
-        self.detail_slider = QSlider(Qt.Orientation.Horizontal)
-        self.detail_slider.setRange(20, 100)
-        self.detail_slider.setSingleStep(5)
-        self.detail_slider.setPageStep(10)
-        self.detail_slider.setValue(60)
-        self.detail_slider.setToolTip(trans.t("depth_3d_detail_hint"))
-        self.detail_value = QLabel("0.60x")
-        self.detail_value.setMinimumWidth(34)
-        self.detail_value.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.detail_slider.valueChanged.connect(
-            lambda v: (self.detail_value.setText(f"{v / 100.0:.2f}x"),
-                       self.surface.set_detail(v)))
+
         self.lbl_surface_state = QLabel("")
         self.lbl_surface_state.setObjectName("mutedLabel")
         self.lbl_surface_state.setWordWrap(True)
         surf_lay.addWidget(self.lbl_surface_state)
-        # Relative relief scales only the non-physical height field, so the
-        # control belongs next to the surface it changes. It stays hidden in
-        # calibrated mode, where real Z positions already set the height.
+
+        # Relief + Detail compact row
+        geom_row = QHBoxLayout()
+        geom_row.setContentsMargins(0, 0, 0, 0)
+        geom_row.setSpacing(10)
         self.relief_row = QWidget()
         relief_row = QHBoxLayout(self.relief_row)
         relief_row.setContentsMargins(0, 0, 0, 0)
@@ -879,15 +1056,82 @@ class DepthMapDialog(QDialog):
         self.relief_spin.valueChanged.connect(
             lambda v: self.surface.set_relief(v / 100.0))
         relief_row.addWidget(relief_label)
-        relief_row.addWidget(self.relief_spin, 1)
-        surf_lay.addWidget(self.relief_row)
+        relief_row.addWidget(self.relief_spin)
+        geom_row.addWidget(self.relief_row)
+
+        detail_row = QHBoxLayout()
+        detail_row.setContentsMargins(0, 0, 0, 0)
+        detail_row.setSpacing(6)
+        self.detail_slider = QSlider(Qt.Orientation.Horizontal)
+        self.detail_slider.setRange(20, 100)
+        self.detail_slider.setSingleStep(5)
+        self.detail_slider.setPageStep(10)
+        self.detail_slider.setValue(60)
+        self.detail_slider.setToolTip(trans.t("depth_3d_detail_hint"))
+        self.detail_value = QLabel("0.60x")
+        self.detail_value.setMinimumWidth(34)
+        self.detail_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.detail_slider.sliderPressed.connect(lambda: self.surface.set_interactive(True))
+        self.detail_slider.sliderReleased.connect(lambda: self.surface.set_interactive(False))
+        self.detail_slider.valueChanged.connect(
+            lambda v: (self.detail_value.setText(f"{v / 100.0:.2f}x"),
+                       self.surface.set_detail(v)))
         detail_row.addWidget(QLabel(trans.t("depth_3d_detail")))
         detail_row.addWidget(self.detail_slider, 1)
         detail_row.addWidget(self.detail_value)
-        surf_lay.addLayout(detail_row)
-        self.btn_surface_reset = QPushButton(trans.t("depth_3d_reset"))
-        self.btn_surface_reset.clicked.connect(self.surface.reset_view)
-        surf_lay.addWidget(self.btn_surface_reset)
+        geom_row.addLayout(detail_row, 1)
+        surf_lay.addLayout(geom_row)
+
+        # Multi-light studio controls (2-column compact grid so left pane never overflows)
+        self.lighting_group = QGroupBox(trans.t("depth_3d_lighting_group"))
+        light_grid = QGridLayout(self.lighting_group)
+        light_grid.setContentsMargins(8, 6, 8, 6)
+        light_grid.setHorizontalSpacing(8)
+        light_grid.setVerticalSpacing(4)
+
+        def _make_light_slider(low, high, initial, fmt_fn, setter):
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(low, high)
+            slider.setValue(initial)
+            slider.setMinimumWidth(56)
+            val_lbl = QLabel(fmt_fn(initial))
+            val_lbl.setMinimumWidth(34)
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            slider.sliderPressed.connect(lambda: self.surface.set_interactive(True))
+            slider.sliderReleased.connect(lambda: self.surface.set_interactive(False))
+            slider.valueChanged.connect(lambda v: (val_lbl.setText(fmt_fn(v)), setter(v)))
+            return slider, val_lbl
+
+        self.light_azimuth_slider, self.light_azimuth_val = _make_light_slider(
+            0, 360, 315, lambda v: f"{v}°", lambda v: self.surface.set_key_azimuth(float(v)))
+        self.light_elevation_slider, self.light_elevation_val = _make_light_slider(
+            5, 90, 50, lambda v: f"{v}°", lambda v: self.surface.set_key_elevation(float(v)))
+        self.light_key_slider, self.light_key_val = _make_light_slider(
+            0, 150, 75, lambda v: f"{v}%", lambda v: self.surface.set_key_intensity(v / 100.0))
+        self.light_fill_slider, self.light_fill_val = _make_light_slider(
+            0, 100, 25, lambda v: f"{v}%", lambda v: self.surface.set_fill_intensity(v / 100.0))
+        self.light_ambient_slider, self.light_ambient_val = _make_light_slider(
+            0, 100, 35, lambda v: f"{v}%", lambda v: self.surface.set_ambient(v / 100.0))
+
+        def _add_light_cell(row, col_base, title_key, slider, val_lbl):
+            light_grid.addWidget(QLabel(trans.t(title_key)), row, col_base)
+            light_grid.addWidget(slider, row, col_base + 1)
+            light_grid.addWidget(val_lbl, row, col_base + 2)
+
+        _add_light_cell(0, 0, "depth_3d_light_azimuth", self.light_azimuth_slider, self.light_azimuth_val)
+        _add_light_cell(0, 3, "depth_3d_light_elevation", self.light_elevation_slider, self.light_elevation_val)
+        _add_light_cell(1, 0, "depth_3d_light_key", self.light_key_slider, self.light_key_val)
+        _add_light_cell(1, 3, "depth_3d_light_fill", self.light_fill_slider, self.light_fill_val)
+        _add_light_cell(2, 0, "depth_3d_light_ambient", self.light_ambient_slider, self.light_ambient_val)
+
+        self.btn_light_reset = QPushButton(trans.t("depth_3d_light_reset"))
+        self.btn_light_reset.clicked.connect(self._reset_lighting)
+        light_grid.addWidget(self.btn_light_reset, 2, 3, 1, 3)
+        for c in (1, 4):
+            light_grid.setColumnStretch(c, 1)
+        surf_lay.addWidget(self.lighting_group)
+
         self.tabs.addTab(surf_page, trans.t("depth_tab_3d"))
         pvlay.addWidget(self.tabs, 1)
         self.lbl_map_state = QLabel(trans.t("depth_previous_map"))
@@ -908,7 +1152,14 @@ class DepthMapDialog(QDialog):
         self._side_controls = QTabWidget()
         source_page, form = self._settings_form()
         appearance_page, appearance = self._settings_form()
-        export_page, exports = self._settings_form()
+        export_page = QScrollArea()
+        export_page.setFrameShape(QFrame.Shape.NoFrame)
+        export_page.setWidgetResizable(True)
+        export_content = QWidget()
+        export_lay = QVBoxLayout(export_content)
+        export_lay.setContentsMargins(10, 10, 10, 10)
+        export_lay.setSpacing(10)
+        export_page.setWidget(export_content)
         self._source_form = form
         self.source_combo = QComboBox()
         self.source_combo.addItem(trans.t("depth_source_current"), "current")
@@ -936,7 +1187,7 @@ class DepthMapDialog(QDialog):
 
         self.method_combo = QComboBox()
         from ui.algorithm_combo import fill_fusion_combo
-        fill_fusion_combo(self.method_combo, depth_algorithms())
+        fill_fusion_combo(self.method_combo, depth_algorithms(), window=self.window_main)
         self._apply_method_availability()
         default = self._current_window_method()
         index = self.method_combo.findData(default)
@@ -1016,7 +1267,7 @@ class DepthMapDialog(QDialog):
         appearance.addRow(self.physical_panel)
         self.mesh_size = StepperSpinBox(minimum=2, maximum=4096, decimals=0,
                                         step=20, value=600)
-        exports.addRow(trans.t("depth_mesh_size"), self.mesh_size)
+        self.mesh_size.setMaximumWidth(120)
         self.texture_combo = QComboBox()
         self.texture_combo.setToolTip(trans.t("depth_texture_hint"))
         self.texture_combo.setAccessibleName(trans.t("depth_texture"))
@@ -1093,13 +1344,79 @@ class DepthMapDialog(QDialog):
         close_btn.clicked.connect(self.reject)
         self.btn_save_indices = QPushButton(trans.t("depth_save_indices"))
         self.btn_save_render = QPushButton(trans.t("depth_save_render"))
+        self.btn_save_contrast = QPushButton(trans.t("action_export_contrast_map"))
+        self.btn_save_contrast.clicked.connect(self._save_contrast_map)
         for button in (self.btn_save_indices, self.btn_save_render):
             button.setToolTip(trans.t("depth_products_hint"))
         self.btn_save_indices.clicked.connect(lambda: self._export_product(False))
         self.btn_save_render.clicked.connect(lambda: self._export_product(True))
-        for button in (self.btn_save_color, self.btn_save_raw, self.btn_save_indices,
-                       self.btn_save_render, self.btn_save_physical, self.btn_save_3d):
-            exports.addRow(button)
+
+        theme_name = (getattr(self.window_main, "ui_theme", None)
+                      or getattr(self.window_main, "theme_mode", None) or "light")
+        export_buttons = (
+            (self.btn_save_color, "color"),
+            (self.btn_save_raw, "raw"),
+            (self.btn_save_indices, "indices"),
+            (self.btn_save_render, "render"),
+            (self.btn_save_contrast, "contrast"),
+            (self.btn_save_physical, "physical"),
+            (self.btn_save_3d, "mesh3d"),
+        )
+        for btn, icon_kind in export_buttons:
+            btn.setObjectName("secondaryButton")
+            btn.setIcon(_make_depth_export_icon(icon_kind, theme_name))
+            btn.setIconSize(QSize(16, 16))
+            btn.setMinimumHeight(34)
+
+        self._export_maps_card = QFrame(export_content)
+        self._export_maps_card.setObjectName("card")
+        maps_card_lay = QVBoxLayout(self._export_maps_card)
+        maps_card_lay.setContentsMargins(12, 10, 12, 12)
+        maps_card_lay.setSpacing(8)
+        maps_title = QLabel(trans.t("depth_export_maps_group"), self._export_maps_card)
+        maps_title.setObjectName("sectionLabel")
+        maps_card_lay.addWidget(maps_title)
+        maps_grid = QGridLayout()
+        maps_grid.setContentsMargins(0, 0, 0, 0)
+        maps_grid.setHorizontalSpacing(8)
+        maps_grid.setVerticalSpacing(8)
+        maps_grid.setColumnStretch(0, 1)
+        maps_grid.setColumnStretch(1, 1)
+        for idx, btn in enumerate((
+            self.btn_save_color,
+            self.btn_save_raw,
+            self.btn_save_indices,
+            self.btn_save_render,
+            self.btn_save_contrast,
+            self.btn_save_physical,
+        )):
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            maps_grid.addWidget(btn, idx // 2, idx % 2)
+        maps_card_lay.addLayout(maps_grid)
+        export_lay.addWidget(self._export_maps_card)
+
+        self._export_mesh_card = QFrame(export_content)
+        self._export_mesh_card.setObjectName("card")
+        mesh_card_lay = QVBoxLayout(self._export_mesh_card)
+        mesh_card_lay.setContentsMargins(12, 10, 12, 12)
+        mesh_card_lay.setSpacing(8)
+        mesh_title = QLabel(trans.t("depth_export_mesh_group"), self._export_mesh_card)
+        mesh_title.setObjectName("sectionLabel")
+        mesh_card_lay.addWidget(mesh_title)
+        mesh_row = QHBoxLayout()
+        mesh_row.setContentsMargins(0, 0, 0, 0)
+        mesh_row.setSpacing(8)
+        mesh_lbl = QLabel(trans.t("depth_mesh_size"), self._export_mesh_card)
+        mesh_lbl.setBuddy(self.mesh_size)
+        mesh_row.addWidget(mesh_lbl)
+        mesh_row.addWidget(self.mesh_size)
+        mesh_row.addStretch(1)
+        mesh_card_lay.addLayout(mesh_row)
+        self.btn_save_3d.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        mesh_card_lay.addWidget(self.btn_save_3d)
+        export_lay.addWidget(self._export_mesh_card)
+        export_lay.addStretch(1)
+
         for button in (self.compute_btn, self.cancel_btn, close_btn):
             btns.add(button)
         layout.addWidget(btns)
@@ -1127,7 +1444,7 @@ class DepthMapDialog(QDialog):
             if _widget is not None:
                 _widget.setProperty("controlId", _control)
         self._load_rendered_depth()
-        splitter.fit_dialog(900, 630)
+        splitter.fit_dialog(980, 680)
 
     @staticmethod
     def _settings_form():
@@ -1241,6 +1558,11 @@ class DepthMapDialog(QDialog):
         context = self._map_context if self._index01 is not None else self._source_context()
         return context.pixel_size_um if context is not None else self._current_pixel_size
 
+
+    def _save_contrast_map(self):
+        exporter = getattr(self.window_main, "export_manager", None)
+        if exporter is not None and hasattr(exporter, "export_contrast_map_dialog"):
+            exporter.export_contrast_map_dialog()
 
     def _save_physical(self):
         if not self._require_current_map():
@@ -1401,6 +1723,10 @@ class DepthMapDialog(QDialog):
             self.status_lbl.setText(trans.t("depth_stale"))
         self._mesh_height = None
         self._mesh_texture = None
+        self._surface_height = None
+        self._surface_texture = None
+        self._surface_extent = None
+        self._surface_lut = None
         self.surface.set_surface(None, None)
 
     def _on_method_changed(self):
@@ -1793,8 +2119,13 @@ class DepthMapDialog(QDialog):
         for name in ("btn_save_color", "btn_save_raw", "btn_save_3d",
                      "btn_save_indices", "btn_save_render"):
             getattr(self, name).setEnabled(current)
-        self.btn_save_3d.setEnabled(current and self._visual_ready_revision == self._visual_revision
-                                    and (self._mesh_height is not None or self._map_only_view()))
+        surface_ready = (current and self._visual_ready_revision == self._visual_revision
+                         and (self._mesh_height is not None or self._map_only_view()))
+        self.btn_save_3d.setEnabled(surface_ready)
+        for name in ("btn_export_anaglyph", "btn_export_stereo_pair", "btn_export_turntable"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.setEnabled(surface_ready)
         self.btn_save_physical.setEnabled(current and self.physical_chk.isChecked())
 
     def _matching_texture_metadata(self):
@@ -1857,6 +2188,8 @@ class DepthMapDialog(QDialog):
                                np.arange(len(positions)), positions)
             labels = [f"{value:g} µm" for value in values]
         self.legend.set_lut(lut, labels[2], labels[0], labels[1])
+        self._surface_lut = lut
+        self.surface.set_colormap_lut(lut)
         if self._index01 is None:
             self.legend.update()
 
@@ -1975,9 +2308,13 @@ class DepthMapDialog(QDialog):
         if result['error']:
             self.lbl_texture_source.setText(trans.t('depth_texture_unavailable'))
             self.lbl_surface_state.setText(trans.t('depth_3d_failed').format(error=result['error']))
+            self._surface_height = self._surface_texture = self._surface_extent = None
             self.surface.set_surface(None, None)
         else:
             self.lbl_texture_source.setText(self._texture_description)
+            self._surface_height = result['surface']
+            self._surface_texture = result['surface_texture']
+            self._surface_extent = result['extent']
             self.surface.set_relief(result['relief'])
             self.surface.set_surface(result['surface'], result['surface_texture'], extent=result['extent'])
             valid = np.isfinite(self._mesh_height)
@@ -2174,6 +2511,173 @@ class DepthMapDialog(QDialog):
             self.status_lbl.setText(str(exc))
             self._reconcile_controls()
 
+    def _on_render_mode_changed(self):
+        mode = str(self.render_mode_combo.currentData() or "textured")
+        self.surface.set_render_mode(mode)
+        if hasattr(self, "lighting_group"):
+            self.lighting_group.setEnabled(mode != "wireframe")
+
+    def _reset_lighting(self):
+        from core.stereo_3d_export import LightingSettings
+        defaults = LightingSettings()
+        for slider, val in (
+            (self.light_azimuth_slider, int(round(defaults.key_azimuth))),
+            (self.light_elevation_slider, int(round(defaults.key_elevation))),
+            (self.light_key_slider, int(round(defaults.key_intensity * 100))),
+            (self.light_fill_slider, int(round(defaults.fill_intensity * 100))),
+            (self.light_ambient_slider, int(round(defaults.ambient * 100))),
+        ):
+            slider.setValue(val)
+        self.surface.set_lighting(defaults)
+
+    def _reset_3d_view(self):
+        self.surface.reset_view()
+
+    def _stereo_source_texture(self):
+        if self._mesh_texture is not None:
+            return self._mesh_texture
+        return self._colorized_full()
+
+    def _start_stereo_export(self, kind: str, title_key: str, default_stem: str, options: dict):
+        if not self._require_current_map() or self._export_worker is not None:
+            return
+        start_dir = image_save_dir()
+        default = os.path.join(start_dir, f"{default_stem}.png")
+        path, _ = FileDialog.getSaveFileName(
+            self, trans.t(title_key), default,
+            "PNG (*.png);;JPEG (*.jpg);;TIFF (*.tif *.tiff);;BMP (*.bmp)",
+        )
+        if not path or not self._require_current_map():
+            return
+        try:
+            self._safe_export_paths([path])
+        except (ValueError, OSError) as exc:
+            self.status_lbl.setText(str(exc))
+            return
+        texture = self._stereo_source_texture()
+        worker = Stereo3DExportWorker(
+            path, texture, self._index01, kind, options,
+            source_paths=self._export_source_paths(), parent=self,
+        )
+        self._export_worker = worker
+        self._export_outcome = None
+        self._cancelling = False
+        self._bind_worker(worker, (
+            (worker.ok, lambda info, w=worker: self._set_export_outcome((True, info), w)),
+            (worker.failed, lambda error, w=worker: self._set_export_outcome((False, error), w)),
+            (worker.finished, lambda w=worker: self._export_finished(w)),
+        ))
+        self.status_lbl.setText(trans.t(title_key))
+        self.status_lbl.setToolTip(path)
+        self._reconcile_controls()
+        remember_image_save(path)
+        try:
+            worker.start()
+        except Exception as exc:
+            self._export_worker = None
+            worker.deleteLater()
+            self.status_lbl.setText(str(exc))
+            self._reconcile_controls()
+
+    def _export_anaglyph(self):
+        if not self._require_current_map() or self._export_worker is not None:
+            return
+        from dialogs.stereo_3d_export import AnaglyphExportDialog
+        dlg = AnaglyphExportDialog(self, default_invert=self.invert_chk.isChecked())
+        if not dlg.exec():
+            return
+        self._start_stereo_export("anaglyph", "depth_3d_anaglyph_title", "depth_anaglyph_3d", dlg.options())
+
+    def _export_stereo_pair(self):
+        if not self._require_current_map() or self._export_worker is not None:
+            return
+        from dialogs.stereo_3d_export import StereoPairExportDialog
+        dlg = StereoPairExportDialog(self, default_invert=self.invert_chk.isChecked())
+        if not dlg.exec():
+            return
+        self._start_stereo_export("stereo_pair", "depth_3d_stereo_pair_title", "depth_stereo_pair", dlg.options())
+
+    def _turntable_progress(self, i: int, n: int, worker):
+        if not self._closing and worker is self._export_worker and not self._cancelling:
+            self.status_lbl.setText(trans.t("depth_3d_turntable_progress").format(i=i, n=n))
+
+    def _export_turntable(self):
+        if not self._require_current_map() or self._export_worker is not None:
+            return
+        if self._surface_height is None:
+            self.tabs.setCurrentIndex(1)
+            self.status_lbl.setText(self.lbl_surface_state.text() or trans.t("depth_no_map_yet"))
+            return
+        from dialogs.stereo_3d_export import TurntableExportDialog
+        from ui.styles import tokens
+        dlg = TurntableExportDialog(self)
+        if not dlg.exec():
+            return
+        theme = tokens()
+        bg_c = QColor(theme["inspectionCanvas"])
+        ac_c = QColor(theme["accent"])
+        wf_c = QColor(theme.get("curveLine", theme["accent"]))
+        yaw, pitch, zoom = self.surface.camera_state()
+        options = dlg.build_options(
+            start_yaw=yaw,
+            base_pitch=pitch,
+            zoom=zoom,
+            relief=1.0 if self.physical_chk.isChecked() else self.relief_spin.value() / 100.0,
+            invert=False,
+            mesh_step=self.detail_slider.value(),
+            render_mode=self.surface.render_mode(),
+            lighting=self.surface.lighting(),
+            background_rgb=(bg_c.red(), bg_c.green(), bg_c.blue()),
+            accent_rgb=(ac_c.red(), ac_c.green(), ac_c.blue()),
+            wireframe_rgb=(wf_c.red(), wf_c.green(), wf_c.blue()) if self.surface.render_mode() == "wireframe" else None,
+        )
+        start_dir = image_save_dir()
+        if options.output_format == "gif":
+            default = os.path.join(start_dir, "depth_turntable.gif")
+            file_filter = "Animated GIF (*.gif)"
+        else:
+            default = os.path.join(start_dir, "depth_turntable.mp4")
+            file_filter = "MP4 Video (*.mp4);;AVI Video (*.avi)"
+        path, _ = FileDialog.getSaveFileName(
+            self, trans.t("depth_3d_turntable_title"), default, file_filter)
+        if not path or not self._require_current_map():
+            return
+        try:
+            self._safe_export_paths([path])
+        except (ValueError, OSError) as exc:
+            self.status_lbl.setText(str(exc))
+            return
+        worker = TurntableExportWorker(
+            path,
+            self._surface_height,
+            self._surface_texture,
+            self._surface_extent,
+            self._surface_lut,
+            options,
+            source_paths=self._export_source_paths(),
+            parent=self,
+        )
+        self._export_worker = worker
+        self._export_outcome = None
+        self._cancelling = False
+        self._bind_worker(worker, (
+            (worker.progress, lambda i, n, w=worker: self._turntable_progress(i, n, w)),
+            (worker.ok, lambda info, w=worker: self._set_export_outcome((True, info), w)),
+            (worker.failed, lambda error, w=worker: self._set_export_outcome((False, error), w)),
+            (worker.finished, lambda w=worker: self._export_finished(w)),
+        ))
+        self.status_lbl.setText(trans.t("depth_3d_turntable_progress").format(i=0, n=options.frame_count))
+        self.status_lbl.setToolTip(path)
+        self._reconcile_controls()
+        remember_image_save(path)
+        try:
+            worker.start()
+        except Exception as exc:
+            self._export_worker = None
+            worker.deleteLater()
+            self.status_lbl.setText(str(exc))
+            self._reconcile_controls()
+
     def _set_export_outcome(self, outcome, worker):
         if not self._closing and worker is self._export_worker:
             self._export_outcome = outcome
@@ -2293,6 +2797,7 @@ class DepthMapDialog(QDialog):
         self._map_icc_profile = self._current_icc_profile = b''
         self._map_context = self._map_output_texture = None
         self._mesh_height = self._mesh_texture = None
+        self._surface_height = self._surface_texture = self._surface_extent = self._surface_lut = None
         self._current_images = []
         self._output_context = self._output_texture = self._source_record = None
         self._workspace_outputs = ()

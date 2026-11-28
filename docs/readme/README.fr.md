@@ -108,7 +108,7 @@ Faites glisser le séparateur pour comparer une image source au résultat fusion
 
 Comparez les méthodes côte à côte et réutilisez le résultat ou les paramètres de votre choix.
 
-OpenFocus A, OpenFocus B et OpenFocus C sont les seules méthodes de fusion stables. Les autres méthodes sont expérimentales. Pour les utiliser dans l’application de bureau, sélectionnez **Paramètres → Paramètres avancés… → Activer les fonctions expérimentales**. Dans la CLI sans interface graphique, utilisez `--experimental`.
+OpenFocus A, OpenFocus B, OpenFocus C, le filtre guidé, GFG-FGF, DCT et DTCWT sont des méthodes de fusion stables. Les méthodes expérimentales (StackMFF V1/V2/V3) s’activent dans l’application de bureau sous **Paramètres → Paramètres avancés… → Activer les fonctions expérimentales**, ou dans la CLI sans interface graphique avec `--experimental`.
 
 </td>
 <td width="54%">
@@ -289,7 +289,7 @@ L'application OpenFocus est publiée sous [licence MIT](../../LICENSE).
 Exécution depuis un clone :
 
 ```bash
-conda create -n openfocus python=3.10
+conda create -n openfocus python=3.12
 conda activate openfocus
 pip install -r requirements.txt
 python main.py

@@ -73,10 +73,10 @@ def test_scaled_bayer_admits_before_unpack_and_preserves_oriented_size(
     monkeypatch.setattr(linear_dng, '_camera_identity', lambda *_args: ('Example', 'Camera'))
     def admit(amount):
         if events == ['open']:
-            assert amount == 104 * 98 * 16
+            assert amount == 104 * 98 * 8
             events.append('admit')
         elif events == ['open', 'admit', 'unpack']:
-            assert amount == 104 * 98 * 24
+            assert amount == 104 * 98 * 4 + ((104 + 1) // 2) * ((98 + 1) // 2) * 6
             events.append('post_admit')
     monkeypatch.setattr(linear_dng, 'require_memory', admit)
     image, metadata = linear_dng.load_linear_raw(path, .22)
